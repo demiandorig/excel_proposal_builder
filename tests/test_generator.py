@@ -58,26 +58,26 @@ print()
 # Simulate planner curation: $7,500/mo split per the salesperson's note
 line_items = [
     LineItem(
-        product_name="Meta Ads",
+        product_name="Facebook & Instagram Ads | Awareness",
         monthly_budget=3000.0,
         months=1,
         target_override="Hispanic A21+ — Los Angeles",
         notes_override="Add retargeting layer per renewal request",
     ),
     LineItem(
-        product_name="Paid Search (SEM)",
+        product_name="Search - AdWords - SEM",
         monthly_budget=2500.0,
         months=1,
         target_override="Hispanic A21+ — Los Angeles",
     ),
     LineItem(
-        product_name="eDigital Display",
+        product_name="Geo targeting only + Hispanic",
         monthly_budget=1500.0,
         months=1,
         target_override="Hispanic A21+ — Northern California",
     ),
     LineItem(
-        product_name="Email Marketing",
+        product_name="Number of emails: 0 - 15,000",
         monthly_budget=500.0,
         months=1,
         notes_override="Client has list to upload — coordinate intake",

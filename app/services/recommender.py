@@ -27,40 +27,40 @@ from app.services.proposal_generator import LineItem
 
 GOAL_PRIORITIES: dict[str, list[str]] = {
     "traffic": [
-        "Paid Search - SEM",
-        "Meta Ads",
-        "eDigital Display",
+        "Search - AdWords - SEM",
+        "Facebook & Instagram Ads | Traffic / Conversion",
+        "Geo targeting only + Hispanic",
         "YouTube Ads",
     ],
     "awareness": [
-        "Entravision Plus CTV | Premier",
-        "eDigital OLV",
+        "Entravision Plus CTV/OTT - English Content",
+        "Video - Pre-roll",
         "YouTube Ads",
-        "Audio Engage",
-        "Meta Ads",
+        "Standard",
+        "Facebook & Instagram Ads | Awareness",
     ],
     "conversions": [
-        "Paid Search - SEM",
-        "Meta Ads",
-        "eDigital Display",
+        "Search - AdWords - SEM",
+        "Facebook & Instagram Ads | Traffic / Conversion",
+        "Geo targeting only + Hispanic",
     ],
     "lead_gen": [
-        "Paid Search - SEM",
-        "Meta Ads",
-        "LinkedIn Ads",
-        "Email Marketing | CPP",
+        "Search - AdWords - SEM",
+        "Facebook & Instagram Ads | Lead Gen / Calls",
+        "LinkedIn",
+        "Number of emails: 0 - 15,000",
     ],
     "engagement": [
-        "Meta Ads",
-        "TikTok Ads",
-        "Spotify Ads",
+        "Facebook & Instagram Ads | Awareness",
+        "In-Feed Ads",
+        "Spotify",
         "YouTube Ads",
     ],
     "default": [
-        "Paid Search - SEM",
-        "Meta Ads",
-        "Entravision Plus CTV | Premier",
-        "eDigital Display",
+        "Search - AdWords - SEM",
+        "Facebook & Instagram Ads | Awareness",
+        "Entravision Plus CTV/OTT - English Content",
+        "Geo targeting only + Hispanic",
     ],
 }
 
@@ -241,7 +241,17 @@ def _recommend_from_brief(
         if not products_in_family:
             continue  # unknown family — skip
 
-        # Pick the salesperson-selected product from this family if any; else cheapest
+        # Pick the salesperson-selected product from this family if any; else
+        # the cheapest VIABLE (independently biddable) product in it.
+        #
+        # "Viable" excludes custom-quote-only lines like "Talent endorsement
+        # / fee" — minimum_spend=0 AND no base_rate is this catalog's
+        # signature for "see Sales Planning for a quote," not a real $0
+        # product. Picking bare-cheapest without this filter meant a family
+        # match against e.g. "Social" (broader than the specific "Branded
+        # Content" family a tactic actually meant) would always resolve to
+        # whatever $0-minimum custom-quote line happened to sit in that
+        # family, regardless of whether it made any sense as a recommendation.
         preferred = None
         for name in request.products_selected:
             p = by_name(name)
@@ -249,7 +259,9 @@ def _recommend_from_brief(
                 preferred = p
                 break
         if preferred is None:
-            preferred = min(products_in_family, key=lambda p: p.minimum_spend or 0)
+            viable = [p for p in products_in_family if (p.minimum_spend or 0) > 0 or p.base_rate is not None]
+            candidates = viable or products_in_family  # fall back rather than error if a family is ALL custom-quote
+            preferred = min(candidates, key=lambda p: p.minimum_spend or 0)
 
         alloc = round(monthly_budget * pct / 50) * 50  # round to $50
         min_spend = preferred.minimum_spend or 0.0

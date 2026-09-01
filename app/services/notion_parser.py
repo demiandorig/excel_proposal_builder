@@ -258,129 +258,148 @@ def _extract_label_raw(text: str, label: str) -> str:
 
 # Product catalog name aliases for matching the "Products selected" field
 # Maps loose user phrasing → canonical catalog product name.
-# Updated 2026-08 for the rate-card-derived 71-product catalog (see catalog.py
-# module docstring) — several old canonical names were renamed or split into
-# multiple new SKUs; where a product split into several variants, the alias
-# below points at the most general one.
+# Rebuilt 2026-09 for the 85-product catalog sourced from LOCAL DIGITAL RATE
+# CARD 2026 (3).xlsx (see catalog.py module docstring) — every alias target
+# below is verified to exist in the current CATALOG by
+# tests/test_parser.py's alias-audit (run it again after any future catalog
+# edit: `{alias: canon for alias, canon in PRODUCT_ALIASES.items() if canon
+# not in {p.name for p in CATALOG}}` should come back empty). Where a
+# product now has multiple objective/variant SKUs (e.g. Meta split by
+# objective, Netflix split by targeting+length), the alias below points at
+# the single most general one — the planner can swap to a more specific
+# variant in Step 04.
 PRODUCT_ALIASES: dict[str, str] = {
     # Search
-    "google ads": "Paid Search - SEM",
-    "paid search": "Paid Search - SEM",
-    "sem": "Paid Search - SEM",
-    "bing ads": "Paid Search - SEM",
-    "pmax": "Paid Search - SEM",             # Performance Max is now an included extension, not a separate SKU
-    "performance max": "Paid Search - SEM",
+    "google ads": "Search - AdWords - SEM",
+    "paid search": "Search - AdWords - SEM",
+    "sem": "Search - AdWords - SEM",
+    "adwords": "Search - AdWords - SEM",
+    "search sem": "Search - AdWords - SEM",
+    "sem pro": "Search - SEM PRO",
+    "bing ads": "Search - AdWords - SEM",
+    "pmax": "Search - AdWords - SEM",
+    "performance max": "Search - AdWords - SEM",
     # Display
-    "display": "eDigital Display",
-    "edigital display": "eDigital Display",
-    "display banner": "eDigital Display",
-    "programmatic display": "eDigital Display",
-    "precision display": "eDigital Display | Precision",
-    "geofencing display": "eDigital Display | Geo Fence",
-    "geo fence display": "eDigital Display | Geo Fence",
-    # OLV
-    "olv": "eDigital OLV",
-    "online video": "eDigital OLV",
-    "pre-roll": "eDigital OLV",
-    "preroll": "eDigital OLV",
-    "precision olv": "eDigital OLV | Precision",
-    "geofencing video": "eDigital OLV | Geo Fence",
-    "geo fence video": "eDigital OLV | Geo Fence",
+    "display": "Geo targeting only + Hispanic",
+    "edigital display": "Geo targeting only + Hispanic",
+    "display banner": "Geo targeting only + Hispanic",
+    "programmatic display": "Geo targeting only + Hispanic",
+    "geofencing display": "Display - Geo Fence",
+    "geo fence display": "Display - Geo Fence",
+    "geofencing": "Display - Geo Fence",
+    # Online Video
+    "olv": "Video - Pre-roll",
+    "online video": "Video - Pre-roll",
+    "pre-roll": "Video - Pre-roll",
+    "preroll": "Video - Pre-roll",
+    "video pre-roll": "Video - Pre-roll",
     # YouTube
     "youtube ads": "YouTube Ads",
+    "youtube video ads": "YouTube Ads",
     "youtube preroll": "YouTube Ads",
     "youtube pre-roll": "YouTube Ads",
     "youtube trueview": "YouTube Ads",
     "trueview": "YouTube Ads",
     "youtube discovery": "YouTube Ads",
-    "youtube audio": "YouTube Audio Ads",
-    # CTV / OTT
-    "connected tv (ott) - entravision plus": "Entravision Plus CTV | Premier",
-    "connected tv (ott)": "Entravision Plus CTV | Premier",
-    "ctv entravision plus": "Entravision Plus CTV | Premier",
-    "entravision plus ctv": "Entravision Plus CTV | Premier",
-    "ctv premier": "Entravision Plus CTV | Premier",
-    "ctv sports": "Entravision Plus CTV | Premier | Live Sports",
-    "sports content": "Entravision Plus CTV | Premier | Live Sports",
-    "live sports": "Entravision Plus CTV | Premier | Live Sports",
-    "live soccer": "Entravision Plus CTV | Premier | Live Soccer",
-    "streaming sports": "Entravision Plus CTV | Premier | Streaming Sports",
-    "vix": "Entravision Plus CTV | ViX",
-    "roku": "Entravision Plus CTV | Roku",
-    "youtube tv": "Entravision Plus CTV | YouTube TV",
-    "amazon prime": "Entravision Plus CTV | Amazon Prime Video",
-    "amazon prime video": "Entravision Plus CTV | Amazon Prime Video",
-    "netflix": "Entravision Plus CTV | Netflix | Run of Network | :15",
-    "netflix :30": "Entravision Plus CTV | Netflix | Run of Network | :30",
-    "netflix age targeted": "Entravision Plus CTV | Netflix | Age Targeted | :15",
-    "netflix gender targeted": "Entravision Plus CTV | Netflix | Gender Targeted | :15",
-    "netflix genre targeted": "Entravision Plus CTV | Netflix | Genre Targeted | :15",
-    "netflix spanish": "Entravision Plus CTV | Netflix | Hispanic Connect | :15",
-    "netflix hispanic": "Entravision Plus CTV | Netflix | Hispanic Connect | :15",
-    # Tentpole/FIFA/NFL package no longer has its own SKU in the 2026 rate
-    # card — closest current analog is the Premier Live Sports package.
-    "tentpole": "Entravision Plus CTV | Premier | Live Sports",
-    "fifa": "Entravision Plus CTV | Premier | Live Soccer",
-    "nfl": "Entravision Plus CTV | Premier | Live Sports",
+    # CTV / OTT / Entravision Plus
+    "connected tv (ott) - entravision plus": "Entravision Plus CTV/OTT - English Content",
+    "connected tv (ott)": "Entravision Plus CTV/OTT - English Content",
+    "ctv entravision plus": "Entravision Plus CTV/OTT - English Content",
+    "entravision plus ctv": "Entravision Plus CTV/OTT - English Content",
+    "ctv": "Entravision Plus CTV/OTT - English Content",
+    "ott": "Entravision Plus CTV/OTT - English Content",
+    "ctv spanish": "Entravision Plus CTV/OTT- Spanish Content only",
+    "ctv hispanic": "Entravision Plus - Hispanics CTV/OTT",
+    "vix": "Entravision Plus - VIX 360 (Includes VIX + UnivisionNow + Univision.com / Univision Apps)",
+    "roku": "Entravision Plus - Roku Ads (Includes The Roku Channel and the popular Espacio Latino Hub)",
+    "amazon prime": "Entravision Plus - Amazon Prime Video",
+    "amazon prime video": "Entravision Plus - Amazon Prime Video",
+    "netflix": "Netflix - Run Of Network Untargeted :15s Ads",
+    "netflix :30": "Netflix - Run Of Network Untargeted :30s Ads",
+    "netflix age targeted": "Netflix - Age Targeted :15s Ads",
+    "netflix gender targeted": "Netflix - Gender Targeted :15s Ads",
+    "netflix genre targeted": "Netflix - Content Genre Targeted :15s Ads",
+    "netflix content genre": "Netflix - Content Genre Targeted :15s Ads",
+    "netflix spanish": "Netflix - Spanish Content :15s Ads",
+    "netflix hispanic": "Netflix - Spanish Content :15s Ads",
     # Audio
-    "spotify": "Spotify Ads",
-    "spotify ads": "Spotify Ads",
-    "audio engage": "Audio Engage",
-    "audioengage": "Audio Engage",
-    "audio engage precision": "Audio Engage | Precision",
-    "o&o audio": "Entravision Audio | Local Stream | Station Specific",
-    "station specific audio": "Entravision Audio | Local Stream | Station Specific",
-    "klyy": "Entravision Audio | Local Stream | KLYY Jose | Spot",
-    # Social
-    "facebook": "Meta Ads",
-    "instagram": "Meta Ads",
-    "meta": "Meta Ads",
-    "meta ads": "Meta Ads",
-    "facebook/ig": "Meta Ads",
-    # O&O-page Meta/TikTok products are now split by content type
-    # (client-provided vs. Creative-Labs-produced) rather than by page.
-    "evc radio meta": "Branded Content | Meta | Ads",
-    "noticias ya": "Branded Content | Meta | Ads",
-    "branded content meta": "Branded Content | Meta | Ads",
-    "creative labs meta": "Creative Labs | Meta | Ads",
-    "shoboy": "Talent Connect | Shoboy",
-    "erazo": "Talent Connect | Erazo",
-    "genio lucas": "Talent Connect | Genio Lucas",
-    "piolin": "Talent Connect | Piolin",
-    "talent connect": "Talent Connect | Shoboy",
-    "tiktok": "TikTok Ads",
-    "tiktok on radio pages": "Branded Content | TikTok | Ads",
-    "linkedin": "LinkedIn Ads",
-    # Email
-    "email": "Email Marketing | CPP",
-    "email marketing": "Email Marketing | CPP",
-    "email retargeting": "Email Marketing | Display Retargeting",
-    "email client list": "Email Marketing | Client List Match",
-    "email hashed file": "Email Marketing | Hashed File Onboarding",
-    "email matchback": "Email Marketing | Matchback",
-    "email postal match": "Email Marketing | Postal Match",
+    "spotify": "Spotify",
+    "spotify ads": "Spotify",
+    "audio engage": "Standard",
+    "audioengage": "Standard",
+    "audio engage custom": "Custom Audience",
+    "station specific audio": "Station Specific",
+    "station specific": "Station Specific",
+    "klyy": "KLYY Jose Station LA - Spot",
+    "day parting": "12 hours Day Parting",
+    # Social / Meta — split by objective; default to the general Awareness
+    # variant, the planner can swap to Traffic/Conversion or Lead Gen/Calls
+    # in Step 04.
+    "facebook": "Facebook & Instagram Ads | Awareness",
+    "instagram": "Facebook & Instagram Ads | Awareness",
+    "meta": "Facebook & Instagram Ads | Awareness",
+    "meta ads": "Facebook & Instagram Ads | Awareness",
+    "facebook/ig": "Facebook & Instagram Ads | Awareness",
+    "facebook ads": "Facebook & Instagram Ads | Awareness",
+    "instagram ads": "Facebook & Instagram Ads | Awareness",
+    "facebook lead gen": "Facebook & Instagram Ads | Lead Gen / Calls",
+    "meta lead gen": "Facebook & Instagram Ads | Lead Gen / Calls",
+    "facebook traffic": "Facebook & Instagram Ads | Traffic / Conversion",
+    "facebook conversion": "Facebook & Instagram Ads | Traffic / Conversion",
+    # Branded content / O&O-page social — client-provided or Entravision-
+    # produced content running on Entravision's own Noticias Ya / Radio /
+    # talent pages, distinct from paid Meta ads on the client's own account.
+    "branded content": "Facebook & Instagram Ads on Noticias or Radio Pages running One objective per campaign using client creative or Inhouse talent.",
+    "noticias ya": "Social Media Post Noticias Ya",
+    "noticias ya live": "Noticias Ya Live",
+    "evc radio meta": "Facebook & Instagram Ads on EVC Radio Pages",
+    "evc radio live": "EVC Radio Live",
+    "talent fee": "Talent endorsement / fee",
+    "talent endorsement": "Talent endorsement / fee",
+    "shoboy": "SHOBOY Page",
+    "erazno": "ERAZNO Page",
+    "genio lucas": "GENIO LUCAS Page",
+    "piolin": "PIOLIN Page",
+    "tiktok": "In-Feed Ads",
+    "tiktok ads": "In-Feed Ads",
+    "tiktok lead gen": "In-Feed Lead Gen Ads",
+    "tiktok on radio pages": "In-Feed Ads (Entravision Pages)",
+    "tiktok on entravision pages": "In-Feed Ads (Entravision Pages)",
+    "linkedin": "LinkedIn",
+    "linkedin ads": "LinkedIn",
+    "social lead gen": "Social - Lead Generation",
+    # Email — no single generic SKU anymore; the rate card breaks the base
+    # blast product out by recipient-count tier, so "email"/"email
+    # marketing" default to the smallest (most common) tier.
+    "email": "Number of emails: 0 - 15,000",
+    "email marketing": "Number of emails: 0 - 15,000",
+    "email blast": "Number of emails: 0 - 15,000",
+    "email campaign": "Number of emails: 0 - 15,000",
+    "email retargeting": "Email Campaigns - Display Re-targeting",
+    "email display retargeting": "Email Campaigns - Display Re-targeting",
+    "email client list": "Email Campaigns - Client List Inclusion",
+    "email hashed file": "Email Campaigns - Hashed Email File",
+    "email matchback": "Email Campaigns - Matchback Analysis",
+    "email postal match": "Email Campaigns - Postal Matching",
     # DOOH
-    "dooh": "Digital Out Of Home",
-    "digital out of home": "Digital Out Of Home",
-    "out-of-home": "Digital Out Of Home",
+    "dooh": "Digital Out of Home",
+    "digital out of home": "Digital Out of Home",
+    "out-of-home": "Digital Out of Home",
     # Services
     "landing page": "Web Services - Landing Pages",
     "web services": "Web Services - Landing Pages",
-    "microsite": "Web Services - Microsite",
-    "creative services": "Creative Services",
-    # Measurement — brand lift / foot traffic / attribution studies now
-    # consolidate under one "Measurement Study" line in the 2026 rate card.
-    "brand lift": "Measurement Study",
-    "foot traffic": "Measurement Study",
-    "attribution": "Measurement Study",
-    "measurement study": "Measurement Study",
-    "call tracking": "Call Tracking Numbers",
+    "microsite": "Microsite",
+    "creative services": "Creatives Development",
+    "creative development": "Creatives Development",
+    # Measurement
+    "brand lift": "Non Media Offering - Brand Lift",
+    "measurement study": "Non Media Offering - Brand Lift",
+    "call tracking": "Call Tracking",
     # Sponsorship
-    "sponsorship": "Sponsorship - Services Sponsorships",
-    "sponsorship display": "Sponsorship - Services Sponsorships",
-    "cw sponsorship": "Sponsorship - CW Video Sponsorship",
-    "nbc sports stream": "Sponsorship - NBC Sports Stream",
-    "fox sports go": "Sponsorship - Fox Sports Go Video Sponsorship",
+    "sponsorship": "Service Sponsorships - McAllen and Palm Springs",
+    "cw sponsorship": "CW Sponsorship",
+    "nbc sports stream": "NBC Sports Stream Sponsorship",
+    "fox sports go": "Fox Sports Go Video Sponsorship",
 }
 
 
