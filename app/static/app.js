@@ -587,6 +587,7 @@ function _resetStrategyUI() {
   document.getElementById("reprompt-btn").style.display = "none";
   document.getElementById("strategy-confirm-btn").style.display = "none";
   document.getElementById("strategy-download-link").classList.add("hidden");
+  document.getElementById("strategy-search-note").classList.add("hidden");
   document.getElementById("reprompt-input").value = "";
 }
 
@@ -631,6 +632,14 @@ async function onStrategyReprompt() {
 
 function renderStrategyBrief(brief) {
   state.strategyBrief = brief;
+
+  const noteEl = document.getElementById("strategy-search-note");
+  if (!brief.used_web_search) {
+    noteEl.classList.remove("hidden");
+    noteEl.textContent = "⚠ " + (brief.error || "Generated without live web search — verify stats before relying on them.");
+  } else {
+    noteEl.classList.add("hidden");
+  }
 
   setText("brief-client-summary", brief.client_summary || "");
   setText("brief-market-context", brief.market_context || "");
@@ -1558,6 +1567,7 @@ function showResult(data) {
 
   aiContent.classList.add("hidden");
   aiError.classList.add("hidden");
+  document.getElementById("enrichment-search-note").classList.add("hidden");
   document.getElementById("email-reprompt-area").classList.add("hidden");
   document.getElementById("email-reprompt-btn").style.display = "";
   document.getElementById("email-reprompt-input").value = "";
@@ -1568,6 +1578,14 @@ function showResult(data) {
     aiError.textContent = "ⓘ " + enrichment.error;
   } else if (enrichment.internal_email_body || enrichment.client_email_body) {
     aiContent.classList.remove("hidden");
+
+    const searchNoteEl = document.getElementById("enrichment-search-note");
+    if (!enrichment.used_web_search) {
+      searchNoteEl.classList.remove("hidden");
+      searchNoteEl.textContent = "⚠ " + (enrichment.error || "Generated without live web search — verify stats before sending.");
+    } else {
+      searchNoteEl.classList.add("hidden");
+    }
 
     // Internal email
     setText("internal-email-subject", "Subject: " + (enrichment.internal_email_subject || ""));

@@ -588,6 +588,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             for pb in enrichment.product_blurbs
         ],
         "has_email_doc": email_doc_filename is not None,
+        "used_web_search": enrichment.used_web_search,
         "error": enrichment.error,
     }
 

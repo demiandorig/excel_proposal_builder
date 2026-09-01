@@ -1178,8 +1178,8 @@ body::before {
   justify-content: flex-end;
 }
 
-/* ----- Step 05: Roadblocks / Restrictions Check ----- */
-.roadblocks-search-note {
+/* Shared "generated without live web search" transparency note — Steps 03, 05, 07 */
+.search-note {
   padding: 10px 14px;
   font-family: var(--font-mono);
   font-size: 12px;

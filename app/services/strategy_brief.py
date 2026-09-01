@@ -49,13 +49,28 @@ General: Entravision's deep expertise in creating culturally relevant, bilingual
 """.strip()
 
 
+_SEARCH_MODEL = "gpt-4o"
+_FALLBACK_MODEL = "gpt-4o"
+
+
 def generate_brief(request, reprompt: Optional[str] = None) -> dict:
     """
     Generate (or regenerate with reprompt) a strategic brief for this proposal.
 
+    Grounded in live web search (OpenAI Responses API + web_search_preview,
+    same mechanism as the Roadblocks step) so the client summary, market
+    context, and tactic-supporting stats are pulled from actual current
+    sources instead of the model's static training-data guesses — the
+    previous chat-completions-only version had no way to look anything up,
+    which is exactly what made its "specific recent stat" asks come out
+    generic. Falls back to a plain (non-searching) completion — with a
+    clear disclaimer — if the Responses API or the search tool isn't
+    available on this account/SDK version.
+
     Returns a dict with keys:
       client_summary, market_context, objectives_analysis, strategy_summary,
-      recommended_tactics (list), key_insights (list), error (str|None)
+      recommended_tactics (list), key_insights (list), used_web_search (bool),
+      error (str|None)
     """
     api_key = os.getenv("OPENAI_API_KEY")
 
@@ -68,16 +83,57 @@ def generate_brief(request, reprompt: Optional[str] = None) -> dict:
     prompt = _build_prompt(request, reprompt)
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=2500,
-            temperature=0.7,
+        response = client.responses.create(
+            model=_SEARCH_MODEL,
+            tools=[{"type": "web_search_preview"}],
+            input=prompt,
+            max_output_tokens=3000,
         )
-        raw = response.choices[0].message.content or ""
-        return _parse(raw)
-    except Exception as exc:
-        return _error_brief(f"AI request failed: {exc}")
+        raw = _extract_response_text(response)
+        return _parse(raw, used_web_search=True)
+    except Exception as search_exc:
+        # Responses API / web_search_preview unavailable on this account or
+        # SDK version — fall back to a plain completion, but say so clearly
+        # rather than silently presenting static-knowledge guesses as
+        # web-verified research.
+        try:
+            response = client.chat.completions.create(
+                model=_FALLBACK_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2500,
+                temperature=0.7,
+            )
+            raw = response.choices[0].message.content or ""
+            result = _parse(raw, used_web_search=False)
+            if not result.get("error"):
+                result["error"] = (
+                    "Web search wasn't available on this account "
+                    f"({search_exc}); this used the model's general knowledge "
+                    "instead — verify stats before relying on them."
+                )
+            return result
+        except Exception as fallback_exc:
+            return _error_brief(f"AI request failed: {fallback_exc}")
+
+
+def _extract_response_text(response) -> str:
+    """
+    Pull the text out of a Responses API result. `.output_text` is the
+    SDK's convenience accessor; fall back to walking `.output` manually for
+    older SDK versions that don't expose it.
+    """
+    text = getattr(response, "output_text", None)
+    if text:
+        return text
+    chunks = []
+    for item in getattr(response, "output", None) or []:
+        for content in getattr(item, "content", None) or []:
+            t = getattr(content, "text", None)
+            if t:
+                chunks.append(t)
+    if chunks:
+        return "\n".join(chunks)
+    raise ValueError("Responses API returned no extractable text")
 
 
 # ---------------------------------------------------------------------------
@@ -111,9 +167,9 @@ def _build_prompt(request, reprompt: Optional[str]) -> str:
         for w in ("hispanic", "spanish", "latino", "latina")
     )
     stat_hint = (
-        "Prioritize U.S. Hispanic-specific industry statistics (2023–2026)."
+        "Search the web for U.S. Hispanic-specific industry statistics (2023–2026) — actually look them up, don't recall from memory."
         if is_hispanic
-        else "Use general U.S. digital advertising industry statistics (2023–2026)."
+        else "Search the web for general U.S. digital advertising industry statistics (2023–2026) — actually look them up, don't recall from memory."
     )
 
     reprompt_block = ""
@@ -149,6 +205,17 @@ Please revise your strategy taking this into account.
 ## STATISTICS GUIDANCE
 {stat_hint}
 {reprompt_block}
+## YOU HAVE LIVE WEB SEARCH — USE IT, DON'T GUESS
+This is a real capability, not a hypothetical: before writing the client
+summary, run an actual search on the client's name/website to find out
+what they really do (don't infer from the name alone if a website is
+given). Before citing a statistic anywhere in this brief, search for it —
+every data_point below must come from a real source you actually found,
+not a number that merely sounds plausible for the category. If a search
+turns up nothing specific enough, say so explicitly in that field ("no
+audience-specific data found, using general market benchmark of X") rather
+than presenting an invented-sounding number as if it were verified.
+
 ## CRITICAL RULE — SPECIFICITY OVER JARGON
 Every tactic's rationale and every key insight MUST explicitly name the
 targeting values above (the demo, geo, behavioral segment, or contextual
@@ -159,6 +226,12 @@ target audience through premium video content."
 GOOD (specific, required style): "For {request.demo or 'this demo'} in
 {request.geo or 'this market'}, CTV captures {request.behavioral or 'this audience'}
 during appointment-viewing hours when linear reach is declining."
+
+Every "citation" field must name a real, specific, searchable source
+(publisher + year) — never a vague placeholder like "Industry Report,
+2025." If you can't find a specific real source for a claim, don't
+present the claim as sourced data at all; fold it into the rationale as
+directional context instead.
 
 If a data point can be tied to the SPECIFIC demo/geo/behavioral/contextual
 values above (e.g. a Hispanic-specific stat when the target is Hispanic, a
@@ -209,7 +282,7 @@ Respond ONLY with valid JSON — no markdown fences, no preamble:
 # ---------------------------------------------------------------------------
 
 
-def _parse(raw: str) -> dict:
+def _parse(raw: str, used_web_search: bool = False) -> dict:
     match = re.search(r"\{[\s\S]*\}", raw)
     if not match:
         return _error_brief("AI response contained no JSON.")
@@ -237,6 +310,7 @@ def _parse(raw: str) -> dict:
         "strategy_summary": _normalize_newlines(data.get("strategy_summary", "")),
         "recommended_tactics": tactics,
         "key_insights": [_normalize_newlines(i) for i in (data.get("key_insights") or [])],
+        "used_web_search": used_web_search,
         "error": None,
     }
 
@@ -249,5 +323,6 @@ def _error_brief(msg: str) -> dict:
         "strategy_summary": "",
         "recommended_tactics": [],
         "key_insights": [],
+        "used_web_search": False,
         "error": msg,
     }

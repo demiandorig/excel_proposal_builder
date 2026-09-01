@@ -65,6 +65,7 @@ class ProposalEnrichment:
     internal_email_body: str = ""
     client_email_subject: str = ""
     client_email_body: str = ""
+    used_web_search: bool = False
     error: Optional[str] = None
 
     def blurb_for(self, product_name: str) -> Optional[str]:
@@ -177,11 +178,23 @@ def safe_filename(title: str) -> str:
 # Main enrichment call
 # ---------------------------------------------------------------------------
 
+_SEARCH_MODEL = "gpt-4o"
+_FALLBACK_MODEL = "gpt-4o"
+
+
 def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional[dict] = None,
                     tiers: Optional[list] = None) -> ProposalEnrichment:
     """
-    Call OpenAI gpt-4o-mini to generate all AI enrichment for a proposal.
+    Call OpenAI to generate all AI enrichment for a proposal — campaign
+    name, per-product blurbs (with data citations), and both emails.
     Returns a ProposalEnrichment — empty fields (not an exception) on failure.
+
+    Grounded in live web search (Responses API + web_search_preview, same
+    mechanism as the Roadblocks and Strategy Brief steps) so a blurb's
+    "specific recent stat" is something actually found via search, not the
+    model's static training-data guess — falls back to a plain (non-
+    searching) completion, with a clear disclaimer, if the Responses API
+    or the search tool isn't available on this account/SDK version.
 
     strategy_brief: the confirmed brief from the app's Step 03 (if the planner
     didn't skip it) — when present, the product blurbs are grounded in the
@@ -212,19 +225,60 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     prompt = _build_prompt(request, line_items, strategy_brief=strategy_brief, tiers=tiers)
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=5000,
-            temperature=0.7,
+        response = client.responses.create(
+            model=_SEARCH_MODEL,
+            tools=[{"type": "web_search_preview"}],
+            input=prompt,
+            max_output_tokens=6000,
         )
-        raw = response.choices[0].message.content
-        return _parse_response(raw, request, line_items)
-    except Exception as exc:
-        return ProposalEnrichment(
-            campaign_name=_fallback_campaign_name(request),
-            error=f"AI enrichment failed: {exc}",
-        )
+        raw = _extract_response_text(response)
+        return _parse_response(raw, request, line_items, used_web_search=True)
+    except Exception as search_exc:
+        # Responses API / web_search_preview unavailable on this account or
+        # SDK version — fall back to a plain completion, but say so clearly
+        # rather than silently presenting static-knowledge guesses as
+        # web-verified stats.
+        try:
+            response = client.chat.completions.create(
+                model=_FALLBACK_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=5000,
+                temperature=0.7,
+            )
+            raw = response.choices[0].message.content
+            result = _parse_response(raw, request, line_items, used_web_search=False)
+            if not result.error:
+                result.error = (
+                    "Web search wasn't available on this account "
+                    f"({search_exc}); this used the model's general knowledge "
+                    "instead — verify stats before relying on them."
+                )
+            return result
+        except Exception as fallback_exc:
+            return ProposalEnrichment(
+                campaign_name=_fallback_campaign_name(request),
+                error=f"AI enrichment failed: {fallback_exc}",
+            )
+
+
+def _extract_response_text(response) -> str:
+    """
+    Pull the text out of a Responses API result. `.output_text` is the
+    SDK's convenience accessor; fall back to walking `.output` manually for
+    older SDK versions that don't expose it.
+    """
+    text = getattr(response, "output_text", None)
+    if text:
+        return text
+    chunks = []
+    for item in getattr(response, "output", None) or []:
+        for content in getattr(item, "content", None) or []:
+            t = getattr(content, "text", None)
+            if t:
+                chunks.append(t)
+    if chunks:
+        return "\n".join(chunks)
+    raise ValueError("Responses API returned no extractable text")
 
 
 def _fallback_campaign_name(request) -> str:
@@ -432,10 +486,10 @@ if you reference impressions; never compute or guess your own.
         for word in ("hispanic", "spanish", "latino", "latina")
     )
     stat_guidance = (
-        "Find U.S. Hispanic-specific statistics (e.g., 'U.S. Hispanic CTV usage 2025', "
-        "'Latino podcast listening 2024')."
+        "Search the web for U.S. Hispanic-specific statistics (e.g., 'U.S. Hispanic CTV usage 2025', "
+        "'Latino podcast listening 2024') — actually look them up, don't recall from memory."
         if is_hispanic
-        else "Find general market statistics from 2023–2026."
+        else "Search the web for general market statistics from 2023–2026 — actually look them up, don't recall from memory."
     )
 
     # If the planner confirmed a Step 03 strategy brief, ground the blurbs in it
@@ -556,6 +610,21 @@ industry-wide number. Only use a generic market-wide stat when nothing more
 specific is plausible, and say so if you do ("no audience-specific data
 available, using general market benchmark").
 
+## YOU HAVE LIVE WEB SEARCH — USE IT, DON'T GUESS
+This is a real capability, not a hypothetical. Before writing each product
+blurb, run an actual search for that stat — don't write a number that
+merely sounds plausible for the category. If the client's website is
+given above, search it too so the blurbs reflect what the client actually
+does, not an assumption from the name. A citation you can't actually
+verify via search should not be presented as sourced data.
+
+BAD blurb (generic, reject this style): "Reach your target audience
+through premium video content that drives engagement and results."
+GOOD blurb (specific, required style): "For {request.demo or 'this demo'}
+in {request.geo or 'this market'}, streaming video captures viewers during
+appointment-viewing hours when linear reach is declining — [real stat
+found via search] (Source, Year). Entravision's [specific advantage]."
+
 ---
 
 Return this exact JSON structure (no deviation):
@@ -576,6 +645,7 @@ Return this exact JSON structure (no deviation):
 
 RULES:
 - Each product blurb: 50–80 words, persuasive, include one real statistic with citation (Source Name, Year), and must name at least one specific targeting value from the Target Audience section above
+- Every citation must name a real, specific, searchable source (publisher + year) you actually found via search — never a vague placeholder like "Industry Report, 2025." If you can't find a specific real source, don't present a number as sourced data — fold it into the blurb as directional context instead
 - A blurb must accurately describe the NAMED product's own format/category — e.g. never describe audio/podcast/streaming content for an email, display, or search product, or vice versa. If the confirmed strategy brief above doesn't cover a product, base its blurb on the Target Audience and Knowledge Base sections instead — never borrow a rationale, stat, or example written for a different product family
 - A product's blurb stays the SAME regardless of which option(s) it appears in — write it once per product, not once per option
 - For Hispanic/Spanish targets: use U.S. Hispanic-specific stats
@@ -591,12 +661,13 @@ RULES:
 # ---------------------------------------------------------------------------
 
 
-def _parse_response(raw: str, request, line_items) -> ProposalEnrichment:
+def _parse_response(raw: str, request, line_items, used_web_search: bool = False) -> ProposalEnrichment:
     # Extract JSON object (defensive — model sometimes adds preamble despite instructions)
     match = re.search(r"\{[\s\S]*\}", raw)
     if not match:
         return ProposalEnrichment(
             campaign_name=_fallback_campaign_name(request),
+            used_web_search=used_web_search,
             error="AI response contained no JSON object.",
         )
 
@@ -605,6 +676,7 @@ def _parse_response(raw: str, request, line_items) -> ProposalEnrichment:
     except json.JSONDecodeError as exc:
         return ProposalEnrichment(
             campaign_name=_fallback_campaign_name(request),
+            used_web_search=used_web_search,
             error=f"JSON parse error: {exc}",
         )
 
@@ -622,4 +694,5 @@ def _parse_response(raw: str, request, line_items) -> ProposalEnrichment:
         internal_email_body=_normalize_newlines(data.get("internal_email_body", "")),
         client_email_subject=data.get("client_email_subject", ""),
         client_email_body=_normalize_newlines(data.get("client_email_body", "")),
+        used_web_search=used_web_search,
     )

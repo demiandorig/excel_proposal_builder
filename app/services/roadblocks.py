@@ -34,8 +34,8 @@ from app.catalog import by_name
 from app.services.text_utils import normalize_newlines as _normalize_newlines
 
 
-_SEARCH_MODEL = "gpt-4o-mini"
-_FALLBACK_MODEL = "gpt-4o-mini"
+_SEARCH_MODEL = "gpt-4o"
+_FALLBACK_MODEL = "gpt-4o"
 
 
 def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = None) -> dict:
