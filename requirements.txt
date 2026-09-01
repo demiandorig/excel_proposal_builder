@@ -1,0 +1,17 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+openpyxl>=3.1
+Pillow>=10.0
+pydantic>=2.0
+openai>=1.50   # needs the Responses API (client.responses) for Step 05's web_search_preview tool
+python-docx>=1.1
+python-dotenv>=1.0   # loads .env at startup (OPENAI_API_KEY, DRIVE_* creds, etc.)
+
+# Optional — only needed if you want the /api/drive/upload endpoint to
+# actually upload to Google Drive. Without these installed (or without the
+# env vars set), Drive upload returns a graceful "not configured" stub.
+google-api-python-client>=2.100
+google-auth>=2.20
+google-auth-httplib2>=0.2
+google-auth-oauthlib>=1.0

@@ -1,0 +1,17 @@
+# Secrets — never commit. Set these as Replit Secrets / your host's env vars instead.
+.env
+
+# Real client proposal history and admin overrides — not code, shouldn't ship in the repo.
+data/proposals/
+app/data/rate_overrides.json
+app/data/custom_products.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

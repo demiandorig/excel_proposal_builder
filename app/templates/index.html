@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Entravision Proposal Builder</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,700;9..144,900&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <a class="brand" href="#" id="logo-reset" title="Start new proposal">
+        <img src="/static/entravision-logo.svg" class="brand-logo" alt="Entravision" />
+        <div class="brand-title">
+          <div class="brand-name">Entravision - Digital Sales Planning</div>
+          <div class="brand-tag">Automated Proposal Builder</div>
+        </div>
+      </a>
+      <nav class="step-nav" aria-label="Progress">
+        <div class="step active" data-step="1"><span>01</span> Paste</div>
+        <div class="step" data-step="2"><span>02</span> Review</div>
+        <div class="step" data-step="3"><span>03</span> Strategy</div>
+        <div class="step" data-step="4"><span>04</span> Curate</div>
+        <div class="step" data-step="5"><span>05</span> Roadblocks</div>
+        <div class="step" data-step="6"><span>06</span> Avails</div>
+        <div class="step" data-step="7"><span>07</span> Generate</div>
+      </nav>
+    </div>
+  </header>
+
+  <main class="canvas">
+
+    <!-- ====================================================================
+         STEP 1 — Paste Notion
+    ===================================================================== -->
+    <section class="panel" id="step-1">
+      <div class="panel-head">
+        <div class="kicker">Step 01</div>
+        <h1 class="display">Paste the Notion request</h1>
+        <p class="lede">Start with the Notion request ID, then copy the full request text below. The parser handles markdown formatting, blank fields, and both Avails-Only and Renewal branches.</p>
+      </div>
+
+      <div class="notion-id-row">
+        <label class="notion-id-label">
+          <span>Notion Request ID <small>(first — required for the proposal filename &amp; title)</small></span>
+          <div class="notion-id-input-group">
+            <span class="notion-id-prefix">EVC-</span>
+            <input type="text" id="notion-id-input" inputmode="numeric" maxlength="5"
+                   placeholder="48213" pattern="[0-9]{4,5}" />
+          </div>
+        </label>
+      </div>
+
+      <div class="paste-area">
+        <textarea
+          id="notion-input"
+          placeholder="Requested by: ...
+Salesperson market: ...
+Salesperson email: ...
+Request type: ...
+────────────
+Client name: ...
+..."></textarea>
+
+        <div class="paste-actions">
+          <button class="btn-secondary" id="load-example-1">Load Example 1 (Avails-Only)</button>
+          <button class="btn-secondary" id="load-example-2">Load Example 2 (Renewal)</button>
+          <button class="btn-primary" id="parse-btn">Parse →</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ====================================================================
+         STEP 2 — Review parsed
+    ===================================================================== -->
+    <section class="panel hidden" id="step-2">
+      <div class="panel-head">
+        <div class="kicker">Step 02</div>
+        <h1 class="display">Review the parsed request</h1>
+        <p class="lede">Double-check the fields the parser pulled. Edit anything that's off — especially targeting, which the planner is the source of truth on.</p>
+        <div class="notion-id-pill" id="notion-id-pill"></div>
+      </div>
+
+      <div id="parse-warnings" class="warnings hidden"></div>
+
+      <!-- Matched products pill row -->
+      <div id="matched-products-row" class="matched-products hidden">
+        <span class="matched-label">Matched products:</span>
+        <span id="matched-products-list"></span>
+      </div>
+
+      <div class="form-grid">
+        <fieldset>
+          <legend>Requester</legend>
+          <label>Requested by <input data-field="requested_by" /></label>
+          <label>Salesperson email <input data-field="salesperson_email" /></label>
+          <label>Market <input data-field="salesperson_market" /></label>
+          <label>Request type <input data-field="request_type" /></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Client</legend>
+          <label>Client name <input data-field="client_name" /></label>
+          <label>Website <input data-field="client_website" /></label>
+          <label>Agency name <input data-field="agency_name" /></label>
+          <label>Agency fee (0.00–0.99)
+            <input data-field="agency_fee" type="number" step="0.01" min="0" max="0.99" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Flight</legend>
+          <label>Start date <input data-field="start_date" /></label>
+          <label>End date <input data-field="end_date" /></label>
+          <label>Months <input data-field="total_months" type="number" min="1" /></label>
+          <label>Monthly budget
+            <input data-field="monthly_budget" type="number" step="0.01" min="0" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Campaign</legend>
+          <label>Goal <input data-field="campaign_goal" /></label>
+          <label>Language <input data-field="language" /></label>
+        </fieldset>
+
+        <fieldset class="span-2">
+          <legend>Tiered Budget <small>(optional — alternate monthly options)</small></legend>
+          <label class="checkbox-label">
+            <input type="checkbox" data-field="tiered_budget" /> This request has tiered budget options
+          </label>
+          <div class="tier-fields-row">
+            <label>Tier #1 <input data-field="tier_1" placeholder="e.g. 10000" /></label>
+            <label>Tier #2 <input data-field="tier_2" placeholder="e.g. 15000" /></label>
+            <label>Tier #3 <input data-field="tier_3" placeholder="e.g. 20000" /></label>
+            <label>Tier #4 <input data-field="tier_4" placeholder="e.g. 25000" /></label>
+          </div>
+          <p class="field-hint">These pre-fill as separate options in Step 04 automatically — adjust products/budgets from there once you've curated the base mix.</p>
+        </fieldset>
+
+        <fieldset class="span-2">
+          <legend>Targeting <small>(planner double-check)</small></legend>
+          <label>Geo <textarea data-field="geo" rows="2"></textarea></label>
+          <label>Demo <textarea data-field="demo" rows="2"></textarea></label>
+          <label>Behavioral <textarea data-field="behavioral" rows="2"></textarea></label>
+          <label>Contextual <textarea data-field="contextual" rows="2"></textarea></label>
+        </fieldset>
+
+        <fieldset class="span-2" id="renewal-block">
+          <legend>Renewal context</legend>
+          <label>Renewal client <input data-field="renewal_client" /></label>
+          <label>Campaign dates <input data-field="renewal_campaign_dates" /></label>
+          <label>Renewal budget <input data-field="renewal_budget" /></label>
+          <label>Change type <input data-field="renewal_change_type" /></label>
+          <label class="span-2">Changes description <textarea data-field="renewal_changes_description" rows="3"></textarea></label>
+        </fieldset>
+      </div>
+
+      <div class="tab-routing">
+        <strong>Suggested output tabs:</strong>
+        <span id="suggested-tabs"></span>
+      </div>
+
+      <div class="panel-actions">
+        <button class="btn-secondary" data-back="1">← Back</button>
+        <button class="btn-primary" data-next="3">Continue →</button>
+      </div>
+    </section>
+
+    <!-- ====================================================================
+         STEP 3 — AI Strategy Brief
+    ===================================================================== -->
+    <section class="panel hidden" id="step-3">
+      <div class="panel-head">
+        <div class="kicker">Step 03</div>
+        <h1 class="display">AI Strategy Brief</h1>
+        <p class="lede">AI is researching the client, market context, and objectives to recommend the best media mix with data-backed rationale. Confirm the plan or reprompt to refine it.</p>
+      </div>
+
+      <!-- Loading state -->
+      <div id="strategy-loading" class="strategy-loading hidden">
+        <div class="strategy-spinner"></div>
+        <span id="strategy-loading-text">Researching campaign…</span>
+      </div>
+
+      <!-- Error / no API key -->
+      <div id="strategy-error" class="strategy-error hidden"></div>
+
+      <!-- Brief content -->
+      <div id="strategy-brief" class="strategy-brief hidden">
+
+        <div class="brief-context-grid">
+          <div class="brief-block">
+            <div class="brief-block-label">Client &amp; Business</div>
+            <div class="brief-block-body" id="brief-client-summary"></div>
+          </div>
+          <div class="brief-block">
+            <div class="brief-block-label">Market Context</div>
+            <div class="brief-block-body" id="brief-market-context"></div>
+          </div>
+          <div class="brief-block span-2">
+            <div class="brief-block-label">Objectives Analysis</div>
+            <div class="brief-block-body" id="brief-objectives"></div>
+          </div>
+        </div>
+
+        <div class="brief-tactics-head">
+          <h3>Recommended Media Tactics</h3>
+          <div id="brief-budget-note" class="brief-budget-note"></div>
+        </div>
+        <div id="brief-tactics" class="brief-tactics"></div>
+
+        <div class="brief-summary-block">
+          <div class="brief-block-label">Strategy Direction</div>
+          <div class="brief-block-body" id="brief-strategy-summary"></div>
+        </div>
+
+        <div class="brief-insights-block">
+          <div class="brief-block-label">Key Insights for the AE</div>
+          <ul id="brief-insights" class="brief-insights-list"></ul>
+        </div>
+
+      </div>
+
+      <!-- Reprompt area -->
+      <div id="reprompt-area" class="reprompt-area hidden">
+        <label class="reprompt-label">What would you like to adjust?
+          <textarea id="reprompt-input" rows="3"
+            placeholder="e.g. 'The client targets Spanish-speaking Hispanics, not English general market' or 'Focus more on social media and less on CTV'"></textarea>
+        </label>
+        <div class="reprompt-actions">
+          <button class="btn-secondary" id="reprompt-cancel-btn">Cancel</button>
+          <button class="btn-primary" id="reprompt-submit-btn">↺ Regenerate Brief</button>
+        </div>
+      </div>
+
+      <div class="panel-actions" id="strategy-actions">
+        <button class="btn-secondary" data-back="2">← Back</button>
+        <button class="btn-secondary" id="strategy-skip-btn">Skip →</button>
+        <div class="spacer"></div>
+        <a class="btn-secondary hidden" id="strategy-download-link" download>⬇ Download Brief (.docx)</a>
+        <button class="btn-secondary" id="reprompt-btn" style="display:none">↺ Refine this plan</button>
+        <button class="btn-primary" id="strategy-confirm-btn" style="display:none" data-next="4">✓ Confirm &amp; Continue →</button>
+      </div>
+    </section>
+
+    <!-- ====================================================================
+         STEP 4 — Curate line items
+    ===================================================================== -->
+    <section class="panel hidden" id="step-4">
+      <div class="panel-head">
+        <div class="kicker">Step 04</div>
+        <h1 class="display">Curate the product mix</h1>
+        <p class="lede">The salesperson's picks are pre-loaded. Add, remove, and adjust budgets. Minimums and rates from the AdFlo catalog show as you go.</p>
+      </div>
+
+      <div class="tier-switcher" id="tier-switcher">
+        <div class="tier-tabs" id="tier-tabs"></div>
+        <button class="btn-secondary" id="add-tier-btn" title="Copy the current mix into a new budget option (up to 4 total)">+ Add Option</button>
+      </div>
+      <p class="tier-switcher-hint hidden" id="tier-switcher-hint">
+        Multiple budget options — each generates its own tab (and gets outlined in the emails) when you generate the proposal.
+      </p>
+
+      <div class="curation-toolbar">
+        <label class="inline-input">
+          <span>Total monthly budget</span>
+          <input type="number" id="total-budget-target" step="50" placeholder="0.00" />
+        </label>
+        <button class="btn-secondary" id="recommend-btn">⚡ Suggest mix</button>
+        <div class="spacer"></div>
+        <div class="totals-display">
+          <div><span class="label">Monthly total</span><span class="value" id="monthly-total">$0</span></div>
+          <div><span class="label">Flight total</span><span class="value" id="flight-total">$0</span></div>
+        </div>
+      </div>
+
+      <div class="line-items-scroll">
+        <table class="line-items">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Product</th>
+              <th>Model</th>
+              <th>Rate</th>
+              <th>Min</th>
+              <th>Monthly $</th>
+              <th>Months</th>
+              <th>Target override</th>
+              <th>Planner note</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="line-items-body">
+            <!-- rows injected here -->
+          </tbody>
+        </table>
+      </div>
+
+      <div class="add-row-controls">
+        <select id="product-picker">
+          <option value="">+ Add product…</option>
+        </select>
+        <button class="btn-secondary" id="add-product-btn">Add</button>
+      </div>
+
+      <div class="panel-actions">
+        <button class="btn-secondary" data-back="3">← Back</button>
+        <button class="btn-primary" data-next="5">Continue →</button>
+      </div>
+    </section>
+
+    <!-- ====================================================================
+         STEP 5 — AI Roadblocks / Restrictions Check
+    ===================================================================== -->
+    <section class="panel hidden" id="step-5">
+      <div class="panel-head">
+        <div class="kicker">Step 05</div>
+        <h1 class="display">AI Roadblocks Check</h1>
+        <p class="lede">AI searches the web for current platform ad policies — targeting restrictions, common rejection reasons, category requirements — for each product in this mix, grounded in the client context from Steps 02–03. Download the report to keep on hand for launch.</p>
+      </div>
+
+      <div id="roadblocks-loading" class="strategy-loading hidden">
+        <div class="strategy-spinner"></div>
+        <span id="roadblocks-loading-text">Searching platform policies…</span>
+      </div>
+
+      <div id="roadblocks-error" class="strategy-error hidden"></div>
+
+      <div id="roadblocks-content" class="strategy-brief hidden">
+        <div class="brief-block">
+          <div class="brief-block-label">Overall Risk Summary</div>
+          <div class="brief-block-body" id="roadblocks-summary"></div>
+        </div>
+
+        <div id="roadblocks-search-note" class="roadblocks-search-note hidden"></div>
+
+        <div id="roadblocks-cards" class="roadblocks-cards"></div>
+      </div>
+
+      <div class="panel-actions" id="roadblocks-actions">
+        <button class="btn-secondary" data-back="4">← Back</button>
+        <button class="btn-secondary" id="roadblocks-skip-btn">Skip →</button>
+        <div class="spacer"></div>
+        <button class="btn-secondary" id="roadblocks-regenerate-btn" style="display:none">↺ Regenerate</button>
+        <a class="btn-secondary hidden" id="roadblocks-download-link" download>⬇ Download Report (.docx)</a>
+        <button class="btn-primary" id="roadblocks-continue-btn" data-next="6">Continue →</button>
+      </div>
+    </section>
+
+    <!-- ====================================================================
+         STEP 6 — Avails (if needed)
+    ===================================================================== -->
+    <section class="panel hidden" id="step-6">
+      <div class="panel-head">
+        <div class="kicker">Step 06</div>
+        <h1 class="display">Avails input <span id="avails-status-pill"></span></h1>
+        <p class="lede" id="avails-blurb">If this proposal needs avails, paste them from the platforms below. Otherwise, skip — avails columns will be left blank for later planner input.</p>
+      </div>
+
+      <div class="tier-switcher" id="tier-switcher-avails-wrap">
+        <div class="tier-tabs" id="tier-tabs-avails"></div>
+        <label class="copy-avails-control">
+          Copy avails from
+          <select id="copy-avails-source"></select>
+          <button class="btn-secondary" id="copy-avails-btn" type="button">Copy →</button>
+        </label>
+      </div>
+      <p class="tier-switcher-hint" id="tier-switcher-hint-avails">
+        Avails are entered separately per option — you're editing <strong id="tier-switcher-active-label">Option A</strong> below. Switch tabs above (or copy from another option) before generating, or that option ships with no avails.
+      </p>
+
+      <div class="avails-grid" id="avails-grid">
+        <!-- one block per product -->
+      </div>
+
+      <div class="panel-actions">
+        <button class="btn-secondary" data-back="5">← Back</button>
+        <button class="btn-primary" data-next="7">Continue →</button>
+      </div>
+    </section>
+
+    <!-- ====================================================================
+         STEP 7 — Generate
+    ===================================================================== -->
+    <section class="panel hidden" id="step-7">
+      <div class="panel-head">
+        <div class="kicker">Step 07</div>
+        <h1 class="display">Generate the proposal</h1>
+        <p class="lede">Review the summary, choose your output tabs, and generate. The file downloads locally and can be pushed to Google Drive in the seller's folder.</p>
+      </div>
+
+      <div id="tiers-avails-warning" class="warnings hidden"></div>
+
+      <div class="generate-summary" id="generate-summary"></div>
+
+      <fieldset class="tabs-override">
+        <legend>Tabs to generate <small>(auto-suggested above; override here)</small></legend>
+        <label><input type="checkbox" data-tab="net" /> Proposal A (Net)</label>
+        <label><input type="checkbox" data-tab="wsections" /> Proposal A (wsections)</label>
+        <label><input type="checkbox" data-tab="gross" /> Proposal A (Gross)</label>
+        <label><input type="checkbox" data-tab="avails_only" /> Avails-Only</label>
+        <label><input type="checkbox" data-tab="dooh_summary" /> DOOH Summary</label>
+        <label><input type="checkbox" data-tab="dooh_screenlist" /> DOOH Screenlist</label>
+      </fieldset>
+
+      <div class="panel-actions">
+        <button class="btn-secondary" data-back="6">← Back</button>
+        <button class="btn-primary btn-large" id="generate-btn">⬇ Generate Proposal</button>
+      </div>
+
+      <div id="result" class="result hidden">
+        <div class="result-header">
+          <h2>Proposal ready</h2>
+          <div class="result-title" id="result-title"></div>
+          <div class="result-meta" id="result-meta"></div>
+        </div>
+        <div class="result-actions">
+          <a id="download-link" class="btn-primary" download>⬇ Download .xlsx</a>
+          <button class="btn-secondary" id="drive-upload-btn">↗ Upload to Google Drive</button>
+          <button class="btn-secondary" id="new-proposal-btn">+ New Proposal</button>
+        </div>
+        <div id="drive-status" class="drive-status hidden"></div>
+
+        <!-- AI-generated content -->
+        <div id="ai-content" class="ai-content hidden">
+
+          <div class="ai-section">
+            <div class="ai-section-head">
+              <h3>Internal Email — For the AE</h3>
+              <button class="btn-copy" data-copy-target="internal-email-body">Copy</button>
+            </div>
+            <div class="email-subject" id="internal-email-subject"></div>
+            <pre class="email-body" id="internal-email-body"></pre>
+          </div>
+
+          <div class="ai-section">
+            <div class="ai-section-head">
+              <h3>Client-Facing Email Template</h3>
+              <div class="ai-section-actions">
+                <button class="btn-copy" data-copy-target="client-email-body">Copy</button>
+                <a id="download-email-doc" class="btn-secondary hidden" download>⬇ Word (.docx)</a>
+              </div>
+            </div>
+            <div class="email-subject" id="client-email-subject"></div>
+            <pre class="email-body" id="client-email-body"></pre>
+          </div>
+
+          <!-- Reprompt area — final-review adjustments to both emails above -->
+          <div id="email-reprompt-area" class="reprompt-area hidden">
+            <label class="reprompt-label">What would you like to change about these emails?
+              <textarea id="email-reprompt-input" rows="3"
+                placeholder="e.g. 'Make the client email shorter' or 'Emphasize the Q4 start date more'"></textarea>
+            </label>
+            <div class="reprompt-actions">
+              <button class="btn-secondary" id="email-reprompt-cancel-btn">Cancel</button>
+              <button class="btn-primary" id="email-reprompt-submit-btn">↺ Regenerate Emails</button>
+            </div>
+          </div>
+          <div class="ai-section-actions">
+            <button class="btn-secondary" id="email-reprompt-btn">↺ Refine these emails</button>
+          </div>
+
+        </div>
+
+        <div id="ai-error" class="ai-error hidden"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <span>Entravision Digital Ops · Proposal Builder v0.1 · AdFlo catalog · 71 products</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

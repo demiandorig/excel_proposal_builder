@@ -1,0 +1,270 @@
+/* ========================================================================
+ * Admin Console — extends styles.css with table/tabs-specific rules
+ * ======================================================================== */
+
+.admin-tabs {
+  display: flex;
+  gap: 4px;
+}
+.admin-tab {
+  padding: 10px 18px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.admin-tab:hover { color: var(--ink); }
+.admin-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.admin-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.admin-toolbar input[type="text"] {
+  flex: 1;
+  max-width: 420px;
+  padding: 10px 14px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-warm);
+}
+.admin-toolbar input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--paper-card);
+}
+.admin-count {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+}
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.admin-table th {
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  padding: 10px 12px;
+  background: var(--paper-warm);
+  border-bottom: 2px solid var(--ink);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+}
+.admin-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rule-soft);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.admin-table tbody tr:hover { background: var(--paper-warm); }
+.admin-table td.wrap { white-space: normal; max-width: 280px; }
+.admin-table .mono { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-soft); }
+.admin-table .muted { color: var(--ink-faint); }
+.admin-empty {
+  text-align: center;
+  padding: 32px !important;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* Rate override inputs */
+.admin-table input[type="number"] {
+  width: 100px;
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-card);
+}
+.admin-table input[type="number"]:focus { outline: none; border-color: var(--accent); }
+.admin-table input.overridden {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.admin-table input.na-field {
+  background: var(--paper-warm);
+  color: var(--ink-faint);
+}
+.reopen-link {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.reopen-link:hover { text-decoration: underline; }
+.override-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  margin-left: 6px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 20px;
+}
+.btn-revert {
+  background: transparent;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 10px;
+}
+.btn-revert:hover { color: var(--red); border-color: var(--red); }
+.btn-save-row {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: white;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 10px;
+  margin-left: 4px;
+}
+.btn-save-row:hover { opacity: 0.85; }
+.btn-save-row:disabled { opacity: 0.4; cursor: default; }
+.btn-delete-row {
+  background: transparent;
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  color: var(--red);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 10px;
+  margin-left: 4px;
+}
+.btn-delete-row:hover { background: #fdf1f0; }
+.custom-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  margin-left: 6px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--green);
+  background: var(--green-soft);
+  border-radius: 20px;
+}
+
+/* Add-product panel */
+.add-product-panel {
+  margin-bottom: 20px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  background: var(--paper-warm);
+  padding: 4px 18px;
+}
+.add-product-panel summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 14px 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  user-select: none;
+}
+.add-product-panel summary::-webkit-details-marker { display: none; }
+.add-product-panel[open] summary { border-bottom: 1px solid var(--rule-soft); }
+.add-product-panel form { padding: 18px 0 20px; }
+
+.add-product-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px 18px;
+}
+.add-product-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.add-product-grid label .req { color: var(--red); }
+.add-product-grid label small {
+  font-weight: 400;
+  color: var(--ink-faint);
+  font-size: 11px;
+}
+.add-product-grid label.span-2 { grid-column: span 2; }
+.add-product-grid input,
+.add-product-grid select,
+.add-product-grid textarea {
+  padding: 9px 12px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-card);
+  resize: vertical;
+}
+.add-product-grid input:focus,
+.add-product-grid select:focus,
+.add-product-grid textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.add-product-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 18px;
+}
+.add-product-error {
+  margin-right: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--red);
+}
+.add-product-error.hidden { display: none; }
+
+@media (max-width: 900px) {
+  .add-product-grid { grid-template-columns: repeat(2, 1fr); }
+  .add-product-grid label.span-2 { grid-column: span 2; }
+}
+@media (max-width: 600px) {
+  .add-product-grid { grid-template-columns: 1fr; }
+  .add-product-grid label.span-2 { grid-column: span 1; }
+}
