@@ -269,30 +269,31 @@ def _extract_label_raw(text: str, label: str) -> str:
 # the single most general one — the planner can swap to a more specific
 # variant in Step 04.
 PRODUCT_ALIASES: dict[str, str] = {
-    # Search
-    "google ads": "Search - AdWords - SEM",
-    "paid search": "Search - AdWords - SEM",
-    "sem": "Search - AdWords - SEM",
-    "adwords": "Search - AdWords - SEM",
-    "search sem": "Search - AdWords - SEM",
-    "sem pro": "Search - SEM PRO",
-    "bing ads": "Search - AdWords - SEM",
-    "pmax": "Search - AdWords - SEM",
-    "performance max": "Search - AdWords - SEM",
+    # Search — "Search - SEM" is now the one catalog line (AdWords/SEM PRO
+    # collapsed into it as pricing-tier variants, see its description)
+    "google ads": "Search - SEM",
+    "paid search": "Search - SEM",
+    "sem": "Search - SEM",
+    "adwords": "Search - SEM",
+    "search sem": "Search - SEM",
+    "sem pro": "Search - SEM",
+    "bing ads": "Search - SEM",
+    "pmax": "Search - SEM",
+    "performance max": "Search - SEM",
     # Display
-    "display": "Geo targeting only + Hispanic",
-    "edigital display": "Geo targeting only + Hispanic",
-    "display banner": "Geo targeting only + Hispanic",
-    "programmatic display": "Geo targeting only + Hispanic",
+    "display": "eDigital Network Display - Standard IAB",
+    "edigital display": "eDigital Network Display - Standard IAB",
+    "display banner": "eDigital Network Display - Standard IAB",
+    "programmatic display": "eDigital Network Display - Standard IAB",
     "geofencing display": "Display - Geo Fence",
     "geo fence display": "Display - Geo Fence",
     "geofencing": "Display - Geo Fence",
     # Online Video
-    "olv": "Video - Pre-roll",
-    "online video": "Video - Pre-roll",
-    "pre-roll": "Video - Pre-roll",
-    "preroll": "Video - Pre-roll",
-    "video pre-roll": "Video - Pre-roll",
+    "olv": "Video - Pre-roll (OLV)",
+    "online video": "Video - Pre-roll (OLV)",
+    "pre-roll": "Video - Pre-roll (OLV)",
+    "preroll": "Video - Pre-roll (OLV)",
+    "video pre-roll": "Video - Pre-roll (OLV)",
     # YouTube
     "youtube ads": "YouTube Ads",
     "youtube video ads": "YouTube Ads",
@@ -322,19 +323,21 @@ PRODUCT_ALIASES: dict[str, str] = {
     "netflix content genre": "Netflix - Content Genre Targeted :15s Ads",
     "netflix spanish": "Netflix - Spanish Content :15s Ads",
     "netflix hispanic": "Netflix - Spanish Content :15s Ads",
-    # Audio
+    # Audio — "Standard"/"Custom Audience"/"Station Specific"/etc. are now
+    # pricing-tier variants folded into their parent's description.
     "spotify": "Spotify",
     "spotify ads": "Spotify",
-    "audio engage": "Standard",
-    "audioengage": "Standard",
-    "audio engage custom": "Custom Audience",
-    "station specific audio": "Station Specific",
-    "station specific": "Station Specific",
-    "klyy": "KLYY Jose Station LA - Spot",
-    "day parting": "12 hours Day Parting",
-    # Social / Meta — split by objective; default to the general Awareness
-    # variant, the planner can swap to Traffic/Conversion or Lead Gen/Calls
-    # in Step 04.
+    "audio engage": "AudioEngage",
+    "audioengage": "AudioEngage",
+    "audio engage custom": "AudioEngage",
+    "audio streaming": "Audio - EVC Audio Streaming",
+    "station specific audio": "Audio - EVC Audio Streaming",
+    "station specific": "Audio - EVC Audio Streaming",
+    "klyy": "Audio - EVC Audio Streaming",
+    "day parting": "Audio - EVC Audio Streaming",
+    # Social / Meta (paid, client's own account) — split by objective;
+    # default to the general Awareness variant, the planner can swap to
+    # Traffic/Conversion or Lead Gen/Calls in Step 04.
     "facebook": "Facebook & Instagram Ads | Awareness",
     "instagram": "Facebook & Instagram Ads | Awareness",
     "meta": "Facebook & Instagram Ads | Awareness",
@@ -346,40 +349,54 @@ PRODUCT_ALIASES: dict[str, str] = {
     "meta lead gen": "Facebook & Instagram Ads | Lead Gen / Calls",
     "facebook traffic": "Facebook & Instagram Ads | Traffic / Conversion",
     "facebook conversion": "Facebook & Instagram Ads | Traffic / Conversion",
-    # Branded content / O&O-page social — client-provided or Entravision-
-    # produced content running on Entravision's own Noticias Ya / Radio /
-    # talent pages, distinct from paid Meta ads on the client's own account.
-    "branded content": "Facebook & Instagram Ads on Noticias or Radio Pages running One objective per campaign using client creative or Inhouse talent.",
-    "noticias ya": "Social Media Post Noticias Ya",
-    "noticias ya live": "Noticias Ya Live",
+    # Meta Branded Content — Entravision-produced/co-branded content running
+    # on Entravision's own Meta pages, distinct from paid Meta ads on the
+    # client's own account. Current naming per Sales Planning (2026-09) —
+    # legacy aliases below point at the same 4 lines under their old names.
+    "branded content": "Meta Branded Content | Sponsorship Ads",
+    "meta branded content": "Meta Branded Content | Sponsorship Ads",
+    "collaborative ads": "Meta Branded Content | Colaborative Ads",
+    "colaborative ads": "Meta Branded Content | Colaborative Ads",
+    "partnership ads": "Meta Branded Content | Partnership Ads",
+    "branded content live": "Meta Branded Content Live| Sponsorship Ads",
+    # Legacy column-B names for the same 4 lines (kept so an older Notion
+    # paste referencing the old naming still resolves correctly).
+    "social media post noticias ya - running advertiser-provided image or video or entravision-created static image.": "Meta Branded Content | Colaborative Ads",
+    "facebook & instagram ads on noticias or radio pages running one objective per campaign using client creative or inhouse talent.": "Meta Branded Content | Sponsorship Ads",
+    "facebook & instagram ads on noticias or radio pages running creative omnichannel campaign featuring in-house talent.": "Meta Branded Content | Partnership Ads",
+    # O&O-page social (organic-style posts, not paid Meta ads)
+    "noticias ya": "Social Media Posts - Noticias Ya",
+    "noticias ya live": "Social Media Posts - Noticias Ya",
     "evc radio meta": "Facebook & Instagram Ads on EVC Radio Pages",
-    "evc radio live": "EVC Radio Live",
-    "talent fee": "Talent endorsement / fee",
-    "talent endorsement": "Talent endorsement / fee",
-    "shoboy": "SHOBOY Page",
-    "erazno": "ERAZNO Page",
-    "genio lucas": "GENIO LUCAS Page",
-    "piolin": "PIOLIN Page",
-    "tiktok": "In-Feed Ads",
-    "tiktok ads": "In-Feed Ads",
-    "tiktok lead gen": "In-Feed Lead Gen Ads",
-    "tiktok on radio pages": "In-Feed Ads (Entravision Pages)",
-    "tiktok on entravision pages": "In-Feed Ads (Entravision Pages)",
+    "evc radio live": "Social Media Posts - Radio Pages",
+    "social media radio pages": "Social Media Posts - Radio Pages",
+    "talent fee": "Social Media Posts - Radio Pages",
+    "talent endorsement": "Social Media Posts - Radio Pages",
+    "shoboy": "Social Media Posts - Radio Pages",
+    "erazno": "Social Media Posts - Radio Pages",
+    "genio lucas": "Social Media Posts - Radio Pages",
+    "piolin": "Social Media Posts - Radio Pages",
+    "tiktok": "Tiktok Ads",
+    "tiktok ads": "Tiktok Ads",
+    "tiktok lead gen": "Tiktok Ads",
+    "tiktok on radio pages": "Tik Tok Ads on Entravision News and Radio Pages",
+    "tiktok on entravision pages": "Tik Tok Ads on Entravision News and Radio Pages",
     "linkedin": "LinkedIn",
     "linkedin ads": "LinkedIn",
-    "social lead gen": "Social - Lead Generation",
-    # Email — no single generic SKU anymore; the rate card breaks the base
-    # blast product out by recipient-count tier, so "email"/"email
-    # marketing" default to the smallest (most common) tier.
-    "email": "Number of emails: 0 - 15,000",
-    "email marketing": "Number of emails: 0 - 15,000",
-    "email blast": "Number of emails: 0 - 15,000",
-    "email campaign": "Number of emails: 0 - 15,000",
+    # Email — no single generic SKU; the rate card breaks the base blast
+    # product out by recipient-count tier, folded as variants under the
+    # one "Email Campaigns" line, so "email"/"email marketing" point there.
+    "email": "Email Campaigns and/or Email Campaigns - Re-Drop",
+    "email marketing": "Email Campaigns and/or Email Campaigns - Re-Drop",
+    "email blast": "Email Campaigns and/or Email Campaigns - Re-Drop",
+    "email campaign": "Email Campaigns and/or Email Campaigns - Re-Drop",
+    "email re-drop": "Email Campaigns and/or Email Campaigns - Re-Drop",
     "email retargeting": "Email Campaigns - Display Re-targeting",
     "email display retargeting": "Email Campaigns - Display Re-targeting",
     "email client list": "Email Campaigns - Client List Inclusion",
     "email hashed file": "Email Campaigns - Hashed Email File",
-    "email matchback": "Email Campaigns - Matchback Analysis",
+    "email matchback": "Email Campaigns - Matchback",
+    "email matchback analysis": "Email Campaigns - Matchback",
     "email postal match": "Email Campaigns - Postal Matching",
     # DOOH
     "dooh": "Digital Out of Home",

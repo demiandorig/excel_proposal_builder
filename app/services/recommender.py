@@ -27,40 +27,40 @@ from app.services.proposal_generator import LineItem
 
 GOAL_PRIORITIES: dict[str, list[str]] = {
     "traffic": [
-        "Search - AdWords - SEM",
+        "Search - SEM",
         "Facebook & Instagram Ads | Traffic / Conversion",
-        "Geo targeting only + Hispanic",
+        "eDigital Network Display - Standard IAB",
         "YouTube Ads",
     ],
     "awareness": [
         "Entravision Plus CTV/OTT - English Content",
-        "Video - Pre-roll",
+        "Video - Pre-roll (OLV)",
         "YouTube Ads",
-        "Standard",
+        "AudioEngage",
         "Facebook & Instagram Ads | Awareness",
     ],
     "conversions": [
-        "Search - AdWords - SEM",
+        "Search - SEM",
         "Facebook & Instagram Ads | Traffic / Conversion",
-        "Geo targeting only + Hispanic",
+        "eDigital Network Display - Standard IAB",
     ],
     "lead_gen": [
-        "Search - AdWords - SEM",
+        "Search - SEM",
         "Facebook & Instagram Ads | Lead Gen / Calls",
         "LinkedIn",
-        "Number of emails: 0 - 15,000",
+        "Email Campaigns and/or Email Campaigns - Re-Drop",
     ],
     "engagement": [
         "Facebook & Instagram Ads | Awareness",
-        "In-Feed Ads",
+        "Tiktok Ads",
         "Spotify",
         "YouTube Ads",
     ],
     "default": [
-        "Search - AdWords - SEM",
+        "Search - SEM",
         "Facebook & Instagram Ads | Awareness",
         "Entravision Plus CTV/OTT - English Content",
-        "Geo targeting only + Hispanic",
+        "eDigital Network Display - Standard IAB",
     ],
 }
 

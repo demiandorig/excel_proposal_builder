@@ -65,19 +65,19 @@ line_items = [
         notes_override="Add retargeting layer per renewal request",
     ),
     LineItem(
-        product_name="Search - AdWords - SEM",
+        product_name="Search - SEM",
         monthly_budget=2500.0,
         months=1,
         target_override="Hispanic A21+ — Los Angeles",
     ),
     LineItem(
-        product_name="Geo targeting only + Hispanic",
+        product_name="eDigital Network Display - Standard IAB",
         monthly_budget=1500.0,
         months=1,
         target_override="Hispanic A21+ — Northern California",
     ),
     LineItem(
-        product_name="Number of emails: 0 - 15,000",
+        product_name="Email Campaigns and/or Email Campaigns - Re-Drop",
         monthly_budget=500.0,
         months=1,
         notes_override="Client has list to upload — coordinate intake",
