@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from app.catalog import CATALOG, by_name, by_family
-from app.services.notion_parser import ProposalRequest
+from app.services.notion_parser import ProposalRequest, compose_target_fallback
 from app.services.proposal_generator import LineItem
 
 
@@ -63,6 +63,20 @@ GOAL_PRIORITIES: dict[str, list[str]] = {
         "eDigital Network Display - Standard IAB",
     ],
 }
+
+
+def _default_target_override(request: ProposalRequest) -> Optional[str]:
+    """
+    The Target Override pre-fill for a recommender-suggested line — the
+    full Demo | Behavioral | Contextual composition (matching what the
+    Excel export already falls back to when a line has no override of its
+    own), not just the bare demo string. Returns None (leave the field
+    blank, showing the textarea's placeholder) rather than the literal
+    text "TBD" when nothing was captured at all — a blank field reads
+    better than a pre-filled "TBD" the planner has to notice and clear.
+    """
+    composed = compose_target_fallback(request)
+    return composed if composed != "TBD" else None
 
 
 def _classify_goal(goal_text: str) -> str:
@@ -182,6 +196,7 @@ def recommend_line_items(
     weight_sum = sum(weights)
     weights = [w / weight_sum for w in weights]
 
+    default_target = _default_target_override(request)
     line_items: list[LineItem] = []
     for (name, minimum), w in zip(selected, weights):
         extra = leftover * w
@@ -194,7 +209,7 @@ def recommend_line_items(
             product_name=name,
             monthly_budget=float(monthly),
             months=months,
-            target_override=request.demo or None,
+            target_override=default_target,
         ))
 
     # Fix rounding overrun: if total > budget, trim the largest line
@@ -230,6 +245,7 @@ def _recommend_from_brief(
 
     # Normalise percentages so they sum to 100
     total_pct = sum(t.get("suggested_budget_pct", 0) for t in tactics) or 100
+    default_target = _default_target_override(request)
     line_items: list[LineItem] = []
 
     for tactic in tactics:
@@ -274,7 +290,7 @@ def _recommend_from_brief(
             product_name=preferred.name,
             monthly_budget=float(alloc),
             months=months,
-            target_override=request.demo or None,
+            target_override=default_target,
         ))
 
     # If brief mapping yielded nothing, fall back to goal-based logic

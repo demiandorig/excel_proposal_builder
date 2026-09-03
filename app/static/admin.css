@@ -183,6 +183,19 @@
   background: var(--green-soft);
   border-radius: 20px;
 }
+.addon-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  margin-left: 6px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-radius: 20px;
+}
 
 /* Add-product panel */
 .add-product-panel {

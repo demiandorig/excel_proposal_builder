@@ -113,7 +113,7 @@ def generate_brief(request, reprompt: Optional[str] = None) -> dict:
                 )
             return result
         except Exception as fallback_exc:
-            return _error_brief(f"AI request failed: {fallback_exc}")
+            return _error_brief(f"Request failed: {fallback_exc}")
 
 
 def _extract_response_text(response) -> str:
@@ -285,7 +285,7 @@ Respond ONLY with valid JSON — no markdown fences, no preamble:
 def _parse(raw: str, used_web_search: bool = False) -> dict:
     match = re.search(r"\{[\s\S]*\}", raw)
     if not match:
-        return _error_brief("AI response contained no JSON.")
+        return _error_brief("No structured response received.")
     try:
         data = json.loads(match.group(0))
     except json.JSONDecodeError as exc:

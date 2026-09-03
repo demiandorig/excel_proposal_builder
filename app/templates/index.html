@@ -32,6 +32,19 @@
     </div>
   </header>
 
+  <!-- Persistent proposal-name bar — visible on every step from Review
+       onward, not just Step 02, so the planner always has the naming-
+       convention title on hand (e.g. to name a Drive folder or Slack
+       thread mid-workflow) without hunting back to the paste screen. -->
+  <div class="proposal-name-bar hidden" id="proposal-name-bar">
+    <div class="proposal-name-bar-inner">
+      <span class="proposal-name-label">Proposal name</span>
+      <span class="proposal-name-text" id="proposal-name-text"></span>
+      <button class="btn-copy proposal-name-copy" id="proposal-name-copy-btn"
+              data-copy-target="proposal-name-text" title="Copy proposal name">⧉ Copy</button>
+    </div>
+  </div>
+
   <main class="canvas">
 
     <!-- ====================================================================
@@ -172,13 +185,13 @@ Client name: ...
     </section>
 
     <!-- ====================================================================
-         STEP 3 — AI Strategy Brief
+         STEP 3 — Strategy Brief
     ===================================================================== -->
     <section class="panel hidden" id="step-3">
       <div class="panel-head">
         <div class="kicker">Step 03</div>
-        <h1 class="display">AI Strategy Brief</h1>
-        <p class="lede">AI is researching the client, market context, and objectives to recommend the best media mix with data-backed rationale. Confirm the plan or reprompt to refine it.</p>
+        <h1 class="display">Strategy Brief</h1>
+        <p class="lede">Entravision Intelligence is researching the client, market context, and objectives to recommend the best media mix with data-backed rationale. Confirm the plan or reprompt to refine it.</p>
       </div>
 
       <!-- Loading state -->
@@ -285,6 +298,7 @@ Client name: ...
         <table class="line-items">
           <thead>
             <tr>
+              <th></th>
               <th>#</th>
               <th>Product</th>
               <th>Model</th>
@@ -310,6 +324,20 @@ Client name: ...
         <button class="btn-secondary" id="add-product-btn">Add</button>
       </div>
 
+      <!-- ==================================================================
+           Add-Ons — fixed-price extras (Services/Measurement catalog
+           families), picked separately from the main product mix: no
+           suggested budget, planner just checks off what applies and can
+           edit the price. Proposal-wide, not per budget-tier/option.
+      =================================================================== -->
+      <div class="addons-module">
+        <div class="addons-module-head">
+          <h3>Add-Ons</h3>
+          <p class="addons-module-hint">Fixed-price extras — check off what applies to this proposal. No suggested budget; the price defaults to the catalog rate and is yours to adjust per deal.</p>
+        </div>
+        <div id="addons-list" class="addons-list"></div>
+      </div>
+
       <div class="panel-actions">
         <button class="btn-secondary" data-back="3">← Back</button>
         <button class="btn-primary" data-next="5">Continue →</button>
@@ -317,13 +345,13 @@ Client name: ...
     </section>
 
     <!-- ====================================================================
-         STEP 5 — AI Roadblocks / Restrictions Check
+         STEP 5 — Roadblocks / Restrictions Check
     ===================================================================== -->
     <section class="panel hidden" id="step-5">
       <div class="panel-head">
         <div class="kicker">Step 05</div>
-        <h1 class="display">AI Roadblocks Check</h1>
-        <p class="lede">AI searches the web for current platform ad policies — targeting restrictions, common rejection reasons, category requirements — for each product in this mix, grounded in the client context from Steps 02–03. Download the report to keep on hand for launch.</p>
+        <h1 class="display">Roadblocks Check</h1>
+        <p class="lede">Entravision Intelligence searches the web for current platform ad policies — targeting restrictions, common rejection reasons, category requirements — for each product in this mix, grounded in the client context from Steps 02–03. Download the report to keep on hand for launch.</p>
       </div>
 
       <div id="roadblocks-loading" class="strategy-loading hidden">
@@ -428,7 +456,7 @@ Client name: ...
         </div>
         <div id="drive-status" class="drive-status hidden"></div>
 
-        <!-- AI-generated content -->
+        <!-- Entravision Intelligence: emails + blurbs -->
         <div id="ai-content" class="ai-content hidden">
 
           <div id="enrichment-search-note" class="search-note hidden"></div>
@@ -472,13 +500,32 @@ Client name: ...
         </div>
 
         <div id="ai-error" class="ai-error hidden"></div>
+
+        <!-- Gamma outline — a paste-in handoff for the "Media Strategy
+             Co-Pilot" GPT (client context + brief + research + media plan),
+             not an API integration: that GPT has no callable API, so the
+             planner copies this text in and pastes it there themselves.
+             Built from data already on the page — no extra request. -->
+        <div class="ai-section gamma-outline-section">
+          <div class="ai-section-head">
+            <h3>Gamma Outline — Media Strategy Co-Pilot</h3>
+            <div class="ai-section-actions">
+              <button class="btn-copy" data-copy-target="gamma-outline-body">Copy</button>
+              <a class="btn-secondary" id="gamma-gpt-link"
+                 href="https://chatgpt.com/g/g-68c0554e8ef08191bec6b1fd5d043eee-media-strategy-co-pilot-for-digital-sales-planners"
+                 target="_blank" rel="noopener">↗ Open Media Strategy Co-Pilot</a>
+            </div>
+          </div>
+          <p class="gamma-outline-hint">Copy the outline below, then paste it into the GPT (opens in a new tab) to build the Gamma presentation.</p>
+          <pre class="email-body" id="gamma-outline-body"></pre>
+        </div>
       </div>
     </section>
 
   </main>
 
   <footer class="footer">
-    <span>Entravision Digital Ops · Proposal Builder v0.1 · AdFlo catalog · 71 products</span>
+    <span>Entravision Digital Ops · Proposal Builder v0.1 · AdFlo catalog · 57 products</span>
   </footer>
 
   <script src="/static/app.js"></script>

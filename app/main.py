@@ -48,7 +48,7 @@ from app.services.notion_parser import (
     parse_notion,
     classify_output_tabs,
 )
-from app.services.proposal_generator import LineItem, generate_proposal
+from app.services.proposal_generator import LineItem, AddonItem, generate_proposal
 from app.services.recommender import recommend_line_items
 from app.services import drive_uploader
 from app.services import ai_enricher
@@ -133,12 +133,21 @@ class LineItemModel(BaseModel):
     notes_override: Optional[str] = None
     target_override: Optional[str] = None
     target_secondary: Optional[str] = None  # secondary audience for added scale/avails
+    estimated_cpm_override: Optional[float] = None  # Step 04 override of the catalog's estimated CPM (Fixed/impressions-estimate products)
+    is_added_value: bool = False  # $0 budget is deliberate — exempt from below-minimum validation, sorts to the bottom of the export
 
 
 class AvailsEntry(BaseModel):
     max_imps: Optional[float] = None
     max_spend: Optional[float] = None
     est_uniques: Optional[float] = None
+    # Avg. frequency (= max_imps / est_uniques) — a Step 06 calculator aid,
+    # interchangeable with imps/uniques (entering any two derives the
+    # third). Defaults to 5.5 in the UI for Fixed/estimated-CPM products.
+    # Not written to its own Excel cell today — only feeds the imps/
+    # uniques values that already have one — kept here purely so it
+    # round-trips correctly through reopen instead of silently vanishing.
+    frequency: Optional[float] = None
     # True when this value was derived from the other field (Fixed/estimated-CPM
     # products) rather than typed directly — rendered as "Est. …" text in Excel.
     max_imps_estimated: Optional[bool] = None
@@ -148,12 +157,27 @@ class AvailsEntry(BaseModel):
     # Excel export write the derived side as a live formula instead of a
     # static number. None for avails saved before this field existed.
     basis: Optional[str] = None
+    # Free-form mode: same three columns as always, but each one takes
+    # whatever text the planner typed ("50 to 100 estimated clicks")
+    # instead of a parsed, calculated number — written verbatim, no
+    # cross-field calculation, no SOV. The *_text fields are only
+    # meaningful when `freeform` is true; ignored otherwise.
+    freeform: Optional[bool] = None
+    max_imps_text: Optional[str] = None
+    max_spend_text: Optional[str] = None
+    est_uniques_text: Optional[str] = None
 
 
 class TierModel(BaseModel):
     label: str  # "A" | "B" | "C" | "D"
     line_items: list[LineItemModel]
     avails_data: Optional[dict[str, AvailsEntry]] = None
+
+
+class AddonItemModel(BaseModel):
+    product_name: str
+    amount: float
+    notes_override: Optional[str] = None
 
 
 class GenerateRequest(BaseModel):
@@ -163,6 +187,13 @@ class GenerateRequest(BaseModel):
     force_tabs: Optional[dict] = None
     avails_data: Optional[dict[str, AvailsEntry]] = None  # product_name -> avails; ignored when `tiers` is present
     strategy_brief: Optional[dict] = None  # confirmed Step 03 brief, if not skipped
+    # Step 04's Add-Ons module picks — proposal-wide (not per-tier). []
+    # (the default, and what an updated frontend always sends even with
+    # nothing picked) means "planner picked none" and the export's ADD-ONS
+    # section is omitted entirely — NOT the legacy hardcoded 4-item list.
+    # That fallback only ever fires for generate_proposal()'s own default
+    # (addons=None), which nothing reachable through this endpoint passes.
+    addons: list[AddonItemModel] = []
 
 
 class StrategyRequest(BaseModel):
@@ -227,6 +258,7 @@ async def get_catalog() -> dict:
             "description": p.proposal_description,
             "notes": p.notes,
             "wide_orbit_code": p.wide_orbit_code,
+            "is_addon": p.is_addon,
         })
     return {
         "families": families(),
@@ -414,6 +446,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
                 notes_override=li.notes_override,
                 target_override=li.target_override,
                 target_secondary=li.target_secondary,
+                estimated_cpm_override=li.estimated_cpm_override,
+                is_added_value=li.is_added_value,
             )
             for li in models
         ]
@@ -482,6 +516,10 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     # 5. Generate Excel — one set of tabs (Net/wsections/Gross/Avails-Only)
     #    PER TIER when there's more than one budget option, lettered
     #    Proposal A/B/C/D; DOOH and Process FAQs stay single shared tabs.
+    addons = [
+        AddonItem(product_name=a.product_name, amount=a.amount, notes_override=a.notes_override)
+        for a in body.addons
+    ]
     try:
         summary = generate_proposal(
             req, tiers[0]["line_items"], output_path,
@@ -490,6 +528,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             proposal_title=proposal_title,
             avails_data=tiers[0]["avails_data"],
             tiers=tiers if multi_tier else None,
+            addons=addons,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
@@ -573,6 +612,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             "tiers": [t.model_dump() for t in body.tiers] if body.tiers else None,
             "strategy_brief": body.strategy_brief,
             "force_tabs": body.force_tabs,
+            "addons": [a.model_dump() for a in body.addons],
         },
     }))
 
@@ -791,6 +831,7 @@ class NewProductRequest(BaseModel):
     notes: Optional[str] = None
     estimated_cpm_for_imps: Optional[float] = None
     tech_platform: Optional[str] = None
+    is_addon: bool = False
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -854,6 +895,7 @@ async def admin_get_rates() -> dict:
             "catalog_estimated_cpm_for_imps": p.estimated_cpm_for_imps,
             "has_override": p.name in overrides,
             "is_custom": p.name in custom_names,
+            "is_addon": p.is_addon,
         })
     return {"products": products, "overridable_fields": list(_OVERRIDABLE_FIELDS)}
 
@@ -904,6 +946,7 @@ async def admin_add_product(body: NewProductRequest) -> dict:
             "notes": body.notes,
             "estimated_cpm_for_imps": body.estimated_cpm_for_imps,
             "tech_platform": body.tech_platform,
+            "is_addon": body.is_addon,
         })
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

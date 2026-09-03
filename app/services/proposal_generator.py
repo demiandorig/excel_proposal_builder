@@ -46,9 +46,36 @@ class LineItem:
     # product_name (e.g. same product, different targeting) — avails_data is
     # keyed by this id, NOT product_name, so those lines don't collide.
     id: Optional[str] = None
+    # Per-line override of the catalog's estimated CPM (Fixed/impressions-
+    # estimate products only — Meta, YouTube, TikTok, LinkedIn, Spotify,
+    # Branded Content, ...). Distinct from rate_override, which is a real
+    # CPM/CPP billing rate: this only feeds the "Est. $" impressions-vs-
+    # spend calculation, never an actual charge. None = use the catalog's
+    # own estimated_cpm_for_imps.
+    estimated_cpm_override: Optional[float] = None
+    # Added Value: a $0 (or below-minimum) budget is valid and expected for
+    # this line, not a planner oversight — exempts it from the below-
+    # minimum validation highlight in the app, and sorts it to the bottom
+    # of the export's line-items table (above the totals row, below every
+    # paid line) rather than interleaved among real budget lines.
+    is_added_value: bool = False
 
     def total_budget(self) -> float:
         return self.monthly_budget * self.months
+
+
+@dataclass
+class AddonItem:
+    """
+    One planner-picked extra from Step 04's Add-Ons module — a fixed-price,
+    one-time line (landing page, call tracking, brand lift study, ...),
+    distinct from LineItem: no months/target/rate, just a name and an
+    editable flat amount. Rolled into the proposal's ADD-ONS / ONE-TIME
+    FEES export block instead of the main line-items table.
+    """
+    product_name: str               # canonical catalog name (a catalog.Product with is_addon=True)
+    amount: float                   # planner-edited flat price; defaults to the catalog minimum_spend client-side
+    notes_override: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +92,7 @@ def generate_proposal(
     proposal_title: Optional[str] = None,
     avails_data: Optional[dict] = None,   # product_name -> {max_imps, max_spend, est_uniques}
     tiers: Optional[list[dict]] = None,   # [{"label": "A", "line_items": [...], "avails_data": {...}}, ...]
+    addons: Optional[list[AddonItem]] = None,   # Step 04's Add-Ons module picks — proposal-wide, not per-tier
 ) -> dict:
     """
     Generate an Excel proposal for the given request + line items.
@@ -85,6 +113,11 @@ def generate_proposal(
                reference content, not a budget scenario). When omitted or a
                single tier, output is byte-for-byte the same as before this
                parameter existed.
+        addons: Step 04's Add-Ons picks (fixed-price extras — landing pages,
+                call tracking, etc.) — the SAME list appears on every tier's
+                sheet, matching how the old hardcoded add-ons list already
+                behaved before it became planner-driven. None falls back to
+                that legacy hardcoded list; [] means "planner picked none."
 
     Returns:
         dict with summary: {tabs_built: [...], total_net: float,
@@ -97,6 +130,24 @@ def generate_proposal(
     if not tiers:
         tiers = [{"label": "A", "line_items": line_items, "avails_data": avails_data}]
     multi_tier = len(tiers) > 1
+
+    # Convert AddonItems into the plain dicts excel_template expects — kept
+    # dict-based at that boundary (like avails_data already is) so
+    # excel_template.py doesn't need to import this module's dataclasses.
+    addons_dicts: Optional[list[dict]] = None
+    if addons is not None:
+        addons_dicts = []
+        for a in addons:
+            p = by_name(a.product_name)
+            desc = (p.proposal_description if p else "") or ""
+            if a.notes_override:
+                desc = f"{desc}\n— {a.notes_override}" if desc else a.notes_override
+            addons_dicts.append({
+                "name": a.product_name,
+                "description": desc,
+                "amount": a.amount,
+                "type": "Added Value" if not a.amount else "Fixed",
+            })
 
     # 1. Resolve which tabs to build — a single decision shared by every tier
     #    (they're all the same request/request_type; only the product mix and
@@ -153,10 +204,24 @@ def generate_proposal(
             matched_line_items.append(li)
         tier_line_items = matched_line_items
 
+        # Added Value lines sort to the bottom of the EXPORT (above the
+        # totals row), regardless of how the planner ordered them while
+        # curating — that ordering is fully planner-controlled (Step 04's
+        # drag-to-reorder) and shouldn't be second-guessed for the
+        # interactive table; a finished proposal document just reads
+        # better with $0/bundled extras grouped at the end rather than
+        # interleaved among real paid lines. Stable sort — only moves
+        # Added Value items past non-Added-Value ones, doesn't otherwise
+        # reorder within either group.
+        if any(li.is_added_value for li in tier_line_items):
+            reordered = sorted(zip(products, tier_line_items), key=lambda pair: pair[1].is_added_value)
+            products = [p for p, _ in reordered]
+            tier_line_items = [li for _, li in reordered]
+
         if tabs.get("net"):
             ws = et.build_proposal_a(wb, products, with_sections=False,
                                      start_date=start_date, end_date=end_date, total_months=total_months,
-                                     sheet_name=f"Proposal {label}")
+                                     sheet_name=f"Proposal {label}", addons=addons_dicts)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix)
             _populate_line_items(ws, products, tier_line_items, gross=False, blurbs=blurbs,
@@ -166,7 +231,7 @@ def generate_proposal(
         if tabs.get("wsections"):
             ws = et.build_proposal_a(wb, products, with_sections=True,
                                      start_date=start_date, end_date=end_date, total_months=total_months,
-                                     sheet_name=f"Proposal {label} (wsections)")
+                                     sheet_name=f"Proposal {label} (wsections)", addons=addons_dicts)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix)
             _populate_line_items(ws, products, tier_line_items, gross=False, with_sections=True, blurbs=blurbs,
@@ -176,7 +241,7 @@ def generate_proposal(
         if tabs.get("gross"):
             ws = et.build_proposal_a_gross(wb, products,
                                            start_date=start_date, end_date=end_date, total_months=total_months,
-                                           sheet_name=f"Proposal {label} (Gross)")
+                                           sheet_name=f"Proposal {label} (Gross)", addons=addons_dicts)
             _populate_meta(ws, request, gross=True, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix)
             _populate_line_items(ws, products, tier_line_items, gross=True, blurbs=blurbs,
@@ -337,7 +402,7 @@ def _populate_line_items(
     row = start_row
     first_data_row = start_row
     last_family = None
-    sov_col = None
+    sov_col = "S" if gross else "Q"
     for product, li in zip(products, line_items):
         if with_sections and product.family != last_family:
             # Section banner just landed on `row`; product row is next.
@@ -373,13 +438,23 @@ def _populate_line_items(
 
         # Notes column — T for net, W for gross
         notes_col = "W" if gross else "T"
+        note_parts = [product.notes or ""]
+        if li.is_added_value:
+            # A $0 (or below-minimum) budget on this line is deliberate, not
+            # an oversight — flag it inline so a reader doesn't mistake it
+            # for a data error.
+            note_parts.append("Added Value — no media cost.")
         if li.notes_override:
-            existing = product.notes or ""
-            combined = (existing + "\n— " + li.notes_override) if existing else li.notes_override
+            note_parts.append(li.notes_override)
+        combined = "\n— ".join(p for p in note_parts if p)
+        if combined:
             ws[f"{notes_col}{row}"] = combined
 
         # Avails (planner-entered from Step 06 of the app) — N/O/P net, P/Q/R gross,
-        # plus the SOV% column right after (Q net, S gross).
+        # plus the SOV% column right after (Q net, S gross). Always written,
+        # even with an empty avails dict, so a line with nothing entered gets
+        # write_avails_cells's grey "not entered" flag instead of the row
+        # silently staying plain-blank with no visual signal either way.
         # Keyed by the line item's own id (falls back to product name for any
         # older/manual request that didn't send one) — id-keying is what lets
         # two lines with the same product carry independent avails.
@@ -387,11 +462,9 @@ def _populate_line_items(
         avail = avails_by.get(li.id) if li.id else None
         if avail is None:
             avail = avails_by.get(product.name)
-        if avail:
-            sov_pct = et.compute_sov_pct(product, li.monthly_budget, avail)
-            sov_col = "S" if gross else "Q"
-            et.write_avails_cells(ws, row, avail, product, gross=gross, sov_pct=sov_pct, sov_col=sov_col,
-                                  budget_col="L")
+        sov_pct = et.compute_sov_pct(product, li.monthly_budget, avail or {}, cpm_override=li.estimated_cpm_override)
+        et.write_avails_cells(ws, row, avail or {}, product, gross=gross, sov_pct=sov_pct, sov_col=sov_col,
+                              budget_col="L", cpm_override=li.estimated_cpm_override)
 
         row += 1
 

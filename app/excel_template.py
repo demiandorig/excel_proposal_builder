@@ -68,6 +68,7 @@ SUBTOTAL_FONT = Font(name="Arial", size=11, bold=True)
 SUBTOTAL_FILL = PatternFill("solid", start_color=LIGHT_PURPLE_BG)
 TOTAL_FONT = Font(name="Arial", size=12, bold=True, color="FF000000")
 TOTAL_FILL = PatternFill("solid", start_color=LIGHT_GREEN_BG)
+AVAILS_EMPTY_FILL = PatternFill("solid", start_color=LIGHT_GREY)
 
 THIN = Side(border_style="thin", color="FFBBBBBB")
 MED = Side(border_style="medium", color="FF000000")
@@ -215,13 +216,18 @@ def _set_array_formula(ws: Worksheet, cell_ref: str, formula_text: str) -> None:
     ws[cell_ref] = ArrayFormula(ref=cell_ref, text=formula_text)
 
 
-def compute_sov_pct(product: Product, monthly_budget: float, avail: dict) -> Optional[float]:
+def compute_sov_pct(product: Product, monthly_budget: float, avail: dict,
+                    cpm_override: Optional[float] = None) -> Optional[float]:
     """
     % of the planner-entered avails ceiling that the curated monthly budget
     would consume — the "Share of Voice" figure: how much of the available
     inventory this campaign is claiming at that product's rate. Compared
     against max_spend when given; falls back to deriving an equivalent spend
     from max_imps via the product's own rate model when spend isn't entered.
+
+    cpm_override: a per-line override of the product's catalog
+    estimated_cpm_for_imps (Step 04's estimated-CPM editor), taking
+    precedence over the catalog default when given.
     """
     if not monthly_budget:
         return None
@@ -235,12 +241,13 @@ def compute_sov_pct(product: Product, monthly_budget: float, avail: dict) -> Opt
         return None
 
     rate = product.base_rate
+    effective_cpm = cpm_override if cpm_override is not None else product.estimated_cpm_for_imps
     if product.buying_model == "CPM" and rate:
         implied_spend = max_imps * rate / 1000
     elif product.buying_model == "CPP" and rate:
         implied_spend = max_imps * rate
-    elif product.estimated_cpm_for_imps:
-        implied_spend = max_imps * product.estimated_cpm_for_imps / 1000
+    elif effective_cpm:
+        implied_spend = max_imps * effective_cpm / 1000
     else:
         return None
     if not implied_spend:
@@ -294,23 +301,27 @@ def _apply_sov_conditional_formatting(ws: Worksheet, col: str, first_row: int, l
 
 
 def _spend_formula_from_imps(product: Product, imps_cell: str, rate_cell: str,
-                             est_cpm_cell: Optional[str]) -> Optional[str]:
+                             est_cpm_cell: Optional[str], cpm_override: Optional[float] = None) -> Optional[str]:
     """Live formula for Max. Recommended Monthly Spend, derived from the Max.
     Recommended Monthly Imps cell — so the spend recalculates automatically
     if the planner edits the imps number (or the rate, when the rate itself
-    lives in a cell) after the file is generated."""
+    lives in a cell) after the file is generated.
+
+    cpm_override: Step 04's per-line estimated-CPM override, taking
+    precedence over the catalog's own estimated_cpm_for_imps when given."""
     if product.buying_model == "CPM" and product.base_rate is not None:
         return f'=IFERROR({imps_cell}*{rate_cell}/1000,"")'
     if product.buying_model == "CPP" and product.base_rate is not None:
         return f'=IFERROR({imps_cell}*{rate_cell},"")'
-    if (product.buying_model == "Fixed" or product.estimated_impressions) and product.estimated_cpm_for_imps:
-        cpm_ref = est_cpm_cell or product.estimated_cpm_for_imps
+    effective_cpm = cpm_override if cpm_override is not None else product.estimated_cpm_for_imps
+    if (product.buying_model == "Fixed" or product.estimated_impressions) and effective_cpm:
+        cpm_ref = est_cpm_cell or effective_cpm
         return f'=IFERROR("Est. $"&TEXT({imps_cell}*{cpm_ref}/1000,"#,##0"),"")'
     return None
 
 
 def _imps_formula_from_spend(product: Product, spend_cell: str, rate_cell: str,
-                             est_cpm_cell: Optional[str]) -> Optional[str]:
+                             est_cpm_cell: Optional[str], cpm_override: Optional[float] = None) -> Optional[str]:
     """Live formula for Max. Recommended Monthly Imps, derived from the Max.
     Recommended Monthly Spend cell — the mirror image of
     `_spend_formula_from_imps`."""
@@ -318,8 +329,9 @@ def _imps_formula_from_spend(product: Product, spend_cell: str, rate_cell: str,
         return f'=IFERROR({spend_cell}/{rate_cell}*1000,0)'
     if product.buying_model == "CPP" and product.base_rate is not None:
         return f'=IFERROR({spend_cell}/{rate_cell},0)'
-    if (product.buying_model == "Fixed" or product.estimated_impressions) and product.estimated_cpm_for_imps:
-        cpm_ref = est_cpm_cell or product.estimated_cpm_for_imps
+    effective_cpm = cpm_override if cpm_override is not None else product.estimated_cpm_for_imps
+    if (product.buying_model == "Fixed" or product.estimated_impressions) and effective_cpm:
+        cpm_ref = est_cpm_cell or effective_cpm
         return f'=IFERROR("Est. "&TEXT({spend_cell}*1000/{cpm_ref},"#,##0"),"")'
     return None
 
@@ -327,15 +339,33 @@ def _imps_formula_from_spend(product: Product, spend_cell: str, rate_cell: str,
 def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[Product] = None,
                        gross: bool = False, cols: Optional[tuple] = None, sov_pct: Optional[float] = None,
                        sov_col: Optional[str] = None, budget_col: Optional[str] = None,
-                       rate_col: str = "K", est_cpm_col: Optional[str] = None) -> None:
+                       rate_col: str = "K", est_cpm_col: Optional[str] = None,
+                       cpm_override: Optional[float] = None) -> None:
     """
     Write planner-entered avails (from the app's Step 06) into the
     Max. Recommended Monthly Imps / Spend / Est. Monthly Uniques columns.
     Net sheets: N/O/P. Gross sheets: P/Q/R. Pass `cols=("I","J","K")` for the
     Avails-Only sheet, which uses a different column layout.
 
+    cpm_override: Step 04's per-line estimated-CPM override (LineItem.
+    estimated_cpm_override) — takes precedence over the product's catalog
+    estimated_cpm_for_imps for this line's derived imps/spend formula.
+
     `avail` shape: {max_imps, max_spend, est_uniques, basis?,
-                    max_imps_estimated?, max_spend_estimated?}. `basis` is
+                    max_imps_estimated?, max_spend_estimated?,
+                    freeform?, max_imps_text?, max_spend_text?, est_uniques_text?}.
+
+    freeform: when true, ignores max_imps/max_spend/est_uniques (the numeric
+    fields) entirely and instead writes max_imps_text/max_spend_text/
+    est_uniques_text verbatim into the SAME three columns — still three
+    separate cells, just plain planner-typed text (e.g. "50 to 100
+    estimated clicks") instead of a parsed, calculated number. No cross-
+    field calculation and no SOV in this mode. Search - SEM defaults to
+    this in Step 06 (there's no meaningful avails ceiling to calculate the
+    way there is for an impression-based product); every other product can
+    opt into it too.
+
+    `basis` is
     "imps" or "spend" — whichever field the planner directly typed most
     recently in Step 06 (the other one is always mechanically derived from
     it there). When `product` + `basis` are given, the derived side is
@@ -359,6 +389,12 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
     the planner edits either cell in Excel. Falls back to the pre-computed
     static `sov_pct` otherwise (the Fixed/estimated-text case, or no
     `budget_col` given, e.g. legacy callers).
+
+    Any of Imps / Spend / Uniques / SOV that ends up with nothing to show
+    (the planner never entered that value, and nothing here can derive it)
+    gets a light grey fill via `_grey_out_empty_avails_cell` instead of
+    being left plain-blank — a deliberate "not entered" flag rather than an
+    ambiguous gap in the table.
     """
     if cols:
         imps_col, spend_col, uniques_col = cols
@@ -370,6 +406,30 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
     rate_cell_ref = f"{rate_col}{row}"
     est_cpm_cell_ref = f"{est_cpm_col}{row}" if est_cpm_col else None
 
+    # Free-form: same three columns as always (Imps / Spend / Uniques), but
+    # each one takes whatever text the planner typed instead of a parsed,
+    # calculated number — "50 to 100 estimated clicks" is a valid Max Imps
+    # value here, verbatim, no formatting, no cross-field calculation.
+    # Skips every branch below (there's no numeric basis for a live formula
+    # or an SOV figure) except the per-column grey-out, which still applies
+    # to whichever of the three the planner left blank — free text in one
+    # field doesn't imply anything about the other two.
+    if avail.get("freeform"):
+        for col, text_key in ((imps_col, "max_imps_text"), (spend_col, "max_spend_text"), (uniques_col, "est_uniques_text")):
+            text = avail.get(text_key)
+            cell_ref = f"{col}{row}"
+            if text:
+                cell = ws[cell_ref]
+                cell.value = text
+                cell.font = BODY_FONT
+                cell.alignment = LEFT
+                _merge_thin_border(cell)
+            else:
+                _grey_out_empty_avails_cell(ws, cell_ref)
+        if sov_col:
+            _grey_out_empty_avails_cell(ws, f"{sov_col}{row}")
+        return
+
     basis = avail.get("basis")
     max_imps = avail.get("max_imps")
     max_spend = avail.get("max_spend")
@@ -377,9 +437,9 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
     imps_formula = spend_formula = None
     if product is not None:
         if basis == "imps" and max_imps is not None:
-            spend_formula = _spend_formula_from_imps(product, imps_cell_ref, rate_cell_ref, est_cpm_cell_ref)
+            spend_formula = _spend_formula_from_imps(product, imps_cell_ref, rate_cell_ref, est_cpm_cell_ref, cpm_override)
         elif basis == "spend" and max_spend is not None:
-            imps_formula = _imps_formula_from_spend(product, spend_cell_ref, rate_cell_ref, est_cpm_cell_ref)
+            imps_formula = _imps_formula_from_spend(product, spend_cell_ref, rate_cell_ref, est_cpm_cell_ref, cpm_override)
 
     spend_is_text = False  # tracked so the SOV formula below knows not to divide by it
 
@@ -397,14 +457,23 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
             cell.value = max_imps
             _format_imps_cell(cell)
         _merge_thin_border(cell)
+    else:
+        _grey_out_empty_avails_cell(ws, imps_cell_ref)
 
     if max_spend is not None or spend_formula:
         cell = ws[spend_cell_ref]
         if spend_formula:
             cell.value = spend_formula
-            cell.alignment = CENTER
-            cell.font = BODY_FONT
             spend_is_text = "Est. $" in spend_formula
+            if spend_is_text:
+                cell.alignment = CENTER
+                cell.font = BODY_FONT
+            else:
+                # A CPM/CPP product's derived spend is a genuine number, not
+                # "Est. $..." text — format it as currency same as a
+                # planner-typed spend below, instead of leaving it "General"
+                # (a bare, un-formatted number with no $ or thousands comma).
+                _format_money_cell(cell)
         elif avail.get("max_spend_estimated"):
             cell.value = f"Est. ${max_spend:,.0f}"
             cell.alignment = CENTER
@@ -414,6 +483,8 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
             cell.value = max_spend
             _format_money_cell(cell)
         _merge_thin_border(cell)
+    else:
+        _grey_out_empty_avails_cell(ws, spend_cell_ref)
 
     est_uniques = avail.get("est_uniques")
     if est_uniques is not None:
@@ -421,6 +492,8 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
         cell.value = est_uniques
         _format_imps_cell(cell)
         _merge_thin_border(cell)
+    else:
+        _grey_out_empty_avails_cell(ws, f"{uniques_col}{row}")
 
     if sov_col:
         cell = ws[f"{sov_col}{row}"]
@@ -437,6 +510,8 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
             if sov_pct is not None:
                 cell.fill = _sov_fill(sov_pct)
             _merge_thin_border(cell)
+        else:
+            _grey_out_empty_avails_cell(ws, f"{sov_col}{row}")
 
 
 def _estimate_row_height(text: str, col_width: float, *, min_height: float = 45, extra_lines: int = 0) -> float:
@@ -459,6 +534,21 @@ def _estimate_row_height(text: str, col_width: float, *, min_height: float = 45,
     lines += extra_lines
     height = lines * 14 + 16  # + padding
     return max(min_height, height)
+
+
+def _grey_out_empty_avails_cell(ws: Worksheet, cell_ref: str) -> None:
+    """
+    Visually flag an avails cell (Max Imps / Max Spend / Est. Uniques / SOV%)
+    that the planner never entered anything for — a light grey fill instead
+    of just leaving it blank like every other untouched cell on the sheet,
+    so "avails weren't entered for this line" reads as a deliberate flag at
+    a glance instead of being indistinguishable from "nothing to see here."
+    Still gets the same thin border as a filled-in avails cell, so the row
+    reads as one consistent table rather than a gap.
+    """
+    cell = ws[cell_ref]
+    cell.fill = AVAILS_EMPTY_FILL
+    _merge_thin_border(cell)
 
 
 def _merge_thin_border(cell) -> None:
@@ -571,12 +661,15 @@ def build_target_cell_value(target_override: Optional[str], target_secondary: Op
 
 def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
                      start_date: str = "", end_date: str = "", total_months: int = 3,
-                     sheet_name: Optional[str] = None) -> Worksheet:
+                     sheet_name: Optional[str] = None, addons: Optional[list[dict]] = None) -> Worksheet:
     """Build the Net-only proposal sheet. Returns the worksheet.
 
     sheet_name: override the default "Proposal A" / "Proposal A (wsections)"
     name — used for tiered-budget proposals, where each option gets its own
     lettered tab ("Proposal A", "Proposal B", ...).
+
+    addons: see _write_addons_grand_total_footer — planner picks from Step
+    04's Add-Ons module, or None to fall back to the legacy hardcoded list.
     """
     if sheet_name is None:
         sheet_name = "Proposal A (wsections)" if with_sections else "Proposal A"
@@ -671,14 +764,15 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     _box_range(ws, total_row, total_row, "C", "L")
     _fill_box_range(ws, total_row, total_row, "C", "L", TOTAL_FILL)
 
-    _write_addons_grand_total_footer(ws, total_row, gross=False, box_max_col="L")
+    _write_addons_grand_total_footer(ws, total_row, gross=False, box_max_col="L", addons=addons)
 
     ws.freeze_panes = "C18"
     return ws
 
 
 def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bool,
-                                     box_max_col: str, months_cell: str = "I10") -> int:
+                                     box_max_col: str, months_cell: str = "I10",
+                                     addons: Optional[list[dict]] = None) -> int:
     """
     Shared by build_proposal_a and build_proposal_a_gross: the ADD-ONS /
     ONE-TIME FEES block, the campaign-length grand total row, the footer
@@ -687,63 +781,73 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     fixes that by having both sheets build it from one place, so they can't
     drift out of sync again.
 
+    addons: the planner's picks from Step 04's Add-Ons module, each a dict
+    {"name", "description", "amount", "type"} ("type" is a display label —
+    "Fixed" or "Added Value" for a $0 amount, mirroring the convention the
+    old hardcoded list already used). `None` falls back to that legacy
+    4-item list (pre-Round-10 behavior, for any caller not yet passing real
+    picks); an explicit empty list means "the planner picked none" and
+    skips the ADD-ONS section entirely — a boxed header with nothing under
+    it would look like a mistake, not a deliberate "no add-ons this time."
+
     Gross sheets additionally carry a GROSS amount per add-on (column N,
     derived from the NET amount via the $I$14 agency-fee cell) and a GROSS
     grand total alongside the NET one.
 
     Returns the signature dotted-line row.
     """
-    addons_start = total_row + 2
-    ws[f"C{addons_start}"] = "ADD-ONS / ONE-TIME FEES"
-    ws[f"C{addons_start}"].font = BODY_BOLD
-    ws[f"C{addons_start}"].fill = SUBTOTAL_FILL
-    ws.merge_cells(f"C{addons_start}:{box_max_col}{addons_start}")
-    addons = [
-        # Search - SEM Setup fee removed — waived, no longer active (was
-        # "Search - SEM Setup — One-time fee (new customers only)", $50 Fixed).
-        ("Call Tracking Service", "Tracking phone number with call recording capabilities.", 0.0, "Added Value"),
-        ("Online Attribution Measurement", "Attribution and reporting layer.", 0.0, "Added Value"),
-        ("Email Database Match — Hashed File Onboarding", "Upload your email database to match opted-in users in our database for precise targeting.", 150.0, "Fixed"),
-        ("Web Services — Landing Page", "Optimized landing page with hosting and dedicated URL.", 100.0, "Fixed"),
-    ]
-    for i, (svc, desc, amt, rtype) in enumerate(addons, start=1):
-        r = addons_start + i
-        ws[f"C{r}"] = svc
-        ws[f"C{r}"].font = BODY_FONT
-        ws[f"C{r}"].alignment = LEFT
-        ws[f"E{r}"] = desc
-        ws[f"E{r}"].alignment = LEFT
-        ws[f"E{r}"].font = BODY_FONT
-        ws[f"J{r}"] = rtype
-        ws[f"J{r}"].alignment = CENTER
-        ws[f"L{r}"] = amt
-        _format_money_cell(ws[f"L{r}"], blue_input=True)
-        if gross:
-            ws[f"N{r}"] = f"=IFERROR(L{r}/(1-$I$14),0)"
-            _format_money_cell(ws[f"N{r}"])
+    if addons is None:
+        addons = [
+            # Search - SEM Setup fee removed — waived, no longer active (was
+            # "Search - SEM Setup — One-time fee (new customers only)", $50 Fixed).
+            {"name": "Call Tracking Service", "description": "Tracking phone number with call recording capabilities.", "amount": 0.0, "type": "Added Value"},
+            {"name": "Online Attribution Measurement", "description": "Attribution and reporting layer.", "amount": 0.0, "type": "Added Value"},
+            {"name": "Email Database Match — Hashed File Onboarding", "description": "Upload your email database to match opted-in users in our database for precise targeting.", "amount": 150.0, "type": "Fixed"},
+            {"name": "Web Services — Landing Page", "description": "Optimized landing page with hosting and dedicated URL.", "amount": 100.0, "type": "Fixed"},
+        ]
 
-    addons_last = addons_start + len(addons)
-    _box_range(ws, addons_start, addons_last, "C", box_max_col)
+    if addons:
+        addons_start = total_row + 2
+        ws[f"C{addons_start}"] = "ADD-ONS / ONE-TIME FEES"
+        ws[f"C{addons_start}"].font = BODY_BOLD
+        ws[f"C{addons_start}"].fill = SUBTOTAL_FILL
+        ws.merge_cells(f"C{addons_start}:{box_max_col}{addons_start}")
+        for i, item in enumerate(addons, start=1):
+            r = addons_start + i
+            ws[f"C{r}"] = item["name"]
+            ws[f"C{r}"].font = BODY_FONT
+            ws[f"C{r}"].alignment = LEFT
+            ws[f"E{r}"] = item.get("description", "")
+            ws[f"E{r}"].alignment = LEFT
+            ws[f"E{r}"].font = BODY_FONT
+            ws[f"J{r}"] = item.get("type", "Fixed")
+            ws[f"J{r}"].alignment = CENTER
+            ws[f"L{r}"] = item["amount"]
+            _format_money_cell(ws[f"L{r}"], blue_input=True)
+            if gross:
+                ws[f"N{r}"] = f"=IFERROR(L{r}/(1-$I$14),0)"
+                _format_money_cell(ws[f"N{r}"])
+
+        addons_last = addons_start + len(addons)
+        _box_range(ws, addons_start, addons_last, "C", box_max_col)
+        addons_sum_term = f' + SUMIF(L{addons_start+1}:L{addons_last},">0")'
+        addons_sum_term_gross = f' + SUMIF(N{addons_start+1}:N{addons_last},">0")'
+        grand_row = addons_last + 2
+    else:
+        addons_sum_term = ""
+        addons_sum_term_gross = ""
+        grand_row = total_row + 2
 
     # Grand total — dynamic label uses the months cell
-    grand_row = addons_last + 2
     ws[f"C{grand_row}"] = f'="TOTAL DIGITAL — "&{months_cell}&"-MONTH CAMPAIGN"'
     ws[f"C{grand_row}"].font = TOTAL_FONT
     ws[f"C{grand_row}"].fill = TOTAL_FILL
-    ws[f"L{grand_row}"] = (
-        f"=ROUNDDOWN(L{total_row}*{months_cell}"
-        f" + SUMIF(L{addons_start+1}:L{addons_last},\">0\")"
-        f",0)"
-    )
+    ws[f"L{grand_row}"] = f"=ROUNDDOWN(L{total_row}*{months_cell}{addons_sum_term},0)"
     _format_money_cell(ws[f"L{grand_row}"])
     ws[f"L{grand_row}"].font = TOTAL_FONT
     ws[f"L{grand_row}"].fill = TOTAL_FILL
     if gross:
-        ws[f"N{grand_row}"] = (
-            f"=ROUNDDOWN(N{total_row}*{months_cell}"
-            f" + SUMIF(N{addons_start+1}:N{addons_last},\">0\")"
-            f",0)"
-        )
+        ws[f"N{grand_row}"] = f"=ROUNDDOWN(N{total_row}*{months_cell}{addons_sum_term_gross},0)"
         _format_money_cell(ws[f"N{grand_row}"])
         ws[f"N{grand_row}"].font = TOTAL_FONT
         ws[f"N{grand_row}"].fill = TOTAL_FILL
@@ -894,11 +998,13 @@ def _write_product_row(ws: Worksheet, row: int, p: Product, gross: bool = False,
 
 def build_proposal_a_gross(wb: Workbook, products: list,
                            start_date: str = "", end_date: str = "", total_months: int = 3,
-                           sheet_name: Optional[str] = None) -> Worksheet:
+                           sheet_name: Optional[str] = None, addons: Optional[list[dict]] = None) -> Worksheet:
     """Build the Gross variant.
 
     sheet_name: override the default "Proposal A (Gross)" — used for
     tiered-budget proposals ("Proposal B (Gross)", etc.).
+
+    addons: see _write_addons_grand_total_footer.
     """
     ws = wb.create_sheet(sheet_name or "Proposal A (Gross)")
     ws.sheet_view.showGridLines = False  # clean white margins outside the boxed tables
@@ -986,7 +1092,7 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     _box_range(ws, total_row, total_row, "C", "N")
     _fill_box_range(ws, total_row, total_row, "C", "N", TOTAL_FILL)
 
-    _write_addons_grand_total_footer(ws, total_row, gross=True, box_max_col="N")
+    _write_addons_grand_total_footer(ws, total_row, gross=True, box_max_col="N", addons=addons)
 
     ws.freeze_panes = "C18"
     return ws
@@ -1108,8 +1214,14 @@ def build_avails_only(wb: Workbook, products: list, *,
         ws[f"G{row}"].alignment = CENTER
         ws[f"G{row}"].border = THIN_BORDER
 
-        # Est. CPM (H) — shown for budget-based/Fixed products that carry one
-        ws[f"H{row}"] = p.estimated_cpm_for_imps or "NA"
+        # Est. CPM (H) — shown for budget-based/Fixed products that carry
+        # one; a Step 04 per-line override (li.estimated_cpm_override) wins
+        # over the catalog default, same as the Net/Gross sheets. Every
+        # formula below that references H{row} (rather than a literal
+        # number) automatically picks up the override for free.
+        cpm_override = li.estimated_cpm_override if li else None
+        effective_cpm = cpm_override if cpm_override is not None else p.estimated_cpm_for_imps
+        ws[f"H{row}"] = effective_cpm or "NA"
         if isinstance(ws[f"H{row}"].value, (int, float)):
             _format_money_cell(ws[f"H{row}"], blue_input=True)
         ws[f"H{row}"].alignment = CENTER
@@ -1129,28 +1241,33 @@ def build_avails_only(wb: Workbook, products: list, *,
         avail = avails_by.get(li.id) if (li and li.id) else None
         if avail is None:
             avail = avails_by.get(p.name)
-        if avail and (avail.get("max_imps") is not None or avail.get("max_spend") is not None):
+        if avail and (avail.get("max_imps") is not None or avail.get("max_spend") is not None or avail.get("freeform")):
             # Planner already computed avails in the app (Step 06) — write directly.
-            sov_pct = compute_sov_pct(p, li.monthly_budget if li else 0, avail)
+            sov_pct = compute_sov_pct(p, li.monthly_budget if li else 0, avail, cpm_override=cpm_override)
             write_avails_cells(ws, row, avail, p, cols=("J", "K", "L"), sov_pct=sov_pct, sov_col="M",
-                               budget_col="I", rate_col="G", est_cpm_col="H")
+                               budget_col="I", rate_col="G", est_cpm_col="H", cpm_override=cpm_override)
         else:
-            # Fallback: leave J open for manual planner input, auto-calc K from it.
-            ws[f"J{row}"].border = THIN_BORDER
+            # Fallback: leave J open for manual planner input, auto-calc K from
+            # it live. J and L are greyed out (not just left blank) to flag
+            # that avails weren't entered for this line yet, same treatment
+            # write_avails_cells uses when a line has an avails entry with
+            # gaps in it — K and M stay un-greyed since they're live formulas
+            # that self-populate the moment J is filled in, not truly empty.
+            _grey_out_empty_avails_cell(ws, f"J{row}")
             ws[f"J{row}"].alignment = CENTER
 
             if p.buying_model == "CPM" and not p.estimated_impressions:
                 ws[f"K{row}"] = f'=IFERROR(J{row}*G{row}/1000,"")'
             elif p.buying_model == "CPP" and not p.estimated_impressions:
                 ws[f"K{row}"] = f'=IFERROR(J{row}*G{row},"")'
-            elif p.estimated_impressions and p.estimated_cpm_for_imps:
+            elif p.estimated_impressions and effective_cpm:
                 ws[f"K{row}"] = f'=IFERROR("Est. $"&TEXT(J{row}*H{row}/1000,"#,##0"),"")'
             else:
                 ws[f"K{row}"] = f'=IFERROR(J{row}*G{row}/1000,"")'
             _format_money_cell(ws[f"K{row}"])
             ws[f"K{row}"].border = THIN_BORDER
 
-            ws[f"L{row}"].border = THIN_BORDER
+            _grey_out_empty_avails_cell(ws, f"L{row}")
             ws[f"L{row}"].alignment = CENTER
 
             # SOV still works here as a live formula — Monthly Budget (I) over

@@ -65,7 +65,7 @@ body::before {
   z-index: 10;
 }
 .masthead-inner {
-  max-width: 1280px;
+  max-width: 1440px;
   margin: 0 auto;
   padding: 18px 32px;
   display: flex;
@@ -130,10 +130,18 @@ body::before {
   color: var(--paper);
 }
 .step.done span { color: var(--green); }
+.step.clickable {
+  cursor: pointer;
+}
+.step.clickable:hover {
+  background: rgba(255,255,255,0.1);
+  color: var(--paper);
+}
+.step.clickable:hover span { color: var(--accent); }
 
 /* ----- Canvas ----- */
 .canvas {
-  max-width: 1100px;
+  max-width: 1440px;
   margin: 0 auto;
   padding: 56px 32px 80px;
   position: relative;
@@ -236,6 +244,49 @@ body::before {
   letter-spacing: 0.03em;
 }
 .notion-id-pill:empty { display: none; }
+
+/* ----- Persistent proposal-name bar (below the masthead, every step) ----- */
+.proposal-name-bar {
+  background: var(--paper-warm);
+  border-bottom: 1px solid var(--rule);
+}
+.proposal-name-bar.hidden { display: none; }
+.proposal-name-bar-inner {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 10px 32px;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.proposal-name-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-faint);
+  flex-shrink: 0;
+}
+.proposal-name-text {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-x: auto;
+  white-space: nowrap;
+  flex: 1;
+}
+.proposal-name-copy {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 10px;
+}
+
+@media (max-width: 760px) {
+  .proposal-name-bar-inner { padding: 10px 20px; flex-wrap: wrap; }
+  .proposal-name-text { white-space: normal; word-break: break-word; }
+}
 
 /* ----- Step 1: Notion ID ----- */
 .notion-id-row {
@@ -375,6 +426,11 @@ body::before {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 28px;
+  /* The wider .canvas is a deliberate win for Step 04's table — a plain
+     2-column review form doesn't need the extra room and reads better
+     capped and centered than stretched edge to edge. */
+  max-width: 900px;
+  margin: 0 auto;
 }
 .form-grid fieldset {
   border: 1px solid var(--rule);
@@ -631,6 +687,20 @@ body::before {
   color: var(--ink-faint);
   width: 28px;
 }
+.line-items td.col-drag {
+  width: 22px;
+  padding: 10px 0 10px 6px;
+}
+.drag-handle {
+  cursor: grab;
+  color: var(--ink-faint);
+  font-size: 15px;
+  user-select: none;
+}
+.drag-handle:hover { color: var(--accent); }
+.line-item-row.dragging { opacity: 0.4; }
+.line-item-row.drag-over-top { box-shadow: inset 0 2px 0 0 var(--accent); }
+.line-item-row.drag-over-bottom { box-shadow: inset 0 -2px 0 0 var(--accent); }
 .line-items td.product {
   font-weight: 600;
   min-width: 220px;
@@ -742,6 +812,31 @@ body::before {
   vertical-align: middle;
 }
 .btn-rate-reset:hover { color: var(--red); }
+/* Estimated-CPM mode (Fixed-model products: Meta, YouTube, TikTok,
+   LinkedIn, Spotify, Branded Content, ...) — visually distinct from a real
+   CPM/CPP rate so it's never mistaken for one. Amber, not the purple used
+   for a real rate override, matching the "estimate/flag" color used
+   elsewhere (e.g. the admin Add-on badge). */
+.est-cpm-display {
+  font-style: italic;
+  color: var(--amber);
+}
+.est-cpm-input {
+  border-color: var(--amber) !important;
+  background: var(--amber-soft) !important;
+}
+.line-items .added-value-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.line-items .added-value-toggle input[type="checkbox"] { width: auto; margin: 0; }
 .line-items td.col-row-actions {
   white-space: nowrap;
   text-align: right;
@@ -783,6 +878,90 @@ body::before {
   background: var(--paper-card);
 }
 
+/* ----- Step 4: Add-Ons module ----- */
+.addons-module {
+  margin-top: 28px;
+  padding: 20px 24px;
+  background: var(--paper-warm);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+}
+.addons-module-head h3 {
+  margin: 0 0 4px;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+}
+.addons-module-hint {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  max-width: 65ch;
+}
+.addons-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-faint);
+}
+.addons-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.addon-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.addon-row:hover {
+  background: var(--paper-card);
+}
+.addon-row input[type="checkbox"] {
+  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.addon-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.addon-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+.addon-desc {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+.addon-price {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  color: var(--ink-soft);
+}
+.addon-price input {
+  width: 80px;
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  text-align: right;
+}
+.addon-price input:disabled {
+  background: var(--paper);
+  color: var(--ink-faint);
+}
+
 /* ----- Step 4: Avails ----- */
 .avails-status-pill {
   display: inline-block;
@@ -821,6 +1000,20 @@ body::before {
   gap: 10px;
   margin-bottom: 12px;
 }
+.freeform-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.freeform-toggle input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
 .avails-card h3 {
   margin: 0;
   font-family: var(--font-display);
@@ -855,7 +1048,9 @@ body::before {
 .sov-helper.sov-red { color: var(--red); }
 .avails-fields {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  /* 3 fields in free-form mode, 4 (with Avg. Frequency) otherwise — auto-fit
+     so neither mode needs its own column-count override. */
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 12px;
 }
 .avails-fields label {
@@ -1292,6 +1487,19 @@ body::before {
   border: 1px solid var(--rule);
   border-radius: var(--radius-lg);
   overflow: hidden;
+}
+
+/* Sits outside #ai-content (it doesn't depend on AI enrichment succeeding —
+   built entirely from data already on the page), so it needs its own top
+   margin instead of inheriting .ai-content's flex `gap`. */
+.gamma-outline-section {
+  margin-top: 24px;
+}
+.gamma-outline-hint {
+  margin: 0;
+  padding: 10px 20px 0;
+  font-size: 12.5px;
+  color: var(--ink-soft);
 }
 
 .ai-section-head {

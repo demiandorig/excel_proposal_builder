@@ -1,7 +1,8 @@
 """
 AI enrichment for the Entravision Proposal Builder.
 
-Uses OpenAI gpt-4o-mini to generate in a single API call:
+Uses OpenAI gpt-4.1 (see _SEARCH_MODEL/_FALLBACK_MODEL below) to generate in
+a single API call:
   - Campaign name (short, memorable, title-cased)
   - Per-product strategic blurbs with data citations (~70 words each)
   - Internal AE email (professional, friendly)
@@ -30,21 +31,46 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 # Entravision knowledge base (mirrors the recommendations agent prompt)
+#
+# Keyed by the CATALOG's own family name (not a loose category label) so
+# _build_prompt() can filter this down to only the families actually
+# curated — see the "podcast bleeding into a Meta blurb" bug this fixed:
+# the block used to be one flat, unfiltered string with every category's
+# advantage text always present, so a product with nothing else to
+# disambiguate it (short name, no per-product description in context
+# either — also fixed, see items_text below) had every OTHER category's
+# language sitting right there for the model to draw on by mistake. Now a
+# family's row simply isn't in context at all unless that family is
+# actually in the curated line items.
 # ---------------------------------------------------------------------------
 
-_KNOWLEDGE_BASE = """
-For CTV/OTT (Entravision Plus, any variant): "Entravision's advanced programmatic and CTV/OTT advertising capabilities with premium publisher partnerships."
-For AudioEngage / Podcast / Digital Audio: "Entravision's leading digital audio and podcast network, which has a 160MM general market reach and 45MM Hispanic coverage."
-For Social Media (Meta Ads / Facebook / Instagram / TikTok): "Entravision's extensive portfolio of owned and operated Spanish-language properties and our deep expertise in creating culturally relevant, bilingual content."
-For Influencer campaigns: "Entravision's vast network of authentic Latino local influencers, our 'Social Media Creators'."
-For SEM / Paid Search / Performance Max: "Entravision's certified SEM team and proprietary bidding strategies optimized for local market dominance."
-For LinkedIn: "Entravision's B2B digital network and expertise in reaching professional and governmental audiences."
-For Email Marketing / Display Retargeting: "Entravision's first-party data network and precision email deployment capabilities."
-For DOOH / Digital Out-of-Home: "Entravision's premium out-of-home inventory network with hyper-local geo-targeting capabilities."
-For Online Video / YouTube / OLV: "Entravision's deep expertise in creating high-impact video content and our managed YouTube advertising capabilities."
-For Display / Geo-Fence: "Entravision's programmatic display network with precision geo-targeting and retargeting capabilities."
-For General / Default: "Entravision's deep expertise in creating culturally relevant, bilingual content that resonates authentically with the target audience."
-""".strip()
+_KNOWLEDGE_BASE_BY_FAMILY: dict[str, str] = {
+    "Entravision Plus": "Entravision's advanced programmatic and CTV/OTT advertising capabilities with premium publisher partnerships.",
+    "Audio": "Entravision's leading digital audio and podcast network, which has a 160MM general market reach and 45MM Hispanic coverage.",
+    "Social": "Entravision's extensive portfolio of owned and operated Spanish-language properties and our deep expertise in creating culturally relevant, bilingual content.",
+    "Branded Content": "Entravision's vast network of authentic Latino local influencers and creators (our 'Social Media Creators'), paired with deep expertise in culturally relevant, bilingual branded content.",
+    "Search": "Entravision's certified SEM team and proprietary bidding strategies optimized for local market dominance.",
+    "Email": "Entravision's first-party data network and precision email deployment capabilities.",
+    "DOOH": "Entravision's premium out-of-home inventory network with hyper-local geo-targeting capabilities.",
+    "Online Video": "Entravision's deep expertise in creating high-impact video content and our managed YouTube advertising capabilities.",
+    "Display": "Entravision's programmatic display network with precision geo-targeting and retargeting capabilities.",
+}
+_KNOWLEDGE_BASE_DEFAULT = (
+    "Entravision's deep expertise in creating culturally relevant, bilingual "
+    "content that resonates authentically with the target audience."
+)
+
+
+def _knowledge_base_block(curated_families: set) -> str:
+    """Only the families actually in the curated line items, plus a
+    catch-all default — see the module comment above for why."""
+    lines = [
+        f'For {fam}: "{_KNOWLEDGE_BASE_BY_FAMILY[fam]}"'
+        for fam in sorted(curated_families)
+        if fam in _KNOWLEDGE_BASE_BY_FAMILY
+    ]
+    lines.append(f'For any other product: "{_KNOWLEDGE_BASE_DEFAULT}"')
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +204,14 @@ def safe_filename(title: str) -> str:
 # Main enrichment call
 # ---------------------------------------------------------------------------
 
-_SEARCH_MODEL = "gpt-4o"
-_FALLBACK_MODEL = "gpt-4o"
+# Bumped one tier up from gpt-4o per explicit request ("beefier... not the
+# mini one"). Not necessarily the newest OpenAI model available by the time
+# this runs — my own knowledge cutoff is Jan 2026 — but it's a real,
+# confirmed-capable step up that still supports the Responses API +
+# web_search_preview tool this file depends on; flag it if something newer
+# should be used instead.
+_SEARCH_MODEL = "gpt-4.1"
+_FALLBACK_MODEL = "gpt-4.1"
 
 
 def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional[dict] = None,
@@ -218,7 +250,7 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     if not api_key:
         return ProposalEnrichment(
             campaign_name=_fallback_campaign_name(request),
-            error="OPENAI_API_KEY not set — AI enrichment skipped.",
+            error="OPENAI_API_KEY not set — email + blurb generation skipped.",
         )
 
     client = _OpenAI(api_key=api_key)
@@ -257,7 +289,7 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
         except Exception as fallback_exc:
             return ProposalEnrichment(
                 campaign_name=_fallback_campaign_name(request),
-                error=f"AI enrichment failed: {fallback_exc}",
+                error=f"Content generation failed: {fallback_exc}",
             )
 
 
@@ -371,7 +403,7 @@ Respond with this exact JSON structure:
         raw = response.choices[0].message.content or ""
         match = re.search(r"\{[\s\S]*\}", raw)
         if not match:
-            return _unchanged("AI response contained no JSON.")
+            return _unchanged("No structured response received — emails left unchanged.")
         data = json.loads(match.group(0))
         return {
             "internal_email_subject": data.get("internal_email_subject") or current_internal_subject,
@@ -428,11 +460,26 @@ def _format_impressions(n: Optional[int]) -> str:
 
 def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
                   tiers: Optional[list] = None) -> str:
-    items_text = "\n".join(
-        f"  - {li.product_name}: ${li.monthly_budget:,.0f}/month × {li.months} months "
-        f"= ${li.monthly_budget * li.months:,.0f} total"
-        for li in line_items
-    )
+    # Ground each product in what it ACTUALLY is (the catalog's own rate-
+    # card description), not just its name + budget — the model had
+    # nothing else to go on before this beyond the product's name and the
+    # (also now-fixed) knowledge-base text, which is exactly how a Meta
+    # blurb ended up describing a podcast: with no real per-product
+    # description in context, "Facebook & Instagram Ads | Awareness" alone
+    # wasn't enough of an anchor to keep every product's blurb from
+    # drifting toward whatever else was sitting in the prompt.
+    def _product_line(li) -> str:
+        p = _catalog_by_name(li.product_name)
+        desc = (p.proposal_description if p else "") or ""
+        if len(desc) > 280:
+            desc = desc[:280].rsplit(" ", 1)[0] + "…"
+        desc_line = f"\n    What this actually is (from Entravision's own rate card — open the blurb grounded in this, don't guess): {desc}" if desc else ""
+        return (
+            f"  - {li.product_name}: ${li.monthly_budget:,.0f}/month × {li.months} months "
+            f"= ${li.monthly_budget * li.months:,.0f} total{desc_line}"
+        )
+
+    items_text = "\n".join(_product_line(li) for li in line_items)
     total_budget = sum(li.monthly_budget * li.months for li in line_items)
     total_impressions = _estimate_monthly_impressions(line_items)
 
@@ -600,8 +647,8 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
 ## PRODUCTS IN THIS PROPOSAL (union across every option, if more than one)
 {items_text}
 
-## ENTRAVISION KNOWLEDGE BASE
-{_KNOWLEDGE_BASE}
+## ENTRAVISION KNOWLEDGE BASE (only the families actually in this proposal)
+{_knowledge_base_block(curated_families)}
 
 ## STATISTICS GUIDANCE
 {stat_guidance}
@@ -620,10 +667,21 @@ verify via search should not be presented as sourced data.
 
 BAD blurb (generic, reject this style): "Reach your target audience
 through premium video content that drives engagement and results."
-GOOD blurb (specific, required style): "For {request.demo or 'this demo'}
-in {request.geo or 'this market'}, streaming video captures viewers during
-appointment-viewing hours when linear reach is declining — [real stat
-found via search] (Source, Year). Entravision's [specific advantage]."
+BAD blurb (fluent but WRONG PRODUCT — reject this style just as hard, even
+though nothing about it individually reads as an error): a confident,
+well-cited paragraph about podcast listenership written under a Meta/
+Facebook product's name. Every product's own "What this actually is" line
+above is the one and only source for what that product does — a stat or
+Entravision advantage clearly written for a DIFFERENT family (podcasts,
+CTV, DOOH, whatever isn't in that product's own description) never belongs
+in this blurb, no matter how well it reads.
+GOOD blurb (specific, required style): "[This product], per its own
+description above, does [the specific thing it does — paraphrase, don't
+just repeat the description verbatim]. For {request.demo or 'this demo'}
+in {request.geo or 'this market'}, that matters because [real stat found
+via search, tied to this product's actual category] (Source, Year).
+Entravision's [specific advantage for THIS product's family] makes this
+the right execution, not just a plausible one."
 
 ---
 
@@ -634,7 +692,7 @@ Return this exact JSON structure (no deviation):
   "product_blurbs": [
     {{
       "product_name": "exact product name as listed above",
-      "blurb": "Strategic Direction: Our strategy is to reach [name the specific demo/geo/behavioral/contextual value from above] via [what and why]. This is highly effective, as [specific recent stat tied to that audience, with year] (Source, Year). We will execute this through [Entravision advantage from knowledge base]."
+      "blurb": "[What this product concretely is/does — grounded in its own 'What this actually is' line above, paraphrased not copied]. For [name the specific demo/geo/behavioral/contextual value from above], this matters because [specific recent stat tied to THAT audience and THIS product's real category, with year] (Source, Year). Entravision's [advantage from the knowledge base row for THIS product's own family] makes this the right execution for this client."
     }}
   ],
   "internal_email_subject": "Digital Strategy Pack: [Client] ([Month Year] Campaign)",
@@ -644,9 +702,10 @@ Return this exact JSON structure (no deviation):
 }}
 
 RULES:
-- Each product blurb: 50–80 words, persuasive, include one real statistic with citation (Source Name, Year), and must name at least one specific targeting value from the Target Audience section above
+- Each product blurb: 50–80 words, insightful (not a basic restatement of the category), include one real statistic with citation (Source Name, Year), and must name at least one specific targeting value from the Target Audience section above
+- Before writing each blurb, re-read that product's own "What this actually is" line above and its own row in the Entravision Knowledge Base. That is the ONLY source of truth for what the product does and which Entravision advantage applies to it — not the product's name alone, not another product's blurb, not a family that merely sounds adjacent
 - Every citation must name a real, specific, searchable source (publisher + year) you actually found via search — never a vague placeholder like "Industry Report, 2025." If you can't find a specific real source, don't present a number as sourced data — fold it into the blurb as directional context instead
-- A blurb must accurately describe the NAMED product's own format/category — e.g. never describe audio/podcast/streaming content for an email, display, or search product, or vice versa. If the confirmed strategy brief above doesn't cover a product, base its blurb on the Target Audience and Knowledge Base sections instead — never borrow a rationale, stat, or example written for a different product family
+- A blurb must accurately describe the NAMED product's own format/category, grounded in ITS OWN description above — e.g. never describe audio/podcast/streaming content for an email, display, or search product, or vice versa, even if that content is sitting elsewhere in this prompt for a different product. If the confirmed strategy brief above doesn't cover a product, base its blurb on the Target Audience section plus that product's own description and knowledge-base row — never borrow a rationale, stat, or example written for a different product family
 - A product's blurb stays the SAME regardless of which option(s) it appears in — write it once per product, not once per option
 - For Hispanic/Spanish targets: use U.S. Hispanic-specific stats
 - Internal email: warm and collegial; do NOT include the client email body inline — just reference it
@@ -668,7 +727,7 @@ def _parse_response(raw: str, request, line_items, used_web_search: bool = False
         return ProposalEnrichment(
             campaign_name=_fallback_campaign_name(request),
             used_web_search=used_web_search,
-            error="AI response contained no JSON object.",
+            error="No structured response received.",
         )
 
     try:

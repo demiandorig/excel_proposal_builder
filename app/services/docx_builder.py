@@ -218,7 +218,7 @@ def build_strategy_brief_docx(
 
     doc = Document()
 
-    h = doc.add_heading(f"{title} — AI Strategy Brief", level=1)
+    h = doc.add_heading(f"{title} — Strategy Brief", level=1)
     for run in h.runs:
         run.font.color.rgb = RGBColor(*_PURPLE)
 

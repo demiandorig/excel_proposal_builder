@@ -14,10 +14,23 @@ const state = {
   // product (e.g. same product, different targeting), so a name-keyed dict
   // would silently collide between them; id is unique per line even then.
   availsData: {},           // id -> { max_imps, max_spend, est_uniques, ... }
+  // Step 04's Add-Ons module — fixed-price extras (Services/Measurement
+  // catalog families), picked separately from the main line-items table.
+  // Keyed by product_name (not id — an add-on is either picked or not,
+  // there's no "duplicate with different targeting" concept for these).
+  // Proposal-wide: NOT part of the per-tier snapshot pattern below, since
+  // the same add-ons apply regardless of which budget option is active.
+  addons: {},               // product_name -> amount (presence = picked)
   rateOverrideOpen: new Set(),  // transient UI state — which row indices show the rate-override input
   proposalId: null,
   proposalSummary: null,
   enrichment: null,         // Step 07 AI email content (subjects/bodies) — reprompt-able in place
+  // The REAL naming-convention title, once known (from a successful Generate
+  // or from reopening a past proposal) — the persistent name bar shows this
+  // verbatim instead of the live best-guess preview once it's set. Cleared
+  // whenever the planner goes back to Step 02, since editing client name/
+  // request type/start date there can change the real title on next Generate.
+  finalProposalTitle: null,
   // Tiered budget options (up to 4 — "A".."D"). state.lineItems/availsData
   // ALWAYS hold the currently-active tier's data (same as before tiers
   // existed — no other code needs to change); `tiers` holds a snapshot for
@@ -26,6 +39,11 @@ const state = {
   tiers: [],                // [{ label, lineItems, availsData }] — every tier EXCEPT the active one
   activeTierLabel: "A",
   step: 1,
+  // The highest step number reached so far this session — lets the top nav
+  // pills be clickable up to (but not past) wherever the wizard has
+  // actually gotten to, without letting the planner skip ahead into a step
+  // whose data was never populated. Reset only by resetAll().
+  furthestStep: 1,
 };
 
 const TIER_LABELS = ["A", "B", "C", "D"];
@@ -139,12 +157,21 @@ async function maybeReopenProposal() {
     state.parsed = data.request || {};
     state.suggestedTabs = null;
     state.strategyBrief = data.strategy_brief || null;
+    // Reopening carries the REAL title from when this proposal was last
+    // generated — show it verbatim rather than a fresh live-guess.
+    state.finalProposalTitle = data.proposal_title || null;
     // Reopened proposals don't carry multi-tier state (pre-dates that
     // feature, or was generated before the reopen_state was extended for
     // it) — reopen always resumes as a single tier "A".
     state.tiers = [];
     state.activeTierLabel = "A";
     const availsData = data.avails_data || {};
+
+    // Restore Add-Ons picks (absent entirely on a proposal generated before
+    // this feature existed — defaults to none picked, not an error).
+    state.addons = {};
+    (data.addons || []).forEach(a => { state.addons[a.product_name] = a.amount; });
+    renderAddonsModule();
 
     // Older saved proposals (before line items carried a stable id) had
     // avails keyed by product_name — assign fresh ids now and carry any
@@ -169,6 +196,10 @@ async function maybeReopenProposal() {
     renderMatchedProducts(state.parsed);
 
     renderLineItems();
+    // A reopened proposal already has every step's data (it was fully
+    // generated once) — let the nav pills jump anywhere immediately
+    // instead of only unlocking as the planner re-visits each step.
+    state.furthestStep = 7;
     goToStep(4);  // straight to Curate — the paste/review content is already known
   } catch (e) {
     alert("Reopen failed: " + e.message);
@@ -184,12 +215,16 @@ async function loadCatalog() {
       state.productIndex[p.name] = p;
     }
   }
-  // Populate the product picker dropdown
+  // Populate the product picker dropdown — add-ons are excluded here, they're
+  // not "products" a campaign is built around and have their own module
+  // (below the line-items table) instead, with no suggested budget.
   const picker = document.getElementById("product-picker");
   for (const fam of state.catalog.families) {
+    const productsInFamily = state.catalog.products_by_family[fam].filter(p => !p.is_addon);
+    if (!productsInFamily.length) continue;  // e.g. Services/Measurement are all-addon families
     const group = document.createElement("optgroup");
     group.label = fam;
-    for (const p of state.catalog.products_by_family[fam]) {
+    for (const p of productsInFamily) {
       const opt = document.createElement("option");
       opt.value = p.name;
       opt.textContent = p.name;
@@ -197,6 +232,7 @@ async function loadCatalog() {
     }
     picker.appendChild(group);
   }
+  renderAddonsModule();
 }
 
 function wireEvents() {
@@ -229,6 +265,20 @@ function wireEvents() {
   });
   document.querySelectorAll("[data-next]").forEach(b => {
     b.addEventListener("click", () => onNext(parseInt(b.dataset.next)));
+  });
+
+  // Step nav PILLS — jump directly to any step already reached. Capture
+  // any in-progress edits on the step being left first, same as onNext
+  // does, so nothing typed gets silently dropped by jumping away.
+  document.querySelectorAll(".step[data-step]").forEach(pill => {
+    pill.addEventListener("click", () => {
+      const target = parseInt(pill.dataset.step);
+      if (target === state.step || target > state.furthestStep) return;
+      if (state.step === 2) syncFormToParsed();
+      if (state.step === 4) syncLineItemsFromTable();
+      if (state.step === 6) syncAvailsFromGrid();
+      goToStep(target);
+    });
   });
 
   // Strategy step
@@ -319,6 +369,9 @@ function resetAll() {
   state.proposalId = null;
   state.proposalSummary = null;
   state.enrichment = null;
+  state.finalProposalTitle = null;
+  state.furthestStep = 1;
+  state.addons = {};
 
   document.getElementById("notion-input").value = "";
   document.getElementById("notion-id-input").value = "";
@@ -332,8 +385,74 @@ function resetAll() {
   document.getElementById("matched-products-row").classList.add("hidden");
   _resetStrategyUI();
   _resetRoadblocksUI();
+  renderAddonsModule();  // re-render so the checkboxes visually clear too, not just state.addons
 
   goToStep(1);
+}
+
+// --------------------------------------------------------------------------
+// Persistent proposal-name bar
+//
+// Mirrors app/services/ai_enricher.py's build_proposal_title()/_get_doc_type()/
+// _to_title_case() to show a live best-guess title while the planner is still
+// curating — the REAL title is always computed server-side at Generate time
+// (campaign name is AI-inferred there, and a missing Notion ID would only
+// then fall back to the sequential counter). If that Python naming logic
+// ever changes, mirror the change here too so the two don't drift.
+// --------------------------------------------------------------------------
+
+const _AVAILS_ONLY_REQUEST_TYPES = new Set([
+  "avails / estimates only (i don't need a proposal right now)",
+  "avails / estimates only",
+  "avails/estimates only",
+  "quick strategic question / need guidance",
+  "quick question",
+]);
+const _MONTH_ABBRS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function _previewDocType(requestType) {
+  const rt = (requestType || "").trim().toLowerCase();
+  if (rt.includes("question")) return "Question";
+  if (rt.includes("renewal")) return "Digital Renewal Plan";
+  if (rt.includes("audit")) return "Digital Research";
+  if (_AVAILS_ONLY_REQUEST_TYPES.has(rt)) return "Avails";
+  return "Digital Media Proposal";
+}
+
+function _previewTitleCase(text) {
+  if (!text) return text;
+  return text.split(" ").map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(" ");
+}
+
+function buildProposalNamePreview(parsed) {
+  if (!parsed) return "";
+  const shortId = (parsed.notion_id || "").trim() || "----";
+  const campaignName = _previewTitleCase((parsed.client_name || "Campaign").trim()) || "Campaign";
+  const docType = _previewDocType(parsed.request_type);
+  let monYY;
+  const d = parsed.start_date ? new Date(parsed.start_date + "T00:00:00") : new Date();
+  if (isNaN(d.getTime())) {
+    const now = new Date();
+    monYY = _MONTH_ABBRS[now.getMonth()] + String(now.getFullYear()).slice(2);
+  } else {
+    monYY = _MONTH_ABBRS[d.getMonth()] + String(d.getFullYear()).slice(2);
+  }
+  return `${shortId} | ${campaignName} | Entravision | ${monYY} | ${docType}`.replace(/ {2,}/g, " ").trim();
+}
+
+function updateProposalNameBar() {
+  const bar = document.getElementById("proposal-name-bar");
+  if (!state.parsed) {
+    bar.classList.add("hidden");
+    return;
+  }
+  const title = state.finalProposalTitle || buildProposalNamePreview(state.parsed);
+  if (!title) {
+    bar.classList.add("hidden");
+    return;
+  }
+  document.getElementById("proposal-name-text").textContent = title;
+  bar.classList.remove("hidden");
 }
 
 // --------------------------------------------------------------------------
@@ -342,12 +461,28 @@ function resetAll() {
 
 function goToStep(n) {
   state.step = n;
+  state.furthestStep = Math.max(state.furthestStep, n);
+  // Editing client name/request type/start date is only possible back on
+  // Step 02 — once there, the last-generated title (if any) can no longer
+  // be trusted as still-accurate, so drop back to the live preview until
+  // the planner generates again.
+  if (n === 2) state.finalProposalTitle = null;
   for (let i = 1; i <= 7; i++) {
     document.getElementById(`step-${i}`).classList.toggle("hidden", i !== n);
     const navEl = document.querySelector(`.step[data-step="${i}"]`);
     navEl.classList.toggle("active", i === n);
-    navEl.classList.toggle("done", i < n);
+    // "done" reflects the furthest point reached, not just "before the
+    // current step" — otherwise stepping back to review something un-marks
+    // every later step as done even though nothing there was undone.
+    navEl.classList.toggle("done", i < state.furthestStep);
+    // Clickable up to (not past) wherever the wizard has actually gotten
+    // to — lets the planner jump back to fix something, or jump forward
+    // again to a step they'd already reached, without skipping ahead into
+    // a step whose data was never populated. Excludes the current step
+    // itself — clicking it would be a no-op, so it shouldn't look clickable.
+    navEl.classList.toggle("clickable", i <= state.furthestStep && i !== n);
   }
+  updateProposalNameBar();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -381,6 +516,8 @@ function onNext(n) {
           notes_override: null,
           target_override: null,
           target_secondary: null,
+          estimated_cpm_override: null,
+          is_added_value: false,
         };
       });
       if (budget && state.lineItems.length > 0) {
@@ -610,7 +747,7 @@ async function onStrategyGenerate(reprompt = null) {
     if (brief.error && !brief.strategy_summary) {
       const errEl = document.getElementById("strategy-error");
       errEl.classList.remove("hidden");
-      errEl.innerHTML = `<strong>AI enrichment unavailable:</strong> ${escapeHtml(brief.error)}<br>
+      errEl.innerHTML = `<strong>Strategy brief unavailable:</strong> ${escapeHtml(brief.error)}<br>
         <small>Set <code>OPENAI_API_KEY</code> to enable this step. You can skip and curate manually.</small>`;
       return;
     }
@@ -999,10 +1136,30 @@ function renderLineItems() {
     const p = state.productIndex[li.product_name] || {};
     const tr = document.createElement("tr");
     const minSpend = p.minimum_spend || 0;
-    const belowMin = li.monthly_budget < minSpend;
-    const rateOpen = state.rateOverrideOpen.has(idx) || li.rate_override != null;
+    // Added Value: a $0 (or below-minimum) budget is deliberate here, not
+    // an oversight — don't flag it.
+    const belowMin = !li.is_added_value && li.monthly_budget < minSpend;
+    const rateOpen = state.rateOverrideOpen.has(idx) || li.rate_override != null || li.estimated_cpm_override != null;
+    // Fixed-model products (Meta, YouTube, TikTok, LinkedIn, Spotify,
+    // Branded Content, ...) have no real per-unit rate to override — their
+    // RATE column instead edits the ESTIMATED CPM that drives the "Est. $"
+    // impressions calc in Step 06/the export. Kept visually distinct
+    // ("Est. $X CPM", not just "$X CPM") so it's never mistaken for a real
+    // billing rate the way a bare number would be.
+    const isFixedModel = (p.pricing_model || "").toUpperCase() === "FIXED";
+    const effectiveCpm = li.estimated_cpm_override != null ? li.estimated_cpm_override : p.estimated_cpm_for_imps;
+
+    // Draggable at the ROW level (native HTML5 drag-and-drop needs the
+    // dragged element itself to carry `draggable`), but the dragstart
+    // handler below only lets the drag actually begin when it started on
+    // the handle cell — so clicking/selecting text anywhere else in the
+    // row (budget input, target textarea, etc.) behaves normally.
+    tr.draggable = true;
+    tr.dataset.idx = idx;
+    tr.className = "line-item-row";
 
     tr.innerHTML = `
+      <td class="col-drag"><span class="drag-handle" title="Drag to reorder">⠿</span></td>
       <td class="idx">${idx + 1}</td>
       <td class="product">
         ${escapeHtml(li.product_name)}
@@ -1010,22 +1167,35 @@ function renderLineItems() {
       </td>
       <td class="model">${escapeHtml(p.pricing_model || "—")}</td>
       <td class="rate-cell">
-        ${rateOpen ? `
+        ${rateOpen ? (isFixedModel ? `
+          <input type="number" step="0.5" min="0" class="rate-override-input est-cpm-input"
+                 placeholder="${p.estimated_cpm_for_imps != null ? "Catalog: $" + p.estimated_cpm_for_imps : "No catalog estimate"}"
+                 value="${li.estimated_cpm_override != null ? li.estimated_cpm_override : ""}"
+                 data-idx="${idx}" data-key="estimated_cpm_override" />
+          <button class="btn-rate-reset" data-idx="${idx}" data-field="estimated_cpm_override" title="Revert to catalog estimate">×</button>
+        ` : `
           <input type="number" step="0.01" min="0" class="rate-override-input"
                  placeholder="${formatRate(p)}"
                  value="${li.rate_override != null ? li.rate_override : ""}"
                  data-idx="${idx}" data-key="rate_override" />
-          <button class="btn-rate-reset" data-idx="${idx}" title="Revert to catalog rate">×</button>
+          <button class="btn-rate-reset" data-idx="${idx}" data-field="rate_override" title="Revert to catalog rate">×</button>
+        `) : (isFixedModel ? `
+          <span class="rate-display est-cpm-display">${effectiveCpm != null ? `Est. $${effectiveCpm} CPM` : "No estimate"}</span>
+          <button class="btn-rate-override" data-idx="${idx}" title="Set an estimated CPM for the impressions calc (not a real billing rate)">✎</button>
         ` : `
           <span class="rate-display">${formatRate(p)}</span>
           <button class="btn-rate-override" data-idx="${idx}" title="Override this rate">✎</button>
-        `}
+        `)}
       </td>
       <td class="min">${money(minSpend)}</td>
       <td class="col-budget">
         <input type="number" step="50" min="0" value="${li.monthly_budget}"
                class="${belowMin ? "below-min" : ""}"
                data-idx="${idx}" data-key="monthly_budget" />
+        <label class="added-value-toggle">
+          <input type="checkbox" data-idx="${idx}" ${li.is_added_value ? "checked" : ""} data-added-value-toggle />
+          Added Value ($0 OK)
+        </label>
       </td>
       <td class="col-months">
         <input type="number" step="1" min="1" value="${li.months}"
@@ -1056,11 +1226,18 @@ function renderLineItems() {
     tbody.appendChild(tr);
   });
   // Wire row events
-  tbody.querySelectorAll("input:not([data-secondary-toggle]), textarea").forEach(inp => {
+  tbody.querySelectorAll("input:not([data-secondary-toggle]):not([data-added-value-toggle]), textarea").forEach(inp => {
     inp.addEventListener("input", onLineItemEdit);
   });
   tbody.querySelectorAll("[data-secondary-toggle]").forEach(cb => {
     cb.addEventListener("change", () => onToggleSecondaryTarget(parseInt(cb.dataset.idx)));
+  });
+  tbody.querySelectorAll("[data-added-value-toggle]").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const idx = parseInt(cb.dataset.idx);
+      state.lineItems[idx].is_added_value = cb.checked;
+      renderLineItems();  // refreshes the below-minimum highlight immediately
+    });
   });
   tbody.querySelectorAll(".btn-duplicate").forEach(btn => {
     btn.addEventListener("click", () => onDuplicateLineItem(parseInt(btn.dataset.idx)));
@@ -1084,12 +1261,83 @@ function renderLineItems() {
   tbody.querySelectorAll(".btn-rate-reset").forEach(btn => {
     btn.addEventListener("click", () => {
       const idx = parseInt(btn.dataset.idx);
-      state.lineItems[idx].rate_override = null;
+      // Which field this clears depends on whether the row was in real-rate
+      // mode or estimated-CPM mode when the reset button was rendered.
+      state.lineItems[idx][btn.dataset.field] = null;
       state.rateOverrideOpen.delete(idx);
       renderLineItems();
     });
   });
+  wireLineItemDrag(tbody);
   updateTotals();
+}
+
+// --------------------------------------------------------------------------
+// Drag-to-reorder line items (Step 04). Native HTML5 drag-and-drop, no
+// library — `draggable` sits on the <tr> (required: the browser only drags
+// the element that actually carries the attribute), but dragstart bails
+// out unless it began on the grip handle, so normal clicks/selection in
+// the row's own inputs and textareas aren't hijacked into a drag.
+// --------------------------------------------------------------------------
+
+function wireLineItemDrag(tbody) {
+  const rows = tbody.querySelectorAll("tr.line-item-row");
+
+  const clearDropIndicators = () => {
+    rows.forEach(r => r.classList.remove("drag-over-top", "drag-over-bottom"));
+  };
+
+  rows.forEach(row => {
+    row.addEventListener("dragstart", e => {
+      if (!e.target.closest(".drag-handle")) {
+        e.preventDefault();
+        return;
+      }
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", row.dataset.idx);
+      row.classList.add("dragging");
+    });
+
+    row.addEventListener("dragover", e => {
+      e.preventDefault();  // required for drop to fire on this element
+      const rect = row.getBoundingClientRect();
+      const insertAfter = e.clientY > rect.top + rect.height / 2;
+      clearDropIndicators();
+      row.classList.add(insertAfter ? "drag-over-bottom" : "drag-over-top");
+    });
+
+    row.addEventListener("drop", e => {
+      e.preventDefault();
+      clearDropIndicators();
+      const fromIdx = parseInt(e.dataTransfer.getData("text/plain"));
+      const dropOnIdx = parseInt(row.dataset.idx);
+      if (isNaN(fromIdx) || isNaN(dropOnIdx)) return;
+      const rect = row.getBoundingClientRect();
+      const insertAfter = e.clientY > rect.top + rect.height / 2;
+      moveLineItem(fromIdx, dropOnIdx, insertAfter);
+    });
+
+    row.addEventListener("dragend", () => {
+      row.classList.remove("dragging");
+      clearDropIndicators();
+    });
+  });
+}
+
+function moveLineItem(fromIdx, dropOnIdx, insertAfter) {
+  // `target` is the position (in the ORIGINAL, pre-removal array) before
+  // which the dragged item should land. Removing the dragged item first
+  // shifts everything after it left by one — so if the target sits after
+  // where the item used to be, that shift has to be un-done by one before
+  // re-inserting, or the item lands one slot further than intended.
+  let target = insertAfter ? dropOnIdx + 1 : dropOnIdx;
+  if (fromIdx < target) target -= 1;
+  if (target === fromIdx) return;  // dropped back where it started
+
+  const [item] = state.lineItems.splice(fromIdx, 1);
+  state.lineItems.splice(target, 0, item);
+  state.rateOverrideOpen.clear();  // indices shift — avoid pointing at the wrong row
+  renderLineItems();
 }
 
 function onLineItemEdit(e) {
@@ -1097,17 +1345,20 @@ function onLineItemEdit(e) {
   const key = e.target.dataset.key;
   let v = e.target.value;
   if (e.target.type === "number") {
-    // rate_override is optional — an emptied field means "no override", not 0.
-    // Required numeric fields (monthly_budget, months) fall back to 0 so the
-    // payload sent to the backend always stays a valid number.
-    v = v === "" ? (key === "rate_override" ? null : 0) : parseFloat(v);
+    // rate_override / estimated_cpm_override are optional — an emptied
+    // field means "no override, fall back to the catalog default", not 0.
+    // Required numeric fields (monthly_budget, months) fall back to 0 so
+    // the payload sent to the backend always stays a valid number.
+    const isOptionalOverride = key === "rate_override" || key === "estimated_cpm_override";
+    v = v === "" ? (isOptionalOverride ? null : 0) : parseFloat(v);
   }
   state.lineItems[idx][key] = v;
   updateTotals();
   if (key === "monthly_budget") {
-    const p = state.productIndex[state.lineItems[idx].product_name] || {};
+    const li = state.lineItems[idx];
+    const p = state.productIndex[li.product_name] || {};
     const minSpend = p.minimum_spend || 0;
-    e.target.classList.toggle("below-min", (v || 0) < minSpend);
+    e.target.classList.toggle("below-min", !li.is_added_value && (v || 0) < minSpend);
   }
 }
 
@@ -1149,9 +1400,76 @@ function onAddProduct() {
     notes_override: null,
     target_override: null,
     target_secondary: null,
+    estimated_cpm_override: null,
+    is_added_value: false,
   });
   picker.value = "";
   renderLineItems();
+}
+
+// --------------------------------------------------------------------------
+// Step 4: Add-Ons module — fixed-price extras (Services/Measurement
+// catalog families), checked on/off separately from the main product mix.
+// No suggested budget: the price defaults to the catalog's minimum_spend
+// (a flat fee, even for the one CPP-modeled add-on — add-ons don't need a
+// rate-times-volume calc, just an editable flat number) and is fully
+// planner-editable per proposal. Proposal-wide, so this renders once (on
+// catalog load) rather than on every tier switch/line-item re-render.
+// --------------------------------------------------------------------------
+
+function renderAddonsModule() {
+  const list = document.getElementById("addons-list");
+  if (!list || !state.catalog) return;
+
+  const addonProducts = state.catalog.families
+    .flatMap(fam => state.catalog.products_by_family[fam])
+    .filter(p => p.is_addon);
+
+  if (!addonProducts.length) {
+    list.innerHTML = `<p class="addons-empty">No add-ons configured yet — an admin can add some from the Rates tab.</p>`;
+    return;
+  }
+
+  list.innerHTML = addonProducts.map(p => {
+    const picked = Object.prototype.hasOwnProperty.call(state.addons, p.name);
+    const amount = picked ? state.addons[p.name] : (p.minimum_spend || 0);
+    return `
+      <label class="addon-row">
+        <input type="checkbox" data-addon-toggle="${escapeHtml(p.name)}" ${picked ? "checked" : ""} />
+        <span class="addon-info">
+          <span class="addon-name">${escapeHtml(p.name)} <span class="family-tag">${escapeHtml(p.family)}</span></span>
+          ${p.description ? `<span class="addon-desc">${escapeHtml(p.description)}</span>` : ""}
+        </span>
+        <span class="addon-price">
+          <span class="addon-price-prefix">$</span>
+          <input type="number" step="1" min="0" value="${amount}" ${picked ? "" : "disabled"}
+                 data-addon-amount="${escapeHtml(p.name)}" />
+        </span>
+      </label>
+    `;
+  }).join("");
+
+  list.querySelectorAll("[data-addon-toggle]").forEach(cb => {
+    cb.addEventListener("change", () => onToggleAddon(cb.dataset.addonToggle, cb.checked));
+  });
+  list.querySelectorAll("[data-addon-amount]").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const name = inp.dataset.addonAmount;
+      if (Object.prototype.hasOwnProperty.call(state.addons, name)) {
+        state.addons[name] = parseFloat(inp.value) || 0;
+      }
+    });
+  });
+}
+
+function onToggleAddon(name, isPicked) {
+  if (isPicked) {
+    const p = state.productIndex[name];
+    state.addons[name] = p ? (p.minimum_spend || 0) : 0;
+  } else {
+    delete state.addons[name];
+  }
+  renderAddonsModule();
 }
 
 function onDuplicateLineItem(idx) {
@@ -1203,6 +1521,75 @@ async function onRecommend() {
 //   Fixed / estimated-CPM products: spend = imps * est_cpm / 1000  (an estimate)
 //   else:  no calc possible (planner enters both by hand)
 // Each function returns {value, estimated} or null when the model doesn't support it.
+// Step 04's per-line estimated-CPM override (li.estimated_cpm_override)
+// takes precedence over the catalog's own estimated_cpm_for_imps — applied
+// by building a "virtual" product with the override baked in, so
+// calcMaxSpendFromImps/calcMaxImpsFromSpend/computeSovPct don't need their
+// own override-handling logic duplicated three times.
+function _effectiveProduct(li, p) {
+  if (li && li.estimated_cpm_override != null) {
+    return { ...p, estimated_cpm_for_imps: li.estimated_cpm_override };
+  }
+  return p;
+}
+
+// --------------------------------------------------------------------------
+// Avg. frequency = Max Imps / Est. Uniques. A 4th avails field, editable
+// and fully interchangeable with the other two: entering any two of
+// {impressions, uniques, frequency} calculates the third, mirroring the
+// existing imps<->spend basis pattern but across three variables instead
+// of two. Defaults to 5.5 for the same "estimated CPM" product pool as the
+// Step 04 estimated-CPM editor (Meta, YouTube, TikTok, LinkedIn, Spotify,
+// Branded Content, ...) — there's no meaningful average-frequency baseline
+// to assume for a real CPM/CPP product, so those start blank.
+// --------------------------------------------------------------------------
+
+function _isEstimateCpmProduct(li, p) {
+  const eff = _effectiveProduct(li, p);
+  return (eff.pricing_model || "").toUpperCase() === "FIXED" && eff.estimated_cpm_for_imps != null;
+}
+
+function _defaultFrequency(li, p) {
+  return _isEstimateCpmProduct(li, p) ? 5.5 : null;
+}
+
+// Mutates `entry` in place, deriving ONE other field from whichever of the
+// remaining two is available, based on which field was just edited:
+//   - uniques edited: uniques × frequency (or the 5.5 default) -> imps
+//   - frequency edited: prefer uniques × frequency -> imps; else imps / frequency -> uniques
+//   - imps edited: prefer imps / uniques -> frequency (uniques already known,
+//     so frequency is the "shown, calculated" side); else imps / frequency -> uniques
+// The default frequency is only ever WRITTEN into entry.frequency once it's
+// actually used for a real calculation — not just because a line rendered
+// with it showing — same lesson as the free-form-avails default: a value
+// that only ever lived in the display, never in state, silently does
+// nothing at export time.
+function _applyFrequencyTriangle(entry, editedKey, defaultFreq) {
+  const imps = entry.max_imps;
+  const uniques = entry.est_uniques;
+  const freq = entry.frequency != null ? entry.frequency : defaultFreq;
+
+  if (editedKey === "est_uniques") {
+    if (uniques != null && freq != null) {
+      entry.max_imps = Math.round(uniques * freq);
+      if (entry.frequency == null) entry.frequency = freq;
+    }
+  } else if (editedKey === "frequency") {
+    if (uniques != null && entry.frequency != null) {
+      entry.max_imps = Math.round(uniques * entry.frequency);
+    } else if (imps != null && entry.frequency != null) {
+      entry.est_uniques = Math.round(imps / entry.frequency);
+    }
+  } else if (editedKey === "max_imps") {
+    if (uniques != null) {
+      entry.frequency = Math.round((imps / uniques) * 10) / 10;
+    } else if (freq != null) {
+      entry.est_uniques = Math.round(imps / freq);
+      if (entry.frequency == null) entry.frequency = freq;
+    }
+  }
+}
+
 function calcMaxSpendFromImps(p, maxImps) {
   if (!maxImps || maxImps <= 0) return null;
   const model = (p.pricing_model || "").toUpperCase();
@@ -1239,7 +1626,7 @@ function computeSovPct(li, p, entry) {
     return li.monthly_budget / entry.max_spend * 100;
   }
   if (entry.max_imps) {
-    const spendResult = calcMaxSpendFromImps(p, entry.max_imps);
+    const spendResult = calcMaxSpendFromImps(_effectiveProduct(li, p), entry.max_imps);
     if (spendResult && spendResult.value) {
       return li.monthly_budget / spendResult.value * 100;
     }
@@ -1332,6 +1719,27 @@ function renderAvailsGrid() {
     const subtitle = dupeCount > 1
       ? (li.target_override ? ` — ${li.target_override}` : ` — line ${idx + 1}`)
       : "";
+    // Free-form beats numeric avails whenever the planner has explicitly
+    // chosen one (`existing.freeform` set); with no explicit choice yet,
+    // Search products default to free-form (there's no meaningful avails
+    // ceiling to calculate for SEM the way there is for impression-based
+    // products) and everything else defaults to the normal numeric fields.
+    // Materialized into state.availsData immediately when the DEFAULT is
+    // free-form (Search) and hasn't been explicitly chosen either way yet
+    // — otherwise a planner who never touches the already-checked checkbox
+    // and just types straight into the pre-shown textarea would have that
+    // text silently do nothing at export time: write_avails_cells() only
+    // checks avail.get("freeform"), it has no family-based fallback of its
+    // own. Deliberately NOT done for the false/numeric default — that
+    // would stamp a `{freeform: false}` entry onto every line the instant
+    // Step 06 renders, even ones the planner never touches, which would
+    // wrongly make renderGenerateSummary()'s "no avails entered for this
+    // option" check think avails exist just because the object has a key.
+    const isFreeform = existing.freeform !== undefined ? existing.freeform : (p.family === "Search");
+    if (existing.freeform === undefined && isFreeform) {
+      state.availsData[li.id] = state.availsData[li.id] || {};
+      state.availsData[li.id].freeform = true;
+    }
     const card = document.createElement("div");
     card.className = "avails-card";
     card.innerHTML = `
@@ -1339,31 +1747,85 @@ function renderAvailsGrid() {
         <h3>${escapeHtml(li.product_name)}${escapeHtml(subtitle)}</h3>
         <span class="sov-badge" id="sov-badge-${escapeAttr(li.id)}"></span>
       </div>
+      <label class="freeform-toggle">
+        <input type="checkbox" data-lid="${escapeAttr(li.id)}" data-freeform-toggle ${isFreeform ? "checked" : ""} />
+        Free-form — type anything in these, no calculation
+      </label>
       <div class="avails-fields">
         <label>Max Recommended Monthly Imps
-          <input type="text" inputmode="numeric" placeholder="—"
-                 value="${formatImpsDisplay(existing.max_imps, existing.max_imps_estimated)}"
-                 data-lid="${escapeAttr(li.id)}" data-key="max_imps" />
+          ${isFreeform ? `
+            <input type="text" placeholder='e.g. "50 to 100"'
+                   value="${escapeHtml(existing.max_imps_text || "")}"
+                   data-lid="${escapeAttr(li.id)}" data-key="max_imps_text" />
+          ` : `
+            <input type="text" inputmode="numeric" placeholder="—"
+                   value="${formatImpsDisplay(existing.max_imps, existing.max_imps_estimated)}"
+                   data-lid="${escapeAttr(li.id)}" data-key="max_imps" />
+          `}
         </label>
         <label>Max Recommended Monthly Spend
-          <input type="text" inputmode="numeric" placeholder="—"
-                 value="${formatSpendDisplay(existing.max_spend, existing.max_spend_estimated)}"
-                 data-lid="${escapeAttr(li.id)}" data-key="max_spend" />
+          ${isFreeform ? `
+            <input type="text" placeholder='e.g. "TBD"'
+                   value="${escapeHtml(existing.max_spend_text || "")}"
+                   data-lid="${escapeAttr(li.id)}" data-key="max_spend_text" />
+          ` : `
+            <input type="text" inputmode="numeric" placeholder="—"
+                   value="${formatSpendDisplay(existing.max_spend, existing.max_spend_estimated)}"
+                   data-lid="${escapeAttr(li.id)}" data-key="max_spend" />
+          `}
         </label>
         <label>Est. Monthly Uniques
-          <input type="text" inputmode="numeric" placeholder="—"
-                 value="${formatPlainDisplay(existing.est_uniques)}"
-                 data-lid="${escapeAttr(li.id)}" data-key="est_uniques" />
+          ${isFreeform ? `
+            <input type="text" placeholder='e.g. "n/a"'
+                   value="${escapeHtml(existing.est_uniques_text || "")}"
+                   data-lid="${escapeAttr(li.id)}" data-key="est_uniques_text" />
+          ` : `
+            <input type="text" inputmode="numeric" placeholder="—"
+                   value="${formatPlainDisplay(existing.est_uniques)}"
+                   data-lid="${escapeAttr(li.id)}" data-key="est_uniques" />
+          `}
         </label>
+        ${!isFreeform ? `
+        <label>Avg. Frequency
+          <input type="text" inputmode="decimal" placeholder="—"
+                 value="${existing.frequency != null ? existing.frequency : (_defaultFrequency(li, p) != null ? _defaultFrequency(li, p) : "")}"
+                 data-lid="${escapeAttr(li.id)}" data-key="frequency" />
+        </label>
+        ` : ""}
       </div>
       <p class="sov-helper" id="sov-helper-${escapeAttr(li.id)}"></p>
     `;
     grid.appendChild(card);
+    // Naturally blanks itself for a free-form entry — computeSovPct() has no
+    // max_spend/max_imps to work with there and returns null either way.
     updateSovBadge(li.id);
   });
 
-  // On focus: strip formatting so the raw number is easy to edit.
-  grid.querySelectorAll("input").forEach(inp => {
+  grid.querySelectorAll("[data-freeform-toggle]").forEach(cb => {
+    cb.addEventListener("change", () => {
+      const lid = cb.dataset.lid;
+      state.availsData[lid] = state.availsData[lid] || {};
+      state.availsData[lid].freeform = cb.checked;
+      renderAvailsGrid();
+    });
+  });
+  // Free-form text inputs (max_imps_text/max_spend_text/est_uniques_text):
+  // stored verbatim, no parsing — matched by the "_text" suffix so this
+  // covers all three without repeating the same three-line handler thrice.
+  grid.querySelectorAll('input[data-key$="_text"]').forEach(inp => {
+    inp.addEventListener("input", () => {
+      const lid = inp.dataset.lid;
+      state.availsData[lid] = state.availsData[lid] || {};
+      state.availsData[lid][inp.dataset.key] = inp.value;
+    });
+  });
+
+  // On focus: strip formatting so the raw number is easy to edit. Excludes
+  // the free-form checkbox (not a value-bearing text field — its `.value`
+  // is meaningless, always "on" per the checkbox default) and the "_text"
+  // free-form inputs above (running parseFormattedInput on "50 to 100"
+  // would strip the letters and glue the digits together into "50100").
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"])').forEach(inp => {
     inp.addEventListener("focus", e => {
       const raw = parseFormattedInput(e.target.value);
       e.target.value = raw === null ? "" : String(Math.round(raw));
@@ -1385,7 +1847,15 @@ function renderAvailsGrid() {
   });
 
   // On blur: parse, store, recalc the paired field, and reformat both.
-  grid.querySelectorAll("input").forEach(inp => {
+  // Excludes the free-form checkbox (its own "change" listener above
+  // handles it — matching it here too would stamp a stray entry[undefined]
+  // into state.availsData, since a checkbox carries no data-key of its own)
+  // and the "_text" free-form inputs (their own "input" listener above
+  // already stores them verbatim; running this handler on them too would
+  // both overwrite that with a numeric parse of the same text AND mangle
+  // it in the process — parseFormattedInput("50 to 100") strips the
+  // letters and glues what's left into "50100").
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"])').forEach(inp => {
     inp.addEventListener("blur", e => {
       const lid = e.target.dataset.lid;
       const key = e.target.dataset.key;
@@ -1397,39 +1867,91 @@ function renderAvailsGrid() {
       const value = parseFormattedInput(e.target.value);
       entry[key] = value;
 
+      const impsInputEl = () => grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="max_imps"]`);
+      const spendInputEl = () => grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="max_spend"]`);
+      const uniquesInputEl = () => grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="est_uniques"]`);
+      const freqInputEl = () => grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="frequency"]`);
+
+      // Recompute Max Spend from a (possibly just-derived, not just
+      // directly-typed) Max Imps value — shared by the direct "typed into
+      // Imps" path below and the "derived via the uniques/frequency
+      // triangle" path, so a chain like Uniques -> Imps -> Spend flows all
+      // the way through in one blur, not just the first hop.
+      const recalcSpendFromImps = (impsValue) => {
+        const spendResult = calcMaxSpendFromImps(_effectiveProduct(li, p), impsValue);
+        if (spendResult !== null) {
+          entry.max_spend = Math.round(spendResult.value);
+          entry.max_spend_estimated = spendResult.estimated;
+          const el = spendInputEl();
+          if (el) el.value = formatSpendDisplay(entry.max_spend, entry.max_spend_estimated);
+        }
+      };
+
       if (key === "max_imps") {
         entry.max_imps_estimated = false;  // directly typed — authoritative
         entry.basis = "imps";  // tells the Excel export which cell to make the live formula's source
         e.target.value = formatImpsDisplay(value, false);
 
-        const spendResult = calcMaxSpendFromImps(p, value);
-        const spendInput = grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="max_spend"]`);
-        if (spendResult !== null) {
-          entry.max_spend = Math.round(spendResult.value);
-          entry.max_spend_estimated = spendResult.estimated;
-          if (spendInput) spendInput.value = formatSpendDisplay(entry.max_spend, entry.max_spend_estimated);
-        } else if (value === null) {
+        if (value !== null) {
+          recalcSpendFromImps(value);
+        } else {
           entry.max_spend = null;
-          if (spendInput) spendInput.value = "";
+          const el = spendInputEl();
+          if (el) el.value = "";
         }
+
+        // Impressions <-> Uniques <-> Frequency triangle (independent of
+        // the spend calc above — Uniques/Frequency never drive spend
+        // directly, only through Impressions).
+        _applyFrequencyTriangle(entry, "max_imps", _defaultFrequency(li, p));
+        const uEl = uniquesInputEl(), fEl = freqInputEl();
+        if (uEl) uEl.value = formatPlainDisplay(entry.est_uniques);
+        if (fEl) fEl.value = entry.frequency != null ? entry.frequency : "";
       } else if (key === "max_spend") {
         entry.max_spend_estimated = false;  // directly typed — authoritative
         entry.basis = "spend";  // tells the Excel export which cell to make the live formula's source
         e.target.value = formatSpendDisplay(value, false);
 
-        const impsResult = calcMaxImpsFromSpend(p, value);
-        const impsInput = grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="max_imps"]`);
+        const impsResult = calcMaxImpsFromSpend(_effectiveProduct(li, p), value);
+        const impsInput = impsInputEl();
         if (impsResult !== null) {
           entry.max_imps = Math.round(impsResult.value);
           entry.max_imps_estimated = impsResult.estimated;
           if (impsInput) impsInput.value = formatImpsDisplay(entry.max_imps, entry.max_imps_estimated);
+          // Spend -> Imps just derived above; let it also refresh Uniques/
+          // Frequency (e.g. Frequency was already known -> Uniques updates).
+          _applyFrequencyTriangle(entry, "max_imps", _defaultFrequency(li, p));
+          const uEl = uniquesInputEl(), fEl = freqInputEl();
+          if (uEl) uEl.value = formatPlainDisplay(entry.est_uniques);
+          if (fEl) fEl.value = entry.frequency != null ? entry.frequency : "";
         } else if (value === null) {
           entry.max_imps = null;
           if (impsInput) impsInput.value = "";
         }
       } else if (key === "est_uniques") {
-        // Uniques never drive or are driven by the imps/spend calc.
         e.target.value = formatPlainDisplay(value);
+        _applyFrequencyTriangle(entry, "est_uniques", _defaultFrequency(li, p));
+        if (entry.max_imps != null) {
+          entry.max_imps_estimated = false;
+          entry.basis = "imps";
+          const el = impsInputEl();
+          if (el) el.value = formatImpsDisplay(entry.max_imps, false);
+          recalcSpendFromImps(entry.max_imps);
+          const fEl = freqInputEl();
+          if (fEl) fEl.value = entry.frequency != null ? entry.frequency : "";
+        }
+      } else if (key === "frequency") {
+        e.target.value = value != null ? value : "";
+        _applyFrequencyTriangle(entry, "frequency", _defaultFrequency(li, p));
+        if (entry.max_imps != null) {
+          entry.max_imps_estimated = false;
+          entry.basis = "imps";
+          const el = impsInputEl();
+          if (el) el.value = formatImpsDisplay(entry.max_imps, false);
+          recalcSpendFromImps(entry.max_imps);
+        }
+        const uEl = uniquesInputEl();
+        if (uEl) uEl.value = formatPlainDisplay(entry.est_uniques);
       }
 
       updateSovBadge(lid);  // refresh against the final, rounded/settled values
@@ -1512,10 +2034,11 @@ async function onGenerate() {
     force_tabs: forceTabs,
     avails_data: state.availsData,
     strategy_brief: state.strategyBrief || null,
+    addons: Object.entries(state.addons).map(([product_name, amount]) => ({ product_name, amount })),
   };
   const btn = document.getElementById("generate-btn");
   btn.disabled = true;
-  btn.textContent = "Generating + AI Pack…";
+  btn.textContent = "Generating + Intelligence Pack…";
   try {
     const res = await fetch("/api/generate", {
       method: "POST",
@@ -1537,11 +2060,97 @@ async function onGenerate() {
   }
 }
 
+// --------------------------------------------------------------------------
+// Gamma outline — a paste-in handoff for the "Media Strategy Co-Pilot" GPT
+// (https://chatgpt.com/g/g-68c0554e...), which has no callable API of its
+// own: the planner copies this text and pastes it into that GPT's chat
+// themselves, rather than this app calling it directly. Built entirely
+// from data already gathered by Steps 01-06 — no extra request, no AI call.
+// --------------------------------------------------------------------------
+
+function buildGammaOutline() {
+  const req = state.parsed || {};
+  const lines = [];
+
+  const campaignName = (state.enrichment && state.enrichment.campaign_name) || req.client_name || "Campaign";
+  lines.push(`MEDIA PLAN OUTLINE — ${campaignName}`);
+  if (state.finalProposalTitle) lines.push(state.finalProposalTitle);
+  lines.push("");
+
+  lines.push("CLIENT & CAMPAIGN");
+  if (req.client_name) lines.push(`- Client: ${req.client_name}`);
+  if (req.client_website) lines.push(`- Website: ${req.client_website}`);
+  if (req.campaign_goal) lines.push(`- Goal: ${req.campaign_goal}`);
+  if (req.geo) lines.push(`- Geo: ${req.geo}`);
+  const targeting = [req.demo, req.behavioral, req.contextual ? `Contextual: ${req.contextual}` : ""]
+    .filter(Boolean).join(" | ");
+  if (targeting) lines.push(`- Target: ${targeting}`);
+  const flightBits = [];
+  if (req.start_date) flightBits.push(req.start_date + (req.end_date ? ` – ${req.end_date}` : ""));
+  if (req.total_months) flightBits.push(`(${req.total_months} month${req.total_months === 1 ? "" : "s"})`);
+  if (flightBits.length) lines.push(`- Flight: ${flightBits.join(" ")}`);
+  lines.push("");
+
+  const brief = state.strategyBrief;
+  if (brief && !brief.error && (brief.strategy_summary || brief.client_summary)) {
+    lines.push("STRATEGY BRIEF");
+    if (brief.client_summary) lines.push(`Client/Category: ${brief.client_summary}`);
+    if (brief.market_context) lines.push(`Market Context: ${brief.market_context}`);
+    if (brief.objectives_analysis) lines.push(`Objectives: ${brief.objectives_analysis}`);
+    if (brief.strategy_summary) lines.push(`Strategy: ${brief.strategy_summary}`);
+    if (brief.key_insights && brief.key_insights.length) {
+      lines.push("Key Insights:");
+      brief.key_insights.forEach(k => lines.push(`  - ${k}`));
+    }
+    lines.push("");
+  }
+
+  const tiers = allTiersForSubmit();
+  lines.push(tiers.length > 1 ? "MEDIA PLAN OPTIONS" : "MEDIA PLAN");
+  tiers.forEach(t => {
+    if (tiers.length > 1) lines.push(`Option ${t.label}:`);
+    let tierTotal = 0;
+    (t.line_items || []).forEach(li => {
+      const p = state.productIndex[li.product_name] || {};
+      tierTotal += (li.monthly_budget || 0) * (li.months || 1);
+      const target = li.target_override || targeting || "(campaign default)";
+      lines.push(`  - ${li.product_name}${p.family ? ` (${p.family})` : ""} — ${money(li.monthly_budget)}/mo × ${li.months}mo — Target: ${target}`);
+    });
+    lines.push(`  Option total: ${money(tierTotal)}`);
+    lines.push("");
+  });
+
+  const addonEntries = Object.entries(state.addons || {});
+  if (addonEntries.length) {
+    lines.push("ADD-ONS");
+    addonEntries.forEach(([name, amount]) => lines.push(`  - ${name}: ${money(amount)}`));
+    lines.push("");
+  }
+
+  const rb = state.roadblocks;
+  if (rb && !rb.error && (rb.overall_summary || (rb.product_roadblocks || []).length)) {
+    lines.push("ROADBLOCKS / CONSIDERATIONS");
+    if (rb.overall_summary) lines.push(rb.overall_summary);
+    (rb.product_roadblocks || []).forEach(pr => {
+      lines.push(`  - ${pr.product_name} (${pr.risk_level || "low"} risk)`);
+      (pr.risks || []).forEach(r => lines.push(`      • ${r.issue}${r.detail ? " — " + r.detail : ""}`));
+    });
+    lines.push("");
+  }
+
+  return lines.join("\n").trim();
+}
+
 function showResult(data) {
   const result = document.getElementById("result");
   result.classList.remove("hidden");
 
-  // Proposal title (naming convention)
+  // Proposal title (naming convention) — now the REAL, server-computed
+  // title (campaign name AI-inferred, real ID assigned), so the persistent
+  // name bar should show this verbatim from here on rather than its guess.
+  state.finalProposalTitle = data.proposal_title || null;
+  updateProposalNameBar();
+
   const titleEl = document.getElementById("result-title");
   if (data.proposal_title) {
     titleEl.textContent = data.proposal_title;
@@ -1558,6 +2167,8 @@ function showResult(data) {
 
   const dl = document.getElementById("download-link");
   dl.href = `/api/download/${data.proposal_id}`;
+
+  document.getElementById("gamma-outline-body").textContent = buildGammaOutline();
 
   // AI enrichment section
   const aiContent = document.getElementById("ai-content");

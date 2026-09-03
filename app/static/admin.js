@@ -146,6 +146,7 @@ function renderRates(list) {
         ${escapeHtml(p.name)}
         ${p.has_override ? '<span class="override-badge">Override</span>' : ""}
         ${p.is_custom ? '<span class="custom-badge">Custom</span>' : ""}
+        ${p.is_addon ? '<span class="addon-badge">Add-on</span>' : ""}
       </td>
       <td class="mono">${escapeHtml(p.buying_model)}</td>
       <td>${numInput(p, "base_rate")}</td>
@@ -280,6 +281,7 @@ async function onAddProduct(e) {
     tech_platform: val("np-tech-platform") || null,
     proposal_description: val("np-description") || null,
     notes: val("np-notes") || null,
+    is_addon: document.getElementById("np-is-addon").checked,
   };
 
   const submitBtn = e.target.querySelector('button[type="submit"]');

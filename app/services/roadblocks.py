@@ -234,7 +234,7 @@ RULES:
 def _parse(raw: str, used_web_search: bool) -> dict:
     match = re.search(r"\{[\s\S]*\}", raw)
     if not match:
-        return _error_result("AI response contained no JSON.")
+        return _error_result("No structured response received.")
     try:
         data = json.loads(match.group(0))
     except json.JSONDecodeError as exc:

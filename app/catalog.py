@@ -115,6 +115,13 @@ class Product:
     # Category policy
     cannabis_policy: str = "not_allowed"          # "allowed" | "custom_request_only" | "mh_only" | "not_allowed"
     political_policy: str = "allowed"             # "allowed" | "restricted" | "not_allowed"
+    # True for the Services/Measurement-style fixed-price extras (landing
+    # pages, call tracking, brand lift studies, ...) that aren't really
+    # "products" a campaign is built around — no suggested budget, picked
+    # via Step 04's separate Add-Ons module instead of the main product
+    # picker/recommender, and rolled into the proposal's ADD-ONS / ONE-TIME
+    # FEES export block rather than the line-items table.
+    is_addon: bool = False
 
 
 
@@ -266,7 +273,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='YouTube Ads',
         notes=NOTE_GOOGLE_VERTICALS,
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='not_allowed',
@@ -896,7 +903,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Audio - Spotify Ads',
         notes='Contact Sales Planning for pricing.',
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=36.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='not_allowed',
@@ -926,7 +933,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Meta Branded Content | Colaborative Ads',
         notes='',
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
@@ -953,7 +960,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Meta Branded Content | Sponsorship Ads',
         notes='',
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
@@ -980,7 +987,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Meta Branded Content | Partnership Ads',
         notes='',
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
@@ -1007,7 +1014,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Meta Branded Content Live| Sponsorship Ads',
         notes='',
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
@@ -1037,7 +1044,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Social Media Posts - Noticias Ya',
         notes=NOTE_META_OO_PAGES,
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
@@ -1064,7 +1071,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Facebook & Instagram Ads on Noticias Ya Pages',
         notes=NOTE_META_OO_PAGES,
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
@@ -1091,7 +1098,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Social Media Post Radio',
         notes='',
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
@@ -1118,7 +1125,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Facebook & Instagram Ads on EVC Radio pages',
         notes=NOTE_META_OO_PAGES,
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
@@ -1226,7 +1233,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Tiktok Ads',
         notes=NOTE_TIKTOK,
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='not_allowed',
@@ -1253,7 +1260,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Tik Tok Ads on Entravision News and Radio Pages',
         notes=NOTE_TIKTOK,
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='not_allowed',
@@ -1280,7 +1287,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Social - LinkedIn Ads',
         notes='',
-        estimated_cpm_for_imps=None,
+        estimated_cpm_for_imps=38.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='not_allowed',
@@ -1509,6 +1516,7 @@ CATALOG: list[Product] = [
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
+        is_addon=True,
     ),
     Product(
         family='Services',
@@ -1536,6 +1544,7 @@ CATALOG: list[Product] = [
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
+        is_addon=True,
     ),
     Product(
         family='Services',
@@ -1563,6 +1572,39 @@ CATALOG: list[Product] = [
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
+        is_addon=True,
+    ),
+    Product(
+        # Re-added as a real catalog entry (Round 10) — previously only existed
+        # as a hardcoded line in excel_template.py's ADD-ONS block, with no
+        # catalog product backing it, when that block became planner-driven
+        # via Step 04's Add-Ons module instead of a fixed list.
+        family='Services',
+        name='Email Database Match - Hashed File Onboarding',
+        short_label='Conversion Support',
+        proposal_description='Upload your email database to match opted-in users in our database for precise targeting.',
+        sizes='Custom',
+        buying_model='Fixed',
+        base_rate=None,
+        estimated_impressions=False,
+        discloses_impressions=False,
+        minimum_spend=150.0,
+        minimum_flight_days=[7, 90],
+        sla_data_days=None,
+        sla_creative_days=None,
+        sla_activate_days=None,
+        sla_total_days=None,
+        media_allocation_pct=0.0,
+        margin_upper=0.4,
+        margin_lower=0.3,
+        tech_platform='',
+        wide_orbit_code='Email Database Match - Hashed File Onboarding',
+        notes='',
+        estimated_cpm_for_imps=None,
+        hispanic_targeting_forced=None,
+        cannabis_policy='not_allowed',
+        political_policy='allowed',
+        is_addon=True,
     ),
     # ===========================================================================
     # SPONSORSHIPS
@@ -1704,6 +1746,7 @@ CATALOG: list[Product] = [
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
+        is_addon=True,
     ),
     Product(
         family='Measurement',
@@ -1731,6 +1774,7 @@ CATALOG: list[Product] = [
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',
+        is_addon=True,
     ),
 ]
 
@@ -1860,8 +1904,14 @@ def add_custom_product(fields: dict) -> Product:
         discloses_impressions=bool(fields.get("discloses_impressions", True)),
         minimum_spend=float(fields.get("minimum_spend") or 0.0),
         minimum_flight_days=tuple(flight_days),
-        sla_existing_days=int(fields.get("sla_existing_days") or 5),
-        sla_pending_days=int(fields.get("sla_pending_days") or 5),
+        # SLA breakdown: an admin-added product has no rate-card SLA columns
+        # to source these from, so they stay unknown (None) unless the
+        # caller explicitly provides one — matches the Optional[int] typing
+        # rather than fabricating a business-day figure with no real basis.
+        sla_data_days=fields.get("sla_data_days"),
+        sla_creative_days=fields.get("sla_creative_days"),
+        sla_activate_days=fields.get("sla_activate_days"),
+        sla_total_days=fields.get("sla_total_days"),
         media_allocation_pct=float(fields.get("media_allocation_pct") or 0.0),
         margin_upper=float(fields.get("margin_upper") or 0.5),
         margin_lower=float(fields.get("margin_lower") or 0.3),
@@ -1873,6 +1923,7 @@ def add_custom_product(fields: dict) -> Product:
         hispanic_targeting_forced=fields.get("hispanic_targeting_forced"),
         cannabis_policy=fields.get("cannabis_policy") or "not_allowed",
         political_policy=fields.get("political_policy") or "allowed",
+        is_addon=bool(fields.get("is_addon", False)),
     )
 
     custom = load_custom_products()
