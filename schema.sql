@@ -106,13 +106,16 @@ CREATE TABLE proposals (
     requested_by                TEXT,
     notion_id                     TEXT,
     proposal_title                 TEXT,
-    filename                         TEXT,
-    generated_at                      TIMESTAMPTZ,
-    requester_ip                       TEXT,
-    requester_user_agent                 TEXT,
-    summary                                 JSONB,
-    reopen_state                              JSONB,
-    created_at                                  TIMESTAMPTZ NOT NULL DEFAULT now()
+    filename                         TEXT,   -- the .xlsx
+    email_doc_filename                 TEXT,   -- client-email .docx, when enrichment produced one
+    pptx_net_filename                    TEXT,   -- Net PowerPoint deck, when a Net tab was built
+    pptx_gross_filename                     TEXT,   -- Gross PowerPoint deck, when a Gross tab was built
+    generated_at                              TIMESTAMPTZ,
+    requester_ip                                TEXT,
+    requester_user_agent                          TEXT,
+    summary                                         JSONB,
+    reopen_state                                      JSONB,
+    created_at                                          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_proposals_generated_at ON proposals (generated_at DESC);
