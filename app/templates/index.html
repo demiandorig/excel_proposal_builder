@@ -461,7 +461,7 @@ Client name: ...
           <a id="download-link" class="btn-primary" download>⬇ Download .xlsx</a>
           <a id="download-pptx-net-link" class="btn-secondary hidden" download>⬇ PowerPoint (Net)</a>
           <a id="download-pptx-gross-link" class="btn-secondary hidden" download>⬇ PowerPoint (Gross)</a>
-          <button class="btn-secondary" id="drive-upload-btn">↗ Upload to Google Drive</button>
+          <button class="btn-secondary" id="drive-upload-btn">↗ Upload .xlsx to Google Drive</button>
           <button class="btn-secondary" id="new-proposal-btn">+ New Proposal</button>
         </div>
         <div id="drive-status" class="drive-status hidden"></div>
@@ -515,11 +515,11 @@ Client name: ...
 
         <div id="ai-error" class="ai-error hidden"></div>
 
-        <!-- Gamma outline — a paste-in handoff for the "Media Strategy
-             Co-Pilot" GPT (client context + brief + research + media plan),
-             not an API integration: that GPT has no callable API, so the
-             planner copies this text in and pastes it there themselves.
-             Built from data already on the page — no extra request. -->
+        <!-- Gamma outline — a paste-in handoff for either planning co-pilot
+             (client context + brief + research + media plan), not an API
+             integration: neither has a callable API, so the planner copies
+             this text in and pastes it there themselves. Built from data
+             already on the page — no extra request. -->
         <div class="ai-section gamma-outline-section">
           <div class="ai-section-head">
             <h3>Gamma Outline — Media Strategy Co-Pilot</h3>
@@ -527,10 +527,13 @@ Client name: ...
               <button class="btn-copy" data-copy-target="gamma-outline-body">Copy</button>
               <a class="btn-secondary" id="gamma-gpt-link"
                  href="https://chatgpt.com/g/g-68c0554e8ef08191bec6b1fd5d043eee-media-strategy-co-pilot-for-digital-sales-planners"
-                 target="_blank" rel="noopener">↗ Open Media Strategy Co-Pilot</a>
+                 target="_blank" rel="noopener">↗ Open Planning ChatGPT Co-Pilot</a>
+              <a class="btn-secondary" id="gamma-gemini-link"
+                 href="https://gemini.google.com/gem/1FT6fHl4snsjkF-JeV1V-48v0UFarqt-b?usp=sharing"
+                 target="_blank" rel="noopener">↗ Open Planning Gemini Co-Pilot</a>
             </div>
           </div>
-          <p class="gamma-outline-hint">Copy the outline below, then paste it into the GPT (opens in a new tab) to build the Gamma presentation.</p>
+          <p class="gamma-outline-hint">Copy the outline below, then paste it into either co-pilot (opens in a new tab) to build the Gamma presentation.</p>
           <pre class="email-body" id="gamma-outline-body"></pre>
         </div>
       </div>

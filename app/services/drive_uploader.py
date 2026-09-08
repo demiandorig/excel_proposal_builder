@@ -50,6 +50,19 @@ def get_auth_url(redirect_uri: str) -> str:
         _client_config(),
         scopes=SCOPES,
         redirect_uri=redirect_uri,
+        # google-auth-oauthlib >=1.0 auto-generates a PKCE code_verifier
+        # here by default and folds its code_challenge into the auth URL.
+        # That verifier only ever lives on THIS Flow object, in THIS
+        # request — but /api/drive/callback handles the redirect in a
+        # separate request and builds a brand-new Flow to exchange the
+        # code, with no way to recover the original verifier. Google's
+        # token endpoint then rejects the exchange with exactly the error
+        # reported: "(invalid_grant) Missing code verifier." PKCE exists to
+        # protect *public* clients that can't hold a secret; this is a
+        # confidential "web" client (it already authenticates with
+        # DRIVE_CLIENT_SECRET), so turning it off is correct here, not a
+        # workaround — must match the same flag in exchange_code() below.
+        autogenerate_code_verifier=False,
     )
     auth_url, _ = flow.authorization_url(
         access_type="offline",
@@ -66,6 +79,7 @@ def exchange_code(code: str, redirect_uri: str) -> None:
         _client_config(),
         scopes=SCOPES,
         redirect_uri=redirect_uri,
+        autogenerate_code_verifier=False,  # must match get_auth_url() — see comment there
     )
     flow.fetch_token(code=code)
     creds = flow.credentials

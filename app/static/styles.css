@@ -1752,6 +1752,10 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 @media (max-width: 800px) {
   .masthead-inner { flex-direction: column; gap: 16px; align-items: flex-start; }
   .step-nav { flex-wrap: wrap; }
+  /* The Gamma outline header now carries 3 actions (Copy + 2 co-pilot
+     links) — let the row wrap instead of overflowing on narrow screens. */
+  .ai-section-head { flex-wrap: wrap; }
+  .ai-section-actions { flex-wrap: wrap; }
   .panel { padding: 28px 20px; }
   .display { font-size: 28px; }
   .form-grid { grid-template-columns: 1fr; }
