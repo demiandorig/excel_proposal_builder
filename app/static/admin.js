@@ -6,12 +6,17 @@ const adminState = {
   proposals: [],
   rates: [],
   ratesLoaded: false,
+  markets: [],
+  marketsLoaded: false,
 };
 
 document.addEventListener("DOMContentLoaded", () => {
   wireTabs();
   wireSearch();
   wireAddProduct();
+  wireEditProduct();
+  wireBulkUpload();
+  wireMarketConfig();
   loadProposals();
 });
 
@@ -26,7 +31,9 @@ function wireTabs() {
       document.querySelectorAll(".admin-tab").forEach(b => b.classList.toggle("active", b === btn));
       document.getElementById("tab-proposals").classList.toggle("hidden", tab !== "proposals");
       document.getElementById("tab-rates").classList.toggle("hidden", tab !== "rates");
+      document.getElementById("tab-markets").classList.toggle("hidden", tab !== "markets");
       if (tab === "rates" && !adminState.ratesLoaded) loadRates();
+      if (tab === "markets" && !adminState.marketsLoaded) loadMarketConfig();
     });
   });
 }
@@ -38,6 +45,49 @@ function wireSearch() {
   document.getElementById("rates-search").addEventListener("input", e => {
     renderRates(filterRates(e.target.value));
   });
+}
+
+// --------------------------------------------------------------------------
+// Bulk upload — add/update many products at once from a CSV (same columns
+// the Export CSV button produces, so export -> edit in Excel -> re-upload
+// is a real workflow, not just a one-way dump).
+// --------------------------------------------------------------------------
+
+function wireBulkUpload() {
+  document.getElementById("bulk-upload-input").addEventListener("change", async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const resultEl = document.getElementById("bulk-upload-result");
+    resultEl.classList.remove("hidden");
+    resultEl.innerHTML = "Uploading…";
+
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await fetch("/api/admin/products/bulk-upsert", { method: "POST", body: formData });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || res.statusText);
+      renderBulkUploadResult(body);
+      await loadRates();
+      renderRates(filterRates(document.getElementById("rates-search").value));
+    } catch (err) {
+      resultEl.innerHTML = `<span class="bur-error">Bulk upload failed: ${escapeHtml(err.message)}</span>`;
+    } finally {
+      e.target.value = "";  // allow re-selecting the same file name again later
+    }
+  });
+}
+
+function renderBulkUploadResult(body) {
+  const resultEl = document.getElementById("bulk-upload-result");
+  const parts = [];
+  parts.push(`<strong>Processed ${body.total_rows_processed} row${body.total_rows_processed === 1 ? "" : "s"}.</strong>`);
+  parts.push(`${body.created.length} added, ${body.updated_as_rate_override.length} rate override${body.updated_as_rate_override.length === 1 ? "" : "s"} updated, ${body.updated_custom_product.length} custom product${body.updated_custom_product.length === 1 ? "" : "s"} replaced.`);
+  if (body.errors.length) {
+    parts.push(`<div class="bur-error">${body.errors.length} row${body.errors.length === 1 ? "" : "s"} skipped:</div>`);
+    parts.push(`<ul>${body.errors.map(e => `<li class="bur-error">${escapeHtml(e)}</li>`).join("")}</ul>`);
+  }
+  resultEl.innerHTML = parts.join(" ");
 }
 
 // --------------------------------------------------------------------------
@@ -156,6 +206,7 @@ function renderRates(list) {
         <button class="btn-save-row" data-action="save" data-product="${escapeAttr(p.name)}">Save</button>
         <button class="btn-revert" data-action="revert" data-product="${escapeAttr(p.name)}"
                 ${p.has_override ? "" : "disabled"}>Revert</button>
+        <button class="btn-secondary" data-action="edit" data-product="${escapeAttr(p.name)}">✎ Edit</button>
         ${p.is_custom ? `<button class="btn-delete-row" data-action="delete" data-product="${escapeAttr(p.name)}">Delete</button>` : ""}
       </td>
     </tr>
@@ -166,6 +217,9 @@ function renderRates(list) {
   });
   body.querySelectorAll('[data-action="revert"]').forEach(btn => {
     btn.addEventListener("click", () => onRevertRate(btn.dataset.product));
+  });
+  body.querySelectorAll('[data-action="edit"]').forEach(btn => {
+    btn.addEventListener("click", () => onOpenEditProduct(btn.dataset.product));
   });
   body.querySelectorAll('[data-action="delete"]').forEach(btn => {
     btn.addEventListener("click", () => onDeleteProduct(btn.dataset.product));
@@ -308,6 +362,263 @@ async function onAddProduct(e) {
   } finally {
     submitBtn.disabled = false;
     submitBtn.textContent = "Add Product";
+  }
+}
+
+// --------------------------------------------------------------------------
+// Edit an existing product (built-in or custom) — every field, not just
+// the 3 the inline rate-table row edits. Reuses the add-product panel's
+// visual pattern (a second <details> form) rather than a modal.
+// --------------------------------------------------------------------------
+
+function wireEditProduct() {
+  const panel = document.getElementById("edit-product-panel");
+  const form = document.getElementById("edit-product-form");
+  const cancelBtn = document.getElementById("edit-product-cancel-btn");
+  if (!form) return;
+
+  form.addEventListener("submit", onSaveEditProduct);
+  cancelBtn.addEventListener("click", () => {
+    panel.open = false;
+    document.getElementById("edit-product-error").classList.add("hidden");
+  });
+}
+
+function onOpenEditProduct(productName) {
+  const p = adminState.rates.find(r => r.name === productName);
+  if (!p) return;
+
+  document.getElementById("edit-product-name-label").textContent = `— ${p.name}`;
+  document.getElementById("edit-product-form").dataset.productName = p.name;
+  document.getElementById("ep-family").value = p.family || "";
+  document.getElementById("ep-name").value = p.name || "";
+  document.getElementById("ep-short-label").value = p.short_label || "";
+  document.getElementById("ep-buying-model").value = p.buying_model || "Fixed";
+  document.getElementById("ep-base-rate").value = p.base_rate ?? "";
+  document.getElementById("ep-min-spend").value = p.minimum_spend ?? "";
+  document.getElementById("ep-est-cpm").value = p.estimated_cpm_for_imps ?? "";
+  document.getElementById("ep-sizes").value = p.sizes || "";
+  document.getElementById("ep-tech-platform").value = p.tech_platform || "";
+  document.getElementById("ep-description").value = p.proposal_description || "";
+  document.getElementById("ep-notes").value = p.notes || "";
+  document.getElementById("ep-is-addon").checked = !!p.is_addon;
+  document.getElementById("edit-product-error").classList.add("hidden");
+
+  const panel = document.getElementById("edit-product-panel");
+  panel.open = true;
+  panel.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function onSaveEditProduct(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("edit-product-error");
+  errEl.classList.add("hidden");
+
+  const val = id => document.getElementById(id).value.trim();
+  // Empty = "leave as the catalog default" (same convention the single-
+  // field rate editor already uses), not "override to blank" — so an
+  // untouched field never accidentally stamps an empty-string override.
+  const strOrNull = id => val(id) || null;
+  const numOrNull = id => {
+    const v = val(id);
+    return v === "" ? null : parseFloat(v);
+  };
+
+  const productName = e.target.dataset.productName;
+  const payload = {
+    product_name: productName,
+    family: strOrNull("ep-family"),
+    short_label: strOrNull("ep-short-label"),
+    buying_model: strOrNull("ep-buying-model"),
+    base_rate: numOrNull("ep-base-rate"),
+    minimum_spend: numOrNull("ep-min-spend"),
+    estimated_cpm_for_imps: numOrNull("ep-est-cpm"),
+    sizes: strOrNull("ep-sizes"),
+    tech_platform: strOrNull("ep-tech-platform"),
+    proposal_description: strOrNull("ep-description"),
+    notes: strOrNull("ep-notes"),
+    is_addon: document.getElementById("ep-is-addon").checked,
+  };
+
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Saving…";
+
+  try {
+    const res = await fetch("/api/admin/products/edit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || res.statusText);
+    }
+    document.getElementById("edit-product-panel").open = false;
+    await loadRates();
+    renderRates(filterRates(document.getElementById("rates-search").value));
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.classList.remove("hidden");
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Save Changes";
+  }
+}
+
+// --------------------------------------------------------------------------
+// Market config — per-market office address + CC list
+// --------------------------------------------------------------------------
+
+function wireMarketConfig() {
+  const saveBaseBtn = document.getElementById("save-base-ccs-btn");
+  if (saveBaseBtn) saveBaseBtn.addEventListener("click", onSaveBaseCcs);
+  const saveT1Btn = document.getElementById("save-t1-ccs-btn");
+  if (saveT1Btn) saveT1Btn.addEventListener("click", onSaveT1Ccs);
+
+  const btn = document.getElementById("add-market-btn");
+  const input = document.getElementById("new-market-name");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const name = input.value.trim();
+    if (!name) return;
+    if (name === "__default__" || adminState.markets.some(m => m.market_key.toLowerCase() === name.toLowerCase())) {
+      alert(`"${name}" already has an entry below.`);
+      return;
+    }
+    // Client-side only until Save is clicked on this row — mirrors how a
+    // blank rate row doesn't hit the server until someone fills it in.
+    adminState.markets.push({ market_key: name, is_default: false, address_line1: "", address_line2: "", ccs: [] });
+    input.value = "";
+    renderMarketConfig();
+  });
+}
+
+async function loadMarketConfig() {
+  try {
+    const res = await fetch("/api/admin/market-config");
+    const data = await res.json();
+    adminState.markets = data.markets || [];
+    adminState.marketsLoaded = true;
+    document.getElementById("base-ccs-input").value = (data.base_ccs || []).join(", ");
+    document.getElementById("t1-ccs-input").value = (data.t1_ccs || []).join(", ");
+    renderMarketConfig();
+  } catch (e) {
+    document.getElementById("markets-body").innerHTML =
+      `<tr><td colspan="5" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+async function onSaveBaseCcs() {
+  await _saveCcsList("save-base-ccs-btn", "base-ccs-input", "/api/admin/market-config/base-ccs");
+}
+
+async function onSaveT1Ccs() {
+  await _saveCcsList("save-t1-ccs-btn", "t1-ccs-input", "/api/admin/market-config/t1-ccs");
+}
+
+async function _saveCcsList(btnId, inputId, endpoint) {
+  const btn = document.getElementById(btnId);
+  const input = document.getElementById(inputId);
+  const ccs = input.value.split(",").map(s => s.trim()).filter(Boolean);
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ccs }),
+    });
+    if (!res.ok) throw new Error(res.statusText);
+    input.value = ccs.join(", ");
+    btn.textContent = "Saved ✓";
+  } catch (e) {
+    alert("Save failed: " + e.message);
+    btn.textContent = "Save";
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { btn.textContent = "Save"; }, 1500);
+  }
+}
+
+function renderMarketConfig() {
+  const body = document.getElementById("markets-body");
+  const list = adminState.markets;
+  document.getElementById("markets-count").textContent =
+    `${list.length} market${list.length === 1 ? "" : ""}`.trim();
+
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="5" class="admin-empty">No markets configured yet.</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = list.map(m => `
+    <tr data-market="${escapeAttr(m.market_key)}">
+      <td class="mono">${m.is_default ? "Default (all other markets)" : escapeHtml(m.market_key)}</td>
+      <td><input type="text" data-field="address_line1" value="${escapeAttr(m.address_line1)}" placeholder="Street address" /></td>
+      <td><input type="text" data-field="address_line2" value="${escapeAttr(m.address_line2)}" placeholder="City, State ZIP" /></td>
+      <td><input type="text" data-field="ccs" value="${escapeAttr((m.ccs || []).join(", "))}" placeholder="name@entravision.com, …" /></td>
+      <td>
+        <button class="btn-save-row" data-action="save-market" data-market="${escapeAttr(m.market_key)}">Save</button>
+        ${m.is_default ? "" : `<button class="btn-delete-row" data-action="delete-market" data-market="${escapeAttr(m.market_key)}">Delete</button>`}
+      </td>
+    </tr>
+  `).join("");
+
+  body.querySelectorAll('[data-action="save-market"]').forEach(btn => {
+    btn.addEventListener("click", () => onSaveMarket(btn.dataset.market));
+  });
+  body.querySelectorAll('[data-action="delete-market"]').forEach(btn => {
+    btn.addEventListener("click", () => onDeleteMarket(btn.dataset.market));
+  });
+}
+
+async function onSaveMarket(marketKey) {
+  const row = document.querySelector(`tr[data-market="${cssEscape(marketKey)}"]`);
+  if (!row) return;
+  const btn = row.querySelector('[data-action="save-market"]');
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+
+  const payload = { market_key: marketKey };
+  row.querySelectorAll("input[data-field]").forEach(inp => {
+    if (inp.dataset.field === "ccs") {
+      payload.ccs = inp.value.split(",").map(s => s.trim()).filter(Boolean);
+    } else {
+      payload[inp.dataset.field] = inp.value.trim();
+    }
+  });
+
+  try {
+    const res = await fetch("/api/admin/market-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.detail || res.statusText);
+    }
+    btn.textContent = "Saved ✓";
+    await loadMarketConfig();
+  } catch (e) {
+    alert("Save failed: " + e.message);
+    btn.disabled = false;
+    btn.textContent = "Save";
+  }
+}
+
+async function onDeleteMarket(marketKey) {
+  if (!confirm(`Remove the "${marketKey}" market entry? It'll revert to the default address/CCs.`)) return;
+  try {
+    const res = await fetch(`/api/admin/market-config/${encodeURIComponent(marketKey)}`, { method: "DELETE" });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.detail || res.statusText);
+    }
+    await loadMarketConfig();
+  } catch (e) {
+    alert("Delete failed: " + e.message);
   }
 }
 

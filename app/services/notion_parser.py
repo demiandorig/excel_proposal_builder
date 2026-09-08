@@ -80,6 +80,11 @@ class ProposalRequest:
 
     # Free text
     salesperson_comments: str = ""
+    # "Question details" — the free-text field on a Quick Question / Need
+    # Guidance request (a distinct field from "Additional comments from the
+    # salesperson" above, not a synonym for it — both get captured, both
+    # feed the AI context block every AI-calling step already builds).
+    question_details: str = ""
 
     # Renewal branch
     renewal_ae_requesting: str = ""
@@ -658,6 +663,19 @@ def parse_notion(text: str, catalog_names: list[str]) -> ProposalRequest:
     # If this is a renewal and main client_name was blank, promote renewal_client
     if req.renewal_client and not req.client_name:
         req.client_name = req.renewal_client
+
+    # "Question details" — Quick Question / Need Guidance requests carry
+    # their own free-text field under this label, separate from the main
+    # branch's "Additional comments from the salesperson" above. Captured
+    # at the bottom of the parser (after every other field is settled) so
+    # it's clearly just extra AI context, not something any structured
+    # field depends on. Every AI-calling step (strategy brief, roadblocks,
+    # enrichment) already reads salesperson_comments as free-text context —
+    # this rides along the same path rather than needing its own prompt
+    # wiring per caller.
+    req.question_details = _extract_label(text, "Question details")
+    if not req.question_details:
+        req.question_details = _extract_after_header(text, "Question details")
 
     return req
 

@@ -557,6 +557,19 @@ body::before {
   opacity: 0.75;
 }
 .tier-tab-remove:hover { opacity: 1; background: rgba(255, 255, 255, 0.25); }
+.tier-tab-rename {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.55;
+}
+.tier-tab-rename:hover { opacity: 1; background: rgba(255, 255, 255, 0.25); }
+.tier-tab:not(.active) .tier-tab-rename:hover { background: var(--accent-soft); }
 .tier-switcher-hint {
   margin: -6px 0 16px;
   font-size: 12px;
@@ -701,6 +714,9 @@ body::before {
 .line-item-row.dragging { opacity: 0.4; }
 .line-item-row.drag-over-top { box-shadow: inset 0 2px 0 0 var(--accent); }
 .line-item-row.drag-over-bottom { box-shadow: inset 0 -2px 0 0 var(--accent); }
+/* Keeps a "grabbing" cursor everywhere (not just over the handle) for the
+   duration of a drag — toggled on <body> by wireLineItemDrag's mousedown. */
+body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !important; }
 .line-items td.product {
   font-weight: 600;
   min-width: 220px;
@@ -777,7 +793,36 @@ body::before {
   font-family: var(--font-mono);
   color: var(--ink-soft);
   white-space: nowrap;
+  position: relative;
 }
+/* Persistent state indicator, not a fade-out flash — visible the whole
+   time an override is active (correct on first render too, not just after
+   an edit), disappears the instant it's reverted. */
+.rate-override-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: 2px;
+  border-radius: 50%;
+  font-size: 9px;
+  line-height: 1;
+  color: transparent;
+  background: transparent;
+  vertical-align: middle;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.rate-override-badge.active {
+  color: white;
+  background: var(--green);
+}
+@keyframes rateOverridePulse {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.6); }
+  100% { transform: scale(1); }
+}
+.rate-override-badge.pulse { animation: rateOverridePulse 0.4s ease; }
 .rate-display { margin-right: 4px; }
 .btn-rate-override {
   background: transparent;
@@ -798,8 +843,14 @@ body::before {
   width: 90px !important;
   min-width: 90px !important;
   display: inline-block;
+  /* Plain, neutral field — the ✓ badge (not a purple fill) is what marks
+     an active override now, so the input itself doesn't need to shout. */
+  border-color: var(--rule) !important;
+  background: var(--paper-card) !important;
+}
+.rate-override-input:focus {
   border-color: var(--accent) !important;
-  background: var(--accent-soft) !important;
+  outline: none;
 }
 .btn-rate-reset {
   background: transparent;
@@ -825,18 +876,85 @@ body::before {
   border-color: var(--amber) !important;
   background: var(--amber-soft) !important;
 }
-.line-items .added-value-toggle {
-  display: flex;
+/* Added Value — a compact switch instead of a bare checkbox + wrapping
+   text, so it reads as one small control under the budget field rather
+   than a second, cramped line item competing for the same narrow cell. */
+.line-items .col-budget input:disabled {
+  background: var(--paper-warm);
+  color: var(--ink-faint);
+  border-style: dashed;
+}
+.line-items .av-switch {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-top: 6px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--ink-faint);
+  margin-top: 8px;
   cursor: pointer;
+  user-select: none;
+}
+.line-items .av-switch input[type="checkbox"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.av-switch-track {
+  position: relative;
+  flex-shrink: 0;
+  width: 26px;
+  height: 15px;
+  border-radius: 20px;
+  background: var(--rule);
+  transition: background 0.15s ease;
+}
+.av-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--paper-card);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+  transition: transform 0.15s ease;
+}
+.av-switch input:checked + .av-switch-track { background: var(--amber); }
+.av-switch input:checked + .av-switch-track .av-switch-thumb { transform: translateX(11px); }
+.av-switch input:focus-visible + .av-switch-track { outline: 2px solid var(--accent); outline-offset: 1px; }
+.av-switch-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--ink-faint);
   white-space: nowrap;
 }
-.line-items .added-value-toggle input[type="checkbox"] { width: auto; margin: 0; }
+.av-switch input:checked ~ .av-switch-label { color: var(--amber); }
+.av-pct-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 6px;
+}
+.av-pct-input {
+  width: 48px !important;
+  min-width: 48px !important;
+  padding: 4px 6px;
+  font-size: 12px;
+  border: 1px solid var(--amber);
+  border-radius: var(--radius);
+  background: var(--amber-soft);
+  color: var(--ink);
+}
+.av-value-preview {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--amber);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .line-items td.col-row-actions {
   white-space: nowrap;
   text-align: right;
@@ -998,7 +1116,16 @@ body::before {
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
+}
+.avails-targeting-reminder {
+  margin: 0 0 12px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  background: var(--paper-warm);
+  border-radius: var(--radius);
 }
 .freeform-toggle {
   display: flex;
@@ -1060,6 +1187,15 @@ body::before {
   letter-spacing: 0.1em;
   color: var(--ink-soft);
   display: block;
+}
+.avails-fields label small {
+  display: block;
+  text-transform: none;
+  letter-spacing: normal;
+  font-family: var(--font-body);
+  font-size: 10px;
+  color: var(--ink-faint);
+  margin-top: 2px;
 }
 .avails-fields input {
   width: 100%;
@@ -1321,6 +1457,15 @@ body::before {
   line-height: 1.5;
   color: var(--green);
 }
+.tactic-min-note {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px dashed var(--rule);
+  font-size: 11px;
+  line-height: 1.5;
+  font-style: italic;
+  color: var(--ink-faint);
+}
 
 .brief-summary-block,
 .brief-insights-block {
@@ -1567,6 +1712,15 @@ body::before {
   margin: 0;
   max-height: 480px;
   overflow-y: auto;
+}
+
+.mailto-hint {
+  margin: 0;
+  padding: 6px 20px 14px;
+  font-family: var(--font-body);
+  font-size: 11.5px;
+  font-style: italic;
+  color: var(--ink-faint);
 }
 
 .ai-error {

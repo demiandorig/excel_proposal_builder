@@ -46,6 +46,18 @@
   border-color: var(--accent);
   background: var(--paper-card);
 }
+.base-ccs-label {
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.base-ccs-label small {
+  display: block;
+  font-weight: 400;
+  color: var(--ink-faint);
+}
 .admin-count {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -106,6 +118,21 @@
   background: var(--paper-card);
 }
 .admin-table input[type="number"]:focus { outline: none; border-color: var(--accent); }
+
+/* Market config inputs (address lines, CC list) — same visual language as
+   the rate override number inputs above, just wider for free text. */
+.admin-table input[type="text"] {
+  width: 100%;
+  min-width: 140px;
+  padding: 5px 8px;
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-card);
+  box-sizing: border-box;
+}
+.admin-table input[type="text"]:focus { outline: none; border-color: var(--accent); }
 .admin-table input.overridden {
   border-color: var(--accent);
   background: var(--accent-soft);
@@ -281,3 +308,18 @@
   .add-product-grid { grid-template-columns: 1fr; }
   .add-product-grid label.span-2 { grid-column: span 1; }
 }
+
+/* Export / Bulk Upload (Rates tab toolbar) */
+.bulk-upload-btn { position: relative; }
+.bulk-upload-result {
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  background: var(--paper-warm);
+  border: 1px solid var(--rule);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.bulk-upload-result strong { color: var(--ink); }
+.bulk-upload-result .bur-error { color: var(--red, #a8261c); }
+.bulk-upload-result ul { margin: 4px 0 10px 18px; padding: 0; max-height: 160px; overflow-y: auto; }

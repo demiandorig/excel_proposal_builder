@@ -1780,7 +1780,20 @@ CATALOG: list[Product] = [
 
 
 
-_OVERRIDABLE_FIELDS = ("base_rate", "minimum_spend", "estimated_cpm_for_imps")
+# The 3 numeric fields were the original, narrow scope of the single-row
+# rate editor; the admin "Edit product" panel widens this to every field
+# that form also lets you SET when adding a brand-new product — same
+# fields, symmetric add/edit UX — for a BUILT-IN catalog product (a custom
+# product's full edit goes through update_custom_product below instead,
+# not this override mechanism). Deliberately excludes `name` (renaming a
+# built-in product this way would desync it from every existing saved
+# proposal and hardcoded reference to the old name) and deeper
+# compliance/SLA/margin fields the add-product form doesn't expose either.
+_OVERRIDABLE_FIELDS = (
+    "base_rate", "minimum_spend", "estimated_cpm_for_imps",
+    "family", "short_label", "buying_model", "sizes", "tech_platform",
+    "proposal_description", "notes", "is_addon",
+)
 _RATE_OVERRIDES_PATH = Path(__file__).resolve().parent / "data" / "rate_overrides.json"
 
 
@@ -1941,6 +1954,42 @@ def delete_custom_product(name: str) -> bool:
     _save_custom_products(filtered)
     clear_rate_override(name)  # drop any override that pointed at it
     return True
+
+
+def update_custom_product(name: str, fields: dict) -> Product:
+    """
+    Update an existing CUSTOM (admin-added) product's fields in place — the
+    admin "Edit product" panel's path for a product that isn't part of the
+    built-in catalog (a built-in goes through the rate-override mechanism
+    above instead). Implemented as delete + re-add under the same name so
+    every field, not just the 3 numeric ones, actually changes.
+
+    `fields` may be a PARTIAL set (None/missing = keep the current value) —
+    the caller (the admin API endpoint) is expected to pre-fill its edit
+    form with the product's current values, so in practice every field
+    that's shown gets resubmitted; this is just defensive.
+    Raises ValueError (same messages as add_custom_product) on invalid input.
+    """
+    custom = load_custom_products()
+    existing = next((p for p in custom if p.name == name), None)
+    if existing is None:
+        raise ValueError(f"Custom product '{name}' not found.")
+
+    merged = asdict(existing)
+    for k, v in fields.items():
+        if v is not None and k in merged:
+            merged[k] = v
+
+    delete_custom_product(name)
+    try:
+        return add_custom_product(merged)
+    except ValueError:
+        # Validation failed on the new values — put the original back
+        # rather than leaving the product deleted with nothing to replace it.
+        custom_now = load_custom_products()
+        custom_now.append(existing)
+        _save_custom_products(custom_now)
+        raise
 
 
 def effective_catalog() -> list[Product]:

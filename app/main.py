@@ -13,8 +13,11 @@ Endpoints:
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
+import re
 import secrets
 import tempfile
 from dataclasses import asdict
@@ -32,15 +35,15 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Body, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Body, Request, UploadFile, File
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.catalog import (
     CATALOG, by_name, families, by_family,
     effective_catalog, load_rate_overrides, save_rate_overrides, clear_rate_override,
-    load_custom_products, add_custom_product, delete_custom_product,
+    load_custom_products, add_custom_product, delete_custom_product, update_custom_product,
     _OVERRIDABLE_FIELDS,
 )
 from app.services.notion_parser import (
@@ -50,9 +53,15 @@ from app.services.notion_parser import (
 )
 from app.services.proposal_generator import LineItem, AddonItem, generate_proposal
 from app.services.recommender import recommend_line_items
+from app.market_config import (
+    load_market_config, set_market_entry, delete_market_entry, DEFAULT_KEY,
+    BASE_CCS_KEY, get_base_ccs, set_base_ccs, get_all_ccs_for_market,
+    T1_CCS_KEY, get_t1_ccs, set_t1_ccs, T1_SPEND_THRESHOLD,
+)
 from app.services import drive_uploader
 from app.services import ai_enricher
 from app.services import docx_builder
+from app.services import pptx_builder
 from app.services import strategy_brief as strategy_brief_svc
 from app.services import roadblocks as roadblocks_svc
 
@@ -97,6 +106,57 @@ _migrate_legacy_temp_proposals()
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.middleware("http")
+async def _no_cache_static(request, call_next):
+    """
+    Force every /static/* response (app.js, styles.css, admin.js, ...) to
+    skip browser caching entirely. Found the hard way: a planner (or a
+    Claude verification session) reloading the page after a deploy can
+    keep running yesterday's app.js indefinitely — StaticFiles' default
+    Last-Modified/ETag caching lets the browser serve straight from its
+    own disk cache without even a conditional request in some cases, so a
+    real fix can silently appear to "not work" for anyone still on the
+    stale cached copy. This is a small internal tool, not a high-traffic
+    site — trading away asset caching entirely is a trivial cost next to
+    "the browser might be running old code and nobody can tell."
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
+def _static_asset_version() -> int:
+    """
+    One shared cache-busting version for every /static/* reference in a
+    served HTML page — the newest mtime across app/static/, as a plain
+    integer. Belt-and-suspenders alongside the no-cache middleware above:
+    that middleware only helps once the browser actually asks the server
+    again, and some caching layers skip that ask entirely for a URL
+    they've already seen; appending ?v=<version> makes every deploy a
+    genuinely new URL, which forces the request regardless.
+    """
+    try:
+        return int(max(f.stat().st_mtime for f in STATIC_DIR.rglob("*") if f.is_file()))
+    except ValueError:
+        return 0  # empty directory — shouldn't happen, but don't crash the page over it
+
+
+def _serve_html_with_cache_busted_static(path: Path) -> HTMLResponse:
+    """Read an HTML template and append ?v=<version> to every /static/...
+    reference (src="..." or href="...") so a deploy is never masked by a
+    stale cached app.js/styles.css — see _static_asset_version() above."""
+    html = path.read_text(encoding="utf-8")
+    version = _static_asset_version()
+    html = re.sub(
+        r'((?:src|href)="/static/[^"?]+)"',
+        rf'\1?v={version}"',
+        html,
+    )
+    return HTMLResponse(content=html)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -135,6 +195,7 @@ class LineItemModel(BaseModel):
     target_secondary: Optional[str] = None  # secondary audience for added scale/avails
     estimated_cpm_override: Optional[float] = None  # Step 04 override of the catalog's estimated CPM (Fixed/impressions-estimate products)
     is_added_value: bool = False  # $0 budget is deliberate — exempt from below-minimum validation, sorts to the bottom of the export
+    added_value_pct: Optional[float] = None  # AV lines only: this % of the tier's real (non-AV) budget is the line's estimated gift value, shown in the export
 
 
 class AvailsEntry(BaseModel):
@@ -166,10 +227,24 @@ class AvailsEntry(BaseModel):
     max_imps_text: Optional[str] = None
     max_spend_text: Optional[str] = None
     est_uniques_text: Optional[str] = None
+    # Free-form's one non-free-text field: there's no real imps/spend to
+    # compute SOV from in free-form mode, so the planner declares it
+    # directly instead — still written as a real %, still gets the same
+    # traffic-light conditional formatting as a computed SOV.
+    sov_pct_freeform: Optional[float] = None
 
 
 class TierModel(BaseModel):
-    label: str  # "A" | "B" | "C" | "D"
+    label: str  # "A" | "B" | "C" | "D" — internal key, Excel sheet-tab suffix, never shown to a seller
+    # Planner-given display name (e.g. "Independent", "Democrat") shown
+    # instead of "Option A" everywhere a seller/client actually reads —
+    # proposal title, Gamma outline, mailto context. None/blank falls back
+    # to "Option {label}", the original behavior. Deliberately NOT used for
+    # the Excel sheet tab name itself (stays "Proposal A" etc.) — several
+    # things key off that exact, stable pattern (tabs_built reporting,
+    # admin proposal-history), and a planner-typed name isn't guaranteed
+    # Excel-sheet-name-safe (length, forbidden characters) or unique.
+    name: Optional[str] = None
     line_items: list[LineItemModel]
     avails_data: Optional[dict[str, AvailsEntry]] = None
 
@@ -236,8 +311,7 @@ class RepromptEmailsRequest(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     """Serve the SPA."""
-    html = (TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")
-    return HTMLResponse(content=html)
+    return _serve_html_with_cache_busted_static(TEMPLATES_DIR / "index.html")
 
 
 @app.get("/api/catalog")
@@ -299,8 +373,20 @@ async def strategy(body: StrategyRequest) -> dict:
     doc_token: Optional[str] = None
     if brief.get("strategy_summary") or brief.get("recommended_tactics"):
         doc_token = secrets.token_urlsafe(12)
-        safe_client = (req.client_name or "proposal").replace("/", "-").replace(" ", "_")[:50]
-        doc_filename = f"{safe_client}_Strategy_Brief.docx"
+        # Same naming convention every other export uses ({ID} | Campaign |
+        # Entravision | MonYY | Doc Type) — this used to be just the raw
+        # client name, missing the ID entirely. No AI-inferred campaign name
+        # exists yet this early in the wizard (that only happens at Step 07
+        # Generate), so this falls back to the client name the same way the
+        # final proposal itself does when enrichment hasn't run.
+        doc_title = ai_enricher.build_proposal_title(
+            short_id=ai_enricher.normalize_notion_id(req.notion_id) or "DRAFT",
+            campaign_name=ai_enricher._fallback_campaign_name(req),
+            request_type=req.request_type,
+            ref_date=req.start_date or "",
+            doc_type_override="Strategy Brief",
+        )
+        doc_filename = ai_enricher.safe_filename(doc_title) + ".docx"
         doc_path = PROPOSALS_DIR / f"strategy_{doc_token}.docx"
         built = docx_builder.build_strategy_brief_docx(
             output_path=doc_path,
@@ -368,8 +454,15 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
     doc_token: Optional[str] = None
     if result.get("product_roadblocks"):
         doc_token = secrets.token_urlsafe(12)
-        safe_client = (req.client_name or "proposal").replace("/", "-").replace(" ", "_")[:50]
-        doc_filename = f"{safe_client}_Roadblocks_Report.docx"
+        # Same naming-convention fix as the Strategy Brief doc above.
+        doc_title = ai_enricher.build_proposal_title(
+            short_id=ai_enricher.normalize_notion_id(req.notion_id) or "DRAFT",
+            campaign_name=ai_enricher._fallback_campaign_name(req),
+            request_type=req.request_type,
+            ref_date=req.start_date or "",
+            doc_type_override="Roadblocks Report",
+        )
+        doc_filename = ai_enricher.safe_filename(doc_title) + ".docx"
         doc_path = PROPOSALS_DIR / f"roadblocks_{doc_token}.docx"
         built = docx_builder.build_roadblocks_docx(
             output_path=doc_path,
@@ -448,6 +541,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
                 target_secondary=li.target_secondary,
                 estimated_cpm_override=li.estimated_cpm_override,
                 is_added_value=li.is_added_value,
+                added_value_pct=li.added_value_pct,
             )
             for li in models
         ]
@@ -459,6 +553,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         tiers = [
             {
                 "label": t.label,
+                "name": t.name,
                 "line_items": _to_line_items(t.line_items),
                 "avails_data": {name: entry.model_dump() for name, entry in (t.avails_data or {}).items()},
             }
@@ -492,7 +587,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     #    When there's more than one budget option, the emails are prompted
     #    to lay out each option explicitly rather than describing one plan.
     tier_context = [
-        {"label": t["label"], "line_items": t["line_items"]} for t in tiers
+        {"label": t["label"], "name": t.get("name"), "line_items": t["line_items"]} for t in tiers
     ] if multi_tier else None
     enrichment = ai_enricher.enrich_proposal(
         req, union_line_items, short_id, strategy_brief=body.strategy_brief, tiers=tier_context,
@@ -577,6 +672,36 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             body=enrichment.client_email_body,
         )
 
+    # 8b. Build the simple, signature-ready Net/Gross PowerPoint decks (Step
+    #     07's PPTX export) — one per tab type actually built for tier A
+    #     (matching whichever of Net/Gross the planner requested). Scoped to
+    #     tier A only for a multi-tier proposal, same as this same response's
+    #     top-level total_net/total_gross already are — a per-tier PPTX set
+    #     isn't built here.
+    pptx_net_filename: Optional[str] = None
+    pptx_gross_filename: Optional[str] = None
+    tier_a_products = [p for li in tiers[0]["line_items"] if (p := by_name(li.product_name)) is not None]
+    tier_a_line_items = [li for li in tiers[0]["line_items"] if by_name(li.product_name) is not None]
+    if tier_a_products:
+        if "Proposal A" in summary.get("tabs_built", []):
+            pptx_net_filename = f"{safe_base}_Net_Deck.pptx"
+            try:
+                pptx_builder.build_signature_deck(
+                    req, tier_a_products, tier_a_line_items, PROPOSALS_DIR / pptx_net_filename,
+                    gross=False, proposal_title=proposal_title,
+                )
+            except Exception:
+                pptx_net_filename = None  # never let an optional export break the main Generate call
+        if "Proposal A (Gross)" in summary.get("tabs_built", []):
+            pptx_gross_filename = f"{safe_base}_Gross_Deck.pptx"
+            try:
+                pptx_builder.build_signature_deck(
+                    req, tier_a_products, tier_a_line_items, PROPOSALS_DIR / pptx_gross_filename,
+                    gross=True, proposal_title=proposal_title,
+                )
+            except Exception:
+                pptx_gross_filename = None
+
     # 9. Track requester device/IP for the admin view
     user_agent = request.headers.get("user-agent", "")
     client_ip = request.client.host if request.client else ""
@@ -593,6 +718,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         "proposal_title": proposal_title,
         "email_doc_filename": email_doc_filename,
         "email_doc_path": str(PROPOSALS_DIR / email_doc_filename) if email_doc_filename else None,
+        "pptx_net_filename": pptx_net_filename,
+        "pptx_gross_filename": pptx_gross_filename,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "requester_ip": client_ip,
         "requester_user_agent": user_agent,
@@ -638,6 +765,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         "proposal_title": proposal_title,
         "summary": summary,
         "enrichment": enrichment_out,
+        "has_pptx_net": pptx_net_filename is not None,
+        "has_pptx_gross": pptx_gross_filename is not None,
     }
 
 
@@ -745,6 +874,41 @@ async def download_email(proposal_id: str) -> FileResponse:
     )
 
 
+_PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+@app.get("/api/download-pptx-net/{proposal_id}")
+async def download_pptx_net(proposal_id: str) -> FileResponse:
+    """Download the simple, signature-ready Net PowerPoint deck for a generated proposal."""
+    meta_file = PROPOSALS_DIR / f"{proposal_id}.json"
+    if not meta_file.exists():
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    meta = json.loads(meta_file.read_text())
+    pptx_filename = meta.get("pptx_net_filename")
+    if not pptx_filename:
+        raise HTTPException(status_code=404, detail="No Net PowerPoint for this proposal")
+    pptx_path = PROPOSALS_DIR / pptx_filename
+    if not pptx_path.exists():
+        raise HTTPException(status_code=410, detail="PowerPoint file expired")
+    return FileResponse(path=str(pptx_path), filename=pptx_filename, media_type=_PPTX_MEDIA_TYPE)
+
+
+@app.get("/api/download-pptx-gross/{proposal_id}")
+async def download_pptx_gross(proposal_id: str) -> FileResponse:
+    """Download the simple, signature-ready Gross PowerPoint deck for a generated proposal."""
+    meta_file = PROPOSALS_DIR / f"{proposal_id}.json"
+    if not meta_file.exists():
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    meta = json.loads(meta_file.read_text())
+    pptx_filename = meta.get("pptx_gross_filename")
+    if not pptx_filename:
+        raise HTTPException(status_code=404, detail="No Gross PowerPoint for this proposal")
+    pptx_path = PROPOSALS_DIR / pptx_filename
+    if not pptx_path.exists():
+        raise HTTPException(status_code=410, detail="PowerPoint file expired")
+    return FileResponse(path=str(pptx_path), filename=pptx_filename, media_type=_PPTX_MEDIA_TYPE)
+
+
 @app.post("/api/drive/upload")
 async def drive_upload(body: DriveUploadRequest, request: Request) -> dict:
     """
@@ -834,11 +998,17 @@ class NewProductRequest(BaseModel):
     is_addon: bool = False
 
 
+class MarketConfigRequest(BaseModel):
+    market_key: str  # matched against the parsed "Salesperson market" field; "__default__" is the fallback every market uses until it has its own entry
+    address_line1: Optional[str] = None
+    address_line2: Optional[str] = None
+    ccs: Optional[list[str]] = None
+
+
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page() -> HTMLResponse:
     """Serve the admin SPA (proposal history + rate overrides)."""
-    html = (TEMPLATES_DIR / "admin.html").read_text(encoding="utf-8")
-    return HTMLResponse(content=html)
+    return _serve_html_with_cache_busted_static(TEMPLATES_DIR / "admin.html")
 
 
 @app.get("/api/admin/proposals")
@@ -877,7 +1047,12 @@ async def admin_list_proposals() -> dict:
 
 @app.get("/api/admin/rates")
 async def admin_get_rates() -> dict:
-    """Return the full catalog (built-in + admin-added) with current overrides flagged, for the admin rate editor."""
+    """Return the full catalog (built-in + admin-added) with current overrides
+    flagged, for both the inline rate editor and the "Edit product" panel —
+    every _OVERRIDABLE_FIELDS field is override-aware here now, not just the
+    original 3 numeric ones (family/buying_model/sizes/etc. used to always
+    show the raw catalog value even when overridden — a real display bug,
+    fixed alongside adding the fields the edit panel needs)."""
     overrides = load_rate_overrides()
     custom_names = {p.name for p in load_custom_products()}
     products = []
@@ -885,17 +1060,22 @@ async def admin_get_rates() -> dict:
         override = overrides.get(p.name, {})
         products.append({
             "name": p.name,
-            "family": p.family,
-            "buying_model": p.buying_model,
+            "family": override.get("family", p.family),
+            "short_label": override.get("short_label", p.short_label),
+            "buying_model": override.get("buying_model", p.buying_model),
             "base_rate": override.get("base_rate", p.base_rate),
             "minimum_spend": override.get("minimum_spend", p.minimum_spend),
             "estimated_cpm_for_imps": override.get("estimated_cpm_for_imps", p.estimated_cpm_for_imps),
+            "sizes": override.get("sizes", p.sizes),
+            "tech_platform": override.get("tech_platform", p.tech_platform),
+            "proposal_description": override.get("proposal_description", p.proposal_description),
+            "notes": override.get("notes", p.notes),
             "catalog_base_rate": p.base_rate,
             "catalog_minimum_spend": p.minimum_spend,
             "catalog_estimated_cpm_for_imps": p.estimated_cpm_for_imps,
             "has_override": p.name in overrides,
             "is_custom": p.name in custom_names,
-            "is_addon": p.is_addon,
+            "is_addon": override.get("is_addon", p.is_addon),
         })
     return {"products": products, "overridable_fields": list(_OVERRIDABLE_FIELDS)}
 
@@ -962,3 +1142,312 @@ async def admin_delete_product(product_name: str) -> dict:
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Custom product '{product_name}' not found.")
     return {"deleted": True, "product_name": product_name}
+
+
+class ProductEditRequest(BaseModel):
+    """Full-field edit for an EXISTING product (built-in or custom) — the
+    admin "Edit" panel's payload. Same field set as NewProductRequest
+    (minus `name`, which isn't editable here — see _OVERRIDABLE_FIELDS'
+    comment in catalog.py) so add/edit stay symmetric. Every field is
+    optional and None means "leave as shown" — the edit panel pre-fills
+    from the product's current effective values and sends null for
+    anything the admin cleared, same "empty = revert to catalog default"
+    convention the single-field rate editor already uses."""
+    product_name: str
+    family: Optional[str] = None
+    short_label: Optional[str] = None
+    buying_model: Optional[str] = None
+    base_rate: Optional[float] = None
+    minimum_spend: Optional[float] = None
+    estimated_cpm_for_imps: Optional[float] = None
+    sizes: Optional[str] = None
+    tech_platform: Optional[str] = None
+    proposal_description: Optional[str] = None
+    notes: Optional[str] = None
+    is_addon: Optional[bool] = None
+
+
+@app.post("/api/admin/products/edit")
+async def admin_edit_product(body: ProductEditRequest) -> dict:
+    """
+    Edit any field of an EXISTING product, built-in or custom:
+      - Built-in: stored as a rate override (like the single-field editor,
+        just covering every field that form doesn't) — only fields that
+        actually differ from the real catalog value are kept, so
+        resubmitting the form unchanged doesn't stamp redundant overrides.
+      - Custom: updated in place via update_custom_product (full replace
+        under the hood, so every field — not just the overridable set —
+        actually changes).
+    """
+    is_builtin = body.product_name in {p.name for p in CATALOG}
+    is_custom = body.product_name in {p.name for p in load_custom_products()}
+    if not is_builtin and not is_custom:
+        raise HTTPException(status_code=404, detail=f"Unknown product '{body.product_name}'")
+
+    fields = {k: v for k, v in body.model_dump(exclude={"product_name"}).items() if v is not None}
+
+    if is_builtin:
+        catalog_product = next(p for p in CATALOG if p.name == body.product_name)
+        kept = {k: v for k, v in fields.items() if v != getattr(catalog_product, k, None)}
+        overrides = load_rate_overrides()
+        if kept:
+            overrides[body.product_name] = kept
+        else:
+            overrides.pop(body.product_name, None)
+        save_rate_overrides(overrides)
+        return {"saved": True, "product_name": body.product_name, "mode": "override", "override": overrides.get(body.product_name, {})}
+    else:
+        try:
+            updated = update_custom_product(body.product_name, fields)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"saved": True, "product_name": updated.name, "mode": "custom"}
+
+
+# Shared column order for both the export and the bulk-upsert import, so a
+# planner can export -> edit in Excel -> re-upload the same file to update
+# records without reshaping anything. is_custom/has_override are exported
+# for visibility but ignored on import — they're derived status, not real
+# editable fields (a row can't "become" built-in, and has_override is just
+# "does base_rate/minimum_spend/estimated_cpm_for_imps differ from the
+# built-in catalog's own value," which importing the row already implies).
+_PRODUCT_CSV_COLUMNS = [
+    "name", "family", "short_label", "buying_model", "base_rate", "minimum_spend",
+    "estimated_cpm_for_imps", "sizes", "tech_platform", "proposal_description",
+    "notes", "is_addon", "is_custom", "has_override",
+]
+
+
+@app.get("/api/admin/products/export")
+async def admin_export_products() -> Response:
+    """Download the full effective catalog (built-ins + overrides applied
+    + custom products) as a CSV — for review/audit, and as a starting
+    point for the bulk-upsert import below (same column order)."""
+    overrides = load_rate_overrides()
+    custom_names = {p.name for p in load_custom_products()}
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=_PRODUCT_CSV_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for p in effective_catalog():
+        writer.writerow({
+            "name": p.name,
+            "family": p.family,
+            "short_label": p.short_label,
+            "buying_model": p.buying_model,
+            "base_rate": p.base_rate,
+            "minimum_spend": p.minimum_spend,
+            "estimated_cpm_for_imps": p.estimated_cpm_for_imps,
+            "sizes": p.sizes,
+            "tech_platform": p.tech_platform,
+            "proposal_description": p.proposal_description,
+            "notes": p.notes,
+            "is_addon": p.is_addon,
+            "is_custom": p.name in custom_names,
+            "has_override": p.name in overrides,
+        })
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=adflo_catalog_export.csv"},
+    )
+
+
+def _parse_csv_bool(v: str) -> bool:
+    return (v or "").strip().lower() in ("true", "1", "yes", "y")
+
+
+def _parse_csv_float(v: str) -> Optional[float]:
+    v = (v or "").strip()
+    if not v:
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        return None
+
+
+@app.post("/api/admin/products/bulk-upsert")
+async def admin_bulk_upsert_products(file: UploadFile = File(...)) -> dict:
+    """
+    Add or update many products at once from an uploaded CSV (same columns
+    as the export above). Matched by `name`:
+      - Name matches a BUILT-IN catalog product -> saved as a rate override
+        (only base_rate/minimum_spend/estimated_cpm_for_imps — a built-in's
+        other fields are the canonical catalog and aren't editable this way,
+        same restriction the single-row rate editor already has).
+      - Name matches an EXISTING CUSTOM product -> replaced entirely with
+        the row's values (delete + re-add, so every field — not just the
+        3 overridable ones — actually updates).
+      - Name matches nothing -> added as a new custom product.
+    Never raises for a single bad row — collects per-row errors instead, so
+    one typo in a 60-row sheet doesn't block the other 59.
+    """
+    raw = (await file.read()).decode("utf-8-sig")  # -sig: tolerate an Excel-saved CSV's BOM
+    reader = csv.DictReader(io.StringIO(raw))
+    if reader.fieldnames is None:
+        raise HTTPException(status_code=400, detail="Empty or unreadable CSV file.")
+    missing_cols = {"name", "family", "buying_model"} - set(reader.fieldnames)
+    if missing_cols:
+        raise HTTPException(status_code=400, detail=f"CSV is missing required column(s): {', '.join(sorted(missing_cols))}")
+
+    builtin_names = {p.name for p in CATALOG}
+    custom_names = {p.name for p in load_custom_products()}
+    created, updated_override, updated_custom, errors = [], [], [], []
+    rows_processed = 0
+
+    for i, row in enumerate(reader, start=2):  # row 1 is the header
+        rows_processed += 1
+        name = (row.get("name") or "").strip()
+        if not name:
+            errors.append(f"Row {i}: missing name — skipped.")
+            continue
+        try:
+            if name in builtin_names:
+                fields = {
+                    k: _parse_csv_float(row.get(k))
+                    for k in ("base_rate", "minimum_spend", "estimated_cpm_for_imps")
+                }
+                # Only actually store a field as an override when it differs
+                # from the built-in catalog's OWN value — otherwise
+                # re-uploading an unedited (or only-partially-edited) export
+                # would silently stamp a redundant override onto every
+                # single built-in product, cluttering the whole catalog
+                # with "Override" badges for values nobody actually changed.
+                catalog_product = next((p for p in CATALOG if p.name == name), None)
+                kept = {
+                    k: v for k, v in fields.items()
+                    if v is not None and (catalog_product is None or v != getattr(catalog_product, k, None))
+                }
+                if kept:
+                    overrides = load_rate_overrides()
+                    overrides[name] = kept
+                    save_rate_overrides(overrides)
+                    updated_override.append(name)
+                # else: every provided value matched the catalog default (or
+                # the row left them all blank) — nothing to do, not an error.
+            else:
+                new_fields = {
+                    "family": row.get("family"),
+                    "name": name,
+                    "short_label": row.get("short_label"),
+                    "buying_model": row.get("buying_model"),
+                    "base_rate": _parse_csv_float(row.get("base_rate")),
+                    "minimum_spend": _parse_csv_float(row.get("minimum_spend")),
+                    "estimated_cpm_for_imps": _parse_csv_float(row.get("estimated_cpm_for_imps")),
+                    "sizes": row.get("sizes"),
+                    "tech_platform": row.get("tech_platform"),
+                    "proposal_description": row.get("proposal_description"),
+                    "notes": row.get("notes"),
+                    "is_addon": _parse_csv_bool(row.get("is_addon")),
+                }
+                if name in custom_names:
+                    delete_custom_product(name)  # re-add below with the full new field set
+                    add_custom_product(new_fields)
+                    updated_custom.append(name)
+                else:
+                    add_custom_product(new_fields)
+                    custom_names.add(name)
+                    created.append(name)
+        except ValueError as e:
+            errors.append(f"Row {i} ('{name}'): {e}")
+
+    return {
+        "created": created,
+        "updated_as_rate_override": updated_override,
+        "updated_custom_product": updated_custom,
+        "errors": errors,
+        "total_rows_processed": rows_processed,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Market config — per-market office address (shown on every export's meta
+# block) and CC list (for the Step 07 seller-email link). Both used to be a
+# single hardcoded Burbank address with no CCs regardless of market; this
+# makes both admin-editable, with a "__default__" entry every market falls
+# back to until it has its own values.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/admin/market-config")
+async def admin_get_market_config() -> dict:
+    """Every configured market's address + CC list ("__default__" first),
+    plus the always-on base CC list."""
+    config = load_market_config()
+    markets = []
+    for key, entry in config.items():
+        if key in (BASE_CCS_KEY, T1_CCS_KEY):
+            continue  # not a market — their own fields below, different shape (a bare list)
+        markets.append({
+            "market_key": key,
+            "is_default": key == DEFAULT_KEY,
+            "address_line1": entry.get("address_line1", ""),
+            "address_line2": entry.get("address_line2", ""),
+            "ccs": entry.get("ccs", []),
+        })
+    markets.sort(key=lambda m: (not m["is_default"], m["market_key"].lower()))
+    return {"markets": markets, "base_ccs": config.get(BASE_CCS_KEY, []), "t1_ccs": config.get(T1_CCS_KEY, [])}
+
+
+class BaseCcsRequest(BaseModel):
+    ccs: list[str] = []
+
+
+@app.post("/api/admin/market-config/base-ccs")
+async def admin_save_base_ccs(body: BaseCcsRequest) -> dict:
+    """Set the CC list included on EVERY seller-email mailto regardless of market."""
+    saved = set_base_ccs(body.ccs)
+    return {"saved": True, "base_ccs": saved}
+
+
+@app.post("/api/admin/market-config/t1-ccs")
+async def admin_save_t1_ccs(body: BaseCcsRequest) -> dict:
+    """Set the escalation CC list added when any tier spends $10k/mo+."""
+    saved = set_t1_ccs(body.ccs)
+    return {"saved": True, "t1_ccs": saved}
+
+
+@app.get("/api/market-ccs")
+async def get_market_ccs_for(market: str = "") -> dict:
+    """Public (non-admin) lookup used by the Step 07 seller-email mailto
+    link: base CCs + this market's own CCs, deduped (query param, not a
+    path segment, because market names carry spaces/parens, e.g.
+    "Los Angeles (Tier 1)") — plus the T1 escalation list and its spend
+    threshold, returned separately since whether T1 actually applies
+    depends on the proposal's tier spend, which only the client knows."""
+    return {
+        "ccs": get_all_ccs_for_market(market or None),
+        "t1_ccs": get_t1_ccs(),
+        "t1_spend_threshold": T1_SPEND_THRESHOLD,
+    }
+
+
+@app.post("/api/admin/market-config")
+async def admin_save_market_config(body: MarketConfigRequest) -> dict:
+    """Upsert one market's address/CCs (or "__default__"). Blank/omitted
+    fields leave that part of the entry untouched — clear the address by
+    posting an explicit empty string, not by omitting it."""
+    market_key = body.market_key.strip()
+    if not market_key:
+        raise HTTPException(status_code=400, detail="market_key is required.")
+    fields = {
+        k: v for k, v in {
+            "address_line1": body.address_line1,
+            "address_line2": body.address_line2,
+            "ccs": body.ccs,
+        }.items() if v is not None
+    }
+    entry = set_market_entry(market_key, fields)
+    return {"saved": True, "market_key": market_key, "entry": entry}
+
+
+@app.delete("/api/admin/market-config/{market_key}")
+async def admin_delete_market_config(market_key: str) -> dict:
+    """Remove a market's own override, reverting it to "__default__". The
+    "__default__" entry itself can't be deleted — clear its fields with a
+    POST instead."""
+    if market_key == DEFAULT_KEY:
+        raise HTTPException(status_code=400, detail="Can't delete the default entry — edit it with POST instead.")
+    deleted = delete_market_entry(market_key)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Market '{market_key}' not found.")
+    return {"deleted": True, "market_key": market_key}

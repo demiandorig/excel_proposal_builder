@@ -5,6 +5,7 @@
 data/proposals/
 app/data/rate_overrides.json
 app/data/custom_products.json
+app/data/market_config.json
 
 # Python
 __pycache__/
@@ -15,3 +16,6 @@ venv/
 # OS/editor noise
 .DS_Store
 Thumbs.db
+
+# Scratch sample files generated for chat delivery — not project code.
+_sample_output/

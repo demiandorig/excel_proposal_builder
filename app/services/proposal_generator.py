@@ -18,6 +18,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from app.catalog import CATALOG, Product, by_name, families, by_family
 from app.services.notion_parser import ProposalRequest, classify_output_tabs
 from app import excel_template as et
+from app.market_config import get_market_address
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,13 @@ class LineItem:
     # of the export's line-items table (above the totals row, below every
     # paid line) rather than interleaved among real budget lines.
     is_added_value: bool = False
+    # AV lines only: the planner's stated "we're giving away roughly this
+    # % of the deal's real value as added value" — e.g. 5% of a $3,000/mo
+    # tier reads as "Estimated $150 value." Purely a note/estimate, never
+    # real budget (monthly_budget on an AV line is still $0) — None/0 means
+    # the planner hasn't put a number on it yet, so the export just shows
+    # the plain "Added Value" note with no dollar estimate.
+    added_value_pct: Optional[float] = None
 
     def total_budget(self) -> float:
         return self.monthly_budget * self.months
@@ -186,7 +194,13 @@ def generate_proposal(
     for tier in tiers:
         label = (tier.get("label") or "A").strip() or "A"
         tier_avails = tier.get("avails_data")
-        tier_title_suffix = f" — Option {label}" if multi_tier else ""
+        # Planner-given display name (e.g. "Independent") wins over the
+        # generic "Option A" wherever a seller/client actually reads this —
+        # the sheet TAB itself still keys off the plain `label` (see
+        # TierModel.name's docstring for why), only the visible title text
+        # changes here.
+        tier_display_name = (tier.get("name") or "").strip() or f"Option {label}"
+        tier_title_suffix = f" — {tier_display_name}" if multi_tier else ""
 
         # Materialize Product objects in the order the planner provided them.
         # Filter products and line_items together so a skipped/unmatched
@@ -268,6 +282,7 @@ def generate_proposal(
         fee = request.agency_fee or 0.0
         tier_summaries.append({
             "label": label,
+            "name": tier_display_name,
             "total_net": tier_total_net,
             "total_gross": tier_total_net / (1 - fee) if fee else tier_total_net,
         })
@@ -351,27 +366,89 @@ def _populate_meta(
     if not include_campaign_meta:
         return
 
-    # Campaign meta block (C11..C15) — Proposal A layout only
+    # Entravision address (C6/C7) — market-specific, admin-configurable.
+    # _write_meta_block wrote the Burbank HQ address here as a static
+    # default; override it per the requesting salesperson's market so each
+    # market can show its own office once an admin configures one (falls
+    # back to the same Burbank default for any market that isn't
+    # configured). Avails-Only reuses C6/C7 for its own different content
+    # (see include_campaign_meta above) so this only applies here.
+    address_line1, address_line2 = get_market_address(request.salesperson_market)
+    ws["C6"] = address_line1
+    ws["C7"] = address_line2
+
+    # Campaign meta block (C11..C15) — Proposal A layout only. Media
+    # Proposal + Order Description combined onto one row (C11) — used to be
+    # two separate rows; freed row 12 entirely to shrink the frozen header
+    # block, leaving more screen room for the unfrozen line-items view.
     media_proposal_line = f"Media Proposal: {request.client_name or 'TBD'}"
     if request.start_date and request.end_date:
         media_proposal_line += f" — {request.start_date} to {request.end_date}"
     elif request.renewal_campaign_dates:
         media_proposal_line += f" — {request.renewal_campaign_dates}"
-    ws["C11"] = media_proposal_line
-
-    ws["C12"] = f"Order Description: {campaign_name}" if campaign_name else "Order Description: "
+    order_description = f"Order Description: {campaign_name}" if campaign_name else "Order Description: "
+    ws["C11"] = f"{media_proposal_line}    |    {order_description}"
 
     if request.geo:
         ws["C13"] = f"Geo: {request.geo}"
 
-    # "Minimum 3 month Commitment" only applies (and should only be shown)
-    # when the actual flight is 3+ months — _write_meta_block's default
-    # text stated it unconditionally regardless of the real flight length.
+    # "All rates are NET" is flatly wrong on a Gross sheet — it says the
+    # opposite of what the sheet actually shows (rates marked up by the
+    # agency fee). "Minimum 3 month Commitment" only applies (and should
+    # only be shown) when the actual flight is 3+ months —
+    # _write_meta_block's default text stated it unconditionally regardless
+    # of the real flight length; that part is independent of net vs. gross.
+    rate_basis_text = "Rates shown are GROSS (inclusive of agency commission)." if gross else "All rates are NET."
     if (request.total_months or 0) >= 3:
-        ws["C14"] = "All rates are NET. Minimum 3 month Commitment."
+        ws["C14"] = f"{rate_basis_text} Minimum 3 month Commitment."
     else:
-        ws["C14"] = "All rates are NET."
+        ws["C14"] = rate_basis_text
     ws["C14"].font = et.BODY_BOLD
+
+
+# ---------------------------------------------------------------------------
+# AI blurb guard-rail
+#
+# Prompt-side fixes (family-filtered knowledge base, real per-product
+# descriptions in context — see ai_enricher.py) make cross-contamination
+# much less likely, but they can't GUARANTEE it — an LLM call has no hard
+# ceiling on "confidently wrong." This is the backstop: the catalog's own
+# proposal_description is ALWAYS the foundation for column E (it's already
+# written there by _write_product_row before this module ever runs), and
+# the AI's blurb is layered on top ONLY when a cheap, deterministic check
+# doesn't catch it describing a different product family's own format —
+# exactly the concrete way this broke once already (a Meta blurb
+# confidently describing a podcast). Not a proof the surviving text is
+# insightful — just a tripwire for the specific, known failure mode. A
+# blurb that fails this check is dropped entirely; the row is left with
+# just its real catalog description, per "verify it's specific to the
+# product, or simply don't include it and just use the description."
+# ---------------------------------------------------------------------------
+
+_FAMILY_FINGERPRINT_TERMS: dict[str, tuple[str, ...]] = {
+    "Audio": ("podcast", "audio streaming", "radio station", "audioengage"),
+    "Online Video": ("pre-roll", "youtube", "video completion", "skippable ad"),
+    "DOOH": ("out-of-home", "billboard", "digital signage"),
+    "Email": ("inbox", "email deployment", "email list", "email database"),
+    "Search": ("search engine", "keyword bidding", "google search", "paid search"),
+    "Social": ("facebook", "instagram", "tiktok", "social feed", "linkedin"),
+    "Display": ("banner ad", "programmatic display", "geo-fence", "retargeting pixel"),
+    "Entravision Plus": ("connected tv", " ctv ", "streaming tv", " ott "),
+    "Branded Content": ("branded content", "sponsored content", "talent endorsement"),
+}
+
+
+def _blurb_seems_cross_contaminated(blurb: str, own_family: str) -> bool:
+    """True if `blurb` contains another family's distinctive terms — a
+    product's own family is exempted so a legitimately Audio-family
+    product can still say "podcast" about itself."""
+    text = f" {blurb.lower()} "
+    for family, terms in _FAMILY_FINGERPRINT_TERMS.items():
+        if family == own_family:
+            continue
+        if any(term in text for term in terms):
+            return True
+    return False
 
 
 def _populate_line_items(
@@ -399,6 +476,14 @@ def _populate_line_items(
     # In with_sections mode, the banner takes row N and the product takes N+1.
     start_row = 19
 
+    # Added Value lines carry no real budget by design (monthly_budget is
+    # forced to 0 the moment the planner flips the switch) — their
+    # estimated "gift value" is a % of what the tier is ACTUALLY billing
+    # for, i.e. every other, non-AV line's real budget. Computed once here
+    # so every AV line's % applies to the same real total rather than each
+    # other's estimates compounding.
+    tier_real_total = sum(li.monthly_budget for li in line_items if not li.is_added_value)
+
     row = start_row
     first_data_row = start_row
     last_family = None
@@ -409,6 +494,24 @@ def _populate_line_items(
             row += 1
             last_family = product.family
 
+        av_value = (tier_real_total * (li.added_value_pct / 100.0)) if (li.is_added_value and li.added_value_pct) else None
+
+        # RATE TYPE (J) / NET RATE (K) — an Added Value line is never priced
+        # like a normal CPM/CPP/Fixed line (that's the whole point), so it
+        # overrides both regardless of what the catalog or a stray
+        # rate_override would otherwise show. K=0 (not text) so the sheet's
+        # own "-"-for-zero number format displays it cleanly while staying
+        # a real, formula-safe number (the Gross sheet's K/(1-fee) column
+        # keeps working instead of erroring on non-numeric text).
+        if li.is_added_value:
+            ws[f"J{row}"] = "Added Value"
+            ws[f"J{row}"].alignment = et.CENTER
+            ws[f"K{row}"] = 0
+            et._format_money_cell(ws[f"K{row}"], blue_input=True)
+        elif li.rate_override is not None:
+            ws[f"K{row}"] = li.rate_override
+            et._format_money_cell(ws[f"K{row}"], blue_input=True)
+
         # NET BUDGET (L) — the planner's MONTHLY budget, not the flight total.
         # Every other formula on this sheet assumes that: "TOTAL DIGITAL
         # MONTHLY" is SUM(L), and the grand total then multiplies that by
@@ -416,13 +519,17 @@ def _populate_line_items(
         # total here instead (monthly × months) double-counts months in
         # the grand total, and mislabels the monthly total 3x too high for
         # a 3-month flight — the exact bug the planner reported.
-        ws[f"L{row}"] = li.monthly_budget
-        et._format_money_cell(ws[f"L{row}"], blue_input=True)
-
-        # NET RATE (K) — override only if planner specified a custom rate
-        if li.rate_override is not None:
-            ws[f"K{row}"] = li.rate_override
-            et._format_money_cell(ws[f"K{row}"], blue_input=True)
+        #
+        # An Added Value line with a stated % instead shows its estimated
+        # gift value as text ("Estimated $150 value") rather than the plain
+        # $0 — still no real budget (SUM(L) below skips non-numeric cells
+        # automatically), just a visible note of what's being given away.
+        if av_value is not None:
+            ws[f"L{row}"] = f"Estimated ${av_value:,.0f} value"
+            et._format_av_value_cell(ws[f"L{row}"])
+        else:
+            ws[f"L{row}"] = li.monthly_budget
+            et._format_money_cell(ws[f"L{row}"], blue_input=True)
 
         # TARGET (D) — per-line override, else Demo | Behavioral | Contextual
         # fallback (instead of leaving the template's default "TBD"); a
@@ -430,11 +537,19 @@ def _populate_line_items(
         # rich-text cell with bolded labels.
         ws[f"D{row}"] = et.build_target_cell_value(li.target_override, li.target_secondary, request)
 
-        # AI BLURB (E) — overrides catalog proposal_description when present
-        if blurbs and product.name in blurbs:
-            ws[f"E{row}"] = blurbs[product.name]
-            # Re-estimate row height for the (usually longer) AI-written text
-            ws.row_dimensions[row].height = et._estimate_row_height(blurbs[product.name], col_width=50)
+        # DETAILS (E) — the catalog's real proposal_description is already
+        # the template default here (written by _write_product_row before
+        # this function ever runs) and stays untouched unless the AI blurb
+        # both exists AND passes the cross-contamination guard-rail above;
+        # when it does, it's appended after the real description rather
+        # than replacing it, so column E is never LESS accurate than the
+        # catalog on its own, only potentially more insightful.
+        blurb_text = blurbs.get(product.name) if blurbs else None
+        if blurb_text and not _blurb_seems_cross_contaminated(blurb_text, product.family):
+            combined_details = f"{product.proposal_description}\n\n{blurb_text}" if product.proposal_description else blurb_text
+            ws[f"E{row}"] = combined_details
+            # Re-estimate row height for the (usually longer) combined text
+            ws.row_dimensions[row].height = et._estimate_row_height(combined_details, col_width=50)
 
         # Notes column — T for net, W for gross
         notes_col = "W" if gross else "T"
@@ -442,8 +557,14 @@ def _populate_line_items(
         if li.is_added_value:
             # A $0 (or below-minimum) budget on this line is deliberate, not
             # an oversight — flag it inline so a reader doesn't mistake it
-            # for a data error.
-            note_parts.append("Added Value — no media cost.")
+            # for a data error. When the planner put a % on it, name the
+            # actual estimated value too, not just that it's free.
+            if av_value is not None:
+                note_parts.append(
+                    f"Added Value — no media cost. Estimated at {li.added_value_pct:g}% of order value (${av_value:,.0f})."
+                )
+            else:
+                note_parts.append("Added Value — no media cost.")
         if li.notes_override:
             note_parts.append(li.notes_override)
         combined = "\n— ".join(p for p in note_parts if p)
@@ -462,7 +583,8 @@ def _populate_line_items(
         avail = avails_by.get(li.id) if li.id else None
         if avail is None:
             avail = avails_by.get(product.name)
-        sov_pct = et.compute_sov_pct(product, li.monthly_budget, avail or {}, cpm_override=li.estimated_cpm_override)
+        sov_pct = et.compute_sov_pct(product, li.monthly_budget, avail or {},
+                                      cpm_override=li.estimated_cpm_override, rate_override=li.rate_override)
         et.write_avails_cells(ws, row, avail or {}, product, gross=gross, sov_pct=sov_pct, sov_col=sov_col,
                               budget_col="L", cpm_override=li.estimated_cpm_override)
 

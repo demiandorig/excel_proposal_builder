@@ -36,8 +36,13 @@ const state = {
   // existed — no other code needs to change); `tiers` holds a snapshot for
   // every OTHER tier, swapped in/out by switchTier(). See "Tiered budget
   // options" section below for the full read/write contract.
-  tiers: [],                // [{ label, lineItems, availsData }] — every tier EXCEPT the active one
+  tiers: [],                // [{ label, name, lineItems, availsData }] — every tier EXCEPT the active one
   activeTierLabel: "A",
+  // Planner-given display name for the ACTIVE tier (e.g. "Independent"),
+  // shown instead of "Option A" everywhere a seller/client actually reads
+  // this — null falls back to "Option {label}". Swapped in/out of the
+  // `tiers` snapshots alongside lineItems/availsData by switchTier().
+  activeTierName: null,
   step: 1,
   // The highest step number reached so far this session — lets the top nav
   // pills be clickable up to (but not past) wherever the wizard has
@@ -165,6 +170,7 @@ async function maybeReopenProposal() {
     // it) — reopen always resumes as a single tier "A".
     state.tiers = [];
     state.activeTierLabel = "A";
+    state.activeTierName = null;
     const availsData = data.avails_data || {};
 
     // Restore Add-Ons picks (absent entirely on a proposal generated before
@@ -366,6 +372,7 @@ function resetAll() {
   state.availsData = {};
   state.tiers = [];
   state.activeTierLabel = "A";
+  state.activeTierName = null;
   state.proposalId = null;
   state.proposalSummary = null;
   state.enrichment = null;
@@ -518,6 +525,7 @@ function onNext(n) {
           target_secondary: null,
           estimated_cpm_override: null,
           is_added_value: false,
+          added_value_pct: null,
         };
       });
       if (budget && state.lineItems.length > 0) {
@@ -622,6 +630,7 @@ async function onParse() {
     state.availsData = {};
     state.tiers = [];
     state.activeTierLabel = "A";
+    state.activeTierName = null;
     fillForm(state.parsed);
     renderWarnings(state.parsed.warnings || []);
     renderMatchedProducts(state.parsed);
@@ -807,6 +816,7 @@ function renderStrategyBrief(brief) {
       <p class="tactic-rationale">${escapeHtml(t.rationale)}</p>
       <p class="tactic-data">📊 ${escapeHtml(t.data_point)} <em class="tactic-citation">(${escapeHtml(t.citation)})</em></p>
       <p class="tactic-advantage">⚡ ${escapeHtml(t.entravision_advantage)}</p>
+      <p class="tactic-min-note">ⓘ This % is a ceiling for the whole ${escapeHtml(t.product_family)} tactic — if you curate more than one product under it in Step 04, each one still has its own separate minimum spend, not a shared pool.</p>
     `;
     tacticsEl.appendChild(card);
   });
@@ -946,9 +956,32 @@ function renderRoadblocks(data) {
 
 function allTiersForSubmit() {
   return [
-    { label: state.activeTierLabel, line_items: state.lineItems, avails_data: state.availsData },
-    ...state.tiers.map(t => ({ label: t.label, line_items: t.lineItems, avails_data: t.availsData })),
+    { label: state.activeTierLabel, name: state.activeTierName, line_items: state.lineItems, avails_data: state.availsData },
+    ...state.tiers.map(t => ({ label: t.label, name: t.name, line_items: t.lineItems, avails_data: t.availsData })),
   ].sort((a, b) => a.label.localeCompare(b.label));
+}
+
+// Planner-given display name for a tier, wherever "Option {label}" used to
+// be hardcoded — checks the active tier and every snapshot, falls back to
+// the original "Option {label}" text when nothing's been set.
+function _tierDisplayName(label) {
+  if (label === state.activeTierLabel) return state.activeTierName || `Option ${label}`;
+  const t = state.tiers.find(x => x.label === label);
+  return (t && t.name) || `Option ${label}`;
+}
+
+function renameTier(label) {
+  const current = _tierDisplayName(label);
+  const input = prompt("Name this option (shown to the seller/client instead of \"Option " + label + "\" — leave blank to reset):", current === `Option ${label}` ? "" : current);
+  if (input === null) return;  // cancelled
+  const name = input.trim() || null;
+  if (label === state.activeTierLabel) {
+    state.activeTierName = name;
+  } else {
+    const t = state.tiers.find(x => x.label === label);
+    if (t) t.name = name;
+  }
+  renderAllTierTabStrips();
 }
 
 function switchTier(label) {
@@ -960,9 +993,10 @@ function switchTier(label) {
   // Replace the target's snapshot (about to become active) with a fresh
   // snapshot of the tier we're leaving — one swap, order doesn't matter
   // since every lookup here is by label, not position.
-  state.tiers.splice(idx, 1, { label: state.activeTierLabel, lineItems: state.lineItems, availsData: state.availsData });
+  state.tiers.splice(idx, 1, { label: state.activeTierLabel, name: state.activeTierName, lineItems: state.lineItems, availsData: state.availsData });
 
   state.activeTierLabel = label;
+  state.activeTierName = target.name || null;
   state.lineItems = target.lineItems;
   state.availsData = target.availsData;
   state.rateOverrideOpen.clear();
@@ -983,7 +1017,7 @@ function addTier(targetBudget) {
   if (!nextLabel) return;
 
   // Snapshot the tier we're leaving active...
-  state.tiers.push({ label: state.activeTierLabel, lineItems: state.lineItems, availsData: state.availsData });
+  state.tiers.push({ label: state.activeTierLabel, name: state.activeTierName, lineItems: state.lineItems, availsData: state.availsData });
 
   // ...then make the NEW tier active, starting as a clone of it — "Add
   // Option" copies the current mix so the planner adjusts from there,
@@ -1001,6 +1035,7 @@ function addTier(targetBudget) {
   if (targetBudget) distributeBudgetProportionally(clonedItems, targetBudget);
 
   state.activeTierLabel = nextLabel;
+  state.activeTierName = null;  // blank — planner renames via the tab strip if they want to
   state.lineItems = clonedItems;
   state.availsData = clonedAvails;
   state.rateOverrideOpen.clear();
@@ -1048,13 +1083,13 @@ function renderAllTierTabStrips() {
   const availsHint = document.getElementById("tier-switcher-hint-avails");
   if (availsHint) availsHint.classList.toggle("hidden", !multiTier);
   const activeLabelEl = document.getElementById("tier-switcher-active-label");
-  if (activeLabelEl) activeLabelEl.textContent = `Option ${state.activeTierLabel}`;
+  if (activeLabelEl) activeLabelEl.textContent = _tierDisplayName(state.activeTierLabel);
 
   // "Copy avails from" dropdown — every OTHER tier, so copying is one click.
   const copySource = document.getElementById("copy-avails-source");
   if (copySource) {
     const otherLabels = state.tiers.map(t => t.label).sort();
-    copySource.innerHTML = otherLabels.map(l => `<option value="${l}">Option ${l}</option>`).join("");
+    copySource.innerHTML = otherLabels.map(l => `<option value="${l}">${escapeHtml(_tierDisplayName(l))}</option>`).join("");
     copySource.parentElement.classList.toggle("hidden", !multiTier || otherLabels.length === 0);
   }
 }
@@ -1090,7 +1125,7 @@ function onCopyAvails() {
 
   renderAvailsGrid();
   if (copiedCount === 0) {
-    alert(`No avails to copy — Option ${sourceLabel} has nothing entered for products in Option ${state.activeTierLabel} (or they're already filled in here).`);
+    alert(`No avails to copy — ${_tierDisplayName(sourceLabel)} has nothing entered for products in ${_tierDisplayName(state.activeTierLabel)} (or they're already filled in here).`);
   }
 }
 
@@ -1102,22 +1137,29 @@ function renderTierTabStrip(containerId, opts) {
 
   tabsEl.innerHTML = allLabels.map(label => `
     <button type="button" class="tier-tab ${label === state.activeTierLabel ? "active" : ""}" data-tier="${label}">
-      Option ${label}
+      ${escapeHtml(_tierDisplayName(label))}
+      <span class="tier-tab-rename" data-tier-rename="${label}" title="Rename this option">✎</span>
       ${opts.removable && totalTiers > 1 ? `<span class="tier-tab-remove" data-tier-remove="${label}" title="Remove this option">×</span>` : ""}
     </button>
   `).join("");
 
   tabsEl.querySelectorAll(".tier-tab").forEach(btn => {
     btn.addEventListener("click", (e) => {
-      if (e.target.closest("[data-tier-remove]")) return;
+      if (e.target.closest("[data-tier-remove]") || e.target.closest("[data-tier-rename]")) return;
       switchTier(btn.dataset.tier);
+    });
+  });
+  tabsEl.querySelectorAll("[data-tier-rename]").forEach(el => {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      renameTier(el.dataset.tierRename);
     });
   });
   if (opts.removable) {
     tabsEl.querySelectorAll("[data-tier-remove]").forEach(el => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
-        if (!confirm(`Remove Option ${el.dataset.tierRemove}? This can't be undone.`)) return;
+        if (!confirm(`Remove ${_tierDisplayName(el.dataset.tierRemove)}? This can't be undone.`)) return;
         removeTier(el.dataset.tierRemove);
       });
     });
@@ -1132,6 +1174,9 @@ function renderLineItems() {
   renderAllTierTabStrips();
   const tbody = document.getElementById("line-items-body");
   tbody.innerHTML = "";
+  // Added Value % basis: the tier's real (non-AV) budget — same "% of what's
+  // actually being billed" rule the export uses (see proposal_generator.py).
+  const tierRealTotal = state.lineItems.reduce((s, li) => s + (li.is_added_value ? 0 : (li.monthly_budget || 0)), 0);
   state.lineItems.forEach((li, idx) => {
     const p = state.productIndex[li.product_name] || {};
     const tr = document.createElement("tr");
@@ -1149,12 +1194,8 @@ function renderLineItems() {
     const isFixedModel = (p.pricing_model || "").toUpperCase() === "FIXED";
     const effectiveCpm = li.estimated_cpm_override != null ? li.estimated_cpm_override : p.estimated_cpm_for_imps;
 
-    // Draggable at the ROW level (native HTML5 drag-and-drop needs the
-    // dragged element itself to carry `draggable`), but the dragstart
-    // handler below only lets the drag actually begin when it started on
-    // the handle cell — so clicking/selecting text anywhere else in the
-    // row (budget input, target textarea, etc.) behaves normally.
-    tr.draggable = true;
+    // Row identity for the mouse-based drag-reorder wiring below — no
+    // `draggable` attribute needed, this isn't native HTML5 drag-and-drop.
     tr.dataset.idx = idx;
     tr.className = "line-item-row";
 
@@ -1168,17 +1209,19 @@ function renderLineItems() {
       <td class="model">${escapeHtml(p.pricing_model || "—")}</td>
       <td class="rate-cell">
         ${rateOpen ? (isFixedModel ? `
-          <input type="number" step="0.5" min="0" class="rate-override-input est-cpm-input"
+          <input type="number" step="1" min="0" class="rate-override-input est-cpm-input"
                  placeholder="${p.estimated_cpm_for_imps != null ? "Catalog: $" + p.estimated_cpm_for_imps : "No catalog estimate"}"
                  value="${li.estimated_cpm_override != null ? li.estimated_cpm_override : ""}"
-                 data-idx="${idx}" data-key="estimated_cpm_override" />
+                 data-idx="${idx}" data-key="estimated_cpm_override" data-rate-input />
           <button class="btn-rate-reset" data-idx="${idx}" data-field="estimated_cpm_override" title="Revert to catalog estimate">×</button>
+          <span class="rate-override-badge ${li.estimated_cpm_override != null ? "active" : ""}" data-idx="${idx}" title="${li.estimated_cpm_override != null ? "Overridden — saved" : ""}">✓</span>
         ` : `
-          <input type="number" step="0.01" min="0" class="rate-override-input"
+          <input type="number" step="1" min="0" class="rate-override-input"
                  placeholder="${formatRate(p)}"
                  value="${li.rate_override != null ? li.rate_override : ""}"
-                 data-idx="${idx}" data-key="rate_override" />
+                 data-idx="${idx}" data-key="rate_override" data-rate-input />
           <button class="btn-rate-reset" data-idx="${idx}" data-field="rate_override" title="Revert to catalog rate">×</button>
+          <span class="rate-override-badge ${li.rate_override != null ? "active" : ""}" data-idx="${idx}" title="${li.rate_override != null ? "Overridden — saved" : ""}">✓</span>
         `) : (isFixedModel ? `
           <span class="rate-display est-cpm-display">${effectiveCpm != null ? `Est. $${effectiveCpm} CPM` : "No estimate"}</span>
           <button class="btn-rate-override" data-idx="${idx}" title="Set an estimated CPM for the impressions calc (not a real billing rate)">✎</button>
@@ -1191,11 +1234,22 @@ function renderLineItems() {
       <td class="col-budget">
         <input type="number" step="50" min="0" value="${li.monthly_budget}"
                class="${belowMin ? "below-min" : ""}"
+               ${li.is_added_value ? "disabled" : ""}
                data-idx="${idx}" data-key="monthly_budget" />
-        <label class="added-value-toggle">
+        <label class="av-switch" title="Added Value — locks this line's budget to $0">
           <input type="checkbox" data-idx="${idx}" ${li.is_added_value ? "checked" : ""} data-added-value-toggle />
-          Added Value ($0 OK)
+          <span class="av-switch-track"><span class="av-switch-thumb"></span></span>
+          <span class="av-switch-label">Added Value</span>
         </label>
+        ${li.is_added_value ? `
+          <div class="av-pct-row">
+            <input type="number" step="1" min="0" max="100" placeholder="%"
+                   value="${li.added_value_pct != null ? li.added_value_pct : ""}"
+                   class="av-pct-input" data-idx="${idx}" data-av-pct
+                   title="% of the tier's real budget to show as this line's estimated AV value" />
+            <span class="av-value-preview" data-av-preview="${idx}">${_avValuePreviewText(li.added_value_pct, tierRealTotal)}</span>
+          </div>
+        ` : ""}
       </td>
       <td class="col-months">
         <input type="number" step="1" min="1" value="${li.months}"
@@ -1226,17 +1280,53 @@ function renderLineItems() {
     tbody.appendChild(tr);
   });
   // Wire row events
-  tbody.querySelectorAll("input:not([data-secondary-toggle]):not([data-added-value-toggle]), textarea").forEach(inp => {
+  tbody.querySelectorAll("input:not([data-secondary-toggle]):not([data-added-value-toggle]):not([data-av-pct]), textarea").forEach(inp => {
     inp.addEventListener("input", onLineItemEdit);
   });
   tbody.querySelectorAll("[data-secondary-toggle]").forEach(cb => {
     cb.addEventListener("change", () => onToggleSecondaryTarget(parseInt(cb.dataset.idx)));
   });
+  // Rate/CPM override: onLineItemEdit already saves it live on every
+  // keystroke (via the generic wiring above) — the ✓ badge is a PERSISTENT
+  // state indicator (rendered from li.rate_override/estimated_cpm_override
+  // above, correct immediately on load — e.g. reopening a proposal with an
+  // existing override shows it right away, not just after an edit), not a
+  // fade-out flash — it stays visible the whole time an override is
+  // active, disappearing only when reverted. A brief pulse on blur is the
+  // "you just changed something" moment layered on top of that.
+  tbody.querySelectorAll("[data-rate-input]").forEach(inp => {
+    inp.addEventListener("blur", () => {
+      const idx = parseInt(inp.dataset.idx);
+      const badge = tbody.querySelector(`.rate-override-badge[data-idx="${idx}"]`);
+      if (!badge) return;
+      const li = state.lineItems[idx];
+      const hasOverride = li && (li.rate_override != null || li.estimated_cpm_override != null);
+      badge.classList.toggle("active", hasOverride);
+      badge.title = hasOverride ? "Overridden — saved" : "";
+      badge.classList.remove("pulse");
+      void badge.offsetWidth;  // restart the CSS animation even if it was already showing
+      badge.classList.add("pulse");
+    });
+  });
+  // AV %: a lightweight dedicated handler (not the generic one, and not a
+  // full renderLineItems() re-render) so the preview updates live as the
+  // planner types without losing focus/cursor position mid-edit — same
+  // reasoning the generic handler already uses for every other text field.
+  tbody.querySelectorAll("[data-av-pct]").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const idx = parseInt(inp.dataset.idx);
+      const li = state.lineItems[idx];
+      li.added_value_pct = inp.value === "" ? null : parseFloat(inp.value);
+      _refreshAvValuePreviews();
+    });
+  });
   tbody.querySelectorAll("[data-added-value-toggle]").forEach(cb => {
     cb.addEventListener("change", () => {
       const idx = parseInt(cb.dataset.idx);
-      state.lineItems[idx].is_added_value = cb.checked;
-      renderLineItems();  // refreshes the below-minimum highlight immediately
+      const li = state.lineItems[idx];
+      li.is_added_value = cb.checked;
+      if (cb.checked) li.monthly_budget = 0;  // an Added Value line is $0 by definition, not "$0 or whatever's left over"
+      renderLineItems();  // refreshes the budget field's value/disabled state, the below-min highlight, and totals
     });
   });
   tbody.querySelectorAll(".btn-duplicate").forEach(btn => {
@@ -1273,53 +1363,70 @@ function renderLineItems() {
 }
 
 // --------------------------------------------------------------------------
-// Drag-to-reorder line items (Step 04). Native HTML5 drag-and-drop, no
-// library — `draggable` sits on the <tr> (required: the browser only drags
-// the element that actually carries the attribute), but dragstart bails
-// out unless it began on the grip handle, so normal clicks/selection in
-// the row's own inputs and textareas aren't hijacked into a drag.
+// Drag-to-reorder line items (Step 04). Plain mouse events (mousedown on
+// the grip handle -> mousemove tracks the cursor and shows a drop
+// indicator -> mouseup commits the move), NOT the native HTML5 Drag and
+// Drop API. The native API was tried first and looked right in the DOM,
+// but a real drag gesture never actually completed one for the planner
+// reporting this — native HTML5 DnD depends on the browser's own OS-level
+// drag-gesture detection, which is exactly the kind of thing that's
+// finicky across trackpads/browsers and (confirmed directly) doesn't
+// reliably fire from a synthetic drag either, so it's inherently harder to
+// even verify. Listening on plain mouse events sidesteps all of that —
+// it's just "where is the cursor, what am I over," the same mechanism
+// most drag-reorder libraries actually use under the hood.
 // --------------------------------------------------------------------------
 
 function wireLineItemDrag(tbody) {
-  const rows = tbody.querySelectorAll("tr.line-item-row");
+  const allRows = () => [...tbody.querySelectorAll("tr.line-item-row")];
 
   const clearDropIndicators = () => {
-    rows.forEach(r => r.classList.remove("drag-over-top", "drag-over-bottom"));
+    allRows().forEach(r => r.classList.remove("drag-over-top", "drag-over-bottom"));
   };
 
-  rows.forEach(row => {
-    row.addEventListener("dragstart", e => {
-      if (!e.target.closest(".drag-handle")) {
-        e.preventDefault();
-        return;
-      }
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", row.dataset.idx);
-      row.classList.add("dragging");
-    });
+  tbody.querySelectorAll(".drag-handle").forEach(handle => {
+    handle.addEventListener("mousedown", e => {
+      if (e.button !== 0) return;  // left-click only
+      e.preventDefault();  // don't let the mouse-down start a text selection
+      const startRow = handle.closest("tr.line-item-row");
+      if (!startRow) return;
+      const fromIdx = parseInt(startRow.dataset.idx);
+      startRow.classList.add("dragging");
+      document.body.classList.add("reordering-line-item");
 
-    row.addEventListener("dragover", e => {
-      e.preventDefault();  // required for drop to fire on this element
-      const rect = row.getBoundingClientRect();
-      const insertAfter = e.clientY > rect.top + rect.height / 2;
-      clearDropIndicators();
-      row.classList.add(insertAfter ? "drag-over-bottom" : "drag-over-top");
-    });
+      let dropTarget = null;
+      let insertAfter = false;
 
-    row.addEventListener("drop", e => {
-      e.preventDefault();
-      clearDropIndicators();
-      const fromIdx = parseInt(e.dataTransfer.getData("text/plain"));
-      const dropOnIdx = parseInt(row.dataset.idx);
-      if (isNaN(fromIdx) || isNaN(dropOnIdx)) return;
-      const rect = row.getBoundingClientRect();
-      const insertAfter = e.clientY > rect.top + rect.height / 2;
-      moveLineItem(fromIdx, dropOnIdx, insertAfter);
-    });
+      const onMouseMove = moveEvent => {
+        const overRow = allRows().find(r => {
+          const rect = r.getBoundingClientRect();
+          return moveEvent.clientY >= rect.top && moveEvent.clientY <= rect.bottom;
+        });
+        clearDropIndicators();
+        if (overRow) {
+          const rect = overRow.getBoundingClientRect();
+          insertAfter = moveEvent.clientY > rect.top + rect.height / 2;
+          overRow.classList.add(insertAfter ? "drag-over-bottom" : "drag-over-top");
+          dropTarget = overRow;
+        } else {
+          dropTarget = null;
+        }
+      };
 
-    row.addEventListener("dragend", () => {
-      row.classList.remove("dragging");
-      clearDropIndicators();
+      const onMouseUp = () => {
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        document.body.classList.remove("reordering-line-item");
+        startRow.classList.remove("dragging");
+        clearDropIndicators();
+        if (dropTarget) {
+          const dropOnIdx = parseInt(dropTarget.dataset.idx);
+          if (!isNaN(dropOnIdx)) moveLineItem(fromIdx, dropOnIdx, insertAfter);
+        }
+      };
+
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
     });
   });
 }
@@ -1359,7 +1466,29 @@ function onLineItemEdit(e) {
     const p = state.productIndex[li.product_name] || {};
     const minSpend = p.minimum_spend || 0;
     e.target.classList.toggle("below-min", !li.is_added_value && (v || 0) < minSpend);
+    // Any AV line's estimated value is a % of every OTHER line's budget —
+    // editing this one shifts that basis for all of them.
+    _refreshAvValuePreviews();
   }
+}
+
+// Added Value % preview — "≈ $150 (5% of $3,000)" — mirrors the export's
+// own calc (tier's real, non-AV budget total × pct) so what the planner
+// sees here matches what lands in the Excel note. Cheap DOM patch instead
+// of a full re-render so typing in either field doesn't lose focus.
+function _avValuePreviewText(pct, tierRealTotal) {
+  if (!pct) return "";
+  const value = tierRealTotal * (pct / 100);
+  return `≈ ${money(value)} (${pct}% of ${money(tierRealTotal)})`;
+}
+
+function _refreshAvValuePreviews() {
+  const tierRealTotal = state.lineItems.reduce((s, li) => s + (li.is_added_value ? 0 : (li.monthly_budget || 0)), 0);
+  document.querySelectorAll("[data-av-preview]").forEach(span => {
+    const idx = parseInt(span.dataset.avPreview);
+    const li = state.lineItems[idx];
+    if (li) span.textContent = _avValuePreviewText(li.added_value_pct, tierRealTotal);
+  });
 }
 
 // Secondary audience (e.g. a broader look-alike layered on a narrow primary
@@ -1402,6 +1531,7 @@ function onAddProduct() {
     target_secondary: null,
     estimated_cpm_override: null,
     is_added_value: false,
+    added_value_pct: null,
   });
   picker.value = "";
   renderLineItems();
@@ -1526,11 +1656,40 @@ async function onRecommend() {
 // by building a "virtual" product with the override baked in, so
 // calcMaxSpendFromImps/calcMaxImpsFromSpend/computeSovPct don't need their
 // own override-handling logic duplicated three times.
-function _effectiveProduct(li, p) {
-  if (li && li.estimated_cpm_override != null) {
-    return { ...p, estimated_cpm_for_imps: li.estimated_cpm_override };
+// Step 06's own reminder of what this line is actually targeting — mirrors
+// notion_parser.compose_target_fallback() (the same DEMO | BEHAVIORAL |
+// CONTEXTUAL composition the Excel TARGET column falls back to) so the
+// planner sees the SAME value here that'll actually land in the export,
+// not just the raw override text with no context when it's blank.
+function _effectiveTargetText(li) {
+  const req = state.parsed || {};
+  let primary = li.target_override;
+  if (!primary) {
+    const parts = [req.demo, req.behavioral, req.contextual ? `Contextual: ${req.contextual}` : ""].filter(Boolean);
+    primary = parts.length ? parts.join(" | ") : "TBD";
   }
-  return p;
+  return li.target_secondary != null && li.target_secondary !== ""
+    ? `${primary} (+ Secondary: ${li.target_secondary})`
+    : primary;
+}
+
+function _effectiveProduct(li, p) {
+  // Builds a shallow-cloned "virtual product" with whichever per-line
+  // Step 04 overrides apply baked in, so every avails/SOV calc site just
+  // reads p.rate/p.estimated_cpm_for_imps normally instead of duplicating
+  // override-resolution logic at each call site. Both overrides can apply
+  // at once in principle (though in practice a line is either a real
+  // CPM/CPP product with a rate_override, or a Fixed/estimated-CPM
+  // product with an estimated_cpm_override, never both meaningfully).
+  if (!li) return p;
+  let eff = p;
+  if (li.rate_override != null) {
+    eff = { ...eff, rate: li.rate_override };
+  }
+  if (li.estimated_cpm_override != null) {
+    eff = { ...eff, estimated_cpm_for_imps: li.estimated_cpm_override };
+  }
+  return eff;
 }
 
 // --------------------------------------------------------------------------
@@ -1570,7 +1729,17 @@ function _applyFrequencyTriangle(entry, editedKey, defaultFreq) {
   const freq = entry.frequency != null ? entry.frequency : defaultFreq;
 
   if (editedKey === "est_uniques") {
-    if (uniques != null && freq != null) {
+    // Impressions already a REAL, independently-known number (typed
+    // directly, or from an ad platform's own delivery estimate) — Uniques
+    // just joined it, so Frequency is now the derived/shown side, same
+    // priority the max_imps branch below already uses. Overwriting the
+    // real Impressions with uniques×default-frequency here was the actual
+    // bug: entering both real numbers never surfaced what frequency they
+    // imply, which is the whole point — a sanity check the planner can
+    // eyeball ("does 5.5 look right, or does this combination look sus?").
+    if (uniques != null && imps != null) {
+      entry.frequency = Math.round((imps / uniques) * 10) / 10;
+    } else if (uniques != null && freq != null) {
       entry.max_imps = Math.round(uniques * freq);
       if (entry.frequency == null) entry.frequency = freq;
     }
@@ -1621,6 +1790,10 @@ function calcMaxImpsFromSpend(p, maxSpend) {
 // --------------------------------------------------------------------------
 
 function computeSovPct(li, p, entry) {
+  // Free-form has nothing to calculate this FROM (no real imps/spend
+  // numbers) — a planner-declared value stands in directly, still driving
+  // the same badge/conditional-formatting pipeline as a computed one.
+  if (entry.sov_pct_freeform != null) return entry.sov_pct_freeform;
   if (!li || !li.monthly_budget) return null;
   if (entry.max_spend) {
     return li.monthly_budget / entry.max_spend * 100;
@@ -1747,6 +1920,7 @@ function renderAvailsGrid() {
         <h3>${escapeHtml(li.product_name)}${escapeHtml(subtitle)}</h3>
         <span class="sov-badge" id="sov-badge-${escapeAttr(li.id)}"></span>
       </div>
+      <p class="avails-targeting-reminder">🎯 Target: ${escapeHtml(_effectiveTargetText(li))} &nbsp;·&nbsp; 📍 Geo: ${escapeHtml(state.parsed.geo || "TBD")}</p>
       <label class="freeform-toggle">
         <input type="checkbox" data-lid="${escapeAttr(li.id)}" data-freeform-toggle ${isFreeform ? "checked" : ""} />
         Free-form — type anything in these, no calculation
@@ -1791,7 +1965,13 @@ function renderAvailsGrid() {
                  value="${existing.frequency != null ? existing.frequency : (_defaultFrequency(li, p) != null ? _defaultFrequency(li, p) : "")}"
                  data-lid="${escapeAttr(li.id)}" data-key="frequency" />
         </label>
-        ` : ""}
+        ` : `
+        <label>SOV %<small> (no imps/spend to calculate it from in free-form — enter your own estimate)</small>
+          <input type="text" inputmode="decimal" placeholder="—" class="sov-freeform-input"
+                 value="${existing.sov_pct_freeform != null ? existing.sov_pct_freeform + "%" : ""}"
+                 data-lid="${escapeAttr(li.id)}" data-key="sov_pct_freeform" />
+        </label>
+        `}
       </div>
       <p class="sov-helper" id="sov-helper-${escapeAttr(li.id)}"></p>
     `;
@@ -1820,12 +2000,33 @@ function renderAvailsGrid() {
     });
   });
 
+  // Free-form SOV %: the one free-form field that ISN'T free text — it
+  // always keeps "%" formatting and drives the same traffic-light
+  // conditional formatting as the numeric-mode calculated SOV, just
+  // planner-declared instead of computed (there's nothing to compute it
+  // FROM in free-form — no real imps/spend numbers to divide).
+  grid.querySelectorAll('input[data-key="sov_pct_freeform"]').forEach(inp => {
+    inp.addEventListener("focus", () => {
+      const n = parseFormattedInput(inp.value);
+      inp.value = n === null ? "" : String(n);
+    });
+    inp.addEventListener("blur", () => {
+      const lid = inp.dataset.lid;
+      state.availsData[lid] = state.availsData[lid] || {};
+      let n = parseFormattedInput(inp.value);
+      if (n !== null) n = Math.max(0, Math.min(100, Math.round(n * 10) / 10));
+      state.availsData[lid].sov_pct_freeform = n;
+      inp.value = n === null ? "" : `${n}%`;
+      applySovDisplay(lid, n);
+    });
+  });
+
   // On focus: strip formatting so the raw number is easy to edit. Excludes
   // the free-form checkbox (not a value-bearing text field — its `.value`
   // is meaningless, always "on" per the checkbox default) and the "_text"
   // free-form inputs above (running parseFormattedInput on "50 to 100"
   // would strip the letters and glue the digits together into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
     inp.addEventListener("focus", e => {
       const raw = parseFormattedInput(e.target.value);
       e.target.value = raw === null ? "" : String(Math.round(raw));
@@ -1855,7 +2056,7 @@ function renderAvailsGrid() {
   // both overwrite that with a numeric parse of the same text AND mangle
   // it in the process — parseFormattedInput("50 to 100") strips the
   // letters and glues what's left into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
     inp.addEventListener("blur", e => {
       const lid = e.target.dataset.lid;
       const key = e.target.dataset.key;
@@ -1979,7 +2180,7 @@ function renderGenerateSummary() {
 
   const allTiers = allTiersForSubmit();
   const multiTier = allTiers.length > 1;
-  const tierLabel = multiTier ? ` (Option ${state.activeTierLabel})` : "";
+  const tierLabel = multiTier ? ` (${_tierDisplayName(state.activeTierLabel)})` : "";
 
   // Catch the exact gap that caused an option to silently ship with no
   // avails: some products across the proposal DO have avails entered, but
@@ -1993,7 +2194,7 @@ function renderGenerateSummary() {
       : [];
     if (anyAvailsAnywhere && emptyTiers.length > 0) {
       availsWarningEl.classList.remove("hidden");
-      availsWarningEl.innerHTML = `<strong>⚠ No avails entered for ${emptyTiers.map(t => `Option ${escapeHtml(t.label)}`).join(", ")}</strong> — other options have avails, so ${emptyTiers.length === 1 ? "this one" : "these"} will export without any. Go back to Step 06, switch to that tab, and enter avails (or use "Copy avails from") if that's not intentional.`;
+      availsWarningEl.innerHTML = `<strong>⚠ No avails entered for ${emptyTiers.map(t => escapeHtml(_tierDisplayName(t.label))).join(", ")}</strong> — other options have avails, so ${emptyTiers.length === 1 ? "this one" : "these"} will export without any. Go back to Step 06, switch to that tab, and enter avails (or use "Copy avails from") if that's not intentional.`;
     } else {
       availsWarningEl.classList.add("hidden");
       availsWarningEl.innerHTML = "";
@@ -2012,7 +2213,7 @@ function renderGenerateSummary() {
     ${fee > 0 ? `<div class="sum-row"><span class="lbl">Flight total (Gross)${tierLabel}</span><span class="val">${money(gross)}</span></div>` : ""}
     ${multiTier ? `<div class="sum-row sum-tiers-row"><span class="lbl">Budget Options</span><span class="val">${allTiers.map(t => {
       const m = (t.line_items || []).reduce((s, li) => s + (li.monthly_budget || 0), 0);
-      return `Option ${escapeHtml(t.label)}: ${money(m)}/mo · ${(t.line_items || []).length} products`;
+      return `${escapeHtml(_tierDisplayName(t.label))}: ${money(m)}/mo · ${(t.line_items || []).length} products`;
     }).join(" &nbsp;·&nbsp; ")}</span></div>` : ""}
   `;
   // Sync suggested tabs into the checkboxes
@@ -2108,7 +2309,7 @@ function buildGammaOutline() {
   const tiers = allTiersForSubmit();
   lines.push(tiers.length > 1 ? "MEDIA PLAN OPTIONS" : "MEDIA PLAN");
   tiers.forEach(t => {
-    if (tiers.length > 1) lines.push(`Option ${t.label}:`);
+    if (tiers.length > 1) lines.push(`${_tierDisplayName(t.label)}:`);
     let tierTotal = 0;
     (t.line_items || []).forEach(li => {
       const p = state.productIndex[li.product_name] || {};
@@ -2141,7 +2342,112 @@ function buildGammaOutline() {
   return lines.join("\n").trim();
 }
 
-function showResult(data) {
+// --------------------------------------------------------------------------
+// Step 7: seller-email mailto link — "the email that the planner sends to
+// the seller," as a ready mailto: link instead of copy/paste only. Ports
+// the CC-assembly logic of the planning team's existing Notion mailto
+// formula (base team CC + market-based CCs + per-request CCs + product/
+// renewal-based CCs, deduped) onto this app's own data:
+//   - Market + per-market CCs are now admin-editable (Markets tab) instead
+//     of hardcoded in the formula — fetched from the server since that's
+//     where the admin config lives.
+//   - The old Tag T1? checkbox branch is now a plain spend rule (planner
+//     confirmed, replacing the Notion-side manual tag): T1 CCs are added
+//     ON TOP of the regular market CCs the moment ANY tier's own monthly
+//     spend crosses the admin-set threshold (starts at $10k) — not instead
+//     of the market list, and a proposal with one big tier and one small
+//     one still escalates.
+//   - "Renewal" detection uses the actual parsed Request Type field
+//     instead of string-matching "renewal" in the project name — more
+//     reliable, same intent (renewals CC an extra couple of people).
+//   - The body is this app's own real, AI-written internal email (already
+//     addressed to the AE by name) rather than the Notion formula's fixed
+//     "*INSERT OBJECTIVE HERE*" placeholder template — strictly better
+//     content, already sitting right above this button once enrichment
+//     succeeds. If enrichment didn't produce a body, the link stays hidden
+//     rather than opening an empty draft.
+// --------------------------------------------------------------------------
+
+const _EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+function _dedupeEmails(list) {
+  const seen = new Set();
+  return list.map(e => (e || "").trim()).filter(e => {
+    if (!e) return false;
+    const k = e.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+async function buildInternalEmailMailtoLink() {
+  const linkEl = document.getElementById("internal-email-mailto-link");
+  const hintEl = document.getElementById("internal-email-mailto-hint");
+  if (!linkEl) return;
+
+  const req = state.parsed || {};
+  const enrichment = state.enrichment || {};
+  const body = enrichment.internal_email_body || "";
+
+  if (!body) {
+    // Nothing real to send (AI enrichment failed/skipped) — hide rather
+    // than open an empty draft; the Copy button covers manual fallback.
+    linkEl.classList.add("hidden");
+    hintEl.classList.add("hidden");
+    return;
+  }
+
+  const to = (req.salesperson_email || "").trim();
+  const subject = enrichment.internal_email_subject || state.finalProposalTitle || "";
+
+  let ccList = [];
+  try {
+    const res = await fetch(`/api/market-ccs?market=${encodeURIComponent(req.salesperson_market || "")}`);
+    if (res.ok) {
+      const marketData = await res.json();
+      ccList = ccList.concat(marketData.ccs || []);
+
+      // T1 escalation: added on top of the regular market CCs (not instead
+      // of) the moment ANY tier's own spend crosses the threshold — a mix
+      // of a big Option A and a small Option B still escalates.
+      const threshold = marketData.t1_spend_threshold || 10000;
+      const tierTotals = allTiersForSubmit().map(t =>
+        (t.line_items || []).reduce((sum, li) => sum + (li.monthly_budget || 0), 0)
+      );
+      if (tierTotals.some(total => total >= threshold)) {
+        ccList = ccList.concat(marketData.t1_ccs || []);
+      }
+    }
+  } catch (e) {
+    // Market-CC lookup failing shouldn't block sending the email at all.
+  }
+
+  ccList = ccList.concat((req.ccs || "").match(_EMAIL_RE) || []);
+
+  const products = req.products_selected || [];
+  if (products.some(p => /\bCTV\b|\bOTT\b/i.test(p))) ccList.push("joel.alcaraz@entravision.com");
+  if (products.some(p => /tik\s*tok|meta|facebook|instagram/i.test(p))) ccList.push("amelia.arce@entravision.com");
+  if ((req.request_type || "").toLowerCase().includes("renewal")) {
+    ccList.push("amelia.arce@entravision.com", "joel.alcaraz@entravision.com");
+  }
+
+  ccList = _dedupeEmails(ccList);
+
+  const mailto = `mailto:${encodeURIComponent(to)}` +
+    `?subject=${encodeURIComponent(subject)}` +
+    (ccList.length ? `&cc=${encodeURIComponent(ccList.join(","))}` : "") +
+    `&body=${encodeURIComponent(body)}`;
+
+  linkEl.href = mailto;
+  linkEl.classList.remove("hidden");
+  // Long AI-written emails can exceed what some clients (older Outlook
+  // especially) reliably accept in a mailto: URL — just a courtesy heads
+  // up, not a hard limit check.
+  hintEl.classList.toggle("hidden", body.length < 1200);
+}
+
+async function showResult(data) {
   const result = document.getElementById("result");
   result.classList.remove("hidden");
 
@@ -2167,6 +2473,13 @@ function showResult(data) {
 
   const dl = document.getElementById("download-link");
   dl.href = `/api/download/${data.proposal_id}`;
+
+  const pptxNetLink = document.getElementById("download-pptx-net-link");
+  pptxNetLink.classList.toggle("hidden", !data.has_pptx_net);
+  if (data.has_pptx_net) pptxNetLink.href = `/api/download-pptx-net/${data.proposal_id}`;
+  const pptxGrossLink = document.getElementById("download-pptx-gross-link");
+  pptxGrossLink.classList.toggle("hidden", !data.has_pptx_gross);
+  if (data.has_pptx_gross) pptxGrossLink.href = `/api/download-pptx-gross/${data.proposal_id}`;
 
   document.getElementById("gamma-outline-body").textContent = buildGammaOutline();
 
@@ -2215,6 +2528,8 @@ function showResult(data) {
       docLink.classList.add("hidden");
     }
   }
+
+  await buildInternalEmailMailtoLink();
 
   result.scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -2269,6 +2584,10 @@ async function onEmailReprompt() {
     document.getElementById("email-reprompt-area").classList.add("hidden");
     document.getElementById("email-reprompt-btn").style.display = "";
     document.getElementById("email-reprompt-input").value = "";
+
+    // The mailto link's subject/body are frozen at the moment they were
+    // built — refresh it now so "Open in Email" reflects the just-revised text.
+    await buildInternalEmailMailtoLink();
   } catch (e) {
     alert("Request failed: " + e.message);
   } finally {

@@ -173,6 +173,7 @@ Market context: {strategy_brief.get('market_context', '')}
 - Client: {getattr(request, 'client_name', '') or 'TBD'} | Website: {getattr(request, 'client_website', '') or 'N/A'}
 - Campaign Goal: {getattr(request, 'campaign_goal', '') or 'Awareness'}
 - AE Comments: {getattr(request, 'salesperson_comments', '') or 'None'}
+- Question Details: {getattr(request, 'question_details', '') or 'None'}
 {strategy_block}
 ## TARGET AUDIENCE
 {target_block}

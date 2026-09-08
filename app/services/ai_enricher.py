@@ -496,19 +496,24 @@ def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
             t_imps = _estimate_monthly_impressions(t_items)
             imps_str = f", {_format_impressions(t_imps)} monthly impressions" if t_imps else ""
             products_str = ", ".join(li.product_name for li in t_items) or "(no products)"
+            option_name = (t.get("name") or "").strip() or f"Option {t.get('label', '?')}"
             option_lines.append(
-                f"  - Option {t.get('label', '?')}: ${t_monthly:,.0f}/month "
+                f"  - {option_name}: ${t_monthly:,.0f}/month "
                 f"(${t_total:,.0f} total flight{imps_str}) — {products_str}"
             )
         tiers_block = f"""
 ## MULTIPLE BUDGET OPTIONS — THIS PROPOSAL HAS {len(tiers)} DISTINCT OPTIONS
 The client is being presented {len(tiers)} alternative budget/product-mix
 options (lettered to match their Excel tabs, "Proposal A", "Proposal B",
-etc.). Do NOT describe this as a single plan — both emails must clearly lay
-out EACH option separately (its own heading, budget, and product mix) so
-the reader can compare them side by side. The monthly impressions figures
-below (where given) are pre-computed from real rates — use them verbatim
-if you reference impressions; never compute or guess your own.
+etc., internally — but each is ALSO given a planner-chosen name below, e.g.
+"Independent" or "Democrat" for a political client). Do NOT describe this
+as a single plan — both emails must clearly lay out EACH option separately
+(its own heading, budget, and product mix) so the reader can compare them
+side by side. **Use the exact option name given below as its heading** —
+never the generic "Option A"/"Option B" unless that's literally what's
+given (no planner name set). The monthly impressions figures below (where
+given) are pre-computed from real rates — use them verbatim if you
+reference impressions; never compute or guess your own.
 {chr(10).join(option_lines)}
 """
 
@@ -638,6 +643,7 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
 - Total Net Investment: ${total_budget:,.0f}{f" (~{_format_impressions(total_impressions)} monthly impressions — pre-computed from real rates, use verbatim, never recompute)" if total_impressions and not tiers_block else ""}
 - Request Type: {request.request_type or "Proposal"}
 - AE Comments: {request.salesperson_comments or "None"}
+- Question Details: {getattr(request, "question_details", "") or "None"}
 - Market: {request.salesperson_market or "TBD"}
 
 ## TARGET AUDIENCE (use these SPECIFIC values by name in every blurb — never
@@ -680,8 +686,18 @@ description above, does [the specific thing it does — paraphrase, don't
 just repeat the description verbatim]. For {request.demo or 'this demo'}
 in {request.geo or 'this market'}, that matters because [real stat found
 via search, tied to this product's actual category] (Source, Year).
-Entravision's [specific advantage for THIS product's family] makes this
-the right execution, not just a plausible one."
+[One concrete, specific detail — a targeting capability, format, or
+placement this particular product offers — that makes it fit this
+audience, stated plainly, not dressed up as a claim about Entravision]."
+
+Do NOT close a blurb with a generic "Entravision's [X] advantage/expertise
+makes this the right execution/choice for this client" sentence — that
+line reads as filler no matter how it's worded, and stacked across every
+product in a proposal it's the same sentence repeated with the noun
+swapped. If there's a genuine, specific Entravision capability worth
+naming (e.g. a named local partnership, a real first-party data asset),
+state the concrete fact itself and stop there — don't wrap it in
+boilerplate praise.
 
 ---
 
@@ -692,7 +708,7 @@ Return this exact JSON structure (no deviation):
   "product_blurbs": [
     {{
       "product_name": "exact product name as listed above",
-      "blurb": "[What this product concretely is/does — grounded in its own 'What this actually is' line above, paraphrased not copied]. For [name the specific demo/geo/behavioral/contextual value from above], this matters because [specific recent stat tied to THAT audience and THIS product's real category, with year] (Source, Year). Entravision's [advantage from the knowledge base row for THIS product's own family] makes this the right execution for this client."
+      "blurb": "[What this product concretely is/does — grounded in its own 'What this actually is' line above, paraphrased not copied]. For [name the specific demo/geo/behavioral/contextual value from above], this matters because [specific recent stat tied to THAT audience and THIS product's real category, with year] (Source, Year). [One concrete, specific detail this product itself offers that fits this audience — NOT a generic 'Entravision's expertise makes this the right execution' closing line]."
     }}
   ],
   "internal_email_subject": "Digital Strategy Pack: [Client] ([Month Year] Campaign)",
@@ -703,6 +719,7 @@ Return this exact JSON structure (no deviation):
 
 RULES:
 - Each product blurb: 50–80 words, insightful (not a basic restatement of the category), include one real statistic with citation (Source Name, Year), and must name at least one specific targeting value from the Target Audience section above
+- Never close a blurb with a generic "Entravision's [X] expertise/advantage makes this the right execution/choice for this client" sentence — cut it outright rather than reword it. Every real, useful sentence in a blurb is specific to that product+audience; a sentence that would read the same with the product name swapped out doesn't belong
 - Before writing each blurb, re-read that product's own "What this actually is" line above and its own row in the Entravision Knowledge Base. That is the ONLY source of truth for what the product does and which Entravision advantage applies to it — not the product's name alone, not another product's blurb, not a family that merely sounds adjacent
 - Every citation must name a real, specific, searchable source (publisher + year) you actually found via search — never a vague placeholder like "Industry Report, 2025." If you can't find a specific real source, don't present a number as sourced data — fold it into the blurb as directional context instead
 - A blurb must accurately describe the NAMED product's own format/category, grounded in ITS OWN description above — e.g. never describe audio/podcast/streaming content for an email, display, or search product, or vice versa, even if that content is sitting elsewhere in this prompt for a different product. If the confirmed strategy brief above doesn't cover a product, base its blurb on the Target Audience section plus that product's own description and knowledge-base row — never borrow a rationale, stat, or example written for a different product family

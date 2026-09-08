@@ -163,6 +163,14 @@ Client name: ...
           <label>Contextual <textarea data-field="contextual" rows="2"></textarea></label>
         </fieldset>
 
+        <fieldset class="span-2">
+          <legend>AI Context <small>(fed into Strategy Brief, Roadblocks, and the generated emails — not shown elsewhere in the export)</small></legend>
+          <label>Additional comments from the salesperson <textarea data-field="salesperson_comments" rows="2"></textarea></label>
+          <label>Question details <small>(Quick Question / Need Guidance requests)</small>
+            <textarea data-field="question_details" rows="2"></textarea>
+          </label>
+        </fieldset>
+
         <fieldset class="span-2" id="renewal-block">
           <legend>Renewal context</legend>
           <label>Renewal client <input data-field="renewal_client" /></label>
@@ -451,6 +459,8 @@ Client name: ...
         </div>
         <div class="result-actions">
           <a id="download-link" class="btn-primary" download>⬇ Download .xlsx</a>
+          <a id="download-pptx-net-link" class="btn-secondary hidden" download>⬇ PowerPoint (Net)</a>
+          <a id="download-pptx-gross-link" class="btn-secondary hidden" download>⬇ PowerPoint (Gross)</a>
           <button class="btn-secondary" id="drive-upload-btn">↗ Upload to Google Drive</button>
           <button class="btn-secondary" id="new-proposal-btn">+ New Proposal</button>
         </div>
@@ -464,10 +474,14 @@ Client name: ...
           <div class="ai-section">
             <div class="ai-section-head">
               <h3>Internal Email — For the AE</h3>
-              <button class="btn-copy" data-copy-target="internal-email-body">Copy</button>
+              <div class="ai-section-actions">
+                <button class="btn-copy" data-copy-target="internal-email-body">Copy</button>
+                <a id="internal-email-mailto-link" class="btn-secondary hidden" href="#">✉ Open in Email</a>
+              </div>
             </div>
             <div class="email-subject" id="internal-email-subject"></div>
             <pre class="email-body" id="internal-email-body"></pre>
+            <p class="mailto-hint hidden" id="internal-email-mailto-hint">Some email clients truncate very long mailto links — if "Open in Email" opens a cut-off draft, copy the text above instead.</p>
           </div>
 
           <div class="ai-section">

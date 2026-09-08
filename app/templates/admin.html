@@ -24,6 +24,7 @@
       <nav class="admin-tabs" aria-label="Admin sections">
         <button class="admin-tab active" data-tab="proposals">Proposal History</button>
         <button class="admin-tab" data-tab="rates">Rate Overrides</button>
+        <button class="admin-tab" data-tab="markets">Markets</button>
       </nav>
     </div>
   </header>
@@ -128,10 +129,71 @@
         </form>
       </details>
 
+      <details class="add-product-panel" id="edit-product-panel">
+        <summary>✎ Edit product <span id="edit-product-name-label"></span></summary>
+        <form id="edit-product-form">
+          <div class="add-product-grid">
+            <label>Family <span class="req">*</span>
+              <input type="text" id="ep-family" required />
+            </label>
+            <label>Product Name
+              <input type="text" id="ep-name" disabled title="Renaming isn't supported here — export/re-import via CSV to rename a product." />
+            </label>
+            <label>Objective / Short Label
+              <input type="text" id="ep-short-label" />
+            </label>
+            <label>Buying Model <span class="req">*</span>
+              <select id="ep-buying-model" required>
+                <option value="CPM">CPM</option>
+                <option value="CPP">CPP</option>
+                <option value="Fixed">Fixed</option>
+              </select>
+            </label>
+            <label>Rate (NET) <small>(blank if Fixed with no per-unit rate)</small>
+              <input type="number" step="0.01" min="0" id="ep-base-rate" />
+            </label>
+            <label>Minimum Spend
+              <input type="number" step="1" min="0" id="ep-min-spend" placeholder="0" />
+            </label>
+            <label>Est. CPM <small>(for Fixed products — enables "Est. n impressions")</small>
+              <input type="number" step="0.01" min="0" id="ep-est-cpm" />
+            </label>
+            <label>Sizes
+              <input type="text" id="ep-sizes" placeholder="Custom" />
+            </label>
+            <label>Tech Platform
+              <input type="text" id="ep-tech-platform" />
+            </label>
+            <label class="checkbox-label span-2">
+              <input type="checkbox" id="ep-is-addon" />
+              This is an add-on <small>(a fixed-price extra like a landing page or call tracking — picked via Step 04's Add-Ons module instead of the main product list, no suggested budget)</small>
+            </label>
+            <label class="span-2">Proposal Description <small>(shown in the DETAILS column)</small>
+              <textarea id="ep-description" rows="2"></textarea>
+            </label>
+            <label class="span-2">Planner Notes <small>(compliance/restriction text)</small>
+              <textarea id="ep-notes" rows="2"></textarea>
+            </label>
+          </div>
+          <div class="add-product-actions">
+            <span id="edit-product-error" class="add-product-error hidden"></span>
+            <button type="button" class="btn-secondary" id="edit-product-cancel-btn">Cancel</button>
+            <button type="submit" class="btn-primary">Save Changes</button>
+          </div>
+        </form>
+      </details>
+
       <div class="admin-toolbar">
         <input type="text" id="rates-search" placeholder="Filter by product or family…" />
         <span class="admin-count" id="rates-count"></span>
+        <div class="spacer"></div>
+        <a href="/api/admin/products/export" class="btn-secondary" download>⬇ Export CSV</a>
+        <label class="btn-secondary bulk-upload-btn">
+          ⬆ Bulk Upload CSV
+          <input type="file" id="bulk-upload-input" accept=".csv" hidden />
+        </label>
       </div>
+      <div id="bulk-upload-result" class="bulk-upload-result hidden"></div>
 
       <div class="table-scroll">
         <table class="admin-table" id="rates-table">
@@ -148,6 +210,50 @@
           </thead>
           <tbody id="rates-body">
             <tr><td colspan="7" class="admin-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ================= MARKETS TAB ================= -->
+    <section class="panel hidden" id="tab-markets">
+      <div class="panel-head">
+        <div class="kicker">Admin</div>
+        <h1 class="display">Market Config</h1>
+        <p class="lede">Each market's Entravision office address (shown on every proposal export's meta block) and CC list for the Step 07 seller email. <strong>Default</strong> is what every market uses until it has its own row below.</p>
+      </div>
+
+      <div class="admin-toolbar base-ccs-toolbar">
+        <label class="base-ccs-label" for="base-ccs-input">Base CCs <small>(every proposal, every market — comma-separated)</small></label>
+        <input type="text" id="base-ccs-input" placeholder="salesplanning@entravision.com" />
+        <button type="button" class="btn-save-row" id="save-base-ccs-btn">Save</button>
+      </div>
+
+      <div class="admin-toolbar base-ccs-toolbar">
+        <label class="base-ccs-label" for="t1-ccs-input">T1 Escalation CCs <small>(added when any tier spends $10k/mo+ — comma-separated)</small></label>
+        <input type="text" id="t1-ccs-input" placeholder="jwoods@entravision.com" />
+        <button type="button" class="btn-save-row" id="save-t1-ccs-btn">Save</button>
+      </div>
+
+      <div class="admin-toolbar">
+        <input type="text" id="new-market-name" placeholder="New market name, e.g. Los Angeles…" />
+        <button type="button" class="btn-secondary" id="add-market-btn">+ Add market</button>
+        <span class="admin-count" id="markets-count"></span>
+      </div>
+
+      <div class="table-scroll">
+        <table class="admin-table" id="markets-table">
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Address Line 1</th>
+              <th>Address Line 2</th>
+              <th>CC Emails <small>(comma-separated)</small></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="markets-body">
+            <tr><td colspan="5" class="admin-empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>

@@ -190,6 +190,7 @@ Please revise your strategy taking this into account.
 - Budget: ${monthly:,.0f}/month × {months} months = ${total:,.0f} total flight
 - Request Type: {request.request_type or "Proposal"}
 - AE Comments: {request.salesperson_comments or "None"}
+- Question Details: {getattr(request, "question_details", "") or "None"}
 
 ## TARGET AUDIENCE (the planner's actual inputs — this is the most important
 ## section in this brief; use these SPECIFIC values by name throughout your
@@ -249,6 +250,7 @@ audience-specific data available, using general market benchmark").
    - One supporting data point with citation in format (Source, Year) — audience-specific where possible, general market only as a fallback (and say so if you fall back)
    - Entravision's specific advantage for this tactic
    - Suggested budget allocation as a percentage (all tactics must sum to 100)
+   - **If the rationale names more than one specific product within the family** (e.g. "Pre-Roll OLV and YouTube" both under Online Video), say explicitly that the suggested % is the family's combined ceiling and each named product still carries its OWN separate minimum spend — never imply they share one pooled minimum. When only one product is named, this doesn't apply.
 5. Write a 2–3 sentence overall strategy summary that ties directly back to the named audience and client.
 6. List 3 key insights the AE should highlight to the client — each one must reference the specific audience/client context, not generic advice that could apply to any campaign.
 
