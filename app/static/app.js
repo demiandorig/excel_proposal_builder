@@ -2606,26 +2606,72 @@ async function onDriveUpload() {
   const status = document.getElementById("drive-status");
   status.classList.remove("hidden", "ok", "warn");
   status.textContent = "Uploading to Drive…";
-  const res = await fetch("/api/drive/upload", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      proposal_id: state.proposalId,
-      seller_email: state.parsed.salesperson_email || "",
-    }),
-  });
-  const data = await res.json();
-  if (data.uploaded) {
-    status.classList.add("ok");
-    status.innerHTML = `✓ Uploaded — <a href="${data.shareable_link}" target="_blank" rel="noopener">Open in Drive</a>`;
-  } else if (data.auth_url) {
-    // Need OAuth authorization
+  // Everything below is awaited inside a try/catch on purpose — without it,
+  // any failure (a network hiccup, a non-JSON error response, a timeout)
+  // left the status text frozen on "Uploading to Drive…" forever with no
+  // feedback at all, which is exactly the "stuck loading" symptom reported.
+  try {
+    const res = await fetch("/api/drive/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        proposal_id: state.proposalId,
+        seller_email: state.parsed.salesperson_email || "",
+      }),
+    });
+    if (!res.ok) throw new Error(`Server returned ${res.status}`);
+    const data = await res.json();
+    if (data.uploaded) {
+      status.classList.add("ok");
+      status.innerHTML = `✓ Uploaded — <a href="${data.shareable_link}" target="_blank" rel="noopener">Open in Drive</a>`;
+    } else if (data.auth_url) {
+      // Need OAuth authorization — opened as a real popup (not a plain
+      // target="_blank" link) so the opener side can detect when it closes
+      // and automatically retry the upload, instead of leaving the planner
+      // to remember to click Upload again themselves.
+      status.classList.add("warn");
+      status.innerHTML = `Drive not authorized. <a href="#" id="drive-auth-link">Click here to authorize Google Drive</a> — it will retry automatically once you approve.`;
+      document.getElementById("drive-auth-link").addEventListener("click", (e) => {
+        e.preventDefault();
+        openDriveAuthPopup(data.auth_url);
+      });
+    } else {
+      status.classList.add("warn");
+      status.textContent = "⚠ " + (data.reason || "Upload not configured");
+    }
+  } catch (e) {
     status.classList.add("warn");
-    status.innerHTML = `Drive not authorized. <a href="${data.auth_url}" target="_blank">Click here to authorize Google Drive</a>, then try uploading again.`;
-  } else {
-    status.classList.add("warn");
-    status.textContent = "⚠ " + (data.reason || "Upload not configured");
+    status.textContent = "⚠ Upload failed: " + e.message + " — try again.";
   }
+}
+
+// Google's OAuth consent/redirect pages send a strict
+// Cross-Origin-Opener-Policy header that severs `window.opener` for the
+// rest of that tab's life (a well-documented popup-flow gotcha, unrelated
+// to this app's own code) — so the callback page's postMessage-to-opener
+// can't be relied on to fire. Polling from the OPENER side instead (reading
+// `popup.closed` on the handle *we* hold) sidesteps that entirely, since it
+// never depends on the popup introspecting us back.
+function openDriveAuthPopup(authUrl) {
+  const popup = window.open(authUrl, "drive_auth", "width=520,height=680");
+  if (!popup) {
+    // Popup blocked by the browser — fall back to a plain new tab the
+    // planner drives themselves, same as this app's previous behavior.
+    window.open(authUrl, "_blank");
+    return;
+  }
+  const status = document.getElementById("drive-status");
+  const startedAt = Date.now();
+  const giveUpAfterMs = 3 * 60 * 1000; // stop polling if it's left open unattended
+  const poll = setInterval(() => {
+    if (popup.closed) {
+      clearInterval(poll);
+      status.textContent = "Authorized — retrying upload…";
+      onDriveUpload();
+    } else if (Date.now() - startedAt > giveUpAfterMs) {
+      clearInterval(poll);
+    }
+  }, 1000);
 }
 
 // --------------------------------------------------------------------------

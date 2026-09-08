@@ -119,3 +119,25 @@ CREATE TABLE proposals (
 );
 
 CREATE INDEX idx_proposals_generated_at ON proposals (generated_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- drive_tokens — the single stored Google OAuth2 token for Drive uploads
+-- (app/services/drive_uploader.py), replacing the local file
+-- ~/.entravision_drive_token.json. One row, fixed id — there's only ever
+-- one Drive connection for the whole app (it authorizes as the app's own
+-- service identity, not per-user), so this is a singleton row rather than
+-- a real per-something table, same shape as market_config's reserved rows.
+-- Moving this off local disk isn't a nice-to-have like the other three
+-- tables above — it's required for Drive upload to work AT ALL on an
+-- autoscale deployment (see POSTGRES_MIGRATION_BRIEF.md's freshness note).
+-- ---------------------------------------------------------------------------
+CREATE TABLE drive_tokens (
+    id             TEXT PRIMARY KEY DEFAULT 'default',
+    token          TEXT NOT NULL,
+    refresh_token  TEXT,
+    token_uri      TEXT NOT NULL,
+    client_id      TEXT NOT NULL,
+    client_secret  TEXT NOT NULL,
+    scopes         TEXT[] NOT NULL DEFAULT '{}',
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
