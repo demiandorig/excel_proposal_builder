@@ -673,30 +673,39 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         )
 
     # 8b. Build the simple, signature-ready Net/Gross PowerPoint decks (Step
-    #     07's PPTX export) — one per tab type actually built for tier A
-    #     (matching whichever of Net/Gross the planner requested). Scoped to
-    #     tier A only for a multi-tier proposal, same as this same response's
-    #     top-level total_net/total_gross already are — a per-tier PPTX set
-    #     isn't built here.
+    #     07's PPTX export) — ALL tiers included (each becomes its own
+    #     labeled section with its own subtotal; alternatives, so never
+    #     summed into one combined total), one deck per tab type actually
+    #     built (Net and/or Gross apply uniformly across every tier — there's
+    #     no per-tier tab selection in this app — so checking tabs_built
+    #     once for either suffix is enough to know whether to build it here).
     pptx_net_filename: Optional[str] = None
     pptx_gross_filename: Optional[str] = None
-    tier_a_products = [p for li in tiers[0]["line_items"] if (p := by_name(li.product_name)) is not None]
-    tier_a_line_items = [li for li in tiers[0]["line_items"] if by_name(li.product_name) is not None]
-    if tier_a_products:
-        if "Proposal A" in summary.get("tabs_built", []):
+    tabs_built_list = summary.get("tabs_built", [])
+    pptx_tiers = []
+    for t in tiers:
+        t_products = [p for li in t["line_items"] if (p := by_name(li.product_name)) is not None]
+        t_line_items = [li for li in t["line_items"] if by_name(li.product_name) is not None]
+        if t_products:
+            pptx_tiers.append({
+                "name": (t.get("name") or "").strip() or f"Option {t['label']}",
+                "products": t_products, "line_items": t_line_items,
+            })
+    if pptx_tiers:
+        if any(tb == f"Proposal {t['label']}" for t in tiers for tb in tabs_built_list):
             pptx_net_filename = f"{safe_base}_Net_Deck.pptx"
             try:
                 pptx_builder.build_signature_deck(
-                    req, tier_a_products, tier_a_line_items, PROPOSALS_DIR / pptx_net_filename,
+                    req, pptx_tiers, PROPOSALS_DIR / pptx_net_filename,
                     gross=False, proposal_title=proposal_title,
                 )
             except Exception:
                 pptx_net_filename = None  # never let an optional export break the main Generate call
-        if "Proposal A (Gross)" in summary.get("tabs_built", []):
+        if any(tb == f"Proposal {t['label']} (Gross)" for t in tiers for tb in tabs_built_list):
             pptx_gross_filename = f"{safe_base}_Gross_Deck.pptx"
             try:
                 pptx_builder.build_signature_deck(
-                    req, tier_a_products, tier_a_line_items, PROPOSALS_DIR / pptx_gross_filename,
+                    req, pptx_tiers, PROPOSALS_DIR / pptx_gross_filename,
                     gross=True, proposal_title=proposal_title,
                 )
             except Exception:
