@@ -13,11 +13,9 @@ edit takes effect immediately with no restart.
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Optional
 
-_MARKET_CONFIG_PATH = Path(__file__).resolve().parent / "data" / "market_config.json"
+from app.db import get_connection
 
 DEFAULT_KEY = "__default__"
 # Always-CC'd addresses (every proposal, every market — the seller-email
@@ -50,12 +48,21 @@ def load_market_config() -> dict:
     the Burbank HQ address / no per-market CCs / just salesplanning@ as the
     base CC the first time this is ever read, so everything has a sane
     fallback even before an admin configures anything."""
-    if not _MARKET_CONFIG_PATH.exists():
-        return {DEFAULT_KEY: dict(_FALLBACK_DEFAULT), BASE_CCS_KEY: list(_FALLBACK_BASE_CCS), T1_CCS_KEY: list(_FALLBACK_T1_CCS)}
-    try:
-        data = json.loads(_MARKET_CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {DEFAULT_KEY: dict(_FALLBACK_DEFAULT), BASE_CCS_KEY: list(_FALLBACK_BASE_CCS), T1_CCS_KEY: list(_FALLBACK_T1_CCS)}
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT market_key, address_line1, address_line2, ccs FROM market_config ORDER BY market_key"
+        ).fetchall()
+    data = {}
+    for row in rows:
+        key = row["market_key"]
+        if key in (BASE_CCS_KEY, T1_CCS_KEY):
+            data[key] = list(row["ccs"] or [])
+        else:
+            data[key] = {
+                "address_line1": row["address_line1"],
+                "address_line2": row["address_line2"],
+                "ccs": list(row["ccs"] or []),
+            }
     if DEFAULT_KEY not in data:
         data[DEFAULT_KEY] = dict(_FALLBACK_DEFAULT)
     if BASE_CCS_KEY not in data:
@@ -66,8 +73,26 @@ def load_market_config() -> dict:
 
 
 def save_market_config(config: dict) -> None:
-    _MARKET_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _MARKET_CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    with get_connection() as conn:
+        conn.execute("DELETE FROM market_config")
+        for market_key, value in config.items():
+            if market_key in (BASE_CCS_KEY, T1_CCS_KEY):
+                address_line1 = None
+                address_line2 = None
+                ccs = list(value or [])
+            else:
+                entry = dict(value or {})
+                address_line1 = entry.get("address_line1")
+                address_line2 = entry.get("address_line2")
+                ccs = list(entry.get("ccs") or [])
+            conn.execute(
+                """
+                INSERT INTO market_config
+                    (market_key, address_line1, address_line2, ccs)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (market_key, address_line1, address_line2, ccs),
+            )
 
 
 def set_market_entry(market_key: str, fields: dict) -> dict:

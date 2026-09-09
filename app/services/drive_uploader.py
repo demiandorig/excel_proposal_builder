@@ -10,17 +10,16 @@ Setup:
      Open auth_url in a browser, authorize, and the callback at /api/drive/callback
      stores the token. Subsequent uploads use the stored token (auto-refreshed).
 
-Token file: ~/.entravision_drive_token.json
+  OAuth credentials are stored in PostgreSQL so they are shared by autoscale
+  instances.
 """
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
-from typing import Optional
+
+from app.db import get_connection
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
-TOKEN_PATH = Path.home() / ".entravision_drive_token.json"
 
 
 def _is_configured() -> bool:
@@ -83,24 +82,51 @@ def exchange_code(code: str, redirect_uri: str) -> None:
     )
     flow.fetch_token(code=code)
     creds = flow.credentials
-    TOKEN_PATH.write_text(json.dumps({
-        "token": creds.token,
-        "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
-        "scopes": list(creds.scopes) if creds.scopes else [],
-    }), encoding="utf-8")
+    _save_credentials(creds)
+
+
+def _save_credentials(creds) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO drive_tokens
+                (id, token, refresh_token, token_uri, client_id, client_secret, scopes)
+            VALUES ('default', %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                token = EXCLUDED.token,
+                refresh_token = EXCLUDED.refresh_token,
+                token_uri = EXCLUDED.token_uri,
+                client_id = EXCLUDED.client_id,
+                client_secret = EXCLUDED.client_secret,
+                scopes = EXCLUDED.scopes,
+                updated_at = now()
+            """,
+            (
+                creds.token,
+                creds.refresh_token,
+                creds.token_uri,
+                creds.client_id,
+                creds.client_secret,
+                list(creds.scopes) if creds.scopes else [],
+            ),
+        )
 
 
 def _load_credentials():
     """Load stored OAuth2 credentials, refreshing if expired. Returns None if not authorized."""
-    if not TOKEN_PATH.exists():
-        return None
     try:
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request as GRequest
-        data = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
+        with get_connection() as conn:
+            data = conn.execute(
+                """
+                SELECT token, refresh_token, token_uri, client_id, client_secret, scopes
+                FROM drive_tokens
+                WHERE id = 'default'
+                """
+            ).fetchone()
+        if not data:
+            return None
         creds = Credentials(
             token=data["token"],
             refresh_token=data.get("refresh_token"),
@@ -111,14 +137,7 @@ def _load_credentials():
         )
         if creds.expired and creds.refresh_token:
             creds.refresh(GRequest())
-            TOKEN_PATH.write_text(json.dumps({
-                "token": creds.token,
-                "refresh_token": creds.refresh_token,
-                "token_uri": creds.token_uri,
-                "client_id": creds.client_id,
-                "client_secret": creds.client_secret,
-                "scopes": list(creds.scopes) if creds.scopes else [],
-            }), encoding="utf-8")
+            _save_credentials(creds)
         return creds
     except Exception:
         return None

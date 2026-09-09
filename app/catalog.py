@@ -74,6 +74,8 @@ from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 from typing import Optional, Union
 
+from app.db import get_connection
+
 
 @dataclass
 class Product:
@@ -1798,13 +1800,21 @@ _RATE_OVERRIDES_PATH = Path(__file__).resolve().parent / "data" / "rate_override
 
 
 def load_rate_overrides() -> dict:
-    """Return {product_name: {field: value, ...}} from disk, or {} if none saved."""
-    if not _RATE_OVERRIDES_PATH.exists():
-        return {}
-    try:
-        return json.loads(_RATE_OVERRIDES_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    """Return {product_name: {field: value, ...}} from PostgreSQL."""
+    columns = ", ".join(("product_name",) + _OVERRIDABLE_FIELDS)
+    with get_connection() as conn:
+        rows = conn.execute(f"SELECT {columns} FROM rate_overrides").fetchall()
+    numeric_fields = {"base_rate", "minimum_spend", "estimated_cpm_for_imps"}
+    overrides = {}
+    for row in rows:
+        fields_ = {}
+        for field_name in _OVERRIDABLE_FIELDS:
+            value = row[field_name]
+            if value is not None:
+                fields_[field_name] = float(value) if field_name in numeric_fields else value
+        if fields_:
+            overrides[row["product_name"]] = fields_
+    return overrides
 
 
 def save_rate_overrides(overrides: dict) -> None:
@@ -1822,15 +1832,30 @@ def save_rate_overrides(overrides: dict) -> None:
         kept = {k: v for k, v in fields_.items() if k in _OVERRIDABLE_FIELDS and v is not None}
         if kept:
             cleaned[name] = kept
-    _RATE_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _RATE_OVERRIDES_PATH.write_text(json.dumps(cleaned, indent=2), encoding="utf-8")
+    columns = ", ".join(("product_name",) + _OVERRIDABLE_FIELDS)
+    placeholders = ", ".join(["%s"] * (1 + len(_OVERRIDABLE_FIELDS)))
+    update_columns = ", ".join(
+        f"{field_name} = EXCLUDED.{field_name}" for field_name in _OVERRIDABLE_FIELDS
+    )
+    with get_connection() as conn:
+        conn.execute("DELETE FROM rate_overrides")
+        for name, fields_ in cleaned.items():
+            conn.execute(
+                f"""
+                INSERT INTO rate_overrides ({columns})
+                VALUES ({placeholders})
+                ON CONFLICT (product_name) DO UPDATE SET
+                    {update_columns},
+                    updated_at = now()
+                """,
+                [name] + [fields_.get(field_name) for field_name in _OVERRIDABLE_FIELDS],
+            )
 
 
 def clear_rate_override(product_name: str) -> None:
     """Remove a single product's override (revert to catalog default)."""
-    overrides = load_rate_overrides()
-    overrides.pop(product_name, None)
-    save_rate_overrides(overrides)
+    with get_connection() as conn:
+        conn.execute("DELETE FROM rate_overrides WHERE product_name = %s", (product_name,))
 
 
 def _apply_override(p: Product) -> Product:
@@ -1857,30 +1882,101 @@ _CUSTOM_PRODUCTS_PATH = Path(__file__).resolve().parent / "data" / "custom_produ
 
 
 def load_custom_products() -> list[Product]:
-    """Return the admin-added products from disk, or [] if none saved."""
-    if not _CUSTOM_PRODUCTS_PATH.exists():
-        return []
-    try:
-        raw = json.loads(_CUSTOM_PRODUCTS_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    """Return the admin-added products from PostgreSQL, or [] if none saved."""
+    columns = (
+        "name, family, short_label, proposal_description, sizes, buying_model, "
+        "base_rate, estimated_impressions, discloses_impressions, minimum_spend, "
+        "minimum_flight_days_min, minimum_flight_days_max, sla_data_days, "
+        "sla_creative_days, sla_activate_days, sla_total_days, media_allocation_pct, "
+        "margin_upper, margin_lower, tech_platform, wide_orbit_code, billing_interval, "
+        "billing_calendar, billing_source, national_supported, notes, "
+        "estimated_cpm_for_imps, hispanic_targeting_forced, cannabis_policy, "
+        "political_policy, is_addon"
+    )
+    with get_connection() as conn:
+        rows = conn.execute(f"SELECT {columns} FROM custom_products ORDER BY name").fetchall()
     products = []
-    for d in raw:
-        d = dict(d)
-        if isinstance(d.get("minimum_flight_days"), list):
-            d["minimum_flight_days"] = tuple(d["minimum_flight_days"])
+    numeric_fields = {
+        "base_rate", "minimum_spend", "media_allocation_pct", "margin_upper",
+        "margin_lower", "estimated_cpm_for_imps",
+    }
+    for row in rows:
+        data = dict(row)
+        for field_name in numeric_fields:
+            if data[field_name] is not None:
+                data[field_name] = float(data[field_name])
+        data["minimum_flight_days"] = (
+            data.pop("minimum_flight_days_min"),
+            data.pop("minimum_flight_days_max"),
+        )
         try:
-            products.append(Product(**d))
+            products.append(Product(**data))
         except TypeError:
-            continue  # a hand-edited/corrupt entry — skip rather than crash the whole catalog
+            continue  # preserve the old behavior for malformed legacy records
     return products
 
 
 def _save_custom_products(products: list[Product]) -> None:
-    _CUSTOM_PRODUCTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _CUSTOM_PRODUCTS_PATH.write_text(
-        json.dumps([asdict(p) for p in products], indent=2), encoding="utf-8"
+    columns = (
+        "name, family, short_label, proposal_description, sizes, buying_model, "
+        "base_rate, estimated_impressions, discloses_impressions, minimum_spend, "
+        "minimum_flight_days_min, minimum_flight_days_max, sla_data_days, "
+        "sla_creative_days, sla_activate_days, sla_total_days, media_allocation_pct, "
+        "margin_upper, margin_lower, tech_platform, wide_orbit_code, billing_interval, "
+        "billing_calendar, billing_source, national_supported, notes, "
+        "estimated_cpm_for_imps, hispanic_targeting_forced, cannabis_policy, "
+        "political_policy, is_addon"
     )
+    placeholders = ", ".join(["%s"] * 31)
+    update_columns = ", ".join(
+        f"{column} = EXCLUDED.{column}" for column in columns.split(", ")
+        if column != "name"
+    )
+    with get_connection() as conn:
+        conn.execute("DELETE FROM custom_products")
+        for product in products:
+            conn.execute(
+                f"""
+                INSERT INTO custom_products ({columns})
+                VALUES ({placeholders})
+                ON CONFLICT (name) DO UPDATE SET
+                    {update_columns},
+                    updated_at = now()
+                """,
+                [
+                    product.name,
+                    product.family,
+                    product.short_label,
+                    product.proposal_description,
+                    product.sizes,
+                    product.buying_model,
+                    product.base_rate,
+                    product.estimated_impressions,
+                    product.discloses_impressions,
+                    product.minimum_spend,
+                    product.minimum_flight_days[0],
+                    product.minimum_flight_days[1],
+                    product.sla_data_days,
+                    product.sla_creative_days,
+                    product.sla_activate_days,
+                    product.sla_total_days,
+                    product.media_allocation_pct,
+                    product.margin_upper,
+                    product.margin_lower,
+                    product.tech_platform,
+                    product.wide_orbit_code,
+                    product.billing_interval,
+                    product.billing_calendar,
+                    product.billing_source,
+                    product.national_supported,
+                    product.notes,
+                    product.estimated_cpm_for_imps,
+                    product.hispanic_targeting_forced,
+                    product.cannabis_policy,
+                    product.political_policy,
+                    product.is_addon,
+                ],
+            )
 
 
 def add_custom_product(fields: dict) -> Product:

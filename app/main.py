@@ -39,7 +39,9 @@ from fastapi import FastAPI, HTTPException, Body, Request, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from psycopg.types.json import Jsonb
 
+from app.db import fetch_all, fetch_one, get_connection
 from app.catalog import (
     CATALOG, by_name, families, by_family,
     effective_catalog, load_rate_overrides, save_rate_overrides, clear_rate_override,
@@ -171,6 +173,103 @@ def _get_next_short_id() -> str:
     except Exception:
         import random
         return str(random.randint(1000, 9999))
+
+
+_PROPOSAL_COLUMNS = (
+    "proposal_id, client_name, seller_email, requested_by, notion_id, "
+    "proposal_title, filename, email_doc_filename, pptx_net_filename, "
+    "pptx_gross_filename, generated_at, requester_ip, requester_user_agent, "
+    "summary, reopen_state"
+)
+
+
+def _proposal_metadata_from_row(row: dict | None) -> dict | None:
+    """Restore the metadata shape used by the existing API from a DB row."""
+    if row is None:
+        return None
+    meta = dict(row)
+    generated_at = meta.get("generated_at")
+    if hasattr(generated_at, "isoformat"):
+        meta["generated_at"] = generated_at.isoformat()
+    meta["summary"] = meta.get("summary") or {}
+    meta["reopen_state"] = meta.get("reopen_state") or {}
+    if meta.get("filename"):
+        meta["path"] = str(PROPOSALS_DIR / meta["filename"])
+    if meta.get("email_doc_filename"):
+        meta["email_doc_path"] = str(PROPOSALS_DIR / meta["email_doc_filename"])
+    return meta
+
+
+def _get_proposal_metadata(proposal_id: str) -> dict | None:
+    row = fetch_one(
+        f"SELECT {_PROPOSAL_COLUMNS} FROM proposals WHERE proposal_id = %s",
+        (proposal_id,),
+    )
+    return _proposal_metadata_from_row(row)
+
+
+def _save_proposal_metadata(
+    *,
+    proposal_id: str,
+    client_name: str,
+    seller_email: str,
+    requested_by: str,
+    notion_id: str | None,
+    proposal_title: str,
+    filename: str,
+    email_doc_filename: str | None,
+    pptx_net_filename: str | None,
+    pptx_gross_filename: str | None,
+    generated_at: datetime,
+    requester_ip: str,
+    requester_user_agent: str,
+    summary: dict,
+    reopen_state: dict,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO proposals (
+                proposal_id, client_name, seller_email, requested_by, notion_id,
+                proposal_title, filename, email_doc_filename, pptx_net_filename,
+                pptx_gross_filename, generated_at, requester_ip,
+                requester_user_agent, summary, reopen_state
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (proposal_id) DO UPDATE SET
+                client_name = EXCLUDED.client_name,
+                seller_email = EXCLUDED.seller_email,
+                requested_by = EXCLUDED.requested_by,
+                notion_id = EXCLUDED.notion_id,
+                proposal_title = EXCLUDED.proposal_title,
+                filename = EXCLUDED.filename,
+                email_doc_filename = EXCLUDED.email_doc_filename,
+                pptx_net_filename = EXCLUDED.pptx_net_filename,
+                pptx_gross_filename = EXCLUDED.pptx_gross_filename,
+                generated_at = EXCLUDED.generated_at,
+                requester_ip = EXCLUDED.requester_ip,
+                requester_user_agent = EXCLUDED.requester_user_agent,
+                summary = EXCLUDED.summary,
+                reopen_state = EXCLUDED.reopen_state
+            """,
+            (
+                proposal_id,
+                client_name,
+                seller_email,
+                requested_by,
+                notion_id,
+                proposal_title,
+                filename,
+                email_doc_filename,
+                pptx_net_filename,
+                pptx_gross_filename,
+                generated_at,
+                requester_ip,
+                requester_user_agent,
+                Jsonb(summary),
+                Jsonb(reopen_state),
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -715,42 +814,38 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     user_agent = request.headers.get("user-agent", "")
     client_ip = request.client.host if request.client else ""
 
-    # 10. Store metadata
-    (PROPOSALS_DIR / f"{proposal_id}.json").write_text(json.dumps({
-        "filename": filename,
-        "path": str(output_path),
-        "client_name": req.client_name,
-        "seller_email": req.salesperson_email,
-        "requested_by": req.requested_by,
-        "notion_id": notion_id,
-        "summary": summary,
-        "proposal_title": proposal_title,
-        "email_doc_filename": email_doc_filename,
-        "email_doc_path": str(PROPOSALS_DIR / email_doc_filename) if email_doc_filename else None,
-        "pptx_net_filename": pptx_net_filename,
-        "pptx_gross_filename": pptx_gross_filename,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "requester_ip": client_ip,
-        "requester_user_agent": user_agent,
-        # Full state so this proposal can be reopened later and re-edited
-        # (Admin → Reopen) without re-pasting from Notion. `tiers` is stored
-        # for fidelity when present; the current reopen flow only restores
-        # the single-tier shape (line_items/avails_data), so a multi-tier
-        # proposal reopens as tier A's mix — full tiered reopen isn't wired
-        # up on the frontend yet.
-        "reopen_state": {
-            "request": body.request,
-            "line_items": [li.model_dump() for li in (body.line_items or (body.tiers[0].line_items if body.tiers else []))],
-            "avails_data": {
-                k: v.model_dump() for k, v in
-                (body.avails_data or (body.tiers[0].avails_data if body.tiers else {}) or {}).items()
-            },
-            "tiers": [t.model_dump() for t in body.tiers] if body.tiers else None,
-            "strategy_brief": body.strategy_brief,
-            "force_tabs": body.force_tabs,
-            "addons": [a.model_dump() for a in body.addons],
+    # 10. Store metadata in PostgreSQL. The generated files remain on disk;
+    # their filenames are persisted so the existing download routes can derive
+    # their paths after a restart or redeploy.
+    reopen_state = {
+        "request": body.request,
+        "line_items": [li.model_dump() for li in (body.line_items or (body.tiers[0].line_items if body.tiers else []))],
+        "avails_data": {
+            k: v.model_dump() for k, v in
+            (body.avails_data or (body.tiers[0].avails_data if body.tiers else {}) or {}).items()
         },
-    }))
+        "tiers": [t.model_dump() for t in body.tiers] if body.tiers else None,
+        "strategy_brief": body.strategy_brief,
+        "force_tabs": body.force_tabs,
+        "addons": [a.model_dump() for a in body.addons],
+    }
+    _save_proposal_metadata(
+        proposal_id=proposal_id,
+        client_name=req.client_name,
+        seller_email=req.salesperson_email,
+        requested_by=req.requested_by,
+        notion_id=notion_id,
+        proposal_title=proposal_title,
+        filename=filename,
+        email_doc_filename=email_doc_filename,
+        pptx_net_filename=pptx_net_filename,
+        pptx_gross_filename=pptx_gross_filename,
+        generated_at=datetime.now(timezone.utc),
+        requester_ip=client_ip,
+        requester_user_agent=user_agent,
+        summary=summary,
+        reopen_state=reopen_state,
+    )
 
     # 11. Build enrichment payload for the frontend
     enrichment_out = {
@@ -786,10 +881,9 @@ async def reopen_proposal(proposal_id: str) -> dict:
     for a previously generated proposal, so the app can pre-fill the wizard
     for edits instead of starting from a blank paste.
     """
-    meta_file = PROPOSALS_DIR / f"{proposal_id}.json"
-    if not meta_file.exists():
+    meta = _get_proposal_metadata(proposal_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
-    meta = json.loads(meta_file.read_text(encoding="utf-8"))
     reopen_state = meta.get("reopen_state")
     if not reopen_state:
         raise HTTPException(status_code=410, detail="This proposal was generated before reopening was supported.")
@@ -829,9 +923,8 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
         body.reprompt,
     )
 
-    meta_file = PROPOSALS_DIR / f"{proposal_id}.json"
-    if meta_file.exists() and not result.get("error") and result.get("client_email_body"):
-        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    meta = _get_proposal_metadata(proposal_id)
+    if meta is not None and not result.get("error") and result.get("client_email_body"):
         email_doc_path_str = meta.get("email_doc_path")
         if email_doc_path_str:
             docx_builder.build_client_email_docx(
@@ -849,10 +942,9 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
 @app.get("/api/download/{proposal_id}")
 async def download(proposal_id: str) -> FileResponse:
     """Download a previously generated proposal."""
-    meta_file = PROPOSALS_DIR / f"{proposal_id}.json"
-    if not meta_file.exists():
+    meta = _get_proposal_metadata(proposal_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
-    meta = json.loads(meta_file.read_text())
     path = Path(meta["path"])
     if not path.exists():
         raise HTTPException(status_code=410, detail="Proposal file expired")
@@ -866,10 +958,9 @@ async def download(proposal_id: str) -> FileResponse:
 @app.get("/api/download-email/{proposal_id}")
 async def download_email(proposal_id: str) -> FileResponse:
     """Download the client-facing email Word document for a generated proposal."""
-    meta_file = PROPOSALS_DIR / f"{proposal_id}.json"
-    if not meta_file.exists():
+    meta = _get_proposal_metadata(proposal_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
-    meta = json.loads(meta_file.read_text())
     doc_path_str = meta.get("email_doc_path")
     if not doc_path_str:
         raise HTTPException(status_code=404, detail="No email document for this proposal")
@@ -889,10 +980,9 @@ _PPTX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.presentationml
 @app.get("/api/download-pptx-net/{proposal_id}")
 async def download_pptx_net(proposal_id: str) -> FileResponse:
     """Download the simple, signature-ready Net PowerPoint deck for a generated proposal."""
-    meta_file = PROPOSALS_DIR / f"{proposal_id}.json"
-    if not meta_file.exists():
+    meta = _get_proposal_metadata(proposal_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
-    meta = json.loads(meta_file.read_text())
     pptx_filename = meta.get("pptx_net_filename")
     if not pptx_filename:
         raise HTTPException(status_code=404, detail="No Net PowerPoint for this proposal")
@@ -905,10 +995,9 @@ async def download_pptx_net(proposal_id: str) -> FileResponse:
 @app.get("/api/download-pptx-gross/{proposal_id}")
 async def download_pptx_gross(proposal_id: str) -> FileResponse:
     """Download the simple, signature-ready Gross PowerPoint deck for a generated proposal."""
-    meta_file = PROPOSALS_DIR / f"{proposal_id}.json"
-    if not meta_file.exists():
+    meta = _get_proposal_metadata(proposal_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
-    meta = json.loads(meta_file.read_text())
     pptx_filename = meta.get("pptx_gross_filename")
     if not pptx_filename:
         raise HTTPException(status_code=404, detail="No Gross PowerPoint for this proposal")
@@ -926,10 +1015,9 @@ async def drive_upload(body: DriveUploadRequest, request: Request) -> dict:
     Returns {needs_auth: true, auth_url: ...} when OAuth2 authorization is required.
     Returns a graceful no-op when Drive credentials aren't configured.
     """
-    meta_file = PROPOSALS_DIR / f"{body.proposal_id}.json"
-    if not meta_file.exists():
+    meta = _get_proposal_metadata(body.proposal_id)
+    if meta is None:
         raise HTTPException(status_code=404, detail="Proposal not found")
-    meta = json.loads(meta_file.read_text())
     path = Path(meta["path"])
 
     redirect_uri = str(request.base_url).rstrip("/") + "/api/drive/callback"
@@ -1023,20 +1111,22 @@ async def admin_page() -> HTMLResponse:
 @app.get("/api/admin/proposals")
 async def admin_list_proposals() -> dict:
     """
-    List every generated proposal this server knows about (from its metadata
-    JSON files), newest first — client, seller, Notion ID, title, and who/what
+    List every generated proposal this server knows about, newest first —
+    client, seller, Notion ID, title, and who/what
     device generated it.
     """
     proposals = []
-    for meta_file in PROPOSALS_DIR.glob("*.json"):
-        if meta_file.stem == "_counter":
-            continue
-        try:
-            meta = json.loads(meta_file.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+    rows = fetch_all(
+        f"""
+        SELECT {_PROPOSAL_COLUMNS}
+        FROM proposals
+        ORDER BY generated_at DESC NULLS LAST, created_at DESC
+        """
+    )
+    for row in rows:
+        meta = _proposal_metadata_from_row(row)
         proposals.append({
-            "proposal_id": meta_file.stem,
+            "proposal_id": meta["proposal_id"],
             "client_name": meta.get("client_name", ""),
             "seller_email": meta.get("seller_email", ""),
             "requested_by": meta.get("requested_by", ""),
