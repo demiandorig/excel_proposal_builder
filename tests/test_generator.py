@@ -1,8 +1,9 @@
 """End-to-end: parse → curate → generate → recalc."""
 import sys
-sys.path.insert(0, "/home/claude/webapp")
-
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from app.catalog import CATALOG
 from app.services.notion_parser import parse_notion
 from app.services.proposal_generator import LineItem, generate_proposal

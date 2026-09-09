@@ -1,6 +1,8 @@
 """Smoke-test the Notion parser with both real examples."""
 import sys
-sys.path.insert(0, "/home/claude/webapp")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.catalog import CATALOG
 from app.services.notion_parser import parse_notion, classify_output_tabs
