@@ -38,3 +38,7 @@ externalPort = 80
 [deployment]
 deploymentTarget = "autoscale"
 run = ["sh", "-c", "exec python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-5000}"]
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 180000
