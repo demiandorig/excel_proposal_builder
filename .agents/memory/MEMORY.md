@@ -1,0 +1,1 @@
+- [Post-merge Python installs](post-merge-python-install.md) — use non-interactive pip with Nix's externally managed environment handled explicitly.
