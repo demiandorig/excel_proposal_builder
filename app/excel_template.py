@@ -146,7 +146,12 @@ def _write_meta_block(ws: Worksheet, title: str, include_billing: bool = True,
     ws["C7"] = "Burbank, CA 91504"
     for r in range(4, 11):
         ws.row_dimensions[r].height = 14
-    ws.row_dimensions[8].height = 10  # "Address: " (F8) — short label, doesn't need full 14pt
+    # Row 8 ("Address: " / F8) used to be knocked down to 10 here on the
+    # theory that a short label doesn't need full height — but it sits
+    # directly under "Billing Name:"/"Contact e-mail:" (rows 6-7, both at
+    # the full 14), so being the one shorter row in that stack read as
+    # squished rather than intentionally compact. Left at 14 with its
+    # neighbors now.
     ws.row_dimensions[9].height = 6   # entirely blank on both sides — pure spacer
 
     # Right column: Customer billing (skipped where not relevant, e.g. Avails-Only)
@@ -771,11 +776,18 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
     ws["I10"].alignment = CENTER
 
-    # Avails section banner (row 16)
-    ws["N16"] = "Monthly Forecast — (4-week) Avails"
-    ws["N16"].font = BODY_BOLD
-    ws["N16"].alignment = CENTER
-    ws.merge_cells("N16:Q16")
+    # Avails section banner — merged across rows 15-16, not just row 16.
+    # _write_meta_block knocks both those rows down to a 6pt spacer, which
+    # is fine as blank gap on every other sheet type, but this sheet also
+    # uses row 16 to hold real text — 6pt reads as squished for that, so
+    # it's bumped back up locally here (the shared function's default stays
+    # untouched for sheets that don't write into this row).
+    ws.row_dimensions[15].height = 10
+    ws.row_dimensions[16].height = 14
+    ws["N15"] = "Monthly Forecast — (4-week) Avails"
+    ws["N15"].font = BODY_BOLD
+    ws["N15"].alignment = CENTER
+    ws.merge_cells("N15:Q16")
 
     # Header row (row 17)
     _set_header(ws, 17, [
@@ -1118,10 +1130,14 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     ws["I14"].alignment = CENTER
     ws["I14"].fill = PatternFill("solid", start_color="FFFFFF00")
 
-    ws["P16"] = "Monthly Forecast — (4-week) Avails"
-    ws["P16"].font = BODY_BOLD
-    ws["P16"].alignment = CENTER
-    ws.merge_cells("P16:S16")
+    # Same local row 15/16 height override as build_proposal_a — see its
+    # comment above for why this can't just live in _write_meta_block.
+    ws.row_dimensions[15].height = 10
+    ws.row_dimensions[16].height = 14
+    ws["P15"] = "Monthly Forecast — (4-week) Avails"
+    ws["P15"].font = BODY_BOLD
+    ws["P15"].alignment = CENTER
+    ws.merge_cells("P15:S16")
 
     _set_header(ws, 17, [
         ("C", "LINE NAME"),
