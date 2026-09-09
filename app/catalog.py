@@ -69,9 +69,7 @@ minimum_spend / estimated_cpm_for_imps without a code change, or the admin
 "Add Product" form for anything genuinely missing from this rate card.
 """
 
-import json
 from dataclasses import dataclass, field, asdict, replace
-from pathlib import Path
 from typing import Optional, Union
 
 from app.db import get_connection
@@ -1796,9 +1794,6 @@ _OVERRIDABLE_FIELDS = (
     "family", "short_label", "buying_model", "sizes", "tech_platform",
     "proposal_description", "notes", "is_addon",
 )
-_RATE_OVERRIDES_PATH = Path(__file__).resolve().parent / "data" / "rate_overrides.json"
-
-
 def load_rate_overrides() -> dict:
     """Return {product_name: {field: value, ...}} from PostgreSQL."""
     columns = ", ".join(("product_name",) + _OVERRIDABLE_FIELDS)
@@ -1819,7 +1814,7 @@ def load_rate_overrides() -> dict:
 
 def save_rate_overrides(overrides: dict) -> None:
     """
-    Persist {product_name: {field: value, ...}} to disk. Only known catalog
+    Persist {product_name: {field: value, ...}} to PostgreSQL. Only known catalog
     (built-in or custom) product names and overridable fields are kept —
     anything else is dropped silently so a bad admin payload can't corrupt
     the store.
@@ -1877,9 +1872,6 @@ def _apply_override(p: Product) -> Product:
 # families()/effective_catalog() exactly like built-in ones, including rate
 # overrides.
 # ---------------------------------------------------------------------------
-
-_CUSTOM_PRODUCTS_PATH = Path(__file__).resolve().parent / "data" / "custom_products.json"
-
 
 def load_custom_products() -> list[Product]:
     """Return the admin-added products from PostgreSQL, or [] if none saved."""

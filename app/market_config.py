@@ -6,10 +6,8 @@ no CCs) regardless of which market the request came from — this makes
 both editable per market from the admin console, with a "__default__"
 entry every market falls back to until someone gives it its own values.
 
-Same on-disk pattern as catalog.py's rate_overrides.json/
-custom_products.json: a plain JSON file, gitignored (it's real
-per-deployment config, not code), read fresh on every call so an admin
-edit takes effect immediately with no restart.
+The configuration is stored in PostgreSQL and read fresh on every call so an
+admin edit takes effect immediately with no restart.
 """
 from __future__ import annotations
 
