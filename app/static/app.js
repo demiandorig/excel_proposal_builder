@@ -22,6 +22,7 @@ const state = {
   // the same add-ons apply regardless of which budget option is active.
   addons: {},               // product_name -> amount (presence = picked)
   rateOverrideOpen: new Set(),  // transient UI state — which row indices show the rate-override input
+  objectiveOtherOpen: new Set(),  // transient UI state — which row indices show the free-text "Other" objective input
   proposalId: null,
   proposalSummary: null,
   enrichment: null,         // Step 07 AI email content (subjects/bodies) — reprompt-able in place
@@ -31,18 +32,22 @@ const state = {
   // whenever the planner goes back to Step 02, since editing client name/
   // request type/start date there can change the real title on next Generate.
   finalProposalTitle: null,
-  // Tiered budget options (up to 4 — "A".."D"). state.lineItems/availsData
+  // Tiered budget options (up to 10 — "A".."J"). state.lineItems/availsData
   // ALWAYS hold the currently-active tier's data (same as before tiers
   // existed — no other code needs to change); `tiers` holds a snapshot for
   // every OTHER tier, swapped in/out by switchTier(). See "Tiered budget
   // options" section below for the full read/write contract.
-  tiers: [],                // [{ label, name, lineItems, availsData }] — every tier EXCEPT the active one
+  tiers: [],                // [{ label, name, geo, lineItems, availsData }] — every tier EXCEPT the active one
   activeTierLabel: "A",
   // Planner-given display name for the ACTIVE tier (e.g. "Independent"),
   // shown instead of "Option A" everywhere a seller/client actually reads
   // this — null falls back to "Option {label}". Swapped in/out of the
   // `tiers` snapshots alongside lineItems/availsData by switchTier().
   activeTierName: null,
+  // Per-tier geo override (e.g. two options targeting different DMAs) —
+  // null falls back to the campaign-level Geo from Step 02. Same
+  // swap-in/swap-out treatment as activeTierName, above.
+  activeTierGeo: null,
   step: 1,
   // The highest step number reached so far this session — lets the top nav
   // pills be clickable up to (but not past) wherever the wizard has
@@ -51,7 +56,67 @@ const state = {
   furthestStep: 1,
 };
 
-const TIER_LABELS = ["A", "B", "C", "D"];
+const TIER_LABELS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
+
+// Per-line objective dropdown (Step 04) — deliberately the same fixed list
+// for every product regardless of family; a given product might realistically
+// only serve 1-2 of these, but that filtering isn't built yet, so every line
+// gets every choice for now. "Other" isn't a real value stored anywhere —
+// selecting it just reveals a free-text input; whatever's typed there IS
+// the stored value (see renderLineItems()'s objective cell).
+const OBJECTIVE_OPTIONS = ["Awareness", "Website Conversion", "Click-To-Call", "Conquesting", "Lead Generation"];
+
+// Best-effort match of Step 02's inferred campaign goal onto one of the
+// fixed dropdown options above — used only to default a new line item's
+// objective, never anything the planner can't immediately see/change.
+// Falls back to the raw goal text verbatim (renders as a custom "Other"
+// value) when nothing recognizable matches, rather than silently
+// discarding whatever was already inferred.
+function _mapCampaignGoalToObjective(goal) {
+  if (!goal) return null;
+  const g = goal.toLowerCase();
+  if (g.includes("click") || g.includes("call")) return "Click-To-Call";
+  if (g.includes("conquest")) return "Conquesting";
+  if (g.includes("lead")) return "Lead Generation";
+  if (g.includes("convers") || g.includes("website") || g.includes("traffic")) return "Website Conversion";
+  if (g.includes("aware")) return "Awareness";
+  return goal;
+}
+
+// Whether row `idx`'s objective dropdown should show "Other…" selected (and
+// its free-text input revealed) — either because the planner just picked
+// "Other…" this session (state.objectiveOtherOpen, a transient UI flag,
+// mirroring rateOverrideOpen's pattern for the same kind of "alternate
+// input mode" toggle) or because the stored value is already custom text
+// that doesn't match any of the fixed options (e.g. a reopened proposal, or
+// a campaign goal that didn't map to one of the 5 presets).
+function _objectiveIsOther(li, idx) {
+  if (state.objectiveOtherOpen.has(idx)) return true;
+  return !!(li.objective_override && !OBJECTIVE_OPTIONS.includes(li.objective_override));
+}
+
+// The one NET<->GROSS formula, shared by the top-level totals and every
+// per-line Gross budget input below — matches app/services/proposal_generator.py
+// and every Excel/PPTX export formula exactly (gross = net / (1 - fee)), so
+// what Step 04 shows is never out of step with what actually gets exported.
+function _netToGross(net, fee) {
+  return fee ? net / (1 - fee) : net;
+}
+function _grossToNet(gross, fee) {
+  return fee ? gross * (1 - fee) : gross;
+}
+
+function onCurateAgencyFeeInput(e) {
+  const v = e.target.value;
+  state.parsed.agency_fee = v === "" ? null : parseFloat(v);
+  // Keep Step 02's own field in sync so going back there shows the same value.
+  const step2Field = document.querySelector('[data-field="agency_fee"]');
+  if (step2Field) step2Field.value = e.target.value;
+  // Full re-render, not just updateTotals() — toggling the fee between
+  // 0 and a real value shows/hides every row's Gross budget cell, a
+  // structural change, not just a number update.
+  renderLineItems();
+}
 
 // Unique-enough id for a line item (stable identity across renders/edits,
 // used to key avails data independent of product name so duplicate-product
@@ -308,6 +373,10 @@ function wireEvents() {
   document.getElementById("add-product-btn").addEventListener("click", onAddProduct);
   document.getElementById("recommend-btn").addEventListener("click", onRecommend);
   document.getElementById("add-tier-btn").addEventListener("click", () => addTier());
+  document.getElementById("tier-geo-input").addEventListener("input", (e) => {
+    state.activeTierGeo = e.target.value.trim() || null;
+  });
+  document.getElementById("curate-agency-fee-input").addEventListener("input", onCurateAgencyFeeInput);
 
   // Avails — copy from another budget option
   document.getElementById("copy-avails-btn").addEventListener("click", onCopyAvails);
@@ -511,6 +580,14 @@ function onNext(n) {
     if (budget) {
       document.getElementById("total-budget-target").value = budget;
     }
+    // Reference/override box — pre-filled from Step 02's parsed value so
+    // the planner sees what was inferred without flipping back a step;
+    // editing it here writes straight back into state.parsed.agency_fee
+    // (see onCurateAgencyFeeInput), the same field Step 02's own input reads.
+    document.getElementById("curate-agency-fee-input").value =
+      state.parsed.agency_fee != null ? state.parsed.agency_fee : "";
+    // Per-tier geo override box — reflects whichever tier is currently active.
+    document.getElementById("tier-geo-input").value = state.activeTierGeo || "";
     if (state.lineItems.length === 0) {
       state.lineItems = (state.parsed.products_selected || []).map(name => {
         const p = state.productIndex[name];
@@ -526,6 +603,10 @@ function onNext(n) {
           estimated_cpm_override: null,
           is_added_value: false,
           added_value_pct: null,
+          // Best-effort default from Step 02's inferred campaign goal —
+          // still a fully editable per-line dropdown, this just saves the
+          // planner from setting the same thing on every line by hand.
+          objective_override: _mapCampaignGoalToObjective(state.parsed.campaign_goal),
         };
       });
       if (budget && state.lineItems.length > 0) {
@@ -538,9 +619,10 @@ function onNext(n) {
       // to that tier's target monthly budget. Guarded by the same
       // lineItems.length===0 check above, so revisiting Step 04 later
       // doesn't re-run this and duplicate/reset options the planner has
-      // since edited or removed. Capped at 3 additional options (A + 3 =
-      // the app's 4-option max) — a 4th non-blank tier value beyond that
-      // has nowhere to go and is skipped.
+      // since edited or removed. Capped at 3 additional options — tied to
+      // Step 02 only ever parsing 4 tier-target fields (tier_1..tier_4),
+      // NOT to the general per-tab option cap (TIER_LABELS, now 10) — a 4th
+      // non-blank tier value beyond that has nowhere to go and is skipped.
       if (state.parsed.tiered_budget) {
         const tierTargets = [state.parsed.tier_1, state.parsed.tier_2, state.parsed.tier_3, state.parsed.tier_4]
           .map(v => parseFloat(String(v || "").replace(/[^0-9.]/g, "")))
@@ -943,7 +1025,7 @@ function renderRoadblocks(data) {
 }
 
 // --------------------------------------------------------------------------
-// Tiered budget options (up to 4 — "A".."D")
+// Tiered budget options (up to 10 — "A".."J")
 //
 // state.lineItems / state.availsData ALWAYS hold the currently-ACTIVE
 // tier's data — every existing curation/avails function keeps working
@@ -956,8 +1038,8 @@ function renderRoadblocks(data) {
 
 function allTiersForSubmit() {
   return [
-    { label: state.activeTierLabel, name: state.activeTierName, line_items: state.lineItems, avails_data: state.availsData },
-    ...state.tiers.map(t => ({ label: t.label, name: t.name, line_items: t.lineItems, avails_data: t.availsData })),
+    { label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, line_items: state.lineItems, avails_data: state.availsData },
+    ...state.tiers.map(t => ({ label: t.label, name: t.name, geo: t.geo, line_items: t.lineItems, avails_data: t.availsData })),
   ].sort((a, b) => a.label.localeCompare(b.label));
 }
 
@@ -968,6 +1050,17 @@ function _tierDisplayName(label) {
   if (label === state.activeTierLabel) return state.activeTierName || `Option ${label}`;
   const t = state.tiers.find(x => x.label === label);
   return (t && t.name) || `Option ${label}`;
+}
+
+// Per-tier geo override, wherever the flat campaign-level Geo used to be
+// the only option — same active/snapshot lookup shape as _tierDisplayName,
+// but falls back to the campaign-level state.parsed.geo (never a hardcoded
+// placeholder) since that's this field's own pre-existing fallback.
+function _effectiveGeo(label) {
+  const tierGeo = label === state.activeTierLabel
+    ? state.activeTierGeo
+    : (state.tiers.find(x => x.label === label) || {}).geo;
+  return (tierGeo && tierGeo.trim()) || (state.parsed && state.parsed.geo) || "";
 }
 
 function renameTier(label) {
@@ -993,13 +1086,15 @@ function switchTier(label) {
   // Replace the target's snapshot (about to become active) with a fresh
   // snapshot of the tier we're leaving — one swap, order doesn't matter
   // since every lookup here is by label, not position.
-  state.tiers.splice(idx, 1, { label: state.activeTierLabel, name: state.activeTierName, lineItems: state.lineItems, availsData: state.availsData });
+  state.tiers.splice(idx, 1, { label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, lineItems: state.lineItems, availsData: state.availsData });
 
   state.activeTierLabel = label;
   state.activeTierName = target.name || null;
+  state.activeTierGeo = target.geo || null;
   state.lineItems = target.lineItems;
   state.availsData = target.availsData;
   state.rateOverrideOpen.clear();
+  state.objectiveOtherOpen.clear();
 
   renderLineItems();
   renderAvailsGrid();
@@ -1011,13 +1106,13 @@ function switchTier(label) {
 // the source tier's current budgets unchanged, for the planner to adjust.
 function addTier(targetBudget) {
   const totalTiers = 1 + state.tiers.length;
-  if (totalTiers >= 4) return;
+  if (totalTiers >= TIER_LABELS.length) return;
   const usedLabels = new Set([state.activeTierLabel, ...state.tiers.map(t => t.label)]);
   const nextLabel = TIER_LABELS.find(l => !usedLabels.has(l));
   if (!nextLabel) return;
 
   // Snapshot the tier we're leaving active...
-  state.tiers.push({ label: state.activeTierLabel, name: state.activeTierName, lineItems: state.lineItems, availsData: state.availsData });
+  state.tiers.push({ label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, lineItems: state.lineItems, availsData: state.availsData });
 
   // ...then make the NEW tier active, starting as a clone of it — "Add
   // Option" copies the current mix so the planner adjusts from there,
@@ -1039,6 +1134,7 @@ function addTier(targetBudget) {
   state.lineItems = clonedItems;
   state.availsData = clonedAvails;
   state.rateOverrideOpen.clear();
+  state.objectiveOtherOpen.clear();
 
   renderLineItems();
   renderAvailsGrid();
@@ -1069,7 +1165,7 @@ function renderAllTierTabStrips() {
   const multiTier = totalTiers > 1;
 
   const addBtn = document.getElementById("add-tier-btn");
-  if (addBtn) addBtn.style.display = totalTiers >= 4 ? "none" : "";
+  if (addBtn) addBtn.style.display = totalTiers >= TIER_LABELS.length ? "none" : "";
 
   const hint = document.getElementById("tier-switcher-hint");
   if (hint) hint.classList.toggle("hidden", !multiTier);
@@ -1236,6 +1332,15 @@ function renderLineItems() {
                class="${belowMin ? "below-min" : ""}"
                ${li.is_added_value ? "disabled" : ""}
                data-idx="${idx}" data-key="monthly_budget" />
+        ${(state.parsed.agency_fee > 0 && !li.is_added_value) ? `
+          <div class="budget-gross-row">
+            <span class="budget-gross-label">Gross</span>
+            <input type="number" step="0.01" min="0"
+                   value="${_netToGross(li.monthly_budget || 0, state.parsed.agency_fee).toFixed(2)}"
+                   data-idx="${idx}" data-gross-budget-input
+                   title="Gross budget for this line — editing recalculates the Net figure above" />
+          </div>
+        ` : ""}
         <label class="av-switch" title="Added Value — locks this line's budget to $0">
           <input type="checkbox" data-idx="${idx}" ${li.is_added_value ? "checked" : ""} data-added-value-toggle />
           <span class="av-switch-track"><span class="av-switch-thumb"></span></span>
@@ -1267,6 +1372,17 @@ function renderLineItems() {
                  data-idx="${idx}" data-key="target_secondary">${escapeHtml(li.target_secondary || "")}</textarea>
         ` : ""}
       </td>
+      <td class="col-objective">
+        <select data-idx="${idx}" data-objective-select>
+          <option value="">— Select —</option>
+          ${OBJECTIVE_OPTIONS.map(opt => `<option value="${escapeHtml(opt)}" ${li.objective_override === opt ? "selected" : ""}>${escapeHtml(opt)}</option>`).join("")}
+          <option value="__other__" ${_objectiveIsOther(li, idx) ? "selected" : ""}>Other…</option>
+        </select>
+        ${_objectiveIsOther(li, idx) ? `
+          <input type="text" class="objective-other-input" placeholder="Custom objective"
+                 value="${escapeHtml(li.objective_override || "")}" data-idx="${idx}" data-key="objective_override" />
+        ` : ""}
+      </td>
       <td class="col-note">
         <input type="text" placeholder="(no note)"
                value="${escapeHtml(li.notes_override || "")}"
@@ -1285,6 +1401,23 @@ function renderLineItems() {
   });
   tbody.querySelectorAll("[data-secondary-toggle]").forEach(cb => {
     cb.addEventListener("change", () => onToggleSecondaryTarget(parseInt(cb.dataset.idx)));
+  });
+  // Objective dropdown: a dedicated handler (not the generic input/textarea
+  // wiring below, which doesn't even match <select>) so picking "Other…"
+  // can open the free-text input without ever storing the literal
+  // "__other__" sentinel as a real objective value.
+  tbody.querySelectorAll("[data-objective-select]").forEach(sel => {
+    sel.addEventListener("change", () => {
+      const idx = parseInt(sel.dataset.idx);
+      const li = state.lineItems[idx];
+      if (sel.value === "__other__") {
+        state.objectiveOtherOpen.add(idx);
+      } else {
+        state.objectiveOtherOpen.delete(idx);
+        li.objective_override = sel.value || null;
+      }
+      renderLineItems();
+    });
   });
   // Rate/CPM override: onLineItemEdit already saves it live on every
   // keystroke (via the generic wiring above) — the ✓ badge is a PERSISTENT
@@ -1320,6 +1453,23 @@ function renderLineItems() {
       _refreshAvValuePreviews();
     });
   });
+  // Gross budget: a dedicated handler (excluded from the generic wiring
+  // above the same way rate/CPM inputs are, via data-gross-budget-input)
+  // since typing a GROSS number must convert back to NET before it's
+  // stored — li.monthly_budget stays the canonical NET value everywhere
+  // else in the app and the export, only the displayed input differs.
+  tbody.querySelectorAll("[data-gross-budget-input]").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const idx = parseInt(inp.dataset.idx);
+      const li = state.lineItems[idx];
+      const fee = state.parsed.agency_fee || 0;
+      const gross = inp.value === "" ? 0 : parseFloat(inp.value);
+      li.monthly_budget = _grossToNet(gross, fee);
+      const netInput = inp.closest("td").querySelector('input[data-key="monthly_budget"]');
+      if (netInput) netInput.value = li.monthly_budget;
+      updateTotals();
+    });
+  });
   tbody.querySelectorAll("[data-added-value-toggle]").forEach(cb => {
     cb.addEventListener("change", () => {
       const idx = parseInt(cb.dataset.idx);
@@ -1339,6 +1489,7 @@ function renderLineItems() {
       if (removed) delete state.availsData[removed.id];
       state.lineItems.splice(idx, 1);
       state.rateOverrideOpen.clear();  // indices shift on removal — avoid pointing at the wrong row
+      state.objectiveOtherOpen.clear();
       renderLineItems();
     });
   });
@@ -1444,6 +1595,7 @@ function moveLineItem(fromIdx, dropOnIdx, insertAfter) {
   const [item] = state.lineItems.splice(fromIdx, 1);
   state.lineItems.splice(target, 0, item);
   state.rateOverrideOpen.clear();  // indices shift — avoid pointing at the wrong row
+  state.objectiveOtherOpen.clear();
   renderLineItems();
 }
 
@@ -1466,6 +1618,14 @@ function onLineItemEdit(e) {
     const p = state.productIndex[li.product_name] || {};
     const minSpend = p.minimum_spend || 0;
     e.target.classList.toggle("below-min", !li.is_added_value && (v || 0) < minSpend);
+    // Keep this row's Gross budget input (if shown) in sync with the Net
+    // value that was just typed — the two stay mirrored regardless of
+    // which one the planner is actually editing.
+    const grossInput = e.target.closest("td")?.querySelector("[data-gross-budget-input]");
+    if (grossInput) {
+      const fee = state.parsed.agency_fee || 0;
+      grossInput.value = _netToGross(v || 0, fee).toFixed(2);
+    }
     // Any AV line's estimated value is a % of every OTHER line's budget —
     // editing this one shifts that basis for all of them.
     _refreshAvValuePreviews();
@@ -1512,6 +1672,20 @@ function updateTotals() {
   const flight = state.lineItems.reduce((s, li) => s + (li.monthly_budget || 0) * (li.months || 1), 0);
   document.getElementById("monthly-total").textContent = money(monthly);
   document.getElementById("flight-total").textContent = money(flight);
+
+  // Gross totals — shown alongside Net whenever an agency fee is set (per
+  // the same request.agency_fee > 0 gate the Step 07 summary already uses),
+  // computed with the exact formula the export uses so these never drift
+  // apart. No agency fee: leave the display exactly as it's always been.
+  const fee = state.parsed.agency_fee || 0;
+  const grossWrap = document.getElementById("totals-gross-wrap");
+  if (grossWrap) {
+    grossWrap.classList.toggle("hidden", !(fee > 0));
+    if (fee > 0) {
+      document.getElementById("monthly-total-gross").textContent = money(_netToGross(monthly, fee));
+      document.getElementById("flight-total-gross").textContent = money(_netToGross(flight, fee));
+    }
+  }
 }
 
 function onAddProduct() {
@@ -1532,6 +1706,7 @@ function onAddProduct() {
     estimated_cpm_override: null,
     is_added_value: false,
     added_value_pct: null,
+    objective_override: _mapCampaignGoalToObjective(state.parsed?.campaign_goal),
   });
   picker.value = "";
   renderLineItems();
@@ -1613,6 +1788,7 @@ function onDuplicateLineItem(idx) {
   }
   state.lineItems.splice(idx + 1, 0, copy);
   state.rateOverrideOpen.clear();  // indices shift — avoid pointing at the wrong row
+  state.objectiveOtherOpen.clear();
   renderLineItems();
 }
 
@@ -1920,7 +2096,7 @@ function renderAvailsGrid() {
         <h3>${escapeHtml(li.product_name)}${escapeHtml(subtitle)}</h3>
         <span class="sov-badge" id="sov-badge-${escapeAttr(li.id)}"></span>
       </div>
-      <p class="avails-targeting-reminder">🎯 Target: ${escapeHtml(_effectiveTargetText(li))} &nbsp;·&nbsp; 📍 Geo: ${escapeHtml(state.parsed.geo || "TBD")}</p>
+      <p class="avails-targeting-reminder">🎯 Target: ${escapeHtml(_effectiveTargetText(li))} &nbsp;·&nbsp; 📍 Geo: ${escapeHtml(_effectiveGeo(state.activeTierLabel) || "TBD")}</p>
       <label class="freeform-toggle">
         <input type="checkbox" data-lid="${escapeAttr(li.id)}" data-freeform-toggle ${isFreeform ? "checked" : ""} />
         Free-form — type anything in these, no calculation

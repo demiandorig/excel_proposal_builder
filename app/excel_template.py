@@ -731,9 +731,40 @@ def build_target_cell_value(target_override: Optional[str], target_secondary: Op
     primary = target_override if target_override else compose_target_fallback(request)
     if not target_secondary:
         return primary
+    # The newline lives at the START of the "Secondary: " run's own text,
+    # not as its own separate bare-string list item — openpyxl only marks
+    # an explicit TextBlock run xml:space="preserve"; a standalone bare
+    # "\n" item gets no such marker and Excel silently collapses it,
+    # verified against the raw saved XML (a real bug this fix corrects,
+    # not a hypothetical one — the line break was never actually rendering).
     return CellRichText(
-        TextBlock(_PRIMARY_LABEL_FONT, "Primary: "), primary, "\n",
-        TextBlock(_SECONDARY_LABEL_FONT, "Secondary: "), target_secondary,
+        TextBlock(_PRIMARY_LABEL_FONT, "Primary: "), primary,
+        TextBlock(_SECONDARY_LABEL_FONT, "\nSecondary: "), target_secondary,
+    )
+
+
+_OBJECTIVE_SUBLINE_FONT = InlineFont(b=False, color=DARK_GREY)
+
+
+def build_product_name_cell_value(product_name: str, fallback_label: str, objective: Optional[str] = None):
+    """
+    Build column C's product-name cell value: the product name (inherits
+    the cell's own BODY_BOLD font — see the note on the newline placement
+    below), then an objective sub-line in a visibly different, muted color
+    so it never reads as a second product name. `objective` is the
+    planner's Step 04 dropdown pick; falls back to the catalog's own
+    short_label when it's None (an older/manual request that never sent
+    one), matching what this cell showed before the objective field existed.
+
+    Same newline-placement fix as build_target_cell_value, above: the "\n"
+    is folded into the START of the colored TextBlock's own text rather
+    than passed as its own bare-string item, which openpyxl does not
+    reliably preserve.
+    """
+    sub_line = objective or fallback_label
+    return CellRichText(
+        product_name,
+        TextBlock(_OBJECTIVE_SUBLINE_FONT, f"\n{sub_line}"),
     )
 
 

@@ -38,7 +38,7 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, Body, Request, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from psycopg.types.json import Jsonb
 
 from app.db import fetch_all, fetch_one, get_connection
@@ -295,6 +295,13 @@ class LineItemModel(BaseModel):
     estimated_cpm_override: Optional[float] = None  # Step 04 override of the catalog's estimated CPM (Fixed/impressions-estimate products)
     is_added_value: bool = False  # $0 budget is deliberate — exempt from below-minimum validation, sorts to the bottom of the export
     added_value_pct: Optional[float] = None  # AV lines only: this % of the tier's real (non-AV) budget is the line's estimated gift value, shown in the export
+    # Step 04's per-line objective dropdown (Awareness / Website Conversion /
+    # Click-To-Call / Conquesting / Lead Generation / a free-text "Other").
+    # Defaults client-side from the Step 02-inferred campaign_goal but is
+    # fully planner-editable per line — None only for older/manual API calls
+    # that never sent one, in which case the export falls back to the
+    # catalog's own short_label exactly as it always has.
+    objective_override: Optional[str] = None
 
 
 class AvailsEntry(BaseModel):
@@ -334,18 +341,37 @@ class AvailsEntry(BaseModel):
 
 
 class TierModel(BaseModel):
-    label: str  # "A" | "B" | "C" | "D" — internal key, Excel sheet-tab suffix, never shown to a seller
+    label: str  # "A".."J" — internal key; tabs_built/admin-history still key off this exact letter (see generate_proposal's sheet-naming, which sanitizes `name` separately for the visible tab title)
     # Planner-given display name (e.g. "Independent", "Democrat") shown
-    # instead of "Option A" everywhere a seller/client actually reads —
-    # proposal title, Gamma outline, mailto context. None/blank falls back
-    # to "Option {label}", the original behavior. Deliberately NOT used for
-    # the Excel sheet tab name itself (stays "Proposal A" etc.) — several
-    # things key off that exact, stable pattern (tabs_built reporting,
-    # admin proposal-history), and a planner-typed name isn't guaranteed
-    # Excel-sheet-name-safe (length, forbidden characters) or unique.
+    # everywhere a seller/client actually reads this — proposal title,
+    # Gamma outline, mailto context, AND (as of the multi-option sheet-tab
+    # naming feature) the Excel tab title itself, sanitized/de-duped for
+    # Excel's naming rules. None/blank falls back to "Option {label}". The
+    # INTERNAL label keeps keying tabs_built/admin-proposal-history (see
+    # TierModel.label's own comment) regardless of what the visible name is.
     name: Optional[str] = None
+    # Per-tier geo override (e.g. two options targeting different DMAs) —
+    # None/blank falls back to the campaign-level ProposalRequest.geo,
+    # exactly like `name` falls back to "Option {label}".
+    geo: Optional[str] = None
     line_items: list[LineItemModel]
     avails_data: Optional[dict[str, AvailsEntry]] = None
+
+    @field_validator("label")
+    @classmethod
+    def _label_must_be_a_single_known_letter(cls, v: str) -> str:
+        v = (v or "").strip().upper()
+        if v not in _TIER_LABELS:
+            raise ValueError(f"tier label must be one of {', '.join(_TIER_LABELS)} (got {v!r})")
+        return v
+
+
+# The full set of valid tier labels — up to 10 simultaneous budget options
+# ("A".."J"), matching the frontend's TIER_LABELS in app.js. Previously
+# unenforced entirely (a comment said "up to 4" but nothing checked it);
+# added real validation here at the same time the cap was actually raised,
+# rather than leaving it open-ended indefinitely.
+_TIER_LABELS = [chr(ord("A") + i) for i in range(10)]
 
 
 class AddonItemModel(BaseModel):
@@ -357,8 +383,20 @@ class AddonItemModel(BaseModel):
 class GenerateRequest(BaseModel):
     request: dict   # serialized ProposalRequest
     line_items: list[LineItemModel] = []   # legacy single-tier shape — used only when `tiers` is absent
-    tiers: Optional[list[TierModel]] = None  # tiered-budget options (up to 4); preferred over `line_items` when present
+    tiers: Optional[list[TierModel]] = None  # tiered-budget options (up to 10); preferred over `line_items` when present
     force_tabs: Optional[dict] = None
+
+    @field_validator("tiers")
+    @classmethod
+    def _tiers_within_cap_and_unique(cls, v: Optional[list[TierModel]]) -> Optional[list[TierModel]]:
+        if not v:
+            return v
+        if len(v) > len(_TIER_LABELS):
+            raise ValueError(f"at most {len(_TIER_LABELS)} tiers are supported (got {len(v)})")
+        labels = [t.label for t in v]
+        if len(set(labels)) != len(labels):
+            raise ValueError(f"tier labels must be unique (got {labels})")
+        return v
     avails_data: Optional[dict[str, AvailsEntry]] = None  # product_name -> avails; ignored when `tiers` is present
     strategy_brief: Optional[dict] = None  # confirmed Step 03 brief, if not skipped
     # Step 04's Add-Ons module picks — proposal-wide (not per-tier). []
@@ -641,6 +679,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
                 estimated_cpm_override=li.estimated_cpm_override,
                 is_added_value=li.is_added_value,
                 added_value_pct=li.added_value_pct,
+                objective_override=li.objective_override,
             )
             for li in models
         ]
@@ -653,6 +692,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             {
                 "label": t.label,
                 "name": t.name,
+                "geo": t.geo,
                 "line_items": _to_line_items(t.line_items),
                 "avails_data": {name: entry.model_dump() for name, entry in (t.avails_data or {}).items()},
             }
@@ -661,6 +701,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     else:
         tiers = [{
             "label": "A",
+            "geo": None,
             "line_items": _to_line_items(body.line_items),
             "avails_data": {name: entry.model_dump() for name, entry in (body.avails_data or {}).items()},
         }]

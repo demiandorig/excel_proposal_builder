@@ -644,10 +644,23 @@ body::before {
   background: var(--paper-card);
 }
 .spacer { flex: 1; }
+.agency-fee-box, .tier-geo-override {
+  margin-bottom: 14px;
+}
+.agency-fee-box input { width: 100px; }
+.tier-geo-override input { width: 240px; }
 .totals-display {
   display: flex;
   gap: 24px;
+  flex-wrap: wrap;
 }
+.totals-gross {
+  display: flex;
+  gap: 24px;
+  padding-left: 20px;
+  border-left: 1px solid var(--rule);
+}
+.totals-gross .value { color: var(--ink-soft); }
 .totals-display > div {
   display: flex;
   flex-direction: column;
@@ -766,6 +779,23 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   background: #fdf1f0;
 }
 .line-items .col-budget input { width: 110px; min-width: 110px; }
+.budget-gross-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.budget-gross-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+}
+.budget-gross-row input { width: 110px; min-width: 110px; }
+.line-items .col-objective { min-width: 150px; }
+.line-items .col-objective select { width: 100%; min-width: 140px; }
+.objective-other-input { width: 100%; min-width: 140px; margin-top: 4px; }
 .line-items .col-months input { width: 60px; min-width: 60px; }
 .line-items .col-target { min-width: 170px; }
 .line-items .col-target textarea { min-width: 170px; min-height: 52px; }

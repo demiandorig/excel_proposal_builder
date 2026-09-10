@@ -8,6 +8,7 @@ with the planner's values.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -67,6 +68,11 @@ class LineItem:
     # the planner hasn't put a number on it yet, so the export just shows
     # the plain "Added Value" note with no dollar estimate.
     added_value_pct: Optional[float] = None
+    # Step 04's per-line objective dropdown (Awareness, Website Conversion,
+    # Click-To-Call, Conquesting, Lead Generation, or free-text "Other").
+    # None falls back to the catalog's own short_label in the export,
+    # exactly what column C showed before this field existed.
+    objective_override: Optional[str] = None
 
     def total_budget(self) -> float:
         return self.monthly_budget * self.months
@@ -84,6 +90,36 @@ class AddonItem:
     product_name: str               # canonical catalog name (a catalog.Product with is_addon=True)
     amount: float                   # planner-edited flat price; defaults to the catalog minimum_spend client-side
     notes_override: Optional[str] = None
+
+
+# Excel forbids these characters anywhere in a sheet title and caps titles
+# at 31 characters total.
+_SHEET_NAME_FORBIDDEN = re.compile(r'[:\\/?*\[\]]')
+
+
+def _safe_sheet_name(base: str, suffix: str, used: set) -> str:
+    """
+    Turn a planner-typed tier display name into a valid, unique Excel sheet
+    title: strip characters Excel forbids, truncate to the 31-char limit
+    (leaving room for `suffix`), and de-dupe against every sheet name
+    already used in this workbook — two tiers could share a display name,
+    or both be left blank, and Excel raises a hard error on any duplicate
+    or invalid title, so this must never produce one. `used` is mutated
+    (the returned name is added to it) — pass the SAME set across the whole
+    workbook's build so tiers can't collide with each other, not just with
+    their own other tabs.
+    """
+    base = _SHEET_NAME_FORBIDDEN.sub("-", (base or "").strip()) or "Option"
+    full = f"{base} {suffix}".strip() if suffix else base
+    full = full[:31]
+    candidate = full
+    n = 2
+    while candidate.lower() in used:
+        tail = f" ({n})"
+        candidate = full[:31 - len(tail)] + tail
+        n += 1
+    used.add(candidate.lower())
+    return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -112,15 +148,18 @@ def generate_proposal(
         output_path: where to write the .xlsx
         force_tabs: optionally override the auto-classified tab set
                     (lets the planner force Gross, force wsections, etc.)
-        tiers: tiered-budget options (up to 4). Each requested tab type
-               (Net/wsections/Gross/Avails-Only) is built once PER TIER,
-               lettered "Proposal A", "Proposal B", ... — the same lettering
-               convention the single-tier sheet name already used, extended
-               to one tab per option. DOOH and Process FAQs stay single,
-               shared tabs regardless of tier count (they're inventory/
-               reference content, not a budget scenario). When omitted or a
-               single tier, output is byte-for-byte the same as before this
-               parameter existed.
+        tiers: tiered-budget options (up to 10). Each requested tab type
+               (Net/wsections/Gross/Avails-Only) is built once PER TIER.
+               `tabs_built`/admin-history always key off "Proposal {label}"
+               ("A".."J") regardless of tier count — the visible Excel tab
+               TITLE is a separately sanitized/de-duped version of the
+               tier's own display name (see _safe_sheet_name below) once
+               there's more than one tier; a single tier's tab keeps the
+               plain "Proposal A" title unchanged. DOOH and Process FAQs
+               stay single, shared tabs regardless of tier count (they're
+               inventory/reference content, not a budget scenario). When
+               omitted or a single tier, output is byte-for-byte the same
+               as before this parameter existed.
         addons: Step 04's Add-Ons picks (fixed-price extras — landing pages,
                 call tracking, etc.) — the SAME list appears on every tier's
                 sheet, matching how the old hardcoded add-ons list already
@@ -190,15 +229,23 @@ def generate_proposal(
     campaign_name = getattr(enrichment, "campaign_name", "") if enrichment else ""
 
     tier_summaries = []
+    # Shared across every tier/tab-type below so two tiers can't collide
+    # with EACH OTHER's sheet titles, not just their own — see _safe_sheet_name.
+    used_sheet_titles: set = set()
 
     for tier in tiers:
         label = (tier.get("label") or "A").strip() or "A"
         tier_avails = tier.get("avails_data")
+        # Per-tier geo override (e.g. two options targeting different DMAs)
+        # — None/blank falls back to the campaign-level request.geo exactly
+        # like tier_display_name falls back to "Option {label}" below.
+        tier_geo = (tier.get("geo") or "").strip() or None
         # Planner-given display name (e.g. "Independent") wins over the
         # generic "Option A" wherever a seller/client actually reads this —
-        # the sheet TAB itself still keys off the plain `label` (see
-        # TierModel.name's docstring for why), only the visible title text
-        # changes here.
+        # proposal title, emails, AND (for a multi-tier proposal) the Excel
+        # tab title itself, via _safe_sheet_name below. tabs_built/admin-
+        # history still key off the plain `label` regardless (see
+        # TierModel.name's own docstring for why that stays stable).
         tier_display_name = (tier.get("name") or "").strip() or f"Option {label}"
         tier_title_suffix = f" — {tier_display_name}" if multi_tier else ""
 
@@ -233,31 +280,34 @@ def generate_proposal(
             tier_line_items = [li for _, li in reordered]
 
         if tabs.get("net"):
+            sheet_title = _safe_sheet_name(tier_display_name, "", used_sheet_titles) if multi_tier else f"Proposal {label}"
             ws = et.build_proposal_a(wb, products, with_sections=False,
                                      start_date=start_date, end_date=end_date, total_months=total_months,
-                                     sheet_name=f"Proposal {label}", addons=addons_dicts)
+                                     sheet_name=sheet_title, addons=addons_dicts)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix)
+                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo)
             _populate_line_items(ws, products, tier_line_items, gross=False, blurbs=blurbs,
                                  avails_data=tier_avails, request=request)
             tabs_built.append(f"Proposal {label}")
 
         if tabs.get("wsections"):
+            sheet_title = _safe_sheet_name(tier_display_name, "(wsections)", used_sheet_titles) if multi_tier else f"Proposal {label} (wsections)"
             ws = et.build_proposal_a(wb, products, with_sections=True,
                                      start_date=start_date, end_date=end_date, total_months=total_months,
-                                     sheet_name=f"Proposal {label} (wsections)", addons=addons_dicts)
+                                     sheet_name=sheet_title, addons=addons_dicts)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix)
+                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo)
             _populate_line_items(ws, products, tier_line_items, gross=False, with_sections=True, blurbs=blurbs,
                                  avails_data=tier_avails, request=request)
             tabs_built.append(f"Proposal {label} (wsections)")
 
         if tabs.get("gross"):
+            sheet_title = _safe_sheet_name(tier_display_name, "(Gross)", used_sheet_titles) if multi_tier else f"Proposal {label} (Gross)"
             ws = et.build_proposal_a_gross(wb, products,
                                            start_date=start_date, end_date=end_date, total_months=total_months,
-                                           sheet_name=f"Proposal {label} (Gross)", addons=addons_dicts)
+                                           sheet_name=sheet_title, addons=addons_dicts)
             _populate_meta(ws, request, gross=True, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix)
+                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo)
             _populate_line_items(ws, products, tier_line_items, gross=True, blurbs=blurbs,
                                  avails_data=tier_avails, request=request)
             # Set agency fee in I14 (Gross sheet's variable input cell)
@@ -270,12 +320,13 @@ def generate_proposal(
 
         if tabs.get("avails_only"):
             avails_sheet_name = f"Avails-Only {label}" if multi_tier else "Avails-Only"
+            sheet_title = _safe_sheet_name(tier_display_name, "(Avails)", used_sheet_titles) if multi_tier else avails_sheet_name
             ws = et.build_avails_only(wb, products, line_items=tier_line_items, request=request,
                                       start_date=start_date, end_date=end_date, avails_data=tier_avails,
-                                      campaign_name=campaign_name, sheet_name=avails_sheet_name)
+                                      campaign_name=campaign_name, sheet_name=sheet_title)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            title_suffix=f" (Avails-Only){tier_title_suffix}",
-                           include_billing=False, include_campaign_meta=False)
+                           include_billing=False, include_campaign_meta=False, tier_geo=tier_geo)
             tabs_built.append(avails_sheet_name)
 
         tier_total_net = sum(li.total_budget() for li in tier_line_items)
@@ -332,6 +383,7 @@ def _populate_meta(
     include_billing: bool = True,
     include_campaign_meta: bool = True,
     campaign_name: str = "",
+    tier_geo: Optional[str] = None,
 ) -> None:
     """
     Overwrite the meta block cells (rows 4-15) with real client info.
@@ -348,6 +400,10 @@ def _populate_meta(
     Specials June 2026") written into the "Order Description:" line. Per-line
     targeting now lives solely in column D of each product row — there's no
     separate campaign-level "Target:" meta line anymore.
+
+    tier_geo: this tier's own geo override (Step 04), if the planner set
+    one — wins over request.geo for the "Geo:" line below when present,
+    exactly like a tier's display name wins over "Option {label}" elsewhere.
     """
     # Title cell (E2 — merged E2:L2)
     if proposal_title:
@@ -389,8 +445,9 @@ def _populate_meta(
     order_description = f"Order Description: {campaign_name}" if campaign_name else "Order Description: "
     ws["C11"] = f"{media_proposal_line}    |    {order_description}"
 
-    if request.geo:
-        ws["C13"] = f"Geo: {request.geo}"
+    effective_geo = tier_geo or request.geo
+    if effective_geo:
+        ws["C13"] = f"Geo: {effective_geo}"
 
     # "All rates are NET" is flatly wrong on a Gross sheet — it says the
     # opposite of what the sheet actually shows (rates marked up by the
@@ -536,6 +593,14 @@ def _populate_line_items(
         # secondary audience turns this into a two-line Primary/Secondary
         # rich-text cell with bolded labels.
         ws[f"D{row}"] = et.build_target_cell_value(li.target_override, li.target_secondary, request)
+
+        # PRODUCT NAME (C) — overwrite the sub-line _write_product_row wrote
+        # at sheet-creation time (the catalog's static short_label) with the
+        # planner's own per-line objective, styled in a visibly different
+        # color so it doesn't read as a second product name. Falls back to
+        # short_label when no objective was set (an older/manual request),
+        # matching this cell's original text exactly in that case.
+        ws[f"C{row}"] = et.build_product_name_cell_value(product.name, product.short_label, li.objective_override)
 
         # DETAILS (E) — the catalog's real proposal_description is already
         # the template default here (written by _write_product_row before

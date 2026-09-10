@@ -281,13 +281,23 @@ Client name: ...
         <p class="lede">The salesperson's picks are pre-loaded. Add, remove, and adjust budgets. Minimums and rates from the AdFlo catalog show as you go.</p>
       </div>
 
+      <label class="inline-input agency-fee-box">
+        <span>Agency fee <small>(parsed from Step 02 — override here if needed; shows Gross alongside Net below when set)</small></span>
+        <input type="number" id="curate-agency-fee-input" step="0.01" min="0" max="0.99" placeholder="0.00" />
+      </label>
+
       <div class="tier-switcher" id="tier-switcher">
         <div class="tier-tabs" id="tier-tabs"></div>
-        <button class="btn-secondary" id="add-tier-btn" title="Copy the current mix into a new budget option (up to 4 total)">+ Add Option</button>
+        <button class="btn-secondary" id="add-tier-btn" title="Copy the current mix into a new budget option (up to 10 total)">+ Add Option</button>
       </div>
       <p class="tier-switcher-hint hidden" id="tier-switcher-hint">
         Multiple budget options — each generates its own tab (and gets outlined in the emails) when you generate the proposal.
       </p>
+
+      <label class="inline-input tier-geo-override">
+        <span>Geo override for this option <small>(blank uses Step 02's Geo)</small></span>
+        <input type="text" id="tier-geo-input" placeholder="e.g. Los Angeles DMA only" />
+      </label>
 
       <div class="curation-toolbar">
         <label class="inline-input">
@@ -299,6 +309,10 @@ Client name: ...
         <div class="totals-display">
           <div><span class="label">Monthly total</span><span class="value" id="monthly-total">$0</span></div>
           <div><span class="label">Flight total</span><span class="value" id="flight-total">$0</span></div>
+          <div class="totals-gross hidden" id="totals-gross-wrap">
+            <div><span class="label">Monthly total (Gross)</span><span class="value" id="monthly-total-gross">$0</span></div>
+            <div><span class="label">Flight total (Gross)</span><span class="value" id="flight-total-gross">$0</span></div>
+          </div>
         </div>
       </div>
 
@@ -315,6 +329,7 @@ Client name: ...
               <th>Monthly $</th>
               <th>Months</th>
               <th>Target override</th>
+              <th>Objective</th>
               <th>Planner note</th>
               <th></th>
             </tr>
