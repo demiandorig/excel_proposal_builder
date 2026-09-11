@@ -92,6 +92,7 @@ KNOWN v0 LIMITATIONS (flagged inline too):
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
 import urllib.parse
@@ -102,6 +103,8 @@ try:
     _HAS_PLAYWRIGHT = True
 except ImportError:
     _HAS_PLAYWRIGHT = False
+
+_logger = logging.getLogger(__name__)
 
 try:
     from langdetect import detect_langs, DetectorFactory
@@ -160,7 +163,17 @@ def _fetch_rendered_text(url: str) -> Optional[str]:
                 return _clean_text(page.inner_text("body"))
             finally:
                 browser.close()
-    except Exception:
+    except Exception as e:
+        # Deliberately still returns None to the caller (a live ad-library
+        # check failing shouldn't break proposal generation) — but the
+        # caller's own error surfaces this as one generic, indistinguishable
+        # "timeout, network error, or missing browser binary" message with
+        # no way to tell which. Logging the real exception here is the only
+        # way to actually tell those apart afterward (this exact ambiguity
+        # is what hid a real missing-browser-binary setup gap — see
+        # scripts/post-merge.sh — until someone happened to check server
+        # logs for it).
+        _logger.warning("ad_presence: page load failed for %s: %s: %s", url, type(e).__name__, e)
         return None
 
 
