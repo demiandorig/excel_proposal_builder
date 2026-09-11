@@ -193,6 +193,52 @@ def build_roadblocks_docx(
     return True
 
 
+_AD_PRESENCE_LANG_LABELS = {"en": "English", "es": "Spanish"}
+_AD_PRESENCE_LABELS = {"meta": "Meta (Facebook/Instagram)", "google": "Google Ads", "tiktok": "TikTok"}
+
+
+def _ad_presence_line(platform_result: dict) -> str:
+    r = platform_result or {}
+    if not r.get("checked"):
+        return f"not checked ({r.get('note') or 'skipped'})"
+    if not r.get("active"):
+        return f"no confirmed active ads found. {r.get('note', '')}".strip()
+    langs = r.get("languages") or {}
+    lang_str = ""
+    if langs:
+        parts = [f"{round(p * 100)}% {_AD_PRESENCE_LANG_LABELS.get(c, c)}"
+                  for c, p in sorted(langs.items(), key=lambda kv: -kv[1])]
+        lang_str = f" — ad copy sampled as {', '.join(parts)}"
+    count = r.get("high_confidence_count") or r.get("ad_count_estimate") or r.get("ad_count_estimate_display") or "some"
+    return f"ACTIVE, ~{count} ad(s) found{lang_str}"
+
+
+def _ad_presence_section(doc, ad_presence: dict) -> None:
+    """Adds a 'Digital Ad Presence' section — a live (non-LLM) check of
+    whether the client is currently running ads on Meta/Google/TikTok, and
+    in what language. See app/services/ad_presence.py. No-op if the check
+    never ran (older brief, or the check itself failed)."""
+    if not ad_presence:
+        return
+    doc.add_paragraph("")
+    p = doc.add_paragraph()
+    p.add_run("Digital Ad Presence").bold = True
+    note_p = doc.add_paragraph()
+    note_run = note_p.add_run(
+        "Live-checked against Meta, Google & TikTok's public ad libraries — "
+        "Meta/Google are reliable signals, TikTok's commercial-ad coverage is thin."
+    )
+    note_run.italic = True
+
+    for key in ("meta", "google", "tiktok"):
+        r = ad_presence.get(key)
+        if not r:
+            continue
+        line_p = doc.add_paragraph(style="List Bullet")
+        line_p.add_run(f"{_AD_PRESENCE_LABELS[key]}: ").bold = True
+        line_p.add_run(_ad_presence_line(r))
+
+
 def build_strategy_brief_docx(
     output_path: Path,
     title: str,
@@ -204,6 +250,7 @@ def build_strategy_brief_docx(
     key_insights: list,
     monthly_budget: float = 0.0,
     total_months: int = 0,
+    ad_presence: dict = None,
 ) -> bool:
     """
     Write the Step 03 AI Strategy Brief as a Word document, in the same
@@ -241,6 +288,7 @@ def build_strategy_brief_docx(
     _section("Client & Business", client_summary)
     _section("Market Context", market_context)
     _section("Objectives Analysis", objectives_analysis)
+    _ad_presence_section(doc, ad_presence)
 
     if recommended_tactics:
         doc.add_paragraph("")
