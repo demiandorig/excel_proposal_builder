@@ -103,7 +103,8 @@ def _set_header(ws: Worksheet, row: int, headers: list) -> None:
 
 
 def _write_meta_block(ws: Worksheet, title: str, include_billing: bool = True,
-                      include_campaign_meta: bool = True) -> None:
+                      include_campaign_meta: bool = True,
+                      include_entravision_address: bool = True) -> None:
     """
     Top brand block. Rows 1-15 (compacted — content stops well before the
     row-17 header so the block doesn't crowd the visible screen).
@@ -115,6 +116,11 @@ def _write_meta_block(ws: Worksheet, title: str, include_billing: bool = True,
     include_campaign_meta: set False for sheets whose product rows start at
     row 11 (e.g. Avails-Only) — the C11:C14 "Media Proposal / Target / Geo"
     lines would otherwise land right on top of the first product rows.
+    include_entravision_address: set False for a purely-informational sheet
+    (Process FAQs) that isn't a billable document at all — Entravision's own
+    office address/contact block doesn't belong there any more than the
+    customer billing block does. Row-height compaction for rows 4-10 still
+    applies regardless, so every sheet's header stays equally compact.
     """
     # C2 + D2: purple background (logo area)
     for col in ("C", "D"):
@@ -138,12 +144,13 @@ def _write_meta_block(ws: Worksheet, title: str, include_billing: bool = True,
     ws.row_dimensions[3].height = 6
 
     # Left column: Entravision contact info (tightened row heights — rows 4-10)
-    ws["C4"] = "ENTRAVISION COMMUNICATIONS CORPORATION"
-    ws["C4"].font = H_BRAND
-    ws["C5"] = "Entravision Contact Information"
-    ws["C5"].font = BODY_BOLD
-    ws["C6"] = "1 Estrella Way"
-    ws["C7"] = "Burbank, CA 91504"
+    if include_entravision_address:
+        ws["C4"] = "ENTRAVISION COMMUNICATIONS CORPORATION"
+        ws["C4"].font = H_BRAND
+        ws["C5"] = "Entravision Contact Information"
+        ws["C5"].font = BODY_BOLD
+        ws["C6"] = "1 Estrella Way"
+        ws["C7"] = "Burbank, CA 91504"
     for r in range(4, 11):
         ws.row_dimensions[r].height = 14
     # Row 8 ("Address: " / F8) used to be knocked down to 10 here on the
@@ -274,6 +281,18 @@ def _mixed_number_sum_formula(range_ref: str, strip_prefixes: tuple = (), strip_
     for suffix in strip_suffixes:
         expr = f'SUBSTITUTE({expr},"{suffix}","")'
     return f'=SUMPRODUCT(IFERROR(VALUE({expr}),0))'
+
+
+def _is_live_sports_product(product: Product) -> bool:
+    """Whether this product's own name flags it as live-sports/tentpole
+    inventory — sold on publisher-controlled, geo-based estimates that can
+    change without notice (today: "NBC Sports Stream Sponsorship", "Fox
+    Sports Go Video Sponsorship"). A name-based check rather than a fixed
+    product list so it still catches any future product named similarly,
+    matching how the disclaimer was actually requested ("anything that
+    says live sports or 'tentpole' in the product name")."""
+    name = product.name.lower()
+    return "sports" in name or "tentpole" in name
 
 
 def compute_sov_pct(product: Product, monthly_budget: float, avail: dict,
@@ -855,6 +874,15 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
             ws[f"C{row}"].alignment = LEFT
             ws.merge_cells(f"C{row}:L{row}")
             ws.row_dimensions[row].height = 22
+            # Every product row around this banner gets a full THIN_BORDER
+            # (see _write_product_row) — this row never did, leaving it as
+            # the one borderless gap in an otherwise fully-gridded table
+            # (only its left/right edges got touched later, by
+            # _apply_outer_border's perimeter pass). Copying/pasting a
+            # range that includes a section banner lost the grid at
+            # exactly that row as a result.
+            for col in "CDEFGHIJKL":
+                ws[f"{col}{row}"].border = THIN_BORDER
             row += 1
             last_family = p.family
 
@@ -875,7 +903,14 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     _format_money_cell(ws[f"L{total_row}"])
     ws[f"L{total_row}"].font = TOTAL_FONT
     ws[f"L{total_row}"].fill = TOTAL_FILL
-    _set_array_formula(ws, f"I{total_row}", f"=SUMPRODUCT(IFERROR(I19:I{last_data_row}*1,0))")
+    # I19:I{last} mixes real numbers (CPM/CPP rows) with "Est. 1,234"-style
+    # TEXT (Fixed/estimated-CPM rows) and literal "NA" — a plain `*1` sum
+    # silently zeroed every "Est. ..." row instead of counting it, which is
+    # exactly the under-total the planner reported. _mixed_number_sum_formula
+    # strips the "Est. " wrapper before parsing, so text rows count too;
+    # "NA" and any genuinely blank row still fall out via IFERROR(...,0), and
+    # a real number passes through unaffected.
+    _set_array_formula(ws, f"I{total_row}", _mixed_number_sum_formula(f"I19:I{last_data_row}", strip_prefixes=("Est. ",)))
     _format_imps_cell(ws[f"I{total_row}"])
     ws[f"I{total_row}"].font = TOTAL_FONT
     ws[f"I{total_row}"].fill = TOTAL_FILL
@@ -885,7 +920,10 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     _box_range(ws, total_row, total_row, "C", "L")
     _fill_box_range(ws, total_row, total_row, "C", "L", TOTAL_FILL)
 
-    _write_addons_grand_total_footer(ws, total_row, gross=False, box_max_col="L", addons=addons)
+    _write_addons_grand_total_footer(
+        ws, total_row, gross=False, box_max_col="L", addons=addons,
+        show_live_sports_disclaimer=any(_is_live_sports_product(p) for p in products),
+    )
 
     ws.freeze_panes = "C18"
     # Default print/PDF view stops at NET BUDGET (L) — avails (N-Q) and
@@ -898,7 +936,8 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
 
 def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bool,
                                      box_max_col: str, months_cell: str = "I10",
-                                     addons: Optional[list[dict]] = None) -> int:
+                                     addons: Optional[list[dict]] = None,
+                                     show_live_sports_disclaimer: bool = False) -> int:
     """
     Shared by build_proposal_a and build_proposal_a_gross: the ADD-ONS /
     ONE-TIME FEES block, the campaign-length grand total row, the footer
@@ -919,6 +958,13 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     Gross sheets additionally carry a GROSS amount per add-on (column N,
     derived from the NET amount via the $I$14 agency-fee cell) and a GROSS
     grand total alongside the NET one.
+
+    show_live_sports_disclaimer: True when this tier includes any product
+    whose name mentions "sports" or "tentpole" — live sports/tentpole
+    inventory is sold on publisher-controlled, geo-based estimates that can
+    change without notice, so those proposals carry an extra highlighted
+    callout (a real re-avail buffer requirement, not boilerplate) right
+    before the signature block.
 
     Returns the signature dotted-line row.
     """
@@ -964,16 +1010,22 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
         addons_sum_term_gross = ""
         grand_row = total_row + 2
 
-    # Grand total — dynamic label uses the months cell
-    ws[f"C{grand_row}"] = f'="TOTAL DIGITAL — "&{months_cell}&"-MONTH CAMPAIGN"'
+    # Grand total — dynamic label uses the months cell. Guarded with
+    # ISNUMBER (falling back to 3, the same default proposal_generator.py
+    # itself uses for a missing total_months) so a months cell that's ever
+    # blank or non-numeric shows a safe number in both the label and the
+    # multiplication below, instead of concatenating raw garbage text into
+    # the label or breaking the dollar total's arithmetic.
+    safe_months = f'IF(ISNUMBER({months_cell}),{months_cell},3)'
+    ws[f"C{grand_row}"] = f'="TOTAL DIGITAL — "&{safe_months}&"-MONTH CAMPAIGN"'
     ws[f"C{grand_row}"].font = TOTAL_FONT
     ws[f"C{grand_row}"].fill = TOTAL_FILL
-    ws[f"L{grand_row}"] = f"=ROUNDDOWN(L{total_row}*{months_cell}{addons_sum_term},0)"
+    ws[f"L{grand_row}"] = f"=ROUNDDOWN(L{total_row}*{safe_months}{addons_sum_term},0)"
     _format_money_cell(ws[f"L{grand_row}"])
     ws[f"L{grand_row}"].font = TOTAL_FONT
     ws[f"L{grand_row}"].fill = TOTAL_FILL
     if gross:
-        ws[f"N{grand_row}"] = f"=ROUNDDOWN(N{total_row}*{months_cell}{addons_sum_term_gross},0)"
+        ws[f"N{grand_row}"] = f"=ROUNDDOWN(N{total_row}*{safe_months}{addons_sum_term_gross},0)"
         _format_money_cell(ws[f"N{grand_row}"])
         ws[f"N{grand_row}"].font = TOTAL_FONT
         ws[f"N{grand_row}"].fill = TOTAL_FILL
@@ -998,8 +1050,29 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     ws.merge_cells(f"C{foot+2}:{box_max_col}{foot+2}")
     ws[f"C{foot+3}"] = "Client accepts Entravision's Terms of Sales (https://entravision.com/termsofsales/)"
 
+    # Live Sports / tentpole inventory callout — only when this tier
+    # actually includes one of those products. Highlighted (not just
+    # italic grey like the footer notes above) since it's a real
+    # operational requirement (a re-avail buffer) the AE needs to plan
+    # around, not routine boilerplate.
+    next_row = foot + 5
+    if show_live_sports_disclaimer:
+        ws[f"C{next_row}"] = (
+            "\U0001F4F6\U0001F3C8 Live Sports Inventory: The numbers provided in this proposal are "
+            "geo-based estimates. Because publishers hold all cards and can adjust pricing or "
+            "inventory without notice, we'll need a mandatory 3-5 business day pit stop for a "
+            "full re-avail before any campaign goes live. Keep this buffer in your SLAs and "
+            "potential secondary avenues for inventory delivery (i.e. audience-based buys)."
+        )
+        ws[f"C{next_row}"].font = Font(name="Arial", size=9, color="FF58151C")
+        ws[f"C{next_row}"].fill = PatternFill("solid", start_color=SOV_RED)
+        ws[f"C{next_row}"].alignment = LEFT
+        ws.merge_cells(f"C{next_row}:{box_max_col}{next_row}")
+        ws.row_dimensions[next_row].height = 42
+        next_row += 2
+
     # Signature block
-    sig = foot + 5
+    sig = next_row
     ws[f"C{sig}"] = "Customer Signature"
     ws[f"E{sig}"] = "Name"
     ws[f"F{sig}"] = "Title"
@@ -1215,14 +1288,25 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     _format_money_cell(ws[f"N{total_row}"])
     ws[f"N{total_row}"].font = TOTAL_FONT
     ws[f"N{total_row}"].fill = TOTAL_FILL
-    _set_array_formula(ws, f"I{total_row}", f"=SUMPRODUCT(IFERROR(I19:I{last_data_row}*1,0))")
+    # Same mixed-text-and-number fix as the Net sheet's own total — see its
+    # comment above.
+    _set_array_formula(ws, f"I{total_row}", _mixed_number_sum_formula(f"I19:I{last_data_row}", strip_prefixes=("Est. ",)))
     _format_imps_cell(ws[f"I{total_row}"])
     ws[f"I{total_row}"].font = TOTAL_FONT
     ws[f"I{total_row}"].fill = TOTAL_FILL
+    # eCPM — the Net sheet has always had this; the Gross sheet never did.
+    # Uses the GROSS dollar total (N) since that's this sheet's own primary
+    # billed figure, the same way the Net sheet's eCPM uses its own L.
+    ws[f"J{total_row}"] = '="eCPM:"'
+    ws[f"K{total_row}"] = f"=IFERROR(N{total_row}/I{total_row}*1000,\"\")"
+    _format_money_cell(ws[f"K{total_row}"])
     _box_range(ws, total_row, total_row, "C", "N")
     _fill_box_range(ws, total_row, total_row, "C", "N", TOTAL_FILL)
 
-    _write_addons_grand_total_footer(ws, total_row, gross=True, box_max_col="N", addons=addons)
+    _write_addons_grand_total_footer(
+        ws, total_row, gross=True, box_max_col="N", addons=addons,
+        show_live_sports_disclaimer=any(_is_live_sports_product(p) for p in products),
+    )
 
     ws.freeze_panes = "C18"
     # Default print/PDF view stops at GROSS BUDGET (N) — see build_proposal_a's
@@ -1620,10 +1704,13 @@ def build_process_faqs(wb: Workbook) -> Worksheet:
     ws.sheet_view.showGridLines = False  # clean white margins outside the boxed tables
     widths = {"A": 1.5, "B": 2.0, "C": 36, "D": 60, "E": 50}
     _apply_col_widths(ws, widths)
-    # No customer billing block here — this is a reference/FAQ tab, not a
-    # billable line-item sheet, so a "Customer Billing Information" block in
-    # column F has nothing to bill against and doesn't apply.
-    _write_meta_block(ws, "Process FAQs", include_billing=False)
+    # No customer billing block, Entravision office address, or campaign
+    # meta here — this is a purely-informational reference/FAQ tab, not a
+    # billable line-item sheet, so none of that belongs on it (it used to
+    # leave "Burbank, CA 91504" and "All rates are NET..." sitting on the
+    # tab as orphaned leftovers from _write_meta_block's shared defaults).
+    _write_meta_block(ws, "Process FAQs", include_billing=False,
+                      include_campaign_meta=False, include_entravision_address=False)
 
     _set_header(ws, 6, [
         ("C", "SERVICES"),

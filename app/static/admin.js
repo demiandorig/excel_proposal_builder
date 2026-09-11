@@ -505,7 +505,7 @@ async function loadMarketConfig() {
     renderMarketConfig();
   } catch (e) {
     document.getElementById("markets-body").innerHTML =
-      `<tr><td colspan="5" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+      `<tr><td colspan="7" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -548,7 +548,7 @@ function renderMarketConfig() {
     `${list.length} market${list.length === 1 ? "" : ""}`.trim();
 
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="5" class="admin-empty">No markets configured yet.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="admin-empty">No markets configured yet.</td></tr>`;
     return;
   }
 
@@ -557,6 +557,8 @@ function renderMarketConfig() {
       <td class="mono">${m.is_default ? "Default (all other markets)" : escapeHtml(m.market_key)}</td>
       <td><input type="text" data-field="address_line1" value="${escapeAttr(m.address_line1)}" placeholder="Street address" /></td>
       <td><input type="text" data-field="address_line2" value="${escapeAttr(m.address_line2)}" placeholder="City, State ZIP" /></td>
+      <td><input type="text" data-field="dsc_email" value="${escapeAttr(m.dsc_email)}" placeholder="dsc@entravision.com" /></td>
+      <td><input type="text" data-field="dsm_email" value="${escapeAttr(m.dsm_email)}" placeholder="dsm@entravision.com" /></td>
       <td><input type="text" data-field="ccs" value="${escapeAttr((m.ccs || []).join(", "))}" placeholder="name@entravision.com, …" /></td>
       <td>
         <button class="btn-save-row" data-action="save-market" data-market="${escapeAttr(m.market_key)}">Save</button>

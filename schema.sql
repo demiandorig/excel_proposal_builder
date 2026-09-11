@@ -76,23 +76,69 @@ CREATE TABLE custom_products (
 -- to keep this as ONE table matching the existing JSON shape 1:1 than to
 -- split base/T1 CCs into their own table for what's really just two
 -- always-present config rows.
+--
+-- dsc_email / dsm_email: the market's own Digital Sales Coordinator
+-- (assistant) and Digital Sales Manager — CC'd on the internal seller
+-- email alongside the flat `ccs` list, kept as their own named columns
+-- (not just two more entries in `ccs`) so the admin UI and the export can
+-- label WHO each address is rather than an undifferentiated CC blob. NULL
+-- until an admin fills them in for a given market — the real per-market
+-- data hasn't been supplied yet, so every seed row below leaves these two
+-- blank rather than guessing.
 -- ---------------------------------------------------------------------------
 CREATE TABLE market_config (
     market_key       TEXT PRIMARY KEY,
     address_line1     TEXT,
     address_line2      TEXT,
-    ccs                  TEXT[] NOT NULL DEFAULT '{}',
-    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+    dsc_email             TEXT,
+    dsm_email              TEXT,
+    ccs                       TEXT[] NOT NULL DEFAULT '{}',
+    updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Seed rows so the app has the same zero-config defaults it has today —
 -- run once, on a fresh database only (ON CONFLICT DO NOTHING makes this
--- safe to re-run).
+-- safe to re-run). The 22 named markets below are the real Entravision
+-- office addresses (client-supplied, Sep 2026) — dsc_email/dsm_email and
+-- ccs are left blank pending the actual per-market directory; an admin
+-- can fill them in via the Markets tab at any time without a code change.
 INSERT INTO market_config (market_key, address_line1, address_line2, ccs) VALUES
     ('__default__', '1 Estrella Way', 'Burbank, CA 91504', '{}'),
     ('__base_ccs__', NULL, NULL, ARRAY['salesplanning@entravision.com']),
-    ('__t1_ccs__', NULL, NULL, ARRAY['jwoods@entravision.com'])
+    ('__t1_ccs__', NULL, NULL, ARRAY['jwoods@entravision.com']),
+    ('Albuquerque', '5411 Jefferson St. NE, Suite 200', 'Albuquerque, NM 87109', '{}'),
+    ('Boston', '5426 N. Mesa St.', 'El Paso, TX 79912', '{}'),
+    ('Corpus Christi', '801 N. Jackson Road', 'McAllen, TX 78501', '{}'),
+    ('Denver', '1907 Mile High Stadium W. Circle', 'Denver, CO 80204', '{}'),
+    ('El Centro', '5770 Ruffin Road', 'San Diego, CA 92123', '{}'),
+    ('El Paso', '5426 N. Mesa', 'El Paso, TX 79912', '{}'),
+    ('Hartford', '5426 N. Mesa St.', 'El Paso, TX 79912', '{}'),
+    ('Laredo', '801 N. Jackson Road', 'McAllen, TX 78501', '{}'),
+    ('Las Vegas', '250 Pilot Rd. Suite 160', 'Las Vegas, NV 89119', '{}'),
+    ('Los Angeles', '1 Estrella Way', 'Burbank, CA 91504', '{}'),
+    ('Lubbock', '5426 N. Mesa', 'El Paso, TX 79912', '{}'),
+    ('McAllen', '801 N. Jackson Road', 'McAllen, TX 78501', '{}'),
+    ('Midland', '5426 N. Mesa', 'El Paso, TX 79912', '{}'),
+    ('Monterey', '801 N. Jackson Road', 'McAllen, TX 78501', '{}'),
+    ('Orlando', '1 Estrella Way', 'Burbank, CA 91504', '{}'),
+    ('Palm Springs', '72920 Parkview Drive', 'Palm Desert, CA 92260', '{}'),
+    ('Phoenix', '501 N. 44th Street, Suite 125', 'Phoenix, AZ 85008', '{}'),
+    ('Reno', '250 Pilot Rd. Suite 160', 'Las Vegas, NV 89119', '{}'),
+    ('Sacramento', '1792 Tribute Road #450', 'Sacramento, CA 95815', '{}'),
+    ('San Diego', '5770 Ruffin Road', 'San Diego, CA 92123', '{}'),
+    ('Santa Barbara', '801 N. Jackson Road', 'McAllen, TX 78501', '{}'),
+    ('Stockton', '1792 Tribute Road, Suite 450', 'Sacramento, CA 95815', '{}'),
+    ('Wichita', '1907 Mile High Stadium W. Circle', 'Denver, CO 80204', '{}')
 ON CONFLICT (market_key) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- Migration for an ALREADY-created market_config table (dev/production —
+-- this schema file's own CREATE TABLE above only runs on a fresh database;
+-- an existing table needs its two new columns added explicitly). Safe to
+-- run more than once.
+-- ---------------------------------------------------------------------------
+ALTER TABLE market_config ADD COLUMN IF NOT EXISTS dsc_email TEXT;
+ALTER TABLE market_config ADD COLUMN IF NOT EXISTS dsm_email TEXT;
 
 -- ---------------------------------------------------------------------------
 -- proposals — one row per generated proposal, replacing data/proposals/*.json.

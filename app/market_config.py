@@ -34,6 +34,8 @@ T1_SPEND_THRESHOLD = 10000.0
 _FALLBACK_DEFAULT = {
     "address_line1": "1 Estrella Way",
     "address_line2": "Burbank, CA 91504",
+    "dsc_email": None,
+    "dsm_email": None,
     "ccs": [],
 }
 _FALLBACK_BASE_CCS = ["salesplanning@entravision.com"]
@@ -41,14 +43,15 @@ _FALLBACK_T1_CCS = ["jwoods@entravision.com"]
 
 
 def load_market_config() -> dict:
-    """{market_name_or_"__default__": {address_line1, address_line2, ccs}},
-    plus a "__base_ccs__": [...] entry. Always includes both — seeded with
-    the Burbank HQ address / no per-market CCs / just salesplanning@ as the
-    base CC the first time this is ever read, so everything has a sane
-    fallback even before an admin configures anything."""
+    """{market_name_or_"__default__": {address_line1, address_line2,
+    dsc_email, dsm_email, ccs}}, plus a "__base_ccs__": [...] entry. Always
+    includes both — seeded with the Burbank HQ address / no per-market CCs
+    / just salesplanning@ as the base CC the first time this is ever read,
+    so everything has a sane fallback even before an admin configures
+    anything."""
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT market_key, address_line1, address_line2, ccs FROM market_config ORDER BY market_key"
+            "SELECT market_key, address_line1, address_line2, dsc_email, dsm_email, ccs FROM market_config ORDER BY market_key"
         ).fetchall()
     data = {}
     for row in rows:
@@ -59,6 +62,8 @@ def load_market_config() -> dict:
             data[key] = {
                 "address_line1": row["address_line1"],
                 "address_line2": row["address_line2"],
+                "dsc_email": row["dsc_email"],
+                "dsm_email": row["dsm_email"],
                 "ccs": list(row["ccs"] or []),
             }
     if DEFAULT_KEY not in data:
@@ -77,29 +82,34 @@ def save_market_config(config: dict) -> None:
             if market_key in (BASE_CCS_KEY, T1_CCS_KEY):
                 address_line1 = None
                 address_line2 = None
+                dsc_email = None
+                dsm_email = None
                 ccs = list(value or [])
             else:
                 entry = dict(value or {})
                 address_line1 = entry.get("address_line1")
                 address_line2 = entry.get("address_line2")
+                dsc_email = entry.get("dsc_email")
+                dsm_email = entry.get("dsm_email")
                 ccs = list(entry.get("ccs") or [])
             conn.execute(
                 """
                 INSERT INTO market_config
-                    (market_key, address_line1, address_line2, ccs)
-                VALUES (%s, %s, %s, %s)
+                    (market_key, address_line1, address_line2, dsc_email, dsm_email, ccs)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (market_key, address_line1, address_line2, ccs),
+                (market_key, address_line1, address_line2, dsc_email, dsm_email, ccs),
             )
 
 
 def set_market_entry(market_key: str, fields: dict) -> dict:
     """Upsert one market's config (or "__default__"). `fields` may contain
-    any of address_line1/address_line2/ccs — only given keys are touched,
-    the rest of that market's existing entry (if any) is preserved."""
+    any of address_line1/address_line2/dsc_email/dsm_email/ccs — only given
+    keys are touched, the rest of that market's existing entry (if any) is
+    preserved."""
     config = load_market_config()
     entry = dict(config.get(market_key, {}))
-    for k in ("address_line1", "address_line2", "ccs"):
+    for k in ("address_line1", "address_line2", "dsc_email", "dsm_email", "ccs"):
         if k in fields:
             entry[k] = fields[k]
     config[market_key] = entry
@@ -194,15 +204,33 @@ def set_t1_ccs(ccs: list[str]) -> list[str]:
     return config[T1_CCS_KEY]
 
 
+def get_market_dsc_dsm(market: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """(dsc_email, dsm_email) for this market — the Digital Sales
+    Coordinator (assistant) and Digital Sales Manager, CC'd on the internal
+    seller email alongside the flat ccs list. Unlike get_market_ccs, these
+    always fall back to the default entry's own dsc/dsm (if any) when the
+    matched market doesn't set its own — there's no "explicit empty list"
+    concept for a single email field the way there is for ccs."""
+    config = load_market_config()
+    key = _market_lookup_key(market, config)
+    entry = config.get(key, {})
+    default = config.get(DEFAULT_KEY, _FALLBACK_DEFAULT)
+    return (
+        entry.get("dsc_email") or default.get("dsc_email"),
+        entry.get("dsm_email") or default.get("dsm_email"),
+    )
+
+
 def get_all_ccs_for_market(market: Optional[str]) -> list[str]:
-    """Base CCs + this market's own CCs, deduped (case-insensitive) while
-    preserving first-seen order — what the seller-email mailto link
-    actually uses. Product/renewal-based CCs are layered on top of this
-    client-side (see app.js) since they depend on the specific proposal's
-    products/title, not just its market."""
+    """Base CCs + this market's own CCs + this market's DSC/DSM (when set),
+    deduped (case-insensitive) while preserving first-seen order — what the
+    seller-email mailto link actually uses. Product/renewal-based CCs are
+    layered on top of this client-side (see app.js) since they depend on
+    the specific proposal's products/title, not just its market."""
+    dsc_email, dsm_email = get_market_dsc_dsm(market)
     seen = set()
     combined = []
-    for email in get_base_ccs() + get_market_ccs(market):
+    for email in get_base_ccs() + get_market_ccs(market) + [dsc_email, dsm_email]:
         e = (email or "").strip()
         if e and e.lower() not in seen:
             seen.add(e.lower())

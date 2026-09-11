@@ -808,7 +808,11 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             proposal_title=proposal_title,
             ae_name=req.requested_by or "",
             ae_email=req.salesperson_email or "",
-            subject=enrichment.client_email_subject,
+            # The persistent, copyable proposal title IS the subject line —
+            # not the AI's own subject guess — so the emailed subject always
+            # matches what's shown at the top of the app and used for the
+            # filename, rather than varying with each AI generation.
+            subject=proposal_title,
             body=enrichment.client_email_body,
         )
 
@@ -973,7 +977,7 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
                 proposal_title=meta.get("proposal_title", ""),
                 ae_name=req.requested_by or "",
                 ae_email=req.salesperson_email or "",
-                subject=result["client_email_subject"],
+                subject=meta.get("proposal_title", ""),  # same title-as-subject rule as the initial generate
                 body=result["client_email_body"],
             )
 
@@ -1140,6 +1144,8 @@ class MarketConfigRequest(BaseModel):
     market_key: str  # matched against the parsed "Salesperson market" field; "__default__" is the fallback every market uses until it has its own entry
     address_line1: Optional[str] = None
     address_line2: Optional[str] = None
+    dsc_email: Optional[str] = None  # Digital Sales Coordinator (assistant) — CC'd on the internal seller email
+    dsm_email: Optional[str] = None  # Digital Sales Manager — CC'd on the internal seller email
     ccs: Optional[list[str]] = None
 
 
@@ -1522,6 +1528,8 @@ async def admin_get_market_config() -> dict:
             "is_default": key == DEFAULT_KEY,
             "address_line1": entry.get("address_line1", ""),
             "address_line2": entry.get("address_line2", ""),
+            "dsc_email": entry.get("dsc_email") or "",
+            "dsm_email": entry.get("dsm_email") or "",
             "ccs": entry.get("ccs", []),
         })
     markets.sort(key=lambda m: (not m["is_default"], m["market_key"].lower()))
@@ -1573,6 +1581,8 @@ async def admin_save_market_config(body: MarketConfigRequest) -> dict:
         k: v for k, v in {
             "address_line1": body.address_line1,
             "address_line2": body.address_line2,
+            "dsc_email": body.dsc_email,
+            "dsm_email": body.dsm_email,
             "ccs": body.ccs,
         }.items() if v is not None
     }

@@ -2575,7 +2575,13 @@ async function buildInternalEmailMailtoLink() {
   }
 
   const to = (req.salesperson_email || "").trim();
-  const subject = enrichment.internal_email_subject || state.finalProposalTitle || "";
+  // The persistent, copyable proposal title IS the subject line now — not
+  // the AI's own subject guess — so the emailed subject always matches
+  // what's shown at the top of the app, rather than varying with each AI
+  // generation. Falls back to the AI subject only in the unlikely case the
+  // title itself isn't set yet (shouldn't normally happen once a proposal
+  // has been generated).
+  const subject = state.finalProposalTitle || enrichment.internal_email_subject || "";
 
   let ccList = [];
   try {
