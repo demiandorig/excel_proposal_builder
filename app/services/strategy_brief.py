@@ -24,6 +24,7 @@ except ImportError:
     _HAS_OPENAI = False
 
 from app.services.text_utils import normalize_newlines as _normalize_newlines
+from app.services import ad_presence as _ad_presence_svc
 
 
 # Entravision catalog families + one-line description for the prompt
@@ -70,7 +71,15 @@ def generate_brief(request, reprompt: Optional[str] = None) -> dict:
     Returns a dict with keys:
       client_summary, market_context, objectives_analysis, strategy_summary,
       recommended_tactics (list), key_insights (list), used_web_search (bool),
-      error (str|None)
+      error (str|None), ad_presence (dict)
+
+    `ad_presence` is a deterministic (non-LLM) live check of whether the
+    client is currently running ads on Meta/Google/TikTok, and in what
+    language — see app/services/ad_presence.py. It's attached to every
+    result (even an error brief) so the UI/export can render it as its own
+    section regardless of whether the LLM call itself succeeded, and it's
+    also folded into the prompt below so the model's own market_context/
+    key_insights can reference it directly instead of guessing.
     """
     api_key = os.getenv("OPENAI_API_KEY")
 
@@ -79,8 +88,10 @@ def generate_brief(request, reprompt: Optional[str] = None) -> dict:
     if not api_key:
         return _error_brief("OPENAI_API_KEY not set.")
 
+    ad_intel = _check_ad_presence_safely(request)
+
     client = _OpenAI(api_key=api_key)
-    prompt = _build_prompt(request, reprompt)
+    prompt = _build_prompt(request, reprompt, ad_intel=ad_intel)
 
     try:
         response = client.responses.create(
@@ -90,7 +101,7 @@ def generate_brief(request, reprompt: Optional[str] = None) -> dict:
             max_output_tokens=3000,
         )
         raw = _extract_response_text(response)
-        return _parse(raw, used_web_search=True)
+        result = _parse(raw, used_web_search=True)
     except Exception as search_exc:
         # Responses API / web_search_preview unavailable on this account or
         # SDK version — fall back to a plain completion, but say so clearly
@@ -111,9 +122,28 @@ def generate_brief(request, reprompt: Optional[str] = None) -> dict:
                     f"({search_exc}); this used the model's general knowledge "
                     "instead — verify stats before relying on them."
                 )
-            return result
         except Exception as fallback_exc:
-            return _error_brief(f"Request failed: {fallback_exc}")
+            result = _error_brief(f"Request failed: {fallback_exc}")
+
+    result["ad_presence"] = ad_intel
+    return result
+
+
+def _check_ad_presence_safely(request) -> dict:
+    """
+    Live-checks Meta/Google/TikTok ad presence for this client (see
+    ad_presence.py: public-website checks, not an API — a handful of
+    browser page loads, ~15-25s total). Wrapped in its own try/except so a
+    slow or broken ad-library page never breaks brief generation itself —
+    this is a bonus signal, not a hard dependency of the brief.
+    """
+    try:
+        return _ad_presence_svc.check_ad_presence(
+            getattr(request, "client_name", "") or "",
+            getattr(request, "client_website", "") or "",
+        )
+    except Exception as exc:
+        return {"summary": "", "error": str(exc), "meta": {}, "google": {}, "tiktok": {}}
 
 
 def _extract_response_text(response) -> str:
@@ -140,7 +170,7 @@ def _extract_response_text(response) -> str:
 # Prompt
 # ---------------------------------------------------------------------------
 
-def _build_prompt(request, reprompt: Optional[str]) -> str:
+def _build_prompt(request, reprompt: Optional[str], ad_intel: Optional[dict] = None) -> str:
     monthly = request.monthly_budget or 0
     months = request.total_months or 3
     total = monthly * months
@@ -181,6 +211,21 @@ Please revise your strategy taking this into account.
 ---
 """
 
+    ad_intel_block = ""
+    if ad_intel and ad_intel.get("summary"):
+        ad_intel_block = f"""
+## CURRENT AD PRESENCE (live-checked just now against the public Meta,
+## Google, and TikTok ad libraries — use this, don't guess or contradict it)
+{ad_intel['summary']}
+
+Where this is specific, use it directly rather than restating it blandly —
+e.g. active Meta ads with no Spanish-language variant is a real, callable
+opportunity; a client already dominant on a channel changes what the
+"opening" is. TikTok's public library has thin commercial coverage, so
+treat a TikTok negative as inconclusive, not as proof — Meta and Google
+findings are the more reliable signal.
+"""
+
     return f"""You are a senior digital media sales strategist at Entravision. Research this campaign request and produce a data-backed strategic brief.
 
 ## CAMPAIGN REQUEST
@@ -205,6 +250,7 @@ Please revise your strategy taking this into account.
 
 ## STATISTICS GUIDANCE
 {stat_hint}
+{ad_intel_block}
 {reprompt_block}
 ## YOU HAVE LIVE WEB SEARCH — USE IT, DON'T GUESS
 This is a real capability, not a hypothetical: before writing the client
@@ -327,4 +373,5 @@ def _error_brief(msg: str) -> dict:
         "key_insights": [],
         "used_web_search": False,
         "error": msg,
+        "ad_presence": {},  # overwritten by generate_brief() when it gets that far
     }

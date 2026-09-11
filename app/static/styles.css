@@ -1412,6 +1412,85 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   color: var(--ink);
 }
 
+.brief-adpresence-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+.brief-adpresence-head h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 600;
+}
+.brief-adpresence-caveat {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+}
+.brief-adpresence {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.adpresence-card {
+  background: var(--paper-card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.adpresence-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.adpresence-platform {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+}
+.adpresence-status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+.adpresence-status.active { color: var(--green); background: var(--green-soft); }
+.adpresence-status.inconclusive { color: var(--amber); background: var(--amber-soft); }
+.adpresence-status.none { color: var(--ink-faint); background: var(--paper-warm); }
+.adpresence-detail {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+.adpresence-langs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.adpresence-lang-chip {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 2px 7px;
+  border-radius: 20px;
+}
+
 .brief-tactics-head {
   display: flex;
   align-items: baseline;

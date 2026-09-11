@@ -873,6 +873,7 @@ function renderStrategyBrief(brief) {
   setText("brief-market-context", brief.market_context || "");
   setText("brief-objectives", brief.objectives_analysis || "");
   setText("brief-strategy-summary", brief.strategy_summary || "");
+  renderAdPresence(brief.ad_presence || {});
 
   // Budget note
   const budget = state.parsed.monthly_budget || parseBudgetFromRenewal(state.parsed) || 0;
@@ -919,6 +920,62 @@ function renderStrategyBrief(brief) {
   } else {
     dlLink.classList.add("hidden");
   }
+}
+
+const AD_PRESENCE_LANG_LABELS = { en: "English", es: "Spanish" };
+
+function renderAdPresence(adPresence) {
+  const el = document.getElementById("brief-ad-presence");
+  if (!el) return;
+
+  const platforms = [
+    ["meta", "Meta (FB/IG)", adPresence.meta],
+    ["google", "Google Ads", adPresence.google],
+    ["tiktok", "TikTok", adPresence.tiktok],
+  ];
+
+  el.innerHTML = platforms.map(([key, label, r]) => {
+    r = r || {};
+    let statusClass = "none";
+    let statusLabel = "NOT CHECKED";
+    let detail = r.note || "Not checked for this proposal.";
+
+    if (r.checked) {
+      if (r.active) {
+        statusClass = "active";
+        statusLabel = "ACTIVE";
+        const count = r.high_confidence_count || r.ad_count_estimate || r.ad_count_estimate_display || "some";
+        if (key === "google") {
+          detail = `~${count} ads` + (r.advertisers && r.advertisers.length ? ` · ${r.advertisers.slice(0, 3).join(", ")}` : "");
+        } else {
+          detail = `~${count} ad(s) found`;
+        }
+      } else if ((r.note || "").toLowerCase().includes("inconclusive")) {
+        statusClass = "inconclusive";
+        statusLabel = "INCONCLUSIVE";
+      } else {
+        statusClass = "none";
+        statusLabel = "NOT FOUND";
+      }
+    }
+
+    const langs = r.languages || {};
+    const langChips = Object.entries(langs)
+      .sort((a, b) => b[1] - a[1])
+      .map(([code, pct]) => `<span class="adpresence-lang-chip">${Math.round(pct * 100)}% ${escapeHtml(AD_PRESENCE_LANG_LABELS[code] || code)}</span>`)
+      .join("");
+
+    return `
+      <div class="adpresence-card">
+        <div class="adpresence-card-head">
+          <span class="adpresence-platform">${escapeHtml(label)}</span>
+          <span class="adpresence-status ${statusClass}">${statusLabel}</span>
+        </div>
+        <div class="adpresence-detail">${escapeHtml(detail)}</div>
+        ${langChips ? `<div class="adpresence-langs">${langChips}</div>` : ""}
+      </div>
+    `;
+  }).join("");
 }
 
 // --------------------------------------------------------------------------

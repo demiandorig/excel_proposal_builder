@@ -17,5 +17,13 @@ google-api-python-client>=2.100
 google-auth>=2.20
 google-auth-httplib2>=0.2
 google-auth-oauthlib>=1.0
+
+# playwright: used by the UI smoke tests (smoke_test_ui*.py) AND by
+# app/services/ad_presence.py (Meta/Google/TikTok ad-library live checks).
+# Needs a one-time browser download after installing the package:
+#   playwright install chromium
 playwright
 pytest
+
+# ad_presence.py's en/es ad-copy language detection (Meta + TikTok samples)
+langdetect>=1.0.9

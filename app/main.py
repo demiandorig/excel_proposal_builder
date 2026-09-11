@@ -536,6 +536,7 @@ async def strategy(body: StrategyRequest) -> dict:
             key_insights=brief.get("key_insights", []),
             monthly_budget=req.monthly_budget or 0.0,
             total_months=req.total_months or 0,
+            ad_presence=brief.get("ad_presence"),
         )
         if built:
             (PROPOSALS_DIR / f"strategy_{doc_token}.json").write_text(json.dumps({
