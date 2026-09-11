@@ -1,1 +1,2 @@
 - [Post-merge Python installs](post-merge-python-install.md) — use non-interactive pip with Nix's externally managed environment handled explicitly.
+- [Playwright browser runtime](playwright-replit-runtime.md) — prefer Replit's managed Chromium wrapper so browser checks inherit the workspace's Nix libraries.

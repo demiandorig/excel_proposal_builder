@@ -2,7 +2,7 @@ modules = ["python-3.12", "nodejs-20", "web", "postgresql-16"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["freetype", "gitFull", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "playwright-driver", "postgresql", "tcl", "tk", "zlib"]
+packages = ["freetype", "gitFull", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "playwright-driver", "postgresql", "tcl", "tk", "zlib", "nspr", "nss", "atk", "cups", "libdrm", "mesa", "expat", "libxkbcommon", "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes", "xorg.libXrandr", "xorg.libxcb", "pango", "cairo", "gtk3", "alsa-lib"]
 
 [agent]
 expertMode = true

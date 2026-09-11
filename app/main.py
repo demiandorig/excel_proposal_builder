@@ -505,7 +505,7 @@ async def strategy(body: StrategyRequest) -> dict:
     valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
     raw = {k: v for k, v in raw.items() if k in valid_fields}
     req = ProposalRequest(**raw)
-    brief = strategy_brief_svc.generate_brief(req, reprompt=body.reprompt)
+    brief = await strategy_brief_svc.generate_brief(req, reprompt=body.reprompt)
 
     doc_token: Optional[str] = None
     if brief.get("strategy_summary") or brief.get("recommended_tactics"):

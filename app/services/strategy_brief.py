@@ -54,7 +54,7 @@ _SEARCH_MODEL = "gpt-4o"
 _FALLBACK_MODEL = "gpt-4o"
 
 
-def generate_brief(request, reprompt: Optional[str] = None) -> dict:
+async def generate_brief(request, reprompt: Optional[str] = None) -> dict:
     """
     Generate (or regenerate with reprompt) a strategic brief for this proposal.
 
@@ -88,7 +88,7 @@ def generate_brief(request, reprompt: Optional[str] = None) -> dict:
     if not api_key:
         return _error_brief("OPENAI_API_KEY not set.")
 
-    ad_intel = _check_ad_presence_safely(request)
+    ad_intel = await _check_ad_presence_safely(request)
 
     client = _OpenAI(api_key=api_key)
     prompt = _build_prompt(request, reprompt, ad_intel=ad_intel)
@@ -129,7 +129,7 @@ def generate_brief(request, reprompt: Optional[str] = None) -> dict:
     return result
 
 
-def _check_ad_presence_safely(request) -> dict:
+async def _check_ad_presence_safely(request) -> dict:
     """
     Live-checks Meta/Google/TikTok ad presence for this client (see
     ad_presence.py: public-website checks, not an API — a handful of
@@ -138,7 +138,7 @@ def _check_ad_presence_safely(request) -> dict:
     this is a bonus signal, not a hard dependency of the brief.
     """
     try:
-        return _ad_presence_svc.check_ad_presence(
+        return await _ad_presence_svc.check_ad_presence(
             getattr(request, "client_name", "") or "",
             getattr(request, "client_website", "") or "",
         )

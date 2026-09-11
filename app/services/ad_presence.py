@@ -96,10 +96,13 @@ import logging
 import re
 import time
 import urllib.parse
+import asyncio
+import os
+import shutil
 from typing import Optional
 
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.async_api import async_playwright
     _HAS_PLAYWRIGHT = True
 except ImportError:
     _HAS_PLAYWRIGHT = False
@@ -129,6 +132,24 @@ _INVISIBLE_CODEPOINTS = (0x200B, 0x200C, 0x200D, 0xFEFF, 0x2060)
 _INVISIBLE_CHARS_RE = re.compile("[" + "".join(chr(c) for c in _INVISIBLE_CODEPOINTS) + "]")
 
 
+def _browser_env() -> dict[str, str]:
+    """Give Playwright's child Chromium access to Replit's Nix libraries."""
+    env = os.environ.copy()
+    nix_ldflags = env.get("NIX_LDFLAGS", "")
+    nix_library_paths = re.findall(r"(?:^|\s)-L(\S+)", nix_ldflags)
+    if nix_library_paths:
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = ":".join(
+            dict.fromkeys(nix_library_paths + ([existing] if existing else []))
+        )
+    return env
+
+
+def _chromium_executable() -> Optional[str]:
+    """Prefer Replit's managed Chromium wrapper with its Nix runtime setup."""
+    return shutil.which("chromium")
+
+
 def _clean_text(text: str) -> str:
     return _INVISIBLE_CHARS_RE.sub("", text)
 
@@ -137,7 +158,7 @@ def _clean_text(text: str) -> str:
 # Shared browser helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_rendered_text(url: str) -> Optional[str]:
+async def _fetch_rendered_text(url: str) -> Optional[str]:
     """
     Loads `url` in a headless Chromium tab and returns the fully-rendered
     page's visible text, or None if the browser/binary isn't available or
@@ -148,21 +169,25 @@ def _fetch_rendered_text(url: str) -> Optional[str]:
     if not _HAS_PLAYWRIGHT:
         return None
     try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+        async with async_playwright() as pw:
+            launch_options = {"headless": True, "env": _browser_env()}
+            executable = _chromium_executable()
+            if executable:
+                launch_options["executable_path"] = executable
+            browser = await pw.chromium.launch(**launch_options)
             try:
-                context = browser.new_context(user_agent=_UA, locale="en-US")
-                page = context.new_page()
+                context = await browser.new_context(user_agent=_UA, locale="en-US")
+                page = await context.new_page()
                 page.set_default_navigation_timeout(_NAV_TIMEOUT_MS)
                 page.set_default_timeout(_NAV_TIMEOUT_MS)
                 try:
-                    page.goto(url, wait_until="networkidle")
+                    await page.goto(url, wait_until="networkidle")
                 except Exception:
-                    page.goto(url, wait_until="domcontentloaded")
-                page.wait_for_timeout(1500)  # let client-side results hydrate
-                return _clean_text(page.inner_text("body"))
+                    await page.goto(url, wait_until="domcontentloaded")
+                await page.wait_for_timeout(1500)  # let client-side results hydrate
+                return _clean_text(await page.inner_text("body"))
             finally:
-                browser.close()
+                await browser.close()
     except Exception as e:
         # Deliberately still returns None to the caller (a live ad-library
         # check failing shouldn't break proposal generation) — but the
@@ -315,14 +340,14 @@ def _is_meta_junk_line(line: str) -> bool:
     return any(p.match(line) for p in _META_JUNK_PATTERNS)
 
 
-def _search_meta_once(query: str, country: str) -> dict:
+async def _search_meta_once(query: str, country: str) -> dict:
     """One Meta Ad Library search for a single query string. Returns raw
     candidates — no confidence scoring yet (that needs the caller's
     client-name/domain context)."""
     out = {"checked": False, "ad_count_estimate": 0, "candidates": [], "note": ""}
     url = ("https://www.facebook.com/ads/library/?active_status=active&ad_type=all"
            f"&country={country}&q={urllib.parse.quote(query)}")
-    text = _fetch_rendered_text(url)
+    text = await _fetch_rendered_text(url)
     if text is None:
         out["note"] = "Meta Ad Library did not load (timeout, network error, or missing browser binary)."
         return out
@@ -351,7 +376,7 @@ def _search_meta_once(query: str, country: str) -> dict:
     return out
 
 
-def check_meta(client_name: str, client_website: str = "", country: str = "US") -> dict:
+async def check_meta(client_name: str, client_website: str = "", country: str = "US") -> dict:
     """Live-checks the public Meta Ad Library across a few name variants
     derived from `client_name`/`client_website`, then confidence-scores
     every candidate ad found against the client's actual name/domain."""
@@ -373,7 +398,7 @@ def check_meta(client_name: str, client_website: str = "", country: str = "US") 
     any_checked = False
 
     for q in variants:
-        r = _search_meta_once(q, country)
+        r = await _search_meta_once(q, country)
         if not r["checked"]:
             continue
         any_checked = True
@@ -421,7 +446,7 @@ def check_meta(client_name: str, client_website: str = "", country: str = "US") 
 # Google Ads Transparency Center (public web UI — no official API exists)
 # ---------------------------------------------------------------------------
 
-def check_google(domain: str, region: str = "US") -> dict:
+async def check_google(domain: str, region: str = "US") -> dict:
     """Live-checks Google's Ads Transparency Center for `domain`. Domain
     search is already precise (no name-variant fuzziness needed the way
     Meta/TikTok keyword search does) — returns verified-advertiser identity
@@ -439,7 +464,7 @@ def check_google(domain: str, region: str = "US") -> dict:
         return result
 
     url = f"https://adstransparency.google.com/?region={region}&domain={urllib.parse.quote(domain)}"
-    text = _fetch_rendered_text(url)
+    text = await _fetch_rendered_text(url)
     if text is None:
         result["note"] = "Google Ads Transparency Center did not load (timeout, network error, or missing browser binary)."
         return result
@@ -471,14 +496,14 @@ def check_google(domain: str, region: str = "US") -> dict:
 # TikTok Commercial Content Library (public web UI)
 # ---------------------------------------------------------------------------
 
-def _search_tiktok_once(query: str, country: str, lookback_days: int) -> dict:
+async def _search_tiktok_once(query: str, country: str, lookback_days: int) -> dict:
     out = {"checked": False, "ad_count_estimate": 0, "candidates": [], "note": ""}
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - lookback_days * 86400 * 1000
     url = ("https://library.tiktok.com/ads?"
            f"region={country}&query={urllib.parse.quote(query)}"
            f"&start_time={start_ms}&end_time={now_ms}")
-    text = _fetch_rendered_text(url)
+    text = await _fetch_rendered_text(url)
     if text is None:
         out["note"] = "TikTok Commercial Content Library did not load (timeout, network error, or missing browser binary)."
         return out
@@ -497,7 +522,7 @@ def _search_tiktok_once(query: str, country: str, lookback_days: int) -> dict:
     return out
 
 
-def check_tiktok(client_name: str, client_website: str = "", country: str = "US", lookback_days: int = 90) -> dict:
+async def check_tiktok(client_name: str, client_website: str = "", country: str = "US", lookback_days: int = 90) -> dict:
     """Live-checks TikTok's Commercial Content Library across the same name
     variants as Meta. Coverage here is the thinnest of the three — see
     module docstring before trusting a negative result."""
@@ -519,7 +544,7 @@ def check_tiktok(client_name: str, client_website: str = "", country: str = "US"
     total_ads = 0
 
     for q in variants:
-        r = _search_tiktok_once(q, country, lookback_days)
+        r = await _search_tiktok_once(q, country, lookback_days)
         if not r["checked"]:
             continue
         any_checked = True
@@ -556,7 +581,7 @@ def check_tiktok(client_name: str, client_website: str = "", country: str = "US"
 # Orchestrator — the entry point Strategy Brief (or anything else) calls
 # ---------------------------------------------------------------------------
 
-def check_ad_presence(client_name: str, client_website: str = "", country: str = "US") -> dict:
+async def check_ad_presence(client_name: str, client_website: str = "", country: str = "US") -> dict:
     """
     Runs all three platform checks for one client and returns a combined
     result plus a `summary` string ready to splice into an LLM prompt (see
@@ -565,9 +590,9 @@ def check_ad_presence(client_name: str, client_website: str = "", country: str =
     started = time.time()
     domain = re.sub(r"^https?://", "", (client_website or "").strip()).split("/")[0]
 
-    meta = check_meta(client_name, client_website, country=country) if (client_name or domain) else _skipped("meta", "no client name or website provided")
-    google = check_google(domain, region=country) if domain else _skipped("google", "no client website provided")
-    tiktok = check_tiktok(client_name, client_website, country=country) if (client_name or domain) else _skipped("tiktok", "no client name or website provided")
+    meta = await check_meta(client_name, client_website, country=country) if (client_name or domain) else _skipped("meta", "no client name or website provided")
+    google = await check_google(domain, region=country) if domain else _skipped("google", "no client website provided")
+    tiktok = await check_tiktok(client_name, client_website, country=country) if (client_name or domain) else _skipped("tiktok", "no client name or website provided")
 
     return {
         "meta": meta,
@@ -618,4 +643,4 @@ if __name__ == "__main__":
 
     name = _sys.argv[1] if len(_sys.argv) > 1 else "Nike"
     site = _sys.argv[2] if len(_sys.argv) > 2 else "nike.com"
-    print(_json.dumps(check_ad_presence(name, site), indent=2, ensure_ascii=False))
+    print(_json.dumps(asyncio.run(check_ad_presence(name, site)), indent=2, ensure_ascii=False))
