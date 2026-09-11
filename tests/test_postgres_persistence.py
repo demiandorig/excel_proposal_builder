@@ -176,6 +176,8 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
             assert market == {{
                 "address_line1": "99 Persistence Way",
                 "address_line2": "Testville, CA 90000",
+                "dsc_email": None,
+                "dsm_email": None,
                 "ccs": [{"market-" + suffix + "@example.test"!r}],
             }}
 

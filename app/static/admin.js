@@ -497,7 +497,19 @@ function wireMarketConfig() {
 async function loadMarketConfig() {
   try {
     const res = await fetch("/api/admin/market-config");
-    const data = await res.json();
+    const raw = await res.text();
+    let data = {};
+    if (raw) {
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        if (!res.ok) throw new Error(raw.trim() || `Server returned ${res.status}`);
+        throw new Error("Server returned an invalid market configuration response.");
+      }
+    }
+    if (!res.ok) {
+      throw new Error(data.detail || raw.trim() || `Server returned ${res.status}`);
+    }
     adminState.markets = data.markets || [];
     adminState.marketsLoaded = true;
     document.getElementById("base-ccs-input").value = (data.base_ccs || []).join(", ");
