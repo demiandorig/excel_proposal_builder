@@ -1,0 +1,57 @@
+1. Login + accounts
+
+New app/auth.py: server-side sessions (an opaque token in an HttpOnly/Secure cookie, checked against Postgres on every request) rather than a stateless signed cookie/JWT — so disabling or deleting someone shuts them out on their next request instead of waiting for a token to expire naturally. Passwords use hashlib.scrypt (stdlib, no new pip dependency to worry about on Replit's Nix build). Policy is length-only — 12+ characters, no forced symbols/numbers — which is both the current NIST recommendation and what "long but accessible" actually wants.
+
+Session length: I read "reset every 5 days" as rolling — every request pushes it 5 days further out, so someone using the tool regularly is never bounced, but 5 days of total inactivity logs them out. If you actually wanted a hard 5-day cutoff regardless of activity, tell me — it's a one-line change.
+
+New Users tab in the admin console (admin.html, admin.js): add/disable/delete accounts, reset passwords, toggle admin. A new login.html uses your marketing deck's actual palette/type (Poppins kicker, near-black + your exact purple) rather than generic styling.
+
+You need to do this before anyone can log in at all:
+
+Run this against your Replit Postgres (I can't reach it from here):
+ALTER TABLE rate_overrides ADD COLUMN IF NOT EXISTS name TEXT;
+ALTER TABLE rate_overrides ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS product_aliases (
+    alias_name     TEXT PRIMARY KEY,
+    current_name   TEXT NOT NULL,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id             TEXT PRIMARY KEY,
+    email          TEXT NOT NULL UNIQUE,
+    password_hash  TEXT NOT NULL,
+    password_salt  TEXT NOT NULL,
+    is_admin       BOOLEAN NOT NULL DEFAULT FALSE,
+    disabled       BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token       TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at);
+Set two Replit secrets once — ADMIN_BOOTSTRAP_EMAIL and ADMIN_BOOTSTRAP_PASSWORD (12+ chars) — so the app can create your first admin account on startup (nobody can log in yet to create one otherwise). Log in with that, then create everyone else from the Users tab — safe to leave the secrets in place afterward, they only ever fire once.
+
+Verified via a real TestClient hitting the actual routes (login, logout, cookie handling, non-admin blocked from /admin and /api/admin/*, can't disable/delete/de-admin yourself, disabling someone kills their live session) with Postgres faked — I don't have a reachable DB from here to test the real thing.
+
+2. Playwright — rechecked
+
+Confirmed the whole chain from last round is consistent: async conversion is complete (only one caller, correctly awaited), the new Nix packages target exactly the shared libraries headless Chromium needs, langdetect/playwright are both still in requirements.txt, and the standalone smoke-test scripts correctly stay on the sync API (they're not running inside an event loop, so that's fine). Nothing more to fix from my side — go ahead and test it live.
+
+3. Reopen bug, loading state, and UI
+
+The reopen bug was restore-side only — app.js's maybeReopenProposal() was hardcoding a reset to a single tier "A" instead of reading the (already-correct) saved data. Fixed: reopening now restores every budget option, forced tab overrides, the Step 05/07 AI results, and the raw Step 01 paste (that last one needed a small save-side addition too, in main.py).
+
+Added a real loading spinner + rotating status text for Generate — it was just a button-label change before, easy to miss on a 10-30s call. Also noticed and fixed the footer's "57 products" — hardcoded and already stale (catalog's actually at 85+); it's live now.
+
+On the broader visual revamp: I did not do a full redesign pass over the whole app this round — that's genuinely more of an iterative, back-and-forth project. What I can tell you: your core brand purple is already #910E95 in the app's CSS, exactly matching your deck's cover slide — that part was already right. I applied your deck's actual typography/palette concretely on the new login page. If you want to push further, point me at specific screens or components that feel most "AI-slop" to you and I'll work through them — that's a much better starting point than me guessing at what "cleaner" means for a dozen screens at once.
+
+4. Product rename + delete
+
+Root cause: rate_overrides was keyed by product name, and renaming would've desynced that key from itself — so it was blocked outright, on purpose. Fix (catalog.py): the override table's key now means "which built-in product," not "what it's called" — the display name became just another overridable field, and every rename is recorded in a new alias table. by_name() and the free-text parser both check current name → original name → alias chain, so an old client paste or an already-saved proposal referencing a pre-rename name still resolves correctly, including through more than one rename. Built-ins can now be soft-deleted (hidden from new proposals, restorable, no code change needed) since they can't be truly removed without editing the catalog source; custom products keep their existing real delete. The Edit panel's name field is no longer disabled.
