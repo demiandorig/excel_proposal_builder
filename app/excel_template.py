@@ -26,6 +26,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from app.catalog import CATALOG, Product, families, by_family
 from app.services.notion_parser import compose_target_fallback
+from app.services import monthly_allocation as _monthly_allocation
 
 # Try to import Image support for logo embedding (optional)
 try:
@@ -1797,6 +1798,152 @@ def build_process_faqs(wb: Workbook) -> Worksheet:
         ws.row_dimensions[row].height = 30
         row += 1
 
+    return ws
+
+
+# ---------------------------------------------------------------------------
+# Monthly Breakdown — optional per-line-item distribution of a line item's
+# total budget across the calendar months its flight touches (see
+# app/services/monthly_allocation.py's module docstring for the full
+# design). Two presentations, both built from the SAME data:
+#   1. Inline columns on the Net/Gross sheet, one row per line item,
+#      aligned with that line item's own row — placed one spacer column
+#      past whatever that sheet already uses (V/AdOps on Net, Y/AdOps on
+#      Gross — both header-only, never written to on a per-row basis, see
+#      the column-map comment at the top of this file).
+#   2. A standalone "Monthly Breakdown" tab, one per tier (see
+#      proposal_generator.py's tier loop) — a plain grid, not tied to
+#      either sheet's own column layout.
+# A combined "$X (Y%)" text cell (matching this file's existing pattern
+# for e.g. Added-Value's "Estimated $150 value" cells) rather than two
+# separate numeric cells — simplest way to show both figures per month
+# without doubling the row/column count.
+# ---------------------------------------------------------------------------
+
+MONTHLY_BREAKDOWN_START_COL = {False: 24, True: 27}  # Net -> X (one spacer past V), Gross -> AA (one spacer past Y)
+
+
+def _mb_cell_text(dollars: Optional[float], total: float) -> str:
+    if dollars is None:
+        return "—"
+    pct = (dollars / total * 100) if total else 0
+    return f"${dollars:,.0f} ({pct:.0f}%)"
+
+
+def write_monthly_breakdown_header(ws: Worksheet, row: int, months: list[dict], start_col: int) -> None:
+    """Month labels, styled exactly like this sheet's own header row (row
+    17 on Net/Gross — passing that same row number here just extends it
+    rightward, rather than inventing a second header style)."""
+    banner_row = row - 1
+    if banner_row >= 1:
+        ws.merge_cells(start_row=banner_row, start_column=start_col, end_row=banner_row,
+                        end_column=start_col + max(len(months) - 1, 0))
+        banner_cell = ws.cell(row=banner_row, column=start_col)
+        banner_cell.value = "MONTHLY BREAKDOWN"
+        banner_cell.font = SECTION_FONT
+        banner_cell.fill = SECTION_FILL
+        banner_cell.alignment = CENTER
+    for i, m in enumerate(months):
+        col = start_col + i
+        cell = ws.cell(row=row, column=col)
+        cell.value = m["label"].upper()
+        cell.font = H_HEADER
+        cell.fill = H_HEADER_FILL
+        cell.alignment = CENTER
+        cell.border = HEADER_BORDER
+        ws.column_dimensions[get_column_letter(col)].width = 15
+
+
+def write_monthly_breakdown_row(ws: Worksheet, row: int, months: list[dict],
+                                 allocations: Optional[dict], total: float, start_col: int) -> None:
+    """One line item's per-month cells — `allocations` is None/empty for a
+    line that doesn't use Monthly Breakdown (renders as a plain dash, not
+    a zero, so it reads as "not broken down" rather than "$0 every month")."""
+    for i, m in enumerate(months):
+        col = start_col + i
+        cell = ws.cell(row=row, column=col)
+        dollars = (allocations or {}).get(m["key"])
+        cell.value = _mb_cell_text(dollars, total) if allocations else "—"
+        cell.font = BODY_FONT
+        cell.alignment = CENTER
+        cell.border = THIN_BORDER
+
+
+def write_monthly_breakdown_total_row(ws: Worksheet, row: int, months: list[dict],
+                                      per_month_totals: dict, start_col: int) -> None:
+    """Plan-level (this tier's) total spend per month — the SAME row as
+    the sheet's own grand-total row, so it reads as one continuous total
+    line across the whole sheet width."""
+    for i, m in enumerate(months):
+        col = start_col + i
+        cell = ws.cell(row=row, column=col)
+        cell.value = per_month_totals.get(m["key"], 0)
+        _format_money_cell(cell)
+        cell.font = TOTAL_FONT
+        cell.fill = TOTAL_FILL
+
+
+def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
+                                 months: list[dict], sheet_name: str = "Monthly Breakdown") -> Worksheet:
+    """
+    Standalone tab: one row per (non-Added-Value) line item that has a
+    Monthly Breakdown, a "TOTAL PLAN SPEND BY MONTH" row at the bottom —
+    plain grid, independent of the Net/Gross column layout entirely.
+    """
+    ws = wb.create_sheet(sheet_name[:31])
+    ws["B2"] = f"Monthly Breakdown — {sheet_name}" if sheet_name != "Monthly Breakdown" else "Monthly Breakdown"
+    ws["B2"].font = TITLE_FONT
+    ws.column_dimensions["A"].width = 2
+    ws.column_dimensions["B"].width = 34
+
+    header_row = 4
+    ws.cell(row=header_row, column=2, value="LINE ITEM").font = H_HEADER
+    ws.cell(row=header_row, column=2).fill = H_HEADER_FILL
+    ws.cell(row=header_row, column=2).border = HEADER_BORDER
+    for i, m in enumerate(months):
+        col = 3 + i
+        cell = ws.cell(row=header_row, column=col, value=m["label"].upper())
+        cell.font = H_HEADER
+        cell.fill = H_HEADER_FILL
+        cell.alignment = CENTER
+        cell.border = HEADER_BORDER
+        ws.column_dimensions[get_column_letter(col)].width = 15
+
+    row = header_row + 1
+    first_data_row = row
+    per_month_totals = {m["key"]: 0.0 for m in months}
+    any_row_written = False
+    for product, li in zip(products, line_items):
+        if getattr(li, "is_added_value", False):
+            continue
+        total = li.monthly_budget * li.months
+        allocations = li.monthly_allocations if li.monthly_allocations else None
+        # Every line item contributes to the plan-level total (day-prorated
+        # estimate if it was never individually customized) — see
+        # monthly_allocation.py's default_allocation(); mirrors exactly
+        # what app.js's _mbEffectiveDistribution shows on-screen, so the
+        # export's total always matches what the planner last saw.
+        distribution = allocations or _monthly_allocation.default_allocation(total, months)
+        for m in months:
+            per_month_totals[m["key"]] += distribution.get(m["key"], 0.0)
+
+        name_cell = ws.cell(row=row, column=2, value=product.name)
+        name_cell.font = BODY_FONT
+        name_cell.border = THIN_BORDER
+        write_monthly_breakdown_row(ws, row, months, allocations, total, start_col=3)
+        any_row_written = True
+        row += 1
+
+    if not any_row_written:
+        ws.cell(row=row, column=2, value="No line items use Monthly Breakdown for this option.").font = NOTE_FONT
+        row += 1
+
+    total_row = row + 1
+    total_label_cell = ws.cell(row=total_row, column=2, value="TOTAL PLAN SPEND BY MONTH")
+    total_label_cell.font = TOTAL_FONT
+    total_label_cell.fill = TOTAL_FILL
+    write_monthly_breakdown_total_row(ws, total_row, months, per_month_totals, start_col=3)
+    _box_range(ws, first_data_row, total_row, "B", get_column_letter(2 + len(months)))
     return ws
 
 

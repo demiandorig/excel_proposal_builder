@@ -301,7 +301,7 @@ async function maybeReopenProposal() {
     // A reopened proposal already has every step's data (it was fully
     // generated once) — let the nav pills jump anywhere immediately
     // instead of only unlocking as the planner re-visits each step.
-    state.furthestStep = 7;
+    state.furthestStep = 8;
     goToStep(4);  // straight to Curate — the paste/review content is already known
   } catch (e) {
     alert("Reopen failed: " + e.message);
@@ -415,7 +415,7 @@ function wireEvents() {
       if (target === state.step || target > state.furthestStep) return;
       if (state.step === 2) syncFormToParsed();
       if (state.step === 4) syncLineItemsFromTable();
-      if (state.step === 6) syncAvailsFromGrid();
+      if (state.step === 7) syncAvailsFromGrid();
       goToStep(target);
     });
   });
@@ -434,7 +434,8 @@ function wireEvents() {
   document.getElementById("reprompt-submit-btn").addEventListener("click", onStrategyReprompt);
 
   // Roadblocks step
-  document.getElementById("roadblocks-skip-btn").addEventListener("click", () => onNext(6));
+  document.getElementById("monthly-breakdown-skip-btn").addEventListener("click", () => onNext(6));
+  document.getElementById("roadblocks-skip-btn").addEventListener("click", () => onNext(7));
   document.getElementById("roadblocks-regenerate-btn").addEventListener("click", () => onRoadblocksGenerate());
 
   // Curation
@@ -627,7 +628,7 @@ function goToStep(n) {
   // be trusted as still-accurate, so drop back to the live preview until
   // the planner generates again.
   if (n === 2) state.finalProposalTitle = null;
-  for (let i = 1; i <= 7; i++) {
+  for (let i = 1; i <= 8; i++) {
     document.getElementById(`step-${i}`).classList.toggle("hidden", i !== n);
     const navEl = document.querySelector(`.step[data-step="${i}"]`);
     navEl.classList.toggle("active", i === n);
@@ -650,7 +651,7 @@ function onNext(n) {
   // Capture form edits before advancing
   if (state.step === 2) syncFormToParsed();
   if (state.step === 4) syncLineItemsFromTable();
-  if (state.step === 6) syncAvailsFromGrid();
+  if (state.step === 7) syncAvailsFromGrid();
 
   if (n === 3) {
     // Trigger AI strategy brief generation
@@ -693,6 +694,11 @@ function onNext(n) {
           // still a fully editable per-line dropdown, this just saves the
           // planner from setting the same thing on every line by hand.
           objective_override: _mapCampaignGoalToObjective(state.parsed.campaign_goal),
+          // Step 05's optional Monthly Breakdown — {"YYYY-MM": dollars}.
+          // null/empty means this line doesn't use it (see
+          // app/services/monthly_allocation.py's docstring: no separate
+          // enabled flag, inferred purely from data presence).
+          monthly_allocations: null,
         };
       });
       if (budget && state.lineItems.length > 0) {
@@ -721,14 +727,15 @@ function onNext(n) {
       }
     }
   }
-  if (n === 5) {
+  if (n === 5) renderMonthlyBreakdown();
+  if (n === 6) {
     // Trigger AI roadblocks check
-    goToStep(5);
+    goToStep(6);
     onRoadblocksGenerate();
     return;
   }
-  if (n === 6) renderAvailsGrid();
-  if (n === 7) renderGenerateSummary();
+  if (n === 7) renderAvailsGrid();
+  if (n === 8) renderGenerateSummary();
   goToStep(n);
 }
 
@@ -1876,6 +1883,7 @@ function onAddProduct() {
     is_added_value: false,
     added_value_pct: null,
     objective_override: _mapCampaignGoalToObjective(state.parsed?.campaign_goal),
+    monthly_allocations: null,
   });
   picker.value = "";
   renderLineItems();
@@ -2212,6 +2220,361 @@ function parseFormattedInput(s) {
   if (!digits) return null;
   const n = parseFloat(digits);
   return isNaN(n) ? null : n;
+}
+
+// --------------------------------------------------------------------------
+// Step 5: Monthly Breakdown (optional) — distributes each (non-Added-Value)
+// line item's Curate-step total across the calendar months its flight
+// actually touches. Mirrors app/services/monthly_allocation.py (see that
+// module's own docstring for the full design rationale — dollars are the
+// source of truth, percentage is always derived, no separate enabled
+// flag) so the live client-side math matches what /api/generate validates
+// authoritatively before letting a plan with unbalanced allocations
+// actually export. Nothing here is persisted until Generate is clicked —
+// this is all just editing state.lineItems[i].monthly_allocations in place.
+// --------------------------------------------------------------------------
+
+const _MB_CENT = 0.005;
+
+function _mbParseDate(raw) {
+  if (!raw) return null;
+  const s = raw.trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    let year = +m[3];
+    if (year < 100) year += 2000;
+    return new Date(Date.UTC(year, +m[1] - 1, +m[2]));
+  }
+  return null;
+}
+
+function _mbMonthKey(d) { return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`; }
+function _mbMonthLabel(d) {
+  return d.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
+}
+function _mbLastDayOfMonth(d) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)); }
+function _mbDaysBetweenInclusive(a, b) { return Math.round((b - a) / 86400000) + 1; }
+
+// Every calendar month overlapping [start, end] — mirrors
+// monthly_allocation.py's months_between() exactly, including active_days
+// per month for day-proration.
+function _mbMonthsBetween(start, end) {
+  if (end < start) { const t = start; start = end; end = t; }
+  const months = [];
+  let cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+  while (cursor <= end) {
+    const monthEnd = _mbLastDayOfMonth(cursor);
+    const activeStart = cursor > start ? cursor : start;
+    const activeEnd = monthEnd < end ? monthEnd : end;
+    months.push({
+      key: _mbMonthKey(cursor),
+      label: _mbMonthLabel(cursor),
+      days_in_month: _mbDaysBetweenInclusive(cursor, monthEnd),
+      active_days: _mbDaysBetweenInclusive(activeStart, activeEnd),
+    });
+    cursor = new Date(Date.UTC(cursor.getUTCMonth() === 11 ? cursor.getUTCFullYear() + 1 : cursor.getUTCFullYear(), (cursor.getUTCMonth() + 1) % 12, 1));
+  }
+  return months;
+}
+
+// Day-prorated default split — mirrors default_allocation() exactly,
+// including "last month absorbs the rounding remainder" so dollars always
+// sum to EXACTLY totalBudget.
+function _mbDefaultAllocation(totalBudget, months) {
+  if (!months.length) return {};
+  const totalActiveDays = months.reduce((s, m) => s + m.active_days, 0) || 1;
+  const allocations = {};
+  let running = 0;
+  months.slice(0, -1).forEach(m => {
+    const share = Math.round(totalBudget * (m.active_days / totalActiveDays) * 100) / 100;
+    allocations[m.key] = share;
+    running += share;
+  });
+  allocations[months[months.length - 1].key] = Math.round((totalBudget - running) * 100) / 100;
+  return allocations;
+}
+
+// Mirrors reconcile_allocation() exactly — the SAME balanced/remaining
+// definition the server uses, so a client-side "balanced ✓" can never
+// disagree with /api/generate's own gate.
+function _mbReconcile(totalBudget, allocations) {
+  const allocated = Math.round(Object.values(allocations).reduce((s, v) => s + (v || 0), 0) * 100) / 100;
+  const remaining = Math.round((totalBudget - allocated) * 100) / 100;
+  const allocatedPct = totalBudget ? (allocated / totalBudget * 100) : 0;
+  return {
+    allocated, remaining,
+    allocated_pct: allocatedPct,
+    remaining_pct: 100 - allocatedPct,
+    balanced: Math.abs(remaining) <= _MB_CENT,
+    over_allocated: remaining < -_MB_CENT,
+  };
+}
+
+// Effective calendar months for the CURRENTLY ACTIVE tier — its own
+// start/end override if set, else the campaign-level Step 02 dates
+// (exactly _effectiveStartDate/_effectiveEndDate's own fallback).
+function _mbEffectiveMonths() {
+  const startRaw = _effectiveStartDate(state.activeTierLabel);
+  const endRaw = _effectiveEndDate(state.activeTierLabel);
+  const start = _mbParseDate(startRaw);
+  const end = _mbParseDate(endRaw);
+  if (!start || !end) return null;
+  return _mbMonthsBetween(start, end);
+}
+
+// Line-item budget changed SINCE THIS ALLOCATION WAS LAST (RE)BUILT —
+// rescale every month's DOLLAR figure so its PERCENTAGE stays exactly
+// what the planner set, per the explicit "percentages remain constant,
+// dollars recalculate" preference.
+//
+// Deliberately does NOT infer "budget changed" from the allocation simply
+// not summing to the current total — that's ALSO exactly what a
+// planner's still-mid-edit, genuinely-unbalanced state looks like, and
+// silently "fixing" that on every render (this function used to run on
+// every renderMonthlyBreakdown() call, including one fired by every
+// keystroke) would erase the very validation state the planner needs to
+// see. li._mbBaseline instead records the total this allocation was
+// last deliberately built against (set by _mbSetAllocation below,
+// touched ONLY there) — a mismatch against li._mbBaseline means the
+// underlying monthly_budget/months genuinely changed elsewhere (Step 04)
+// since; the allocation's OWN internal sum is irrelevant to that question.
+function _mbRescaleForBudgetChange(li) {
+  const total = li.monthly_budget * li.months;
+  if (!li.monthly_allocations || li._mbBaseline === undefined || Math.abs(li._mbBaseline - total) <= _MB_CENT) {
+    return li.monthly_allocations;
+  }
+  const priorBaseline = li._mbBaseline || 1;  // guard divide-by-zero; a $0 baseline has nothing meaningful to rescale FROM anyway
+  const rescaled = {};
+  const keys = Object.keys(li.monthly_allocations);
+  let running = 0;
+  keys.slice(0, -1).forEach(k => {
+    const share = Math.round(total * (li.monthly_allocations[k] / priorBaseline) * 100) / 100;
+    rescaled[k] = share;
+    running += share;
+  });
+  rescaled[keys[keys.length - 1]] = Math.round((total - running) * 100) / 100;
+  li._mbBaseline = total;
+  return rescaled;
+}
+
+// The ONE place monthly_allocations gets (re)built wholesale from a total
+// (as opposed to a single month being hand-edited) — always stamps
+// _mbBaseline so _mbRescaleForBudgetChange above can later tell "budget
+// moved since" apart from "planner hasn't balanced this yet".
+function _mbSetAllocation(li, allocations) {
+  li.monthly_allocations = allocations;
+  li._mbBaseline = li.monthly_budget * li.months;
+}
+
+// Campaign dates changed since this allocation was set — preserve every
+// month that still exists UNCHANGED (never silently destroy a planner's
+// figure), drop months no longer in the flight, and leave a brand-new
+// month at $0 — any resulting imbalance surfaces through the normal
+// validation state rather than being silently auto-fixed.
+function _mbReconcileMonthsForDateChange(li, months) {
+  if (!li.monthly_allocations) return li.monthly_allocations;
+  const validKeys = new Set(months.map(m => m.key));
+  const next = {};
+  Object.keys(li.monthly_allocations).forEach(k => {
+    if (validKeys.has(k)) next[k] = li.monthly_allocations[k];
+  });
+  months.forEach(m => { if (!(m.key in next)) next[m.key] = 0; });
+  return next;
+}
+
+// This line's monthly split for the PLAN-LEVEL summary bar — its own
+// customized allocation if it has one, else the same day-prorated default
+// shown but never persisted, purely so the plan-level total is always a
+// complete picture rather than silently excluding lines nobody's
+// customized yet.
+function _mbEffectiveDistribution(li, months) {
+  if (li.monthly_allocations && Object.keys(li.monthly_allocations).length) return li.monthly_allocations;
+  return _mbDefaultAllocation(li.monthly_budget * li.months, months);
+}
+
+function renderMonthlyBreakdown() {
+  const months = _mbEffectiveMonths();
+  const emptyState = document.getElementById("mb-no-dates");
+  const content = document.getElementById("mb-content");
+  if (!months || !months.length) {
+    emptyState.classList.remove("hidden");
+    content.classList.add("hidden");
+    _mbSetContinueEnabled(true);  // nothing to validate — never block on a missing-dates state
+    return;
+  }
+  emptyState.classList.add("hidden");
+  content.classList.remove("hidden");
+
+  const eligibleLines = state.lineItems.filter(li => !li.is_added_value);
+  const anyLineActive = eligibleLines.some(li => li.monthly_allocations && Object.keys(li.monthly_allocations).length);
+
+  eligibleLines.forEach(li => {
+    if (li.monthly_allocations && Object.keys(li.monthly_allocations).length) {
+      li.monthly_allocations = _mbReconcileMonthsForDateChange(li, months);
+      if (li._mbBaseline === undefined) {
+        // First time this render loop has seen this line's data (e.g.
+        // just reopened a past proposal, or a manually-injected/legacy
+        // allocation) — seed the baseline at whatever total it has RIGHT
+        // NOW rather than treating "no baseline yet" as "budget changed,
+        // rescale immediately." A genuinely unbalanced reopened plan
+        // still surfaces as unbalanced (see _mbLineItemBlockHtml's own
+        // reconcile check) — this only controls whether THIS function
+        // silently rewrites its numbers on the very first render.
+        li._mbBaseline = li.monthly_budget * li.months;
+      } else {
+        li.monthly_allocations = _mbRescaleForBudgetChange(li);
+      }
+    } else if (anyLineActive) {
+      // "Line item added" (or never touched) while the feature is already
+      // in use elsewhere on this tier — join it automatically rather than
+      // leaving the plan-level total silently incomplete for this line.
+      _mbSetAllocation(li, _mbDefaultAllocation(li.monthly_budget * li.months, months));
+    }
+  });
+
+  document.getElementById("mb-line-items").innerHTML = eligibleLines.map(li => _mbLineItemBlockHtml(li, months)).join("")
+    || `<p class="mb-empty-hint">No line items yet — add products in Step 04 first.</p>`;
+  _mbWireLineItemBlocks(months);
+  _mbRenderPlanSummary(months);
+  _mbUpdateContinueState(months);
+}
+
+function _mbLineItemBlockHtml(li, months) {
+  const product = state.productIndex[li.product_name];
+  const total = li.monthly_budget * li.months;
+  const enabled = !!(li.monthly_allocations && Object.keys(li.monthly_allocations).length);
+  const allocations = enabled ? li.monthly_allocations : {};
+  const r = _mbReconcile(total, allocations);
+  const minSpend = product ? (product.minimum_spend || 0) : 0;
+
+  const rows = months.map(m => {
+    const dollars = allocations[m.key] || 0;
+    const pct = total ? (dollars / total * 100) : 0;
+    const belowMin = enabled && minSpend > 0 && dollars + _MB_CENT < minSpend;
+    return `
+      <tr data-month="${m.key}" class="${belowMin ? "mb-row-warn" : ""}">
+        <td class="mono">${escapeHtml(m.label)}</td>
+        <td><input type="number" step="0.01" min="0" max="100" class="mb-pct-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? Math.round(pct * 100) / 100 : ""}" ${enabled ? "" : "disabled"} /></td>
+        <td><input type="number" step="0.01" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
+        <td class="mb-validation">${belowMin ? `⚠ Below min ($${minSpend.toLocaleString()})` : (enabled ? "✓" : "")}</td>
+      </tr>`;
+  }).join("");
+
+  const statusClass = !enabled ? "mb-status-off" : (r.balanced ? "mb-status-ok" : (r.over_allocated ? "mb-status-over" : "mb-status-under"));
+  const statusText = !enabled ? "Not using Monthly Breakdown"
+    : r.balanced ? `Allocated: 100% / ${money(total)}`
+    : r.over_allocated ? `Over-allocated by ${Math.abs(r.remaining_pct).toFixed(1)}% / ${money(Math.abs(r.remaining))}`
+    : `Allocated: ${r.allocated_pct.toFixed(1)}% / ${money(r.allocated)} — Remaining: ${r.remaining_pct.toFixed(1)}% / ${money(r.remaining)}`;
+
+  return `
+    <details class="mb-line-block" ${enabled ? "open" : ""} data-line-id="${li.id}">
+      <summary>
+        <span class="mb-line-name">${escapeHtml(product ? product.name : li.product_name)}</span>
+        <span class="mb-line-total">Total: ${money(total)}</span>
+        <label class="mb-enable-toggle" onclick="event.stopPropagation()">
+          <input type="checkbox" class="mb-enable-checkbox" data-line="${li.id}" ${enabled ? "checked" : ""} />
+          Use Monthly Breakdown
+        </label>
+        <span class="mb-status-badge ${statusClass}">${escapeHtml(statusText)}</span>
+      </summary>
+      <div class="mb-line-body">
+        <table class="mb-table">
+          <thead><tr><th>Month</th><th>%</th><th>$</th><th>Status</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <button type="button" class="btn-secondary mb-reset-btn" data-line="${li.id}" ${enabled ? "" : "disabled"}>↺ Reset to day-prorated default</button>
+      </div>
+    </details>`;
+}
+
+function _mbFindLineItem(id) { return state.lineItems.find(li => String(li.id) === String(id)); }
+
+function _mbWireLineItemBlocks(months) {
+  document.querySelectorAll(".mb-enable-checkbox").forEach(cb => {
+    cb.addEventListener("change", (e) => {
+      const li = _mbFindLineItem(e.target.dataset.line);
+      if (!li) return;
+      if (e.target.checked) {
+        _mbSetAllocation(li, _mbDefaultAllocation(li.monthly_budget * li.months, months));
+      } else {
+        li.monthly_allocations = null;
+        delete li._mbBaseline;
+      }
+      renderMonthlyBreakdown();
+    });
+  });
+  document.querySelectorAll(".mb-reset-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const li = _mbFindLineItem(btn.dataset.line);
+      if (!li) return;
+      _mbSetAllocation(li, _mbDefaultAllocation(li.monthly_budget * li.months, months));
+      renderMonthlyBreakdown();
+    });
+  });
+  document.querySelectorAll(".mb-pct-input").forEach(inp => {
+    inp.addEventListener("input", (e) => {
+      const li = _mbFindLineItem(e.target.dataset.line);
+      if (!li || !li.monthly_allocations) return;
+      const total = li.monthly_budget * li.months;
+      const pct = parseFloat(e.target.value);
+      li.monthly_allocations[e.target.dataset.month] = isNaN(pct) ? 0 : Math.round(total * pct / 100 * 100) / 100;
+      renderMonthlyBreakdown();
+    });
+  });
+  document.querySelectorAll(".mb-dollar-input").forEach(inp => {
+    inp.addEventListener("input", (e) => {
+      const li = _mbFindLineItem(e.target.dataset.line);
+      if (!li || !li.monthly_allocations) return;
+      const dollars = parseFloat(e.target.value);
+      li.monthly_allocations[e.target.dataset.month] = isNaN(dollars) ? 0 : Math.round(dollars * 100) / 100;
+      renderMonthlyBreakdown();
+    });
+  });
+}
+
+function _mbRenderPlanSummary(months) {
+  const eligibleLines = state.lineItems.filter(li => !li.is_added_value);
+  const totals = {};
+  months.forEach(m => { totals[m.key] = 0; });
+  eligibleLines.forEach(li => {
+    const dist = _mbEffectiveDistribution(li, months);
+    months.forEach(m => { totals[m.key] += dist[m.key] || 0; });
+  });
+  const grandTotal = months.reduce((s, m) => s + totals[m.key], 0);
+  const cells = months.map(m => `
+    <div class="mb-summary-cell">
+      <div class="mb-summary-month">${escapeHtml(m.label)}</div>
+      <div class="mb-summary-amount">${money(totals[m.key])}</div>
+    </div>`).join("");
+  document.getElementById("mb-plan-summary").innerHTML = `
+    <div class="mb-summary-label">Total plan spend by month <small>(day-prorated estimate for any line not yet customized)</small></div>
+    <div class="mb-summary-row">${cells}
+      <div class="mb-summary-cell mb-summary-cell-total">
+        <div class="mb-summary-month">Total</div>
+        <div class="mb-summary-amount">${money(grandTotal)}</div>
+      </div>
+    </div>`;
+}
+
+// Blocks "Continue" (never "Skip") while ANY enabled line item is
+// unbalanced — the hard "must balance to be considered complete"
+// requirement; /api/generate re-validates this authoritatively regardless
+// as a backstop for anyone who skips past an unbalanced state anyway.
+function _mbUpdateContinueState(months) {
+  const anyUnbalanced = state.lineItems.some(li => {
+    if (li.is_added_value || !li.monthly_allocations || !Object.keys(li.monthly_allocations).length) return false;
+    return !_mbReconcile(li.monthly_budget * li.months, li.monthly_allocations).balanced;
+  });
+  _mbSetContinueEnabled(!anyUnbalanced);
+}
+
+function _mbSetContinueEnabled(enabled) {
+  const btn = document.getElementById("monthly-breakdown-continue-btn");
+  if (!btn) return;
+  btn.disabled = !enabled;
+  btn.title = enabled ? "" : "One or more line items' monthly allocations don't balance to 100% / the full budget yet.";
 }
 
 function renderAvailsGrid() {

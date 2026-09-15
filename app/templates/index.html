@@ -7,7 +7,7 @@
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,700;9..144,900&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,700;9..144,900&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&family=Poppins:wght@700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -25,9 +25,10 @@
         <div class="step" data-step="2"><span>02</span> Review</div>
         <div class="step" data-step="3"><span>03</span> Strategy</div>
         <div class="step" data-step="4"><span>04</span> Curate</div>
-        <div class="step" data-step="5"><span>05</span> Roadblocks</div>
-        <div class="step" data-step="6"><span>06</span> Avails</div>
-        <div class="step" data-step="7"><span>07</span> Generate</div>
+        <div class="step" data-step="5"><span>05</span> Monthly</div>
+        <div class="step" data-step="6"><span>06</span> Roadblocks</div>
+        <div class="step" data-step="7"><span>07</span> Avails</div>
+        <div class="step" data-step="8"><span>08</span> Generate</div>
       </nav>
       <div id="account-widget" class="account-widget"></div>
     </div>
@@ -385,11 +386,45 @@ Client name: ...
     </section>
 
     <!-- ====================================================================
-         STEP 5 — Roadblocks / Restrictions Check
+         STEP 5 — Monthly Breakdown (optional) — distributes each line
+         item's Curate-step total across the calendar months its flight
+         actually touches. Entirely opt-in: skipping this step (or never
+         customizing a line here) changes nothing else about the proposal.
     ===================================================================== -->
     <section class="panel hidden" id="step-5">
       <div class="panel-head">
-        <div class="kicker">Step 05</div>
+        <div class="kicker">Step 05 · Optional</div>
+        <h1 class="display">Monthly breakdown</h1>
+        <p class="lede">Split each line item's budget across the calendar months your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat monthly figure is all you need; nothing else changes if you do.</p>
+      </div>
+
+      <div id="mb-no-dates" class="mb-empty-state hidden">
+        <p>Monthly Breakdown needs a campaign flight to divide into months. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.</p>
+      </div>
+
+      <div id="mb-content">
+        <div class="mb-plan-summary" id="mb-plan-summary">
+          <!-- plan-level "total spend by month" bar — rendered by renderMonthlyBreakdown() -->
+        </div>
+        <div id="mb-line-items">
+          <!-- one collapsible block per (non-Added-Value) line item -->
+        </div>
+      </div>
+
+      <div class="panel-actions">
+        <button class="btn-secondary" data-back="4">← Back</button>
+        <button class="btn-secondary" id="monthly-breakdown-skip-btn">Skip →</button>
+        <div class="spacer"></div>
+        <button class="btn-primary" data-next="6" id="monthly-breakdown-continue-btn">Continue →</button>
+      </div>
+    </section>
+
+    <!-- ====================================================================
+         STEP 6 — Roadblocks / Restrictions Check
+    ===================================================================== -->
+    <section class="panel hidden" id="step-6">
+      <div class="panel-head">
+        <div class="kicker">Step 06</div>
         <h1 class="display">Roadblocks Check</h1>
         <p class="lede">Entravision Intelligence searches the web for current platform ad policies — targeting restrictions, common rejection reasons, category requirements — for each product in this mix, grounded in the client context from Steps 02–03. Download the report to keep on hand for launch.</p>
       </div>
@@ -413,21 +448,21 @@ Client name: ...
       </div>
 
       <div class="panel-actions" id="roadblocks-actions">
-        <button class="btn-secondary" data-back="4">← Back</button>
+        <button class="btn-secondary" data-back="5">← Back</button>
         <button class="btn-secondary" id="roadblocks-skip-btn">Skip →</button>
         <div class="spacer"></div>
         <button class="btn-secondary" id="roadblocks-regenerate-btn" style="display:none">↺ Regenerate</button>
         <a class="btn-secondary hidden" id="roadblocks-download-link" download>⬇ Download Report (.docx)</a>
-        <button class="btn-primary" id="roadblocks-continue-btn" data-next="6">Continue →</button>
+        <button class="btn-primary" id="roadblocks-continue-btn" data-next="7">Continue →</button>
       </div>
     </section>
 
     <!-- ====================================================================
-         STEP 6 — Avails (if needed)
+         STEP 7 — Avails (if needed)
     ===================================================================== -->
-    <section class="panel hidden" id="step-6">
+    <section class="panel hidden" id="step-7">
       <div class="panel-head">
-        <div class="kicker">Step 06</div>
+        <div class="kicker">Step 07</div>
         <h1 class="display">Avails input <span id="avails-status-pill"></span></h1>
         <p class="lede" id="avails-blurb">If this proposal needs avails, paste them from the platforms below. Otherwise, skip — avails columns will be left blank for later planner input.</p>
       </div>
@@ -449,17 +484,17 @@ Client name: ...
       </div>
 
       <div class="panel-actions">
-        <button class="btn-secondary" data-back="5">← Back</button>
-        <button class="btn-primary" data-next="7">Continue →</button>
+        <button class="btn-secondary" data-back="6">← Back</button>
+        <button class="btn-primary" data-next="8">Continue →</button>
       </div>
     </section>
 
     <!-- ====================================================================
-         STEP 7 — Generate
+         STEP 8 — Generate
     ===================================================================== -->
-    <section class="panel hidden" id="step-7">
+    <section class="panel hidden" id="step-8">
       <div class="panel-head">
-        <div class="kicker">Step 07</div>
+        <div class="kicker">Step 08</div>
         <h1 class="display">Generate the proposal</h1>
         <p class="lede">Review the summary, choose your output tabs, and generate. The file downloads locally and can be pushed to Google Drive in the seller's folder.</p>
       </div>
@@ -479,7 +514,7 @@ Client name: ...
       </fieldset>
 
       <div class="panel-actions">
-        <button class="btn-secondary" data-back="6">← Back</button>
+        <button class="btn-secondary" data-back="7">← Back</button>
         <button class="btn-primary btn-large" id="generate-btn">⬇ Generate Proposal</button>
       </div>
 

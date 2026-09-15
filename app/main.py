@@ -72,6 +72,7 @@ from app.services import docx_builder
 from app.services import pptx_builder
 from app.services import strategy_brief as strategy_brief_svc
 from app.services import roadblocks as roadblocks_svc
+from app.services import monthly_allocation
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +390,14 @@ class LineItemModel(BaseModel):
     # that never sent one, in which case the export falls back to the
     # catalog's own short_label exactly as it always has.
     objective_override: Optional[str] = None
+    # Optional Step 04.5 "Monthly Breakdown" — {"YYYY-MM": dollars, ...}.
+    # None/empty means this line doesn't use it (the feature is entirely
+    # opt-in per line, inferred from data presence — see
+    # app/services/monthly_allocation.py's module docstring for why
+    # there's deliberately no separate enabled/disabled flag). Dollars are
+    # the source of truth; percentage is always derived from these on
+    # both the client and server, never stored separately.
+    monthly_allocations: Optional[dict[str, float]] = None
 
 
 class AvailsEntry(BaseModel):
@@ -806,6 +815,53 @@ async def recommend(body: RecommendRequest) -> dict:
     return {"line_items": [asdict(li) for li in items]}
 
 
+def _validate_monthly_breakdown(tiers: list[dict], req: ProposalRequest, multi_tier: bool) -> tuple[list[str], list[dict]]:
+    """
+    Extracted from /api/generate so it's independently testable. Returns
+    (balance_errors, minimum_warnings):
+      - balance_errors: non-empty means /api/generate must refuse to
+        proceed — a line item's monthly dollars don't sum to its own
+        Curate-step total (see monthly_allocation.py's module docstring
+        on why that's the one hard requirement here).
+      - minimum_warnings: below-rate-card-minimum months, for EVERY tier
+        regardless of balance errors — never blocks generation (the
+        planner may have a deliberate reason to go under), surfaced back
+        on the response instead so it's never silently swallowed either.
+    """
+    balance_errors: list[str] = []
+    minimum_warnings: list[dict] = []
+    for t in tiers:
+        tier_label = t.get("label") or "A"
+        effective_start = (t.get("start_date") or req.start_date or "").strip()
+        effective_end = (t.get("end_date") or req.end_date or "").strip()
+        start_d = monthly_allocation.parse_flexible_date(effective_start)
+        end_d = monthly_allocation.parse_flexible_date(effective_end)
+        months = monthly_allocation.months_between(start_d, end_d) if (start_d and end_d) else []
+        for li in t["line_items"]:
+            if not li.monthly_allocations:
+                continue
+            total = li.monthly_budget * li.months
+            result = monthly_allocation.reconcile_allocation(total, li.monthly_allocations)
+            if not result["balanced"]:
+                direction = "over-allocated" if result["over_allocated"] else "under-allocated"
+                balance_errors.append(
+                    f"Option {tier_label} — {li.product_name}: monthly breakdown is {direction} by "
+                    f"${abs(result['remaining']):,.2f} (allocated ${result['allocated']:,.2f} of ${total:,.2f})."
+                )
+            if months:
+                product = by_name(li.product_name)
+                min_spend = product.minimum_spend if product else None
+                minimum_warnings.extend(monthly_allocation.check_minimum_violations(
+                    line_item_label=f"Option {tier_label}" if multi_tier else "",
+                    product_name=li.product_name,
+                    minimum_spend=min_spend,
+                    is_added_value=li.is_added_value,
+                    months=months,
+                    allocations=li.monthly_allocations,
+                ))
+    return balance_errors, minimum_warnings
+
+
 @app.post("/api/generate")
 async def generate(body: GenerateRequest, request: Request) -> dict:
     """
@@ -835,6 +891,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
                 is_added_value=li.is_added_value,
                 added_value_pct=li.added_value_pct,
                 objective_override=li.objective_override,
+                monthly_allocations=li.monthly_allocations,
             )
             for li in models
         ]
@@ -865,6 +922,18 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             "avails_data": {name: entry.model_dump() for name, entry in (body.avails_data or {}).items()},
         }]
     multi_tier = len(tiers) > 1
+
+    # Monthly Breakdown validation — the authoritative gate (the frontend
+    # already blocks its own "Continue" button on the same math, see
+    # app.js's _mbUpdateContinueState; this is what makes it actually
+    # enforced rather than just a UI hint someone could route around,
+    # e.g. by clicking "Skip" past an unbalanced line).
+    balance_errors, minimum_warnings = _validate_monthly_breakdown(tiers, req, multi_tier)
+    if balance_errors:
+        raise HTTPException(status_code=400, detail={
+            "message": "Monthly Breakdown doesn't balance yet — fix these before generating.",
+            "errors": balance_errors,
+        })
 
     # Union of every tier's line items — product blurbs and the campaign
     # name don't vary by tier, so enrichment runs once against everything
@@ -1083,6 +1152,12 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         "enrichment": enrichment_out,
         "has_pptx_net": pptx_net_filename is not None,
         "has_pptx_gross": pptx_gross_filename is not None,
+        # Below-minimum-monthly-spend flags — never blocks generation (the
+        # planner may have a deliberate reason to go under), but must
+        # never be silently swallowed either. See the balance-error gate
+        # above for the one thing about Monthly Breakdown that IS a hard
+        # failure.
+        "monthly_breakdown_warnings": minimum_warnings,
     }
 
 

@@ -18,10 +18,16 @@
   --amber: #b87800;
   --amber-soft: #fbeed1;
   --red: #a8261c;
+  --red-soft: #fdf1f0;   /* was hardcoded #fdf1f0 in ~6 places — every OTHER status color already had its own -soft pairing */
 
   --font-display: "Fraunces", Georgia, serif;
   --font-body: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  /* Small uppercase tracked labels (kickers, tab labels) — the one place
+     the brand deck's own Poppins-bold treatment layers cleanly onto this
+     app's existing serif-display + mono-label system without competing
+     with Fraunces for the same "distinctive headline" role. */
+  --font-kicker: "Poppins", var(--font-mono);
 
   --radius: 4px;
   --radius-lg: 8px;
@@ -186,7 +192,7 @@ body::before {
 
 .panel-head { margin-bottom: 32px; }
 .kicker {
-  font-family: var(--font-mono);
+  font-family: var(--font-kicker);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.18em;
@@ -812,7 +818,7 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 }
 .line-items input.below-min {
   border-color: var(--red);
-  background: #fdf1f0;
+  background: var(--red-soft);
 }
 .line-items .col-budget input { width: 110px; min-width: 110px; }
 .budget-gross-row {
@@ -1043,7 +1049,7 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 }
 .line-items td .btn-remove:hover {
   color: var(--red);
-  background: #fdf1f0;
+  background: var(--red-soft);
 }
 
 .add-row-controls {
@@ -1226,7 +1232,7 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 .sov-badge.sov-green { color: var(--green); background: var(--green-soft); }
 .sov-badge.sov-yellow { color: var(--amber); background: var(--amber-soft); }
 .sov-badge.sov-orange { color: #b8560c; background: #fdead3; }
-.sov-badge.sov-red { color: var(--red); background: #fdf1f0; }
+.sov-badge.sov-red { color: var(--red); background: var(--red-soft); }
 
 .sov-helper {
   margin: 10px 0 0;
@@ -1415,6 +1421,131 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   line-height: 1.6;
   margin-bottom: 16px;
 }
+
+/* ----- Step 5: Monthly Breakdown ----- */
+.mb-empty-state {
+  padding: 20px 24px;
+  background: var(--paper-warm);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  font-size: 14px;
+  color: var(--ink-soft);
+  margin-bottom: 20px;
+}
+.mb-empty-hint { color: var(--ink-faint); font-size: 13px; }
+
+.mb-plan-summary {
+  background: var(--ink);
+  border-radius: var(--radius-lg);
+  padding: 18px 22px;
+  margin-bottom: 24px;
+  position: sticky;
+  top: 76px;
+  z-index: 5;
+}
+.mb-summary-label {
+  font-family: var(--font-kicker);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--paper);
+  opacity: 0.75;
+  margin-bottom: 12px;
+}
+.mb-summary-label small { text-transform: none; letter-spacing: 0; font-family: var(--font-body); opacity: 0.8; }
+.mb-summary-row {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.mb-summary-cell { min-width: 90px; }
+.mb-summary-month {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--paper);
+  opacity: 0.6;
+  margin-bottom: 4px;
+}
+.mb-summary-amount {
+  font-family: var(--font-display);
+  font-size: 20px;
+  color: var(--paper);
+}
+.mb-summary-cell-total .mb-summary-amount { color: var(--accent); }
+.mb-summary-cell-total { border-left: 1px solid rgba(255,255,255,0.2); padding-left: 18px; }
+
+.mb-line-block {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  margin-bottom: 14px;
+  background: var(--paper-card);
+}
+.mb-line-block summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  user-select: none;
+}
+.mb-line-block summary::-webkit-details-marker { display: none; }
+.mb-line-block[open] summary { border-bottom: 1px solid var(--rule-soft); }
+.mb-line-name { font-weight: 600; color: var(--ink); flex: 1; min-width: 160px; }
+.mb-line-total { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-soft); }
+.mb-enable-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.mb-status-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 20px;
+}
+.mb-status-off { color: var(--ink-faint); background: var(--paper-warm); }
+.mb-status-ok { color: var(--green); background: var(--green-soft); }
+.mb-status-under { color: var(--amber); background: var(--amber-soft); }
+.mb-status-over { color: var(--red); background: var(--red-soft); }
+
+.mb-line-body { padding: 18px 20px; }
+.mb-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.mb-table th {
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  padding: 6px 10px;
+  border-bottom: 2px solid var(--rule);
+}
+.mb-table td { padding: 6px 10px; border-bottom: 1px solid var(--rule-soft); }
+.mb-table input[type="number"] {
+  width: 90px;
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-card);
+}
+.mb-table input[type="number"]:disabled { background: var(--paper-warm); color: var(--ink-faint); }
+.mb-table input[type="number"]:focus { outline: none; border-color: var(--accent); }
+.mb-row-warn td { background: var(--amber-soft); }
+.mb-validation { font-size: 12px; color: var(--amber); white-space: nowrap; }
+.mb-reset-btn { margin-top: 14px; font-size: 12px; padding: 8px 14px; }
 
 .strategy-brief { display: flex; flex-direction: column; gap: 20px; }
 
@@ -1715,7 +1846,7 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   border-radius: 20px;
   white-space: nowrap;
 }
-.risk-badge.risk-high { color: var(--red); background: #fdf1f0; }
+.risk-badge.risk-high { color: var(--red); background: var(--red-soft); }
 .risk-badge.risk-medium { color: var(--amber); background: var(--amber-soft); }
 .risk-badge.risk-low { color: var(--green); background: var(--green-soft); }
 

@@ -20,6 +20,7 @@ from app.catalog import CATALOG, Product, by_name, families, by_family
 from app.services.notion_parser import ProposalRequest, classify_output_tabs
 from app import excel_template as et
 from app.market_config import get_market_address
+from app.services import monthly_allocation as mo
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +74,12 @@ class LineItem:
     # None falls back to the catalog's own short_label in the export,
     # exactly what column C showed before this field existed.
     objective_override: Optional[str] = None
+    # Optional Step 04.5 "Monthly Breakdown" — {"YYYY-MM": dollars, ...}.
+    # See app/services/monthly_allocation.py's module docstring: dollars
+    # are the source of truth, percentage is always derived from these,
+    # and an empty/None dict means this line simply doesn't use the
+    # feature (no separate enabled flag to fall out of sync with this).
+    monthly_allocations: Optional[dict[str, float]] = None
 
     def total_budget(self) -> float:
         return self.monthly_budget * self.months
@@ -248,6 +255,29 @@ def generate_proposal(
         # just the C11 summary text.
         tier_start_date = (tier.get("start_date") or "").strip() or start_date
         tier_end_date = (tier.get("end_date") or "").strip() or end_date
+        # Monthly Breakdown — see app/services/monthly_allocation.py.
+        # Computed once per tier from ITS OWN effective dates (so a
+        # per-tier date override, added the same round as this feature,
+        # is respected). None when the dates don't parse — Monthly
+        # Breakdown is simply skipped for this tier's export either way,
+        # same as if no line item had used it.
+        _tier_start_parsed = mo.parse_flexible_date(tier_start_date)
+        _tier_end_parsed = mo.parse_flexible_date(tier_end_date)
+        tier_months = (
+            mo.months_between(_tier_start_parsed, _tier_end_parsed)
+            if (_tier_start_parsed and _tier_end_parsed) else []
+        )
+        # Whether to build the Monthly Breakdown columns/tab at all for
+        # this tier — entirely inferred from data (does any line item
+        # actually have an allocation?), never a separate flag that could
+        # fall out of sync with it. tier_line_items isn't assigned yet at
+        # this point in the loop (that happens below, after unmatched
+        # products are filtered out) — recomputed from the RAW tier
+        # dict's line items instead, which is fine since this is only
+        # ever a yes/no gate, not something that needs the filtered list.
+        tier_uses_monthly_breakdown = bool(tier_months) and any(
+            li.monthly_allocations for li in tier["line_items"]
+        )
         # Planner-given display name (e.g. "Independent") wins over the
         # generic "Option A" wherever a seller/client actually reads this —
         # proposal title, emails, AND (for a multi-tier proposal) the Excel
@@ -297,6 +327,8 @@ def generate_proposal(
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=False, blurbs=blurbs,
                                  avails_data=tier_avails, request=request)
+            if tier_uses_monthly_breakdown:
+                _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=False)
             tabs_built.append(f"Proposal {label}")
 
         if tabs.get("wsections"):
@@ -309,6 +341,8 @@ def generate_proposal(
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=False, with_sections=True, blurbs=blurbs,
                                  avails_data=tier_avails, request=request)
+            if tier_uses_monthly_breakdown:
+                _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=False, with_sections=True)
             tabs_built.append(f"Proposal {label} (wsections)")
 
         if tabs.get("gross"):
@@ -321,6 +355,8 @@ def generate_proposal(
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=True, blurbs=blurbs,
                                  avails_data=tier_avails, request=request)
+            if tier_uses_monthly_breakdown:
+                _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=True)
             # Set agency fee in I14 (Gross sheet's variable input cell)
             if request.agency_fee is not None:
                 ws["I14"] = request.agency_fee
@@ -340,6 +376,12 @@ def generate_proposal(
                            include_billing=False, include_campaign_meta=False, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             tabs_built.append(avails_sheet_name)
+
+        if tier_uses_monthly_breakdown:
+            mb_sheet_name = f"Monthly Breakdown {label}" if multi_tier else "Monthly Breakdown"
+            mb_sheet_title = _safe_sheet_name(tier_display_name, "(Monthly)", used_sheet_titles) if multi_tier else mb_sheet_name
+            et.build_monthly_breakdown_tab(wb, products, tier_line_items, tier_months, sheet_name=mb_sheet_title)
+            tabs_built.append(mb_sheet_name)
 
         tier_total_net = sum(li.total_budget() for li in tier_line_items)
         fee = request.agency_fee or 0.0
@@ -679,3 +721,44 @@ def _populate_line_items(
 
     if sov_col:
         et._apply_sov_conditional_formatting(ws, sov_col, first_data_row, row - 1)
+
+
+def _populate_monthly_breakdown_inline(
+    ws, products: list[Product], line_items: list[LineItem], months: list[dict], *,
+    gross: bool, with_sections: bool = False,
+) -> None:
+    """
+    Writes the Monthly Breakdown columns to the right of the avails block
+    (see excel_template.py's own module comment on exactly which columns)
+    — one row per line item, aligned with that SAME line item's row on
+    this sheet. The plan-level "total spend by month" figure lives on the
+    dedicated Monthly Breakdown tab (build_monthly_breakdown_tab) instead
+    of being duplicated here too — this sheet's own existing grand-total
+    row already isn't per-month, so there's no natural single row here to
+    attach a per-month total to without guessing at its position (that
+    row's number is computed inside build_proposal_a/_gross, not exposed
+    to this caller).
+
+    Deliberately its OWN small row-tracking loop rather than sharing
+    _populate_line_items' — that function is large, already-working, and
+    heavily commented; a second, much smaller loop just for "does this
+    row happen to be a section banner" is a safer choice than threading a
+    shared row-map through it for one new caller. Keep this in sync with
+    _populate_line_items' own copy of the same rule if that ever changes.
+    """
+    if not months:
+        return
+    start_col = et.MONTHLY_BREAKDOWN_START_COL[gross]
+    start_row = 19
+    row = start_row
+    last_family = None
+    for product, li in zip(products, line_items):
+        if with_sections and product.family != last_family:
+            row += 1
+            last_family = product.family
+        if not li.is_added_value:
+            total = li.monthly_budget * li.months
+            et.write_monthly_breakdown_row(ws, row, months, li.monthly_allocations, total, start_col)
+        row += 1
+
+    et.write_monthly_breakdown_header(ws, start_row - 2, months, start_col)
