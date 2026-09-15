@@ -1020,6 +1020,14 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     ws[f"C{grand_row}"] = f'="TOTAL DIGITAL — "&{safe_months}&"-MONTH CAMPAIGN"'
     ws[f"C{grand_row}"].font = TOTAL_FONT
     ws[f"C{grand_row}"].fill = TOTAL_FILL
+    # Impressions grand total — same monthly-figure * months-in-campaign
+    # logic as the dollar totals below (no addons term: add-ons don't carry
+    # impressions). Previously missing entirely, so the campaign-total row
+    # showed a dollar figure with no impressions to back it up.
+    ws[f"I{grand_row}"] = f"=ROUNDDOWN(I{total_row}*{safe_months},0)"
+    _format_imps_cell(ws[f"I{grand_row}"])
+    ws[f"I{grand_row}"].font = TOTAL_FONT
+    ws[f"I{grand_row}"].fill = TOTAL_FILL
     ws[f"L{grand_row}"] = f"=ROUNDDOWN(L{total_row}*{safe_months}{addons_sum_term},0)"
     _format_money_cell(ws[f"L{grand_row}"])
     ws[f"L{grand_row}"].font = TOTAL_FONT

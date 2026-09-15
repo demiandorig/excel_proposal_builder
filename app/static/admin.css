@@ -223,6 +223,29 @@
   background: var(--amber-soft);
   border-radius: 20px;
 }
+.deleted-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  margin-left: 6px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--red);
+  background: #fdf1f0;
+  border-radius: 20px;
+}
+.rename-hint {
+  display: inline-block;
+  margin-left: 6px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-faint);
+  cursor: help;
+}
+tr.row-deleted { opacity: 0.55; }
+tr.row-deleted td { background: var(--paper-warm); }
 
 /* Add-product panel */
 .add-product-panel {

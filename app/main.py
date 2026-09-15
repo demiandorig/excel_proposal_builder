@@ -16,6 +16,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -24,6 +25,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 # Load .env (OPENAI_API_KEY, DRIVE_CLIENT_ID/SECRET/ROOT_FOLDER_ID, etc.) into
 # the process environment before anything below reads os.environ — the repo
@@ -36,10 +38,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException, Body, Request, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from psycopg.types.json import Jsonb
+
+from app import auth as auth_svc
 
 from app.db import fetch_all, fetch_one, get_connection
 from app.catalog import (
@@ -47,6 +51,8 @@ from app.catalog import (
     effective_catalog, load_rate_overrides, save_rate_overrides, clear_rate_override,
     load_custom_products, add_custom_product, delete_custom_product, update_custom_product,
     _OVERRIDABLE_FIELDS,
+    record_product_alias, resolve_product_alias, all_product_aliases,
+    load_deleted_builtin_names, set_builtin_deleted,
 )
 from app.services.notion_parser import (
     ProposalRequest,
@@ -127,6 +133,87 @@ async def _no_cache_static(request, call_next):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
     return response
+
+
+_logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Login — every route needs a valid session except this small allowlist
+# (plus /static/* — just JS/CSS/images, no data) and everything under
+# /api/admin/ (+ the /admin page) additionally needs is_admin. See
+# app/auth.py for the session model itself.
+# ---------------------------------------------------------------------------
+SESSION_COOKIE_NAME = "session_token"
+_PUBLIC_PATHS = {
+    "/login",
+    "/api/login",
+    "/api/health",
+    "/api/market-ccs",  # already a deliberately public, non-admin lookup (see its own route below)
+}
+
+
+@app.middleware("http")
+async def _require_login(request: Request, call_next):
+    """
+    Rejects anything not on the public allowlist without a valid session
+    cookie — an HTML page request redirects to /login (with `next` so it
+    lands back where it was headed), an /api/* request gets a plain JSON
+    401/403 instead (app/static/session-guard.js, loaded on every page,
+    turns a 401 from ANY fetch call into a client-side redirect, so a
+    session that expires mid-use is handled the same way as never having
+    logged in). A valid, non-admin session hitting an admin-only path
+    (the /admin page or /api/admin/*) gets 403 (API) / redirected to `/`
+    (page) instead of 401 — they ARE logged in, they just can't be here.
+    """
+    path = request.url.path
+    if path in _PUBLIC_PATHS or path.startswith("/static/"):
+        return await call_next(request)
+
+    is_api = path.startswith("/api/")
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    try:
+        user = auth_svc.get_user_by_session(token) if token else None
+    except RuntimeError:
+        # DATABASE_URL not set/reachable — fail closed (no silent bypass of
+        # login just because the session store itself is unavailable).
+        user = None
+
+    if user is None:
+        if is_api:
+            return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+        return RedirectResponse(f"/login?next={quote(path, safe='')}")
+
+    if (path == "/admin" or path.startswith("/api/admin/")) and not user["is_admin"]:
+        if is_api:
+            return JSONResponse({"detail": "Admin access required"}, status_code=403)
+        return RedirectResponse("/")
+
+    request.state.user = user
+    response = await call_next(request)
+    try:
+        # Rolling expiry — every authenticated request pushes the session
+        # another SESSION_LIFETIME_DAYS forward, so an active user is
+        # effectively never logged out (see app/auth.py's own docstring).
+        auth_svc.refresh_session(token)
+    except Exception as e:
+        _logger.warning("Session refresh failed (non-fatal): %s: %s", type(e).__name__, e)
+    return response
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    """
+    Best-effort, never fatal to app startup — this app has always been
+    able to START without a reachable DATABASE_URL (individual DB-backed
+    requests fail on their own instead, per app/db.py's own RuntimeError),
+    and login shouldn't change that: a startup DB hiccup should still let
+    the process come up rather than crash-looping.
+    """
+    try:
+        auth_svc.bootstrap_admin_from_env()
+        auth_svc.purge_expired_sessions()
+    except Exception as e:
+        _logger.warning("Startup auth bootstrap/session-purge skipped: %s: %s", type(e).__name__, e)
 
 
 def _static_asset_version() -> int:
@@ -354,6 +441,11 @@ class TierModel(BaseModel):
     # None/blank falls back to the campaign-level ProposalRequest.geo,
     # exactly like `name` falls back to "Option {label}".
     geo: Optional[str] = None
+    # Per-tier flight-date override (e.g. two options running different
+    # windows) — same fallback convention as `geo`: None/blank falls back
+    # to the campaign-level ProposalRequest.start_date/end_date.
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
     line_items: list[LineItemModel]
     avails_data: Optional[dict[str, AvailsEntry]] = None
 
@@ -399,6 +491,12 @@ class GenerateRequest(BaseModel):
         return v
     avails_data: Optional[dict[str, AvailsEntry]] = None  # product_name -> avails; ignored when `tiers` is present
     strategy_brief: Optional[dict] = None  # confirmed Step 03 brief, if not skipped
+    roadblocks: Optional[dict] = None  # confirmed Step 05 roadblocks result, if not skipped — saved to reopen_state purely so a reopen can restore it; not otherwise used by generation itself
+    # The exact Step 01 paste that produced `request` below — has no effect
+    # on generation (parsing already happened), carried through purely so
+    # reopen_state can save it and a reopen can refill the textarea (see
+    # GET /api/proposal/{id}/reopen and app.js's maybeReopenProposal()).
+    raw_notion_text: Optional[str] = None
     # Step 04's Add-Ons module picks — proposal-wide (not per-tier). []
     # (the default, and what an updated frontend always sends even with
     # nothing picked) means "planner picked none" and the export's ADD-ONS
@@ -451,6 +549,62 @@ async def index() -> HTMLResponse:
     return _serve_html_with_cache_busted_static(TEMPLATES_DIR / "index.html")
 
 
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request) -> HTMLResponse:
+    """Serve the login page. Already-logged-in visitors are sent straight
+    to `/` instead of seeing the form again."""
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if token and auth_svc.get_user_by_session(token):
+        return RedirectResponse("/")
+    return _serve_html_with_cache_busted_static(TEMPLATES_DIR / "login.html")
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/login")
+async def login(body: LoginRequest, response: Response) -> dict:
+    """Checks email/password, and on success sets the session cookie the
+    auth middleware (_require_login) looks for on every later request."""
+    user = auth_svc.get_user_by_email(body.email)
+    if user is None or user["disabled"] or not auth_svc.verify_password(
+        body.password, user["password_hash"], user["password_salt"]
+    ):
+        # Deliberately the SAME message for "no such account" and "wrong
+        # password" — telling them apart lets an attacker enumerate which
+        # emails have accounts here.
+        raise HTTPException(status_code=401, detail="Incorrect email or password.")
+
+    token = auth_svc.create_session(user["id"])
+    response.set_cookie(
+        SESSION_COOKIE_NAME, token,
+        max_age=auth_svc.SESSION_LIFETIME_DAYS * 86400,
+        httponly=True, secure=True, samesite="lax", path="/",
+    )
+    return {"ok": True, "email": user["email"], "is_admin": user["is_admin"]}
+
+
+@app.post("/api/logout")
+async def logout(request: Request, response: Response) -> dict:
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if token:
+        auth_svc.delete_session(token)
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/me")
+async def me(request: Request) -> dict:
+    """Who's logged in — the masthead uses this to show an email + Log out
+    link, and admin.html to decide whether to show the Users tab at all."""
+    user = getattr(request.state, "user", None)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"email": user["email"], "is_admin": user["is_admin"]}
+
+
 @app.get("/api/catalog")
 async def get_catalog() -> dict:
     """Return the AdFlo product catalog (with any admin rate overrides applied), grouped by family."""
@@ -481,7 +635,7 @@ async def get_catalog() -> dict:
 async def parse(body: ParseRequest) -> dict:
     """Parse Notion text into a structured ProposalRequest."""
     catalog_names = [p.name for p in effective_catalog()]
-    req = parse_notion(body.notion_text, catalog_names)
+    req = parse_notion(body.notion_text, catalog_names, db_aliases=all_product_aliases())
     tabs = classify_output_tabs(
         req.request_type,
         req.products_selected,
@@ -694,6 +848,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
                 "label": t.label,
                 "name": t.name,
                 "geo": t.geo,
+                "start_date": t.start_date,
+                "end_date": t.end_date,
                 "line_items": _to_line_items(t.line_items),
                 "avails_data": {name: entry.model_dump() for name, entry in (t.avails_data or {}).items()},
             }
@@ -703,6 +859,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         tiers = [{
             "label": "A",
             "geo": None,
+            "start_date": None,
+            "end_date": None,
             "line_items": _to_line_items(body.line_items),
             "avails_data": {name: entry.model_dump() for name, entry in (body.avails_data or {}).items()},
         }]
@@ -860,7 +1018,28 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     user_agent = request.headers.get("user-agent", "")
     client_ip = request.client.host if request.client else ""
 
-    # 10. Store metadata in PostgreSQL. The generated files remain on disk;
+    # 10. Build enrichment payload for the frontend (and for reopen_state
+    # below — moved up from its old spot after _save_proposal_metadata so
+    # the same dict can be persisted, not just returned for this one
+    # response cycle. Previously this was pure ephemera: a reopen had no
+    # way to see the campaign name / email copy / product blurbs a
+    # proposal was actually generated with).
+    enrichment_out = {
+        "campaign_name": enrichment.campaign_name,
+        "internal_email_subject": enrichment.internal_email_subject,
+        "internal_email_body": internal_email_body,
+        "client_email_subject": enrichment.client_email_subject,
+        "client_email_body": enrichment.client_email_body,
+        "product_blurbs": [
+            {"product_name": pb.product_name, "blurb": pb.blurb}
+            for pb in enrichment.product_blurbs
+        ],
+        "has_email_doc": email_doc_filename is not None,
+        "used_web_search": enrichment.used_web_search,
+        "error": enrichment.error,
+    }
+
+    # 11. Store metadata in PostgreSQL. The generated files remain on disk;
     # their filenames are persisted so the existing download routes can derive
     # their paths after a restart or redeploy.
     reopen_state = {
@@ -872,8 +1051,11 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         },
         "tiers": [t.model_dump() for t in body.tiers] if body.tiers else None,
         "strategy_brief": body.strategy_brief,
+        "roadblocks": body.roadblocks,
         "force_tabs": body.force_tabs,
         "addons": [a.model_dump() for a in body.addons],
+        "raw_notion_text": body.raw_notion_text,
+        "enrichment": enrichment_out,
     }
     _save_proposal_metadata(
         proposal_id=proposal_id,
@@ -892,22 +1074,6 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         summary=summary,
         reopen_state=reopen_state,
     )
-
-    # 11. Build enrichment payload for the frontend
-    enrichment_out = {
-        "campaign_name": enrichment.campaign_name,
-        "internal_email_subject": enrichment.internal_email_subject,
-        "internal_email_body": internal_email_body,
-        "client_email_subject": enrichment.client_email_subject,
-        "client_email_body": enrichment.client_email_body,
-        "product_blurbs": [
-            {"product_name": pb.product_name, "blurb": pb.blurb}
-            for pb in enrichment.product_blurbs
-        ],
-        "has_email_doc": email_doc_filename is not None,
-        "used_web_search": enrichment.used_web_search,
-        "error": enrichment.error,
-    }
 
     return {
         "proposal_id": proposal_id,
@@ -1113,10 +1279,11 @@ async def health() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Admin — proposal history + rate overrides
+# Admin — proposal history + rate overrides + user management
 #
-# No auth layer (this is an internal single-team tool run locally); if this
-# ever moves off localhost, put it behind a login before relying on it.
+# Behind login (see _require_login above) — every /api/admin/* route AND
+# the /admin page itself additionally require is_admin, not just a valid
+# session.
 # ---------------------------------------------------------------------------
 
 class RateOverrideRequest(BaseModel):
@@ -1156,6 +1323,71 @@ async def admin_page() -> HTMLResponse:
     return _serve_html_with_cache_busted_static(TEMPLATES_DIR / "admin.html")
 
 
+# --------------------------------------------------------------------------
+# Users — admin-only account management. There's no self-service signup;
+# an admin creates every account here (the very first one comes from the
+# ADMIN_BOOTSTRAP_EMAIL/PASSWORD startup step in app/auth.py instead, since
+# nobody can be logged in yet to use this endpoint).
+# --------------------------------------------------------------------------
+
+class NewUserRequest(BaseModel):
+    email: str
+    password: str
+    is_admin: bool = False
+
+
+class UserUpdateRequest(BaseModel):
+    is_admin: Optional[bool] = None
+    disabled: Optional[bool] = None
+    new_password: Optional[str] = None
+
+
+@app.get("/api/admin/users")
+async def admin_list_users() -> dict:
+    return {"users": auth_svc.list_users()}
+
+
+@app.post("/api/admin/users")
+async def admin_create_user(body: NewUserRequest) -> dict:
+    try:
+        user = auth_svc.create_user(body.email, body.password, is_admin=body.is_admin)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"created": True, "user": user}
+
+
+@app.patch("/api/admin/users/{user_id}")
+async def admin_update_user(user_id: str, body: UserUpdateRequest, request: Request) -> dict:
+    if auth_svc.get_user_by_id(user_id) is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    acting_user = request.state.user  # set by _require_login — always present here, this route is admin-only
+    if body.disabled and user_id == acting_user["id"]:
+        raise HTTPException(status_code=400, detail="You can't disable your own account.")
+    if body.is_admin is False and user_id == acting_user["id"]:
+        raise HTTPException(status_code=400, detail="You can't remove your own admin access.")
+    if body.new_password is not None:
+        try:
+            auth_svc.set_user_password(user_id, body.new_password)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if body.is_admin is not None:
+        auth_svc.set_user_admin(user_id, body.is_admin)
+    if body.disabled is not None:
+        auth_svc.set_user_disabled(user_id, body.disabled)
+    return {"saved": True, "user": auth_svc.get_user_by_id(user_id)}
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, request: Request) -> dict:
+    acting_user = request.state.user
+    if user_id == acting_user["id"]:
+        raise HTTPException(status_code=400, detail="You can't delete your own account.")
+    deleted = auth_svc.delete_user(user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"deleted": True}
+
+
 @app.get("/api/admin/proposals")
 async def admin_list_proposals() -> dict:
     """
@@ -1192,6 +1424,38 @@ async def admin_list_proposals() -> dict:
     return {"proposals": proposals, "count": len(proposals)}
 
 
+def _resolve_admin_product_key(product_name: str) -> tuple[str, bool]:
+    """
+    Given a display name an admin action is targeting — the product's
+    CURRENT name (possibly renamed), its ORIGINAL/never-renamed name, or an
+    even older former name — resolve it to (stable_key, is_builtin).
+    stable_key is the raw CATALOG literal name for a built-in (the actual
+    rate_overrides.product_name / by_name() lookup key, which never
+    changes regardless of renames), or the custom product's own current
+    `name` column for a custom (customs have no separate stable/display
+    split the way built-ins do — see update_custom_product). Raises
+    ValueError (surfaced as a 404) if nothing matches.
+    """
+    builtin_raw_names = {p.name for p in CATALOG}
+    custom_names = {p.name for p in load_custom_products()}
+    # 1. Direct raw/current match — covers "never renamed", the common case
+    # for both built-ins and customs.
+    if product_name in builtin_raw_names:
+        return product_name, True
+    if product_name in custom_names:
+        return product_name, False
+    # 2. Current EFFECTIVE (renamed) display name for a built-in.
+    overrides = load_rate_overrides()
+    for p in CATALOG:
+        if overrides.get(p.name, {}).get("name") == product_name:
+            return p.name, True
+    # 3. An older former name, from further back than the latest rename.
+    current = resolve_product_alias(product_name)
+    if current and current != product_name:
+        return _resolve_admin_product_key(current)
+    raise ValueError(f"Unknown product '{product_name}'")
+
+
 @app.get("/api/admin/rates")
 async def admin_get_rates() -> dict:
     """Return the full catalog (built-in + admin-added) with current overrides
@@ -1199,14 +1463,21 @@ async def admin_get_rates() -> dict:
     every _OVERRIDABLE_FIELDS field is override-aware here now, not just the
     original 3 numeric ones (family/buying_model/sizes/etc. used to always
     show the raw catalog value even when overridden — a real display bug,
-    fixed alongside adding the fields the edit panel needs)."""
+    fixed alongside adding the fields the edit panel needs). Soft-deleted
+    built-ins are included (not hidden like effective_catalog()'s default)
+    so the admin can see and restore them."""
     overrides = load_rate_overrides()
     custom_names = {p.name for p in load_custom_products()}
+    deleted_names = load_deleted_builtin_names()
     products = []
     for p in CATALOG + load_custom_products():
         override = overrides.get(p.name, {})
         products.append({
-            "name": p.name,
+            "name": override.get("name", p.name),
+            # The raw/original name — stays stable across renames, so
+            # admin.js can target edit/delete/restore actions unambiguously
+            # even after the display `name` above has changed.
+            "stable_name": p.name,
             "family": override.get("family", p.family),
             "short_label": override.get("short_label", p.short_label),
             "buying_model": override.get("buying_model", p.buying_model),
@@ -1222,6 +1493,7 @@ async def admin_get_rates() -> dict:
             "catalog_estimated_cpm_for_imps": p.estimated_cpm_for_imps,
             "has_override": p.name in overrides,
             "is_custom": p.name in custom_names,
+            "is_deleted": p.name in deleted_names,
             "is_addon": override.get("is_addon", p.is_addon),
         })
     return {"products": products, "overridable_fields": list(_OVERRIDABLE_FIELDS)}
@@ -1230,8 +1502,10 @@ async def admin_get_rates() -> dict:
 @app.post("/api/admin/rates")
 async def admin_save_rate(body: RateOverrideRequest) -> dict:
     """Save (or update) a rate override for one product."""
-    if by_name(body.product_name) is None and body.product_name not in {p.name for p in CATALOG}:
-        raise HTTPException(status_code=404, detail=f"Unknown product '{body.product_name}'")
+    try:
+        stable_key, _ = _resolve_admin_product_key(body.product_name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
     overrides = load_rate_overrides()
     fields_ = {
@@ -1241,19 +1515,29 @@ async def admin_save_rate(body: RateOverrideRequest) -> dict:
             "estimated_cpm_for_imps": body.estimated_cpm_for_imps,
         }.items() if v is not None
     }
-    if fields_:
-        overrides[body.product_name] = fields_
+    # Merge onto (rather than replace) any existing override row so this
+    # narrow 3-field editor can't silently drop OTHER overridden fields —
+    # a rename (`name`) or an "Edit product" panel change, for instance.
+    existing = overrides.get(stable_key, {})
+    merged = {**existing, **fields_}
+    if merged:
+        overrides[stable_key] = merged
     else:
-        overrides.pop(body.product_name, None)
+        overrides.pop(stable_key, None)
     save_rate_overrides(overrides)
-    return {"saved": True, "product_name": body.product_name, "override": fields_}
+    return {"saved": True, "product_name": stable_key, "override": merged}
 
 
 @app.delete("/api/admin/rates/{product_name}")
 async def admin_clear_rate(product_name: str) -> dict:
-    """Revert one product's rate override back to the catalog default."""
-    clear_rate_override(product_name)
-    return {"cleared": True, "product_name": product_name}
+    """Revert one product's rate override back to the catalog default
+    (also undoes any rename or soft-delete recorded on that row)."""
+    try:
+        stable_key, _ = _resolve_admin_product_key(product_name)
+    except ValueError:
+        stable_key = product_name  # nothing to resolve — clearing is a no-op either way
+    clear_rate_override(stable_key)
+    return {"cleared": True, "product_name": stable_key}
 
 
 @app.post("/api/admin/products")
@@ -1282,25 +1566,55 @@ async def admin_add_product(body: NewProductRequest) -> dict:
 
 @app.delete("/api/admin/products/{product_name}")
 async def admin_delete_product(product_name: str) -> dict:
-    """Remove a custom (admin-added) product. Built-in catalog products can't be deleted here."""
-    if product_name in {p.name for p in CATALOG}:
-        raise HTTPException(status_code=400, detail="Built-in catalog products can't be deleted — only admin-added ones.")
-    deleted = delete_custom_product(product_name)
+    """
+    Remove a product. A built-in is SOFT-deleted (hidden from new
+    selection everywhere except the admin Rates table itself, which still
+    shows it — with a Restore action — so this is reversible; the CATALOG
+    Python list itself is untouched, since it's meant to stay a pure
+    reflection of the rate card, per catalog.py's own module docstring). A
+    custom (admin-added) product is hard-deleted, same as before.
+    """
+    try:
+        stable_key, is_builtin = _resolve_admin_product_key(product_name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if is_builtin:
+        set_builtin_deleted(stable_key, True)
+        return {"deleted": True, "product_name": stable_key, "mode": "soft_delete"}
+    deleted = delete_custom_product(stable_key)
     if not deleted:
-        raise HTTPException(status_code=404, detail=f"Custom product '{product_name}' not found.")
-    return {"deleted": True, "product_name": product_name}
+        raise HTTPException(status_code=404, detail=f"Custom product '{stable_key}' not found.")
+    return {"deleted": True, "product_name": stable_key, "mode": "hard_delete"}
+
+
+@app.post("/api/admin/products/{product_name}/restore")
+async def admin_restore_product(product_name: str) -> dict:
+    """Undo a built-in product's soft-delete. Custom products are hard-deleted (see above) — nothing to restore."""
+    try:
+        stable_key, is_builtin = _resolve_admin_product_key(product_name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if not is_builtin:
+        raise HTTPException(status_code=400, detail="Custom products aren't soft-deleted, so there's nothing to restore — it would need to be re-added instead.")
+    set_builtin_deleted(stable_key, False)
+    return {"restored": True, "product_name": stable_key}
 
 
 class ProductEditRequest(BaseModel):
     """Full-field edit for an EXISTING product (built-in or custom) — the
-    admin "Edit" panel's payload. Same field set as NewProductRequest
-    (minus `name`, which isn't editable here — see _OVERRIDABLE_FIELDS'
-    comment in catalog.py) so add/edit stay symmetric. Every field is
-    optional and None means "leave as shown" — the edit panel pre-fills
-    from the product's current effective values and sends null for
-    anything the admin cleared, same "empty = revert to catalog default"
-    convention the single-field rate editor already uses."""
+    admin "Edit" panel's payload. Same field set as NewProductRequest, plus
+    `new_name` (renaming IS supported here now — see catalog.py's
+    _OVERRIDABLE_FIELDS/by_name/record_product_alias for how an old name
+    keeps resolving afterward, for both the parser and already-saved
+    proposals). `product_name` identifies which product to edit and may be
+    its current name, its original/never-renamed name, or any former name
+    — see _resolve_admin_product_key. Every other field is optional and
+    None means "leave as shown" — the edit panel pre-fills from the
+    product's current effective values and sends null for anything the
+    admin cleared, same "empty = revert to catalog default" convention the
+    single-field rate editor already uses."""
     product_name: str
+    new_name: Optional[str] = None
     family: Optional[str] = None
     short_label: Optional[str] = None
     buying_model: Optional[str] = None
@@ -1325,29 +1639,48 @@ async def admin_edit_product(body: ProductEditRequest) -> dict:
       - Custom: updated in place via update_custom_product (full replace
         under the hood, so every field — not just the overridable set —
         actually changes).
+    A `new_name` that differs from the product's current effective name
+    renames it and records an alias (see catalog.py) so the parser and any
+    already-saved proposal keep resolving the name it used to have.
     """
-    is_builtin = body.product_name in {p.name for p in CATALOG}
-    is_custom = body.product_name in {p.name for p in load_custom_products()}
-    if not is_builtin and not is_custom:
-        raise HTTPException(status_code=404, detail=f"Unknown product '{body.product_name}'")
+    try:
+        stable_key, is_builtin = _resolve_admin_product_key(body.product_name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
-    fields = {k: v for k, v in body.model_dump(exclude={"product_name"}).items() if v is not None}
+    overrides = load_rate_overrides()
+    current_effective_name = overrides.get(stable_key, {}).get("name", stable_key) if is_builtin else stable_key
+
+    new_name = (body.new_name or "").strip() or None
+    if new_name and new_name == current_effective_name:
+        new_name = None  # resubmitted unchanged — not actually a rename
+    if new_name:
+        taken = {p.name for p in effective_catalog(include_deleted=True)} - {current_effective_name}
+        if new_name in taken:
+            raise HTTPException(status_code=400, detail=f"A product named '{new_name}' already exists.")
+
+    fields = {k: v for k, v in body.model_dump(exclude={"product_name", "new_name"}).items() if v is not None}
+    if new_name:
+        fields["name"] = new_name
 
     if is_builtin:
-        catalog_product = next(p for p in CATALOG if p.name == body.product_name)
+        catalog_product = next(p for p in CATALOG if p.name == stable_key)
         kept = {k: v for k, v in fields.items() if v != getattr(catalog_product, k, None)}
-        overrides = load_rate_overrides()
         if kept:
-            overrides[body.product_name] = kept
+            overrides[stable_key] = kept
         else:
-            overrides.pop(body.product_name, None)
+            overrides.pop(stable_key, None)
         save_rate_overrides(overrides)
-        return {"saved": True, "product_name": body.product_name, "mode": "override", "override": overrides.get(body.product_name, {})}
+        if new_name:
+            record_product_alias(current_effective_name, new_name)
+        return {"saved": True, "product_name": new_name or stable_key, "mode": "override", "override": overrides.get(stable_key, {})}
     else:
         try:
-            updated = update_custom_product(body.product_name, fields)
+            updated = update_custom_product(stable_key, fields)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        if new_name:
+            record_product_alias(current_effective_name, new_name)
         return {"saved": True, "product_name": updated.name, "mode": "custom"}
 
 
@@ -1361,7 +1694,7 @@ async def admin_edit_product(body: ProductEditRequest) -> dict:
 _PRODUCT_CSV_COLUMNS = [
     "name", "family", "short_label", "buying_model", "base_rate", "minimum_spend",
     "estimated_cpm_for_imps", "sizes", "tech_platform", "proposal_description",
-    "notes", "is_addon", "is_custom", "has_override",
+    "notes", "is_addon", "is_custom", "has_override", "is_deleted",
 ]
 
 
@@ -1372,10 +1705,17 @@ async def admin_export_products() -> Response:
     point for the bulk-upsert import below (same column order)."""
     overrides = load_rate_overrides()
     custom_names = {p.name for p in load_custom_products()}
+    deleted_names = load_deleted_builtin_names()
+    raw_products = list(CATALOG) + load_custom_products()
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=_PRODUCT_CSV_COLUMNS, extrasaction="ignore")
     writer.writeheader()
-    for p in effective_catalog():
+    # include_deleted=True (and zipped against the equally-unfiltered
+    # raw_products) so a soft-deleted built-in doesn't misalign this
+    # pairing — has_override/is_deleted are checked by each product's
+    # STABLE name (`raw.name`), not `p.name`, which is the CURRENT
+    # (possibly renamed) display name once overrides are applied below.
+    for p, raw in zip(effective_catalog(include_deleted=True), raw_products):
         writer.writerow({
             "name": p.name,
             "family": p.family,
@@ -1390,7 +1730,8 @@ async def admin_export_products() -> Response:
             "notes": p.notes,
             "is_addon": p.is_addon,
             "is_custom": p.name in custom_names,
-            "has_override": p.name in overrides,
+            "has_override": raw.name in overrides,
+            "is_deleted": raw.name in deleted_names,
         })
     return Response(
         content=buf.getvalue(),

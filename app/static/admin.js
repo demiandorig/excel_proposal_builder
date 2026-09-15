@@ -8,6 +8,9 @@ const adminState = {
   ratesLoaded: false,
   markets: [],
   marketsLoaded: false,
+  users: [],
+  usersLoaded: false,
+  currentUserEmail: null,  // set by loadUsers()'s /api/me call — lets the Users tab hide "disable/delete self" actions
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -17,6 +20,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireEditProduct();
   wireBulkUpload();
   wireMarketConfig();
+  wireAddUser();
   loadProposals();
 });
 
@@ -32,8 +36,10 @@ function wireTabs() {
       document.getElementById("tab-proposals").classList.toggle("hidden", tab !== "proposals");
       document.getElementById("tab-rates").classList.toggle("hidden", tab !== "rates");
       document.getElementById("tab-markets").classList.toggle("hidden", tab !== "markets");
+      document.getElementById("tab-users").classList.toggle("hidden", tab !== "users");
       if (tab === "rates" && !adminState.ratesLoaded) loadRates();
       if (tab === "markets" && !adminState.marketsLoaded) loadMarketConfig();
+      if (tab === "users" && !adminState.usersLoaded) loadUsers();
     });
   });
 }
@@ -175,7 +181,8 @@ function filterRates(query) {
   const q = query.trim().toLowerCase();
   if (!q) return adminState.rates;
   return adminState.rates.filter(p =>
-    p.name.toLowerCase().includes(q) || p.family.toLowerCase().includes(q)
+    p.name.toLowerCase().includes(q) || p.family.toLowerCase().includes(q) ||
+    (p.stable_name || "").toLowerCase().includes(q)  // finds a renamed product by its former name too
   );
 }
 
@@ -190,24 +197,28 @@ function renderRates(list) {
   }
 
   body.innerHTML = list.map(p => `
-    <tr data-product="${escapeAttr(p.name)}">
+    <tr data-product="${escapeAttr(p.stable_name)}" class="${p.is_deleted ? "row-deleted" : ""}">
       <td class="mono">${escapeHtml(p.family)}</td>
       <td class="wrap">
         ${escapeHtml(p.name)}
         ${p.has_override ? '<span class="override-badge">Override</span>' : ""}
         ${p.is_custom ? '<span class="custom-badge">Custom</span>' : ""}
         ${p.is_addon ? '<span class="addon-badge">Add-on</span>' : ""}
+        ${p.is_deleted ? '<span class="deleted-badge">Deleted</span>' : ""}
+        ${p.name !== p.stable_name ? `<span class="rename-hint" title="Original catalog name — still recognized in old pastes and saved proposals">was: ${escapeHtml(p.stable_name)}</span>` : ""}
       </td>
       <td class="mono">${escapeHtml(p.buying_model)}</td>
       <td>${numInput(p, "base_rate")}</td>
       <td>${numInput(p, "minimum_spend")}</td>
       <td>${numInput(p, "estimated_cpm_for_imps")}</td>
       <td>
-        <button class="btn-save-row" data-action="save" data-product="${escapeAttr(p.name)}">Save</button>
-        <button class="btn-revert" data-action="revert" data-product="${escapeAttr(p.name)}"
+        <button class="btn-save-row" data-action="save" data-product="${escapeAttr(p.stable_name)}" ${p.is_deleted ? "disabled" : ""}>Save</button>
+        <button class="btn-revert" data-action="revert" data-product="${escapeAttr(p.stable_name)}"
                 ${p.has_override ? "" : "disabled"}>Revert</button>
-        <button class="btn-secondary" data-action="edit" data-product="${escapeAttr(p.name)}">✎ Edit</button>
-        ${p.is_custom ? `<button class="btn-delete-row" data-action="delete" data-product="${escapeAttr(p.name)}">Delete</button>` : ""}
+        <button class="btn-secondary" data-action="edit" data-product="${escapeAttr(p.stable_name)}" ${p.is_deleted ? "disabled" : ""}>✎ Edit</button>
+        ${p.is_deleted
+          ? `<button class="btn-secondary" data-action="restore" data-product="${escapeAttr(p.stable_name)}">↺ Restore</button>`
+          : `<button class="btn-delete-row" data-action="delete" data-product="${escapeAttr(p.stable_name)}" data-custom="${p.is_custom ? "1" : "0"}">Delete</button>`}
       </td>
     </tr>
   `).join("");
@@ -222,7 +233,10 @@ function renderRates(list) {
     btn.addEventListener("click", () => onOpenEditProduct(btn.dataset.product));
   });
   body.querySelectorAll('[data-action="delete"]').forEach(btn => {
-    btn.addEventListener("click", () => onDeleteProduct(btn.dataset.product));
+    btn.addEventListener("click", () => onDeleteProduct(btn.dataset.product, btn.dataset.custom === "1"));
+  });
+  body.querySelectorAll('[data-action="restore"]').forEach(btn => {
+    btn.addEventListener("click", () => onRestoreProduct(btn.dataset.product));
   });
 }
 
@@ -279,8 +293,11 @@ async function onRevertRate(productName) {
   }
 }
 
-async function onDeleteProduct(productName) {
-  if (!confirm(`Permanently delete "${productName}"? This can't be undone.`)) return;
+async function onDeleteProduct(productName, isCustom) {
+  const confirmMsg = isCustom
+    ? `Permanently delete "${productName}"? This can't be undone.`
+    : `Delete "${productName}"? It'll be hidden from new proposals (and the catalog dropdown), but any proposal that already uses it keeps working, and you can restore it here later.`;
+  if (!confirm(confirmMsg)) return;
   try {
     const res = await fetch(`/api/admin/products/${encodeURIComponent(productName)}`, { method: "DELETE" });
     if (!res.ok) {
@@ -291,6 +308,20 @@ async function onDeleteProduct(productName) {
     renderRates(filterRates(document.getElementById("rates-search").value));
   } catch (e) {
     alert("Delete failed: " + e.message);
+  }
+}
+
+async function onRestoreProduct(productName) {
+  try {
+    const res = await fetch(`/api/admin/products/${encodeURIComponent(productName)}/restore`, { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || res.statusText);
+    }
+    await loadRates();
+    renderRates(filterRates(document.getElementById("rates-search").value));
+  } catch (e) {
+    alert("Restore failed: " + e.message);
   }
 }
 
@@ -384,12 +415,12 @@ function wireEditProduct() {
   });
 }
 
-function onOpenEditProduct(productName) {
-  const p = adminState.rates.find(r => r.name === productName);
+function onOpenEditProduct(stableName) {
+  const p = adminState.rates.find(r => r.stable_name === stableName);
   if (!p) return;
 
   document.getElementById("edit-product-name-label").textContent = `— ${p.name}`;
-  document.getElementById("edit-product-form").dataset.productName = p.name;
+  document.getElementById("edit-product-form").dataset.productName = p.stable_name;
   document.getElementById("ep-family").value = p.family || "";
   document.getElementById("ep-name").value = p.name || "";
   document.getElementById("ep-short-label").value = p.short_label || "";
@@ -427,6 +458,7 @@ async function onSaveEditProduct(e) {
   const productName = e.target.dataset.productName;
   const payload = {
     product_name: productName,
+    new_name: strOrNull("ep-name"),
     family: strOrNull("ep-family"),
     short_label: strOrNull("ep-short-label"),
     buying_model: strOrNull("ep-buying-model"),
@@ -668,4 +700,157 @@ function escapeAttr(s) {
 
 function cssEscape(s) {
   return String(s).replace(/["\\]/g, "\\$&");
+}
+
+// --------------------------------------------------------------------------
+// Users — who can sign in. Admin-only (the page itself is behind
+// _require_login's is_admin check; this is just the UI for it).
+// --------------------------------------------------------------------------
+
+async function loadUsers() {
+  try {
+    const [usersRes, meRes] = await Promise.all([fetch("/api/admin/users"), fetch("/api/me")]);
+    const data = await usersRes.json();
+    adminState.users = data.users || [];
+    adminState.usersLoaded = true;
+    if (meRes.ok) adminState.currentUserEmail = (await meRes.json()).email;
+    renderUsers();
+  } catch (e) {
+    document.getElementById("users-body").innerHTML =
+      `<tr><td colspan="5" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderUsers() {
+  const body = document.getElementById("users-body");
+  const list = adminState.users;
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="5" class="admin-empty">No users yet.</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map(u => {
+    const isSelf = u.email === adminState.currentUserEmail;
+    return `
+    <tr data-user-id="${escapeAttr(u.id)}" class="${u.disabled ? "row-deleted" : ""}">
+      <td class="wrap">${escapeHtml(u.email)}${isSelf ? ' <span class="custom-badge">You</span>' : ""}</td>
+      <td>
+        <label class="checkbox-label">
+          <input type="checkbox" data-action="toggle-admin" ${u.is_admin ? "checked" : ""} ${isSelf ? "disabled title=\"You can't remove your own admin access\"" : ""} />
+        </label>
+      </td>
+      <td>${u.disabled ? '<span class="deleted-badge">Disabled</span>' : '<span class="custom-badge">Active</span>'}</td>
+      <td class="mono">${formatDate(u.created_at)}</td>
+      <td>
+        <button class="btn-secondary" data-action="reset-password">Reset password</button>
+        ${isSelf
+          ? ""
+          : `<button class="btn-secondary" data-action="toggle-disabled">${u.disabled ? "Enable" : "Disable"}</button>
+             <button class="btn-delete-row" data-action="delete-user">Delete</button>`}
+      </td>
+    </tr>
+  `;
+  }).join("");
+
+  body.querySelectorAll('[data-action="toggle-admin"]').forEach(el => {
+    el.addEventListener("change", (e) => onUpdateUser(rowUserId(e.target), { is_admin: e.target.checked }));
+  });
+  body.querySelectorAll('[data-action="toggle-disabled"]').forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      const row = e.target.closest("tr");
+      const user = adminState.users.find(u => u.id === row.dataset.userId);
+      onUpdateUser(row.dataset.userId, { disabled: !user.disabled });
+    });
+  });
+  body.querySelectorAll('[data-action="reset-password"]').forEach(btn => {
+    btn.addEventListener("click", (e) => onResetPassword(rowUserId(e.target)));
+  });
+  body.querySelectorAll('[data-action="delete-user"]').forEach(btn => {
+    btn.addEventListener("click", (e) => onDeleteUser(rowUserId(e.target)));
+  });
+}
+
+function rowUserId(el) {
+  return el.closest("tr").dataset.userId;
+}
+
+async function onUpdateUser(userId, patch) {
+  try {
+    const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || res.statusText);
+    }
+    await loadUsers();
+  } catch (e) {
+    alert("Update failed: " + e.message);
+    await loadUsers();  // re-render to undo an optimistic checkbox flip, if any
+  }
+}
+
+async function onResetPassword(userId) {
+  const newPassword = prompt("New password for this user (12+ characters — a passphrase is fine):");
+  if (newPassword === null) return;  // cancelled
+  if (newPassword.length < 12) {
+    alert("Password must be at least 12 characters.");
+    return;
+  }
+  await onUpdateUser(userId, { new_password: newPassword });
+  alert("Password reset. Share it with them through a secure channel — it won't be shown again here.");
+}
+
+async function onDeleteUser(userId) {
+  const user = adminState.users.find(u => u.id === userId);
+  if (!confirm(`Permanently delete the account for "${user ? user.email : userId}"? This can't be undone.`)) return;
+  try {
+    const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || res.statusText);
+    }
+    await loadUsers();
+  } catch (e) {
+    alert("Delete failed: " + e.message);
+  }
+}
+
+function wireAddUser() {
+  const panel = document.getElementById("add-user-panel");
+  const form = document.getElementById("add-user-form");
+  if (!form) return;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById("add-user-error");
+    errEl.classList.add("hidden");
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Adding…";
+    try {
+      const res = await fetch("/api/admin/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: document.getElementById("nu-email").value.trim(),
+          password: document.getElementById("nu-password").value,
+          is_admin: document.getElementById("nu-is-admin").checked,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || res.statusText);
+      }
+      form.reset();
+      panel.open = false;
+      await loadUsers();
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("hidden");
+    } finally {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Add User";
+    }
+  });
 }

@@ -6,6 +6,7 @@ const state = {
   catalog: null,            // { families: [...], products_by_family: {...} }
   productIndex: {},         // name -> product object (flat lookup)
   parsed: null,             // parsed ProposalRequest dict
+  rawNotionText: null,      // the exact Step 01 paste that produced `parsed` — sent to /api/generate and saved to reopen_state so a reopen can refill the textarea (not re-derivable from `parsed` once past Step 01)
   suggestedTabs: null,
   strategyBrief: null,      // confirmed AI strategy brief (or null if skipped)
   roadblocks: null,         // Step 05 AI roadblocks/restrictions result (or null if skipped)
@@ -48,6 +49,14 @@ const state = {
   // null falls back to the campaign-level Geo from Step 02. Same
   // swap-in/swap-out treatment as activeTierName, above.
   activeTierGeo: null,
+  // Per-tier flight-date override (e.g. two options running different
+  // windows) — null falls back to the campaign-level Start/End date from
+  // Step 02. Same swap-in/swap-out treatment as activeTierGeo, above.
+  // Deliberately NOT carried over to a brand-new option by addTier() (see
+  // its comment) — unlike geo, a new option defaulting to the previous
+  // option's exact date range is more likely to be wrong than right.
+  activeTierStartDate: null,
+  activeTierEndDate: null,
   step: 1,
   // The highest step number reached so far this session — lets the top nav
   // pills be clickable up to (but not past) wherever the wizard has
@@ -225,18 +234,22 @@ async function maybeReopenProposal() {
     const data = await res.json();
 
     state.parsed = data.request || {};
-    state.suggestedTabs = null;
     state.strategyBrief = data.strategy_brief || null;
+    // Step 05/07 AI results and the proposal id itself — previously never
+    // restored at all (they're only ever set by a fresh /api/generate's
+    // showResult()), which silently left "Regenerate emails" and "Upload
+    // to Drive" inert after a reopen even though the original run's
+    // results were sitting right there in reopen_state.
+    state.roadblocks = data.roadblocks || null;
+    state.enrichment = data.enrichment || null;
+    state.proposalId = reopenId;
+    // The exact Step 01 paste, when this proposal was generated after that
+    // started being saved — refills the textarea below. Older proposals
+    // have nothing here; the box is just left blank, same as today.
+    state.rawNotionText = data.raw_notion_text || null;
     // Reopening carries the REAL title from when this proposal was last
     // generated — show it verbatim rather than a fresh live-guess.
     state.finalProposalTitle = data.proposal_title || null;
-    // Reopened proposals don't carry multi-tier state (pre-dates that
-    // feature, or was generated before the reopen_state was extended for
-    // it) — reopen always resumes as a single tier "A".
-    state.tiers = [];
-    state.activeTierLabel = "A";
-    state.activeTierName = null;
-    const availsData = data.avails_data || {};
 
     // Restore Add-Ons picks (absent entirely on a proposal generated before
     // this feature existed — defaults to none picked, not an error).
@@ -244,29 +257,47 @@ async function maybeReopenProposal() {
     (data.addons || []).forEach(a => { state.addons[a.product_name] = a.amount; });
     renderAddonsModule();
 
-    // Older saved proposals (before line items carried a stable id) had
-    // avails keyed by product_name — assign fresh ids now and carry any
-    // such avails entry over so nothing is silently lost on reopen.
-    state.lineItems = (data.line_items || []).map(li => {
-      const item = { ...li };
-      if (!item.id) {
-        const newId = newLineItemId();
-        if (availsData[item.product_name] && !availsData[newId]) {
-          availsData[newId] = availsData[item.product_name];
-        }
-        item.id = newId;
-      }
-      return item;
-    });
-    state.availsData = availsData;
+    // Multi-tier restore — every option the proposal actually had, not a
+    // hardcoded single "A". The full per-tier data (label/name/geo/dates/
+    // line_items/avails_data) has been in reopen_state all along; this was
+    // a pure restore-side bug, never a save-side one. Falls back to the
+    // flat legacy line_items/avails_data shape for a proposal saved before
+    // tiers existed at all.
+    const wireTiers = (data.tiers && data.tiers.length)
+      ? [...data.tiers].sort((a, b) => a.label.localeCompare(b.label))
+      : [{
+          label: "A", name: null, geo: null, start_date: null, end_date: null,
+          line_items: data.line_items || [], avails_data: data.avails_data || {},
+        }];
+    const migratedTiers = wireTiers.map(_migrateReopenedTier);
+    const [active, ...rest] = migratedTiers;
+
+    state.activeTierLabel = active.label;
+    state.activeTierName = active.name;
+    state.activeTierGeo = active.geo;
+    state.activeTierStartDate = active.startDate;
+    state.activeTierEndDate = active.endDate;
+    state.lineItems = active.lineItems;
+    state.availsData = active.availsData;
+    state.tiers = rest;
+
+    // Forced export-tab selections, if the planner had overridden any
+    // before generating — reuses suggestedTabs' own existing checkbox-sync
+    // loop in renderGenerateSummary() rather than adding a second one.
+    state.suggestedTabs = data.force_tabs || null;
 
     fillForm(state.parsed);
     const digits = (state.parsed.notion_id || "").replace(/^EVC-/, "");
     document.getElementById("notion-id-input").value = digits;
     document.getElementById("notion-id-pill").textContent = state.parsed.notion_id || "";
+    document.getElementById("notion-input").value = state.rawNotionText || "";
     renderMatchedProducts(state.parsed);
 
     renderLineItems();
+    renderAllTierTabStrips();
+    document.getElementById("tier-geo-input").value = state.activeTierGeo || "";
+    document.getElementById("tier-start-date-input").value = state.activeTierStartDate || "";
+    document.getElementById("tier-end-date-input").value = state.activeTierEndDate || "";
     // A reopened proposal already has every step's data (it was fully
     // generated once) — let the nav pills jump anywhere immediately
     // instead of only unlocking as the planner re-visits each step.
@@ -275,6 +306,37 @@ async function maybeReopenProposal() {
   } catch (e) {
     alert("Reopen failed: " + e.message);
   }
+}
+
+// Converts one tier from the /api/generate WIRE shape (snake_case,
+// line_items/avails_data — what reopen_state stores verbatim) to the
+// in-memory SNAPSHOT shape switchTier()/addTier() use (camelCase
+// lineItems/availsData/startDate/endDate), and backfills a stable id onto
+// any line item saved before ids existed — the same migration the old
+// single-tier reopen code did, just applied to every tier now that all of
+// them actually get restored instead of only the flattened active one.
+function _migrateReopenedTier(t) {
+  const availsData = { ...(t.avails_data || {}) };
+  const lineItems = (t.line_items || []).map(li => {
+    const item = { ...li };
+    if (!item.id) {
+      const newId = newLineItemId();
+      if (availsData[item.product_name] && !availsData[newId]) {
+        availsData[newId] = availsData[item.product_name];
+      }
+      item.id = newId;
+    }
+    return item;
+  });
+  return {
+    label: t.label || "A",
+    name: t.name || null,
+    geo: t.geo || null,
+    startDate: t.start_date || null,
+    endDate: t.end_date || null,
+    lineItems,
+    availsData,
+  };
 }
 
 async function loadCatalog() {
@@ -286,6 +348,12 @@ async function loadCatalog() {
       state.productIndex[p.name] = p;
     }
   }
+  // Footer product count — was a hardcoded "57 products" that had already
+  // drifted from the real (larger) catalog size; derived live from the
+  // same flat index above so it can't go stale again as products are
+  // added/removed.
+  const footerCount = document.getElementById("footer-product-count");
+  if (footerCount) footerCount.textContent = Object.keys(state.productIndex).length;
   // Populate the product picker dropdown — add-ons are excluded here, they're
   // not "products" a campaign is built around and have their own module
   // (below the line-items table) instead, with no suggested budget.
@@ -376,6 +444,12 @@ function wireEvents() {
   document.getElementById("tier-geo-input").addEventListener("input", (e) => {
     state.activeTierGeo = e.target.value.trim() || null;
   });
+  document.getElementById("tier-start-date-input").addEventListener("input", (e) => {
+    state.activeTierStartDate = e.target.value.trim() || null;
+  });
+  document.getElementById("tier-end-date-input").addEventListener("input", (e) => {
+    state.activeTierEndDate = e.target.value.trim() || null;
+  });
   document.getElementById("curate-agency-fee-input").addEventListener("input", onCurateAgencyFeeInput);
 
   // Avails — copy from another budget option
@@ -434,6 +508,7 @@ function wireEvents() {
 
 function resetAll() {
   state.parsed = null;
+  state.rawNotionText = null;
   state.suggestedTabs = null;
   state.strategyBrief = null;
   state.roadblocks = null;
@@ -442,6 +517,12 @@ function resetAll() {
   state.tiers = [];
   state.activeTierLabel = "A";
   state.activeTierName = null;
+  // activeTierGeo wasn't reset here before (pre-existing gap, same class as
+  // the two below) — fixing alongside adding the date fields so "New
+  // Proposal" can't leak a prior proposal's tier overrides into a new one.
+  state.activeTierGeo = null;
+  state.activeTierStartDate = null;
+  state.activeTierEndDate = null;
   state.proposalId = null;
   state.proposalSummary = null;
   state.enrichment = null;
@@ -455,6 +536,9 @@ function resetAll() {
   document.getElementById("result").classList.add("hidden");
   document.getElementById("drive-status").classList.add("hidden");
   document.querySelectorAll("[data-field]").forEach(el => { el.value = ""; });
+  document.getElementById("tier-geo-input").value = "";
+  document.getElementById("tier-start-date-input").value = "";
+  document.getElementById("tier-end-date-input").value = "";
   document.getElementById("line-items-body").innerHTML = "";
   document.getElementById("avails-grid").innerHTML = "";
   document.getElementById("parse-warnings").classList.add("hidden");
@@ -586,8 +670,10 @@ function onNext(n) {
     // (see onCurateAgencyFeeInput), the same field Step 02's own input reads.
     document.getElementById("curate-agency-fee-input").value =
       state.parsed.agency_fee != null ? state.parsed.agency_fee : "";
-    // Per-tier geo override box — reflects whichever tier is currently active.
+    // Per-tier geo/date override boxes — reflect whichever tier is currently active.
     document.getElementById("tier-geo-input").value = state.activeTierGeo || "";
+    document.getElementById("tier-start-date-input").value = state.activeTierStartDate || "";
+    document.getElementById("tier-end-date-input").value = state.activeTierEndDate || "";
     if (state.lineItems.length === 0) {
       state.lineItems = (state.parsed.products_selected || []).map(name => {
         const p = state.productIndex[name];
@@ -707,6 +793,9 @@ async function onParse() {
     const data = await res.json();
     state.parsed = data.request;
     state.parsed.notion_id = "EVC-" + notionDigits;
+    // Kept verbatim (not re-derived from the DOM later) so it survives a
+    // reopen — see reopen_state's raw_notion_text and maybeReopenProposal().
+    state.rawNotionText = text;
     state.suggestedTabs = data.suggested_tabs;
     state.lineItems = [];  // reset so step 3 re-populates from fresh parse
     state.availsData = {};
@@ -1095,8 +1184,8 @@ function renderRoadblocks(data) {
 
 function allTiersForSubmit() {
   return [
-    { label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, line_items: state.lineItems, avails_data: state.availsData },
-    ...state.tiers.map(t => ({ label: t.label, name: t.name, geo: t.geo, line_items: t.lineItems, avails_data: t.availsData })),
+    { label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, start_date: state.activeTierStartDate, end_date: state.activeTierEndDate, line_items: state.lineItems, avails_data: state.availsData },
+    ...state.tiers.map(t => ({ label: t.label, name: t.name, geo: t.geo, start_date: t.startDate, end_date: t.endDate, line_items: t.lineItems, avails_data: t.availsData })),
   ].sort((a, b) => a.label.localeCompare(b.label));
 }
 
@@ -1118,6 +1207,21 @@ function _effectiveGeo(label) {
     ? state.activeTierGeo
     : (state.tiers.find(x => x.label === label) || {}).geo;
   return (tierGeo && tierGeo.trim()) || (state.parsed && state.parsed.geo) || "";
+}
+
+// Per-tier date overrides, same active/snapshot lookup shape and
+// campaign-level fallback as _effectiveGeo above.
+function _effectiveStartDate(label) {
+  const tierDate = label === state.activeTierLabel
+    ? state.activeTierStartDate
+    : (state.tiers.find(x => x.label === label) || {}).startDate;
+  return (tierDate && tierDate.trim()) || (state.parsed && state.parsed.start_date) || "";
+}
+function _effectiveEndDate(label) {
+  const tierDate = label === state.activeTierLabel
+    ? state.activeTierEndDate
+    : (state.tiers.find(x => x.label === label) || {}).endDate;
+  return (tierDate && tierDate.trim()) || (state.parsed && state.parsed.end_date) || "";
 }
 
 function renameTier(label) {
@@ -1143,11 +1247,13 @@ function switchTier(label) {
   // Replace the target's snapshot (about to become active) with a fresh
   // snapshot of the tier we're leaving — one swap, order doesn't matter
   // since every lookup here is by label, not position.
-  state.tiers.splice(idx, 1, { label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, lineItems: state.lineItems, availsData: state.availsData });
+  state.tiers.splice(idx, 1, { label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, startDate: state.activeTierStartDate, endDate: state.activeTierEndDate, lineItems: state.lineItems, availsData: state.availsData });
 
   state.activeTierLabel = label;
   state.activeTierName = target.name || null;
   state.activeTierGeo = target.geo || null;
+  state.activeTierStartDate = target.startDate || null;
+  state.activeTierEndDate = target.endDate || null;
   state.lineItems = target.lineItems;
   state.availsData = target.availsData;
   state.rateOverrideOpen.clear();
@@ -1169,7 +1275,7 @@ function addTier(targetBudget) {
   if (!nextLabel) return;
 
   // Snapshot the tier we're leaving active...
-  state.tiers.push({ label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, lineItems: state.lineItems, availsData: state.availsData });
+  state.tiers.push({ label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, startDate: state.activeTierStartDate, endDate: state.activeTierEndDate, lineItems: state.lineItems, availsData: state.availsData });
 
   // ...then make the NEW tier active, starting as a clone of it — "Add
   // Option" copies the current mix so the planner adjusts from there,
@@ -1188,6 +1294,12 @@ function addTier(targetBudget) {
 
   state.activeTierLabel = nextLabel;
   state.activeTierName = null;  // blank — planner renames via the tab strip if they want to
+  // Unlike geo (a quirk, not a deliberate choice — see its own state comment),
+  // a brand-new option starts with NO date override: silently inheriting the
+  // source option's exact flight window is more likely wrong than right for
+  // a genuinely new budget option, so this resets rather than carries over.
+  state.activeTierStartDate = null;
+  state.activeTierEndDate = null;
   state.lineItems = clonedItems;
   state.availsData = clonedAvails;
   state.rateOverrideOpen.clear();
@@ -2153,7 +2265,7 @@ function renderAvailsGrid() {
         <h3>${escapeHtml(li.product_name)}${escapeHtml(subtitle)}</h3>
         <span class="sov-badge" id="sov-badge-${escapeAttr(li.id)}"></span>
       </div>
-      <p class="avails-targeting-reminder">🎯 Target: ${escapeHtml(_effectiveTargetText(li))} &nbsp;·&nbsp; 📍 Geo: ${escapeHtml(_effectiveGeo(state.activeTierLabel) || "TBD")}</p>
+      <p class="avails-targeting-reminder">🎯 Target: ${escapeHtml(_effectiveTargetText(li))} &nbsp;·&nbsp; 📍 Geo: ${escapeHtml(_effectiveGeo(state.activeTierLabel) || "TBD")} &nbsp;·&nbsp; 📅 ${escapeHtml(_effectiveStartDate(state.activeTierLabel) || "TBD")} – ${escapeHtml(_effectiveEndDate(state.activeTierLabel) || "TBD")}</p>
       <label class="freeform-toggle">
         <input type="checkbox" data-lid="${escapeAttr(li.id)}" data-freeform-toggle ${isFreeform ? "checked" : ""} />
         Free-form — type anything in these, no calculation
@@ -2468,11 +2580,35 @@ async function onGenerate() {
     force_tabs: forceTabs,
     avails_data: state.availsData,
     strategy_brief: state.strategyBrief || null,
+    roadblocks: state.roadblocks || null,
+    raw_notion_text: state.rawNotionText || null,
     addons: Object.entries(state.addons).map(([product_name, amount]) => ({ product_name, amount })),
   };
   const btn = document.getElementById("generate-btn");
   btn.disabled = true;
   btn.textContent = "Generating + Intelligence Pack…";
+  const loadingEl = document.getElementById("generate-loading");
+  const loadingText = document.getElementById("generate-loading-text");
+  // Rotates through the REAL stages /api/generate goes through server-side
+  // (in this order — see main.py's own numbered comments), not a fake
+  // percentage bar: there's no live progress channel from the server (one
+  // request/response, no SSE/websocket), so this is a best-effort "here's
+  // roughly what's happening" cue rather than a literal synced progress
+  // meter. Still much better than a static button label for a call that
+  // routinely takes 10-30+ seconds.
+  const GENERATE_STAGES = [
+    "Calling AI enrichment (campaign name, emails, blurbs)…",
+    "Building Excel workbook and formulas…",
+    "Assembling PowerPoint decks (if included)…",
+    "Almost there — packaging your download…",
+  ];
+  let stageIdx = 0;
+  loadingText.textContent = GENERATE_STAGES[0];
+  loadingEl.classList.remove("hidden");
+  const stageTimer = setInterval(() => {
+    stageIdx = Math.min(stageIdx + 1, GENERATE_STAGES.length - 1);
+    loadingText.textContent = GENERATE_STAGES[stageIdx];
+  }, 4000);
   try {
     const res = await fetch("/api/generate", {
       method: "POST",
@@ -2489,6 +2625,8 @@ async function onGenerate() {
     state.proposalSummary = data.summary;
     showResult(data);
   } finally {
+    clearInterval(stageTimer);
+    loadingEl.classList.add("hidden");
     btn.disabled = false;
     btn.textContent = "⬇ Generate Proposal";
   }

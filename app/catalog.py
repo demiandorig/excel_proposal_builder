@@ -1785,12 +1785,19 @@ CATALOG: list[Product] = [
 # that form also lets you SET when adding a brand-new product — same
 # fields, symmetric add/edit UX — for a BUILT-IN catalog product (a custom
 # product's full edit goes through update_custom_product below instead,
-# not this override mechanism). Deliberately excludes `name` (renaming a
-# built-in product this way would desync it from every existing saved
-# proposal and hardcoded reference to the old name) and deeper
-# compliance/SLA/margin fields the add-product form doesn't expose either.
+# not this override mechanism). Deeper compliance/SLA/margin fields the
+# add-product form doesn't expose either stay out of scope here too.
+#
+# `name` IS in this list (unlike earlier versions of this file): renaming a
+# built-in product now goes through this exact same override mechanism —
+# rate_overrides.product_name stays the STABLE lookup key (the product's
+# original catalog.py literal name, which never changes) while the
+# override's own `name` FIELD becomes the current display name. See
+# by_name()/record_product_alias() below for how an old display name (from
+# before a rename) keeps resolving — that's what actually makes renaming
+# safe, not excluding the field.
 _OVERRIDABLE_FIELDS = (
-    "base_rate", "minimum_spend", "estimated_cpm_for_imps",
+    "name", "base_rate", "minimum_spend", "estimated_cpm_for_imps",
     "family", "short_label", "buying_model", "sizes", "tech_platform",
     "proposal_description", "notes", "is_addon",
 )
@@ -1860,6 +1867,88 @@ def _apply_override(p: Product) -> Product:
     if not override:
         return p
     return replace(p, **{k: v for k, v in override.items() if k in _OVERRIDABLE_FIELDS})
+
+
+# ---------------------------------------------------------------------------
+# Product renaming — aliases + built-in soft-delete
+#
+# A rename changes a product's DISPLAY name (the override's `name` field, or
+# a custom product's `name` column) while its STABLE key (rate_overrides.
+# product_name for a built-in) never changes. That alone would strand any
+# reference to the OLD display name — a planner's free-text paste, or
+# product_name on an already-saved proposal's line item — so every rename
+# also records an alias here. by_name() consults this after failing to
+# match the raw/current name; the parser (notion_parser.py) consults it via
+# all_product_aliases() when building its own match candidates.
+# ---------------------------------------------------------------------------
+
+def record_product_alias(old_name: str, new_name: str) -> None:
+    """Record that `old_name` is now called `new_name`. Also repoints any
+    EARLIER alias that pointed at old_name, so a chain of renames
+    (A -> B -> C) still resolves in one hop from any historical name to
+    the current one."""
+    if not old_name or not new_name or old_name == new_name:
+        return
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE product_aliases SET current_name = %s, updated_at = now() WHERE current_name = %s",
+            (new_name, old_name),
+        )
+        conn.execute(
+            """
+            INSERT INTO product_aliases (alias_name, current_name) VALUES (%s, %s)
+            ON CONFLICT (alias_name) DO UPDATE SET
+                current_name = EXCLUDED.current_name, updated_at = now()
+            """,
+            (old_name, new_name),
+        )
+
+
+def resolve_product_alias(name: str) -> Optional[str]:
+    """If `name` is a former product display name, return its current one."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT current_name FROM product_aliases WHERE alias_name = %s", (name,)
+        ).fetchone()
+    return row["current_name"] if row else None
+
+
+def all_product_aliases() -> dict[str, str]:
+    """{former_name: current_name} for every renamed product — fed into the
+    free-text parser's own candidate list (see notion_parser.py) so a
+    client's pasted request can still mention a product by a name it no
+    longer has."""
+    with get_connection() as conn:
+        rows = conn.execute("SELECT alias_name, current_name FROM product_aliases").fetchall()
+    return {r["alias_name"]: r["current_name"] for r in rows}
+
+
+def load_deleted_builtin_names() -> set[str]:
+    """Stable (original catalog.py literal) names of every soft-deleted
+    built-in product. Independent of load_rate_overrides()/_OVERRIDABLE_FIELDS
+    — is_deleted is a delete/restore action, not an editable form field."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT product_name FROM rate_overrides WHERE is_deleted"
+        ).fetchall()
+    return {r["product_name"] for r in rows}
+
+
+def set_builtin_deleted(stable_name: str, deleted: bool) -> None:
+    """Soft-delete (or restore) a BUILT-IN product by its stable catalog.py
+    name. A built-in can't be truly removed without a code change/deploy
+    (see module docstring) — this only hides it from new selection; by_name()
+    still resolves it so an already-saved proposal referencing it keeps
+    working. Upserts a bare rate_overrides row if one doesn't exist yet."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO rate_overrides (product_name, is_deleted) VALUES (%s, %s)
+            ON CONFLICT (product_name) DO UPDATE SET
+                is_deleted = EXCLUDED.is_deleted, updated_at = now()
+            """,
+            (stable_name, deleted),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2080,29 +2169,57 @@ def update_custom_product(name: str, fields: dict) -> Product:
         raise
 
 
-def effective_catalog() -> list[Product]:
-    """Built-in + custom products, with any admin rate overrides applied — for listing/admin views."""
+def effective_catalog(include_deleted: bool = False) -> list[Product]:
+    """Built-in + custom products, with any admin rate overrides (including
+    a rename) applied — for listing/the wizard's product picker/the parser's
+    candidate list. include_deleted=False (the default) hides soft-deleted
+    built-ins from all of those — pass True for the admin view, which needs
+    to show (and offer to restore) a deleted product, not just hide it."""
     all_products = list(CATALOG) + load_custom_products()
-    overrides = load_rate_overrides()
-    if not overrides:
-        return all_products
-    return [_apply_override(p) for p in all_products]
+    applied = [_apply_override(p) for p in all_products]
+    if include_deleted:
+        return applied
+    deleted = load_deleted_builtin_names()
+    return [p for p, raw in zip(applied, all_products) if raw.name not in deleted]
 
 
 def by_name(name: str) -> Optional[Product]:
-    """Find a product (built-in or custom) by its L2 name, with any admin rate override applied."""
+    """
+    Find a product (built-in or custom) by its CURRENT display name, its
+    original/never-renamed name, or any FORMER name it's since been renamed
+    from — with any admin rate override applied. Always resolves a
+    soft-deleted built-in too (unlike effective_catalog()'s default) so an
+    already-saved proposal referencing it doesn't silently lose the line
+    item; callers that need to exclude deleted products (the wizard's
+    picker, the parser) go through effective_catalog() instead, not this.
+    """
+    # 1. Raw catalog/custom literal name — covers "never renamed" (the
+    #    common case) and a saved LineItem.product_name from BEFORE a
+    #    rename (the original name is always rate_overrides' own stable key).
     p = next((prod for prod in CATALOG if prod.name == name), None)
     if p is None:
         p = next((prod for prod in load_custom_products() if prod.name == name), None)
-    if p is None:
-        return None
-    return _apply_override(p)
+    if p is not None:
+        return _apply_override(p)
+    # 2. Current EFFECTIVE (possibly renamed) display name — covers a fresh
+    #    lookup using today's name for a built-in whose raw literal differs.
+    for prod in list(CATALOG) + load_custom_products():
+        applied = _apply_override(prod)
+        if applied.name == name:
+            return applied
+    # 3. Alias table — covers an OLDER intermediate display name, from
+    #    further back than the most recent rename.
+    current = resolve_product_alias(name)
+    if current and current != name:
+        return by_name(current)
+    return None
 
 
-def by_family(family: str) -> list[Product]:
-    """All products (built-in or custom) in a Family, with any admin rate overrides applied."""
-    all_products = list(CATALOG) + load_custom_products()
-    return [_apply_override(p) for p in all_products if p.family == family]
+def by_family(family: str, include_deleted: bool = False) -> list[Product]:
+    """All products (built-in or custom) in a Family, with any admin rate
+    overrides (including a rename) applied. See effective_catalog() for
+    include_deleted."""
+    return [p for p in effective_catalog(include_deleted=include_deleted) if p.family == family]
 
 
 def families() -> list[str]:

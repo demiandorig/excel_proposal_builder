@@ -25,7 +25,9 @@
         <button class="admin-tab active" data-tab="proposals">Proposal History</button>
         <button class="admin-tab" data-tab="rates">Rate Overrides</button>
         <button class="admin-tab" data-tab="markets">Markets</button>
+        <button class="admin-tab" data-tab="users">Users</button>
       </nav>
+      <div id="account-widget" class="account-widget"></div>
     </div>
   </header>
 
@@ -137,7 +139,7 @@
               <input type="text" id="ep-family" required />
             </label>
             <label>Product Name
-              <input type="text" id="ep-name" disabled title="Renaming isn't supported here — export/re-import via CSV to rename a product." />
+              <input type="text" id="ep-name" title="Renaming keeps the old name resolvable — the parser and any already-saved proposal still recognize it." />
             </label>
             <label>Objective / Short Label
               <input type="text" id="ep-short-label" />
@@ -261,12 +263,61 @@
       </div>
     </section>
 
+    <!-- ================= USERS TAB ================= -->
+    <section class="panel hidden" id="tab-users">
+      <div class="panel-head">
+        <div class="kicker">Admin</div>
+        <h1 class="display">Users</h1>
+        <p class="lede">Who can sign in. There's no self-service signup — add an account here for anyone who needs access, and remove it the same way when they no longer should.</p>
+      </div>
+
+      <details class="add-product-panel" id="add-user-panel">
+        <summary>+ Add user</summary>
+        <form id="add-user-form">
+          <div class="add-product-grid">
+            <label>Email <span class="req">*</span>
+              <input type="email" id="nu-email" required />
+            </label>
+            <label>Password <span class="req">*</span> <small>(12+ characters — a passphrase is fine and encouraged)</small>
+              <input type="password" id="nu-password" required minlength="12" />
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="nu-is-admin" />
+              Admin <small>(can reach this Admin console, including other users)</small>
+            </label>
+          </div>
+          <div class="add-product-actions">
+            <span id="add-user-error" class="add-product-error hidden"></span>
+            <button type="submit" class="btn-primary">Add User</button>
+          </div>
+        </form>
+      </details>
+
+      <div class="table-scroll">
+        <table class="admin-table" id="users-table">
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Admin</th>
+              <th>Status</th>
+              <th>Created</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="users-body">
+            <tr><td colspan="5" class="admin-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
   </main>
 
   <footer class="footer">
     <span>Entravision Digital Ops · Admin Console · internal use only</span>
   </footer>
 
+  <script src="/static/session-guard.js"></script>
   <script src="/static/admin.js"></script>
 </body>
 </html>

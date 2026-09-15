@@ -29,6 +29,7 @@
         <div class="step" data-step="6"><span>06</span> Avails</div>
         <div class="step" data-step="7"><span>07</span> Generate</div>
       </nav>
+      <div id="account-widget" class="account-widget"></div>
     </div>
   </header>
 
@@ -300,10 +301,20 @@ Client name: ...
         Multiple budget options — each generates its own tab (and gets outlined in the emails) when you generate the proposal.
       </p>
 
-      <label class="inline-input tier-geo-override">
-        <span>Geo override for this option <small>(blank uses Step 02's Geo)</small></span>
-        <input type="text" id="tier-geo-input" placeholder="e.g. Los Angeles DMA only" />
-      </label>
+      <div class="tier-override-row">
+        <label class="inline-input tier-geo-override">
+          <span>Geo override for this option <small>(blank uses Step 02's Geo)</small></span>
+          <input type="text" id="tier-geo-input" placeholder="e.g. Los Angeles DMA only" />
+        </label>
+        <label class="inline-input tier-date-override">
+          <span>Start override <small>(blank = default)</small></span>
+          <input type="text" id="tier-start-date-input" placeholder="e.g. 2026-06-01" title="Blank uses Step 02's Start date" />
+        </label>
+        <label class="inline-input tier-date-override">
+          <span>End override <small>(blank = default)</small></span>
+          <input type="text" id="tier-end-date-input" placeholder="e.g. 2026-06-30" title="Blank uses Step 02's End date" />
+        </label>
+      </div>
 
       <div class="curation-toolbar">
         <label class="inline-input">
@@ -472,6 +483,14 @@ Client name: ...
         <button class="btn-primary btn-large" id="generate-btn">⬇ Generate Proposal</button>
       </div>
 
+      <!-- Loading state — generation genuinely takes a while (AI enrichment
+           call + Excel/PPTX/docx build); a disabled button with new text is
+           too easy to miss, especially once it's scrolled out of view. -->
+      <div id="generate-loading" class="strategy-loading hidden">
+        <div class="strategy-spinner"></div>
+        <span id="generate-loading-text">Calling AI enrichment (campaign name, emails, blurbs)…</span>
+      </div>
+
       <div id="result" class="result hidden">
         <div class="result-header">
           <h2>Proposal ready</h2>
@@ -563,9 +582,10 @@ Client name: ...
   </main>
 
   <footer class="footer">
-    <span>Entravision Digital Ops · Proposal Builder v0.1 · AdFlo catalog · 57 products</span>
+    <span>Entravision Digital Ops · Proposal Builder v0.1 · AdFlo catalog · <span id="footer-product-count">…</span> products</span>
   </footer>
 
+  <script src="/static/session-guard.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

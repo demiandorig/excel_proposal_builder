@@ -240,6 +240,14 @@ def generate_proposal(
         # — None/blank falls back to the campaign-level request.geo exactly
         # like tier_display_name falls back to "Option {label}" below.
         tier_geo = (tier.get("geo") or "").strip() or None
+        # Per-tier flight-date override (e.g. two options running different
+        # windows) — same fallback-to-campaign-default convention as
+        # tier_geo. Applied to BOTH the summary line (_populate_meta) and
+        # the actual sheet-builder calls below, so a tier that overrides
+        # its dates gets that reflected in its per-row date cells too, not
+        # just the C11 summary text.
+        tier_start_date = (tier.get("start_date") or "").strip() or start_date
+        tier_end_date = (tier.get("end_date") or "").strip() or end_date
         # Planner-given display name (e.g. "Independent") wins over the
         # generic "Option A" wherever a seller/client actually reads this —
         # proposal title, emails, AND (for a multi-tier proposal) the Excel
@@ -282,10 +290,11 @@ def generate_proposal(
         if tabs.get("net"):
             sheet_title = _safe_sheet_name(tier_display_name, "", used_sheet_titles) if multi_tier else f"Proposal {label}"
             ws = et.build_proposal_a(wb, products, with_sections=False,
-                                     start_date=start_date, end_date=end_date, total_months=total_months,
+                                     start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
                                      sheet_name=sheet_title, addons=addons_dicts)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo)
+                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
+                           tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=False, blurbs=blurbs,
                                  avails_data=tier_avails, request=request)
             tabs_built.append(f"Proposal {label}")
@@ -293,10 +302,11 @@ def generate_proposal(
         if tabs.get("wsections"):
             sheet_title = _safe_sheet_name(tier_display_name, "(wsections)", used_sheet_titles) if multi_tier else f"Proposal {label} (wsections)"
             ws = et.build_proposal_a(wb, products, with_sections=True,
-                                     start_date=start_date, end_date=end_date, total_months=total_months,
+                                     start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
                                      sheet_name=sheet_title, addons=addons_dicts)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo)
+                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
+                           tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=False, with_sections=True, blurbs=blurbs,
                                  avails_data=tier_avails, request=request)
             tabs_built.append(f"Proposal {label} (wsections)")
@@ -304,10 +314,11 @@ def generate_proposal(
         if tabs.get("gross"):
             sheet_title = _safe_sheet_name(tier_display_name, "(Gross)", used_sheet_titles) if multi_tier else f"Proposal {label} (Gross)"
             ws = et.build_proposal_a_gross(wb, products,
-                                           start_date=start_date, end_date=end_date, total_months=total_months,
+                                           start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
                                            sheet_name=sheet_title, addons=addons_dicts)
             _populate_meta(ws, request, gross=True, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo)
+                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
+                           tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=True, blurbs=blurbs,
                                  avails_data=tier_avails, request=request)
             # Set agency fee in I14 (Gross sheet's variable input cell)
@@ -322,11 +333,12 @@ def generate_proposal(
             avails_sheet_name = f"Avails-Only {label}" if multi_tier else "Avails-Only"
             sheet_title = _safe_sheet_name(tier_display_name, "(Avails)", used_sheet_titles) if multi_tier else avails_sheet_name
             ws = et.build_avails_only(wb, products, line_items=tier_line_items, request=request,
-                                      start_date=start_date, end_date=end_date, avails_data=tier_avails,
+                                      start_date=tier_start_date, end_date=tier_end_date, avails_data=tier_avails,
                                       campaign_name=campaign_name, sheet_name=sheet_title)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            title_suffix=f" (Avails-Only){tier_title_suffix}",
-                           include_billing=False, include_campaign_meta=False, tier_geo=tier_geo)
+                           include_billing=False, include_campaign_meta=False, tier_geo=tier_geo,
+                           tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             tabs_built.append(avails_sheet_name)
 
         tier_total_net = sum(li.total_budget() for li in tier_line_items)
@@ -384,6 +396,8 @@ def _populate_meta(
     include_campaign_meta: bool = True,
     campaign_name: str = "",
     tier_geo: Optional[str] = None,
+    tier_start_date: Optional[str] = None,
+    tier_end_date: Optional[str] = None,
 ) -> None:
     """
     Overwrite the meta block cells (rows 4-15) with real client info.
@@ -404,6 +418,12 @@ def _populate_meta(
     tier_geo: this tier's own geo override (Step 04), if the planner set
     one — wins over request.geo for the "Geo:" line below when present,
     exactly like a tier's display name wins over "Option {label}" elsewhere.
+
+    tier_start_date/tier_end_date: this tier's already-resolved (override-
+    or-campaign-default) flight dates, as computed by the caller's own
+    tier_start_date/tier_end_date fallback — unlike tier_geo, these arrive
+    pre-resolved (never None when the caller is the tier loop below) since
+    the sheet-builder calls need a concrete string either way.
     """
     # Title cell (E2 — merged E2:L2)
     if proposal_title:
@@ -437,9 +457,11 @@ def _populate_meta(
     # Proposal + Order Description combined onto one row (C11) — used to be
     # two separate rows; freed row 12 entirely to shrink the frozen header
     # block, leaving more screen room for the unfrozen line-items view.
+    effective_start_date = tier_start_date if tier_start_date is not None else request.start_date
+    effective_end_date = tier_end_date if tier_end_date is not None else request.end_date
     media_proposal_line = f"Media Proposal: {request.client_name or 'TBD'}"
-    if request.start_date and request.end_date:
-        media_proposal_line += f" — {request.start_date} to {request.end_date}"
+    if effective_start_date and effective_end_date:
+        media_proposal_line += f" — {effective_start_date} to {effective_end_date}"
     elif request.renewal_campaign_dates:
         media_proposal_line += f" — {request.renewal_campaign_dates}"
     order_description = f"Order Description: {campaign_name}" if campaign_name else "Order Description: "

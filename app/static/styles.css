@@ -108,6 +108,32 @@ body::before {
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
+.account-widget {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--paper);
+  white-space: nowrap;
+}
+.account-widget .account-email { color: var(--paper); opacity: 0.75; }
+.account-widget .account-link,
+.account-widget .account-logout {
+  color: var(--paper);
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: var(--radius);
+  padding: 5px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  cursor: pointer;
+}
+.account-widget .account-link:hover,
+.account-widget .account-logout:hover { border-color: var(--accent); color: var(--accent); }
 .step {
   display: flex;
   align-items: center;
@@ -649,6 +675,16 @@ body::before {
 }
 .agency-fee-box input { width: 100px; }
 .tier-geo-override input { width: 240px; }
+.tier-override-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.tier-override-row .inline-input { margin-bottom: 0; flex: 0 0 auto; }
+.tier-override-row .tier-geo-override input { width: 200px; }
+.tier-date-override input { width: 130px; }
 .totals-display {
   display: flex;
   gap: 24px;

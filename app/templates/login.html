@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in — Entravision Proposal Builder</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600&family=Poppins:wght@700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css" />
+  <style>
+    /* Login-only styling, layered on top of styles.css's shared tokens
+       (--ink, --accent, --paper, etc.) rather than duplicating them. */
+    body.login-body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--ink);
+      padding: 24px;
+    }
+    .login-card {
+      width: 100%;
+      max-width: 380px;
+      background: var(--paper-card);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+      padding: 40px 36px;
+    }
+    .login-kicker {
+      font-family: "Poppins", var(--font-body);
+      font-weight: 700;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin: 0 0 10px;
+    }
+    .login-title {
+      font-family: var(--font-display);
+      font-weight: 500;
+      font-size: 26px;
+      color: var(--ink);
+      margin: 0 0 6px;
+    }
+    .login-sub {
+      font-family: "Open Sans", var(--font-body);
+      font-size: 13px;
+      color: var(--ink-faint);
+      margin: 0 0 28px;
+    }
+    .login-field {
+      display: block;
+      margin-bottom: 16px;
+    }
+    .login-field span {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ink-soft);
+      margin-bottom: 6px;
+    }
+    .login-field input {
+      width: 100%;
+      padding: 11px 12px;
+      font-family: "Open Sans", var(--font-body);
+      font-size: 14px;
+      border: 1px solid var(--rule);
+      border-radius: var(--radius);
+      background: var(--paper-card);
+      color: var(--ink);
+    }
+    .login-field input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+    .login-submit {
+      width: 100%;
+      margin-top: 8px;
+      padding: 12px;
+      font-family: "Open Sans", var(--font-body);
+      font-weight: 600;
+      font-size: 14px;
+      color: white;
+      background: var(--ink);
+      border: none;
+      border-radius: var(--radius);
+      cursor: pointer;
+    }
+    .login-submit:hover { background: var(--accent); }
+    .login-submit:disabled { opacity: 0.5; cursor: default; }
+    .login-error {
+      margin: 0 0 16px;
+      padding: 10px 12px;
+      font-size: 13px;
+      color: var(--red);
+      background: #fdf1f0;
+      border: 1px solid var(--red);
+      border-radius: var(--radius);
+    }
+    .login-error.hidden { display: none; }
+    .login-footnote {
+      margin-top: 22px;
+      font-size: 12px;
+      color: var(--ink-faint);
+      text-align: center;
+    }
+  </style>
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <p class="login-kicker">Entravision Digital Ops</p>
+    <h1 class="login-title">Sign in</h1>
+    <p class="login-sub">Proposal Builder is for internal use — sign in with the account your admin set up for you.</p>
+
+    <div id="login-error" class="login-error hidden"></div>
+
+    <form id="login-form">
+      <label class="login-field">
+        <span>Email</span>
+        <input type="email" id="login-email" autocomplete="username" required />
+      </label>
+      <label class="login-field">
+        <span>Password</span>
+        <input type="password" id="login-password" autocomplete="current-password" required />
+      </label>
+      <button type="submit" class="login-submit" id="login-submit-btn">Sign in</button>
+    </form>
+
+    <p class="login-footnote">Don't have an account? Ask your admin to add you from the Users tab.</p>
+  </div>
+
+  <script>
+    document.getElementById("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById("login-error");
+      const btn = document.getElementById("login-submit-btn");
+      errEl.classList.add("hidden");
+      btn.disabled = true;
+      btn.textContent = "Signing in…";
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: document.getElementById("login-email").value.trim(),
+            password: document.getElementById("login-password").value,
+          }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || "Sign in failed.");
+        }
+        // Only ever follow a same-site relative path — `next` is attacker-
+        // controllable (it's a URL query param), so a value like
+        // "https://evil.example" or "//evil.example" must never be
+        // followed as-is.
+        const params = new URLSearchParams(window.location.search);
+        const next = params.get("next") || "/";
+        window.location.href = (next.startsWith("/") && !next.startsWith("//")) ? next : "/";
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove("hidden");
+        btn.disabled = false;
+        btn.textContent = "Sign in";
+      }
+    });
+  </script>
+</body>
+</html>

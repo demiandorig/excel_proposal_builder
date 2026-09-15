@@ -432,12 +432,15 @@ def _token_set(s: str) -> set:
     return {t for t in re.findall(r"[a-z0-9]+", s.lower()) if t not in _STOPWORDS}
 
 
-def _match_product(raw: str, catalog_names: list[str]) -> Optional[str]:
+def _match_product(raw: str, catalog_names: list[str], db_aliases: Optional[dict] = None) -> Optional[str]:
     """
     Try to map a raw user-supplied product string to a catalog name.
     Strategy:
       1. exact (case-insensitive) match on catalog names
-      2. alias map (case-insensitive substring)
+      2. alias map (case-insensitive substring) — the static, hand-curated
+         PRODUCT_ALIASES dict below, plus (2b) any admin-recorded rename
+         alias from the DB (see catalog.py's record_product_alias) — exact
+         match only for the latter, see its own comment for why.
       3. token-set match: the raw text and a catalog name overlap if one's
          tokens fully contain the other's (word order/insertions don't
          matter — e.g. "YouTube Video Ads" matches "YouTube Ads" because
@@ -458,10 +461,21 @@ def _match_product(raw: str, catalog_names: list[str]) -> Optional[str]:
         if cn.lower() == r:
             return cn
 
-    # 2. alias
+    # 2. alias (static, hand-curated)
     for alias, canonical in PRODUCT_ALIASES.items():
         if alias in r:
             if canonical in catalog_names:
+                return canonical
+
+    # 2b. alias (DB-driven — an admin renamed this product at some point;
+    # see catalog.py's record_product_alias/all_product_aliases). Exact
+    # match only, unlike the static dict's substring check above — a
+    # product's own former name is a real, once-canonical name, not a loose
+    # phrasing, so it doesn't need substring leniency and exact matching
+    # avoids an over-eager false positive against unrelated free text.
+    if db_aliases:
+        for alias, canonical in db_aliases.items():
+            if alias.lower() == r and canonical in catalog_names:
                 return canonical
 
     # 3. token-set overlap — order- and insertion-tolerant
@@ -488,7 +502,7 @@ def _match_product(raw: str, catalog_names: list[str]) -> Optional[str]:
     return None
 
 
-def _parse_products(raw: str, catalog_names: list[str]) -> tuple[list[str], list[str]]:
+def _parse_products(raw: str, catalog_names: list[str], db_aliases: Optional[dict] = None) -> tuple[list[str], list[str]]:
     """
     Parse the comma- or newline-separated list of products selected.
     Returns (matched_canonical_names, warnings_for_unmatched).
@@ -503,7 +517,7 @@ def _parse_products(raw: str, catalog_names: list[str]) -> tuple[list[str], list
         piece = piece.strip(" -•*")
         if not piece:
             continue
-        canonical = _match_product(piece, catalog_names)
+        canonical = _match_product(piece, catalog_names, db_aliases)
         if canonical and canonical not in matched:
             matched.append(canonical)
         elif not canonical:
@@ -515,7 +529,7 @@ def _parse_products(raw: str, catalog_names: list[str]) -> tuple[list[str], list
 # Public API
 # ---------------------------------------------------------------------------
 
-def parse_notion(text: str, catalog_names: list[str]) -> ProposalRequest:
+def parse_notion(text: str, catalog_names: list[str], db_aliases: Optional[dict] = None) -> ProposalRequest:
     """
     Parse Notion paste into a ProposalRequest.
 
@@ -523,6 +537,12 @@ def parse_notion(text: str, catalog_names: list[str]) -> ProposalRequest:
         text: The raw Notion paste from the planner.
         catalog_names: List of canonical product names from catalog.CATALOG
                        (passed in so this parser stays decoupled).
+        db_aliases: {former_name: current_name} for every admin-renamed
+                    product (catalog.all_product_aliases()) — lets a paste
+                    that mentions a product by a name it no longer has still
+                    resolve. Optional/None for callers (tests, scripts) that
+                    don't have a DB to hand — matching plain PRODUCT_ALIASES
+                    behavior in that case.
 
     Returns:
         ProposalRequest with as much filled in as we could pull.
@@ -605,7 +625,7 @@ def parse_notion(text: str, catalog_names: list[str]) -> ProposalRequest:
 
     # Products selected — value follows the label on the same line
     req.products_selected_raw = _extract_label(text, "Products selected")
-    products, prod_warnings = _parse_products(req.products_selected_raw, catalog_names)
+    products, prod_warnings = _parse_products(req.products_selected_raw, catalog_names, db_aliases)
     req.products_selected = products
     req.warnings.extend(prod_warnings)
 

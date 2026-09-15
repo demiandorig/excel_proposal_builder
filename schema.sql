@@ -141,6 +141,88 @@ ALTER TABLE market_config ADD COLUMN IF NOT EXISTS dsc_email TEXT;
 ALTER TABLE market_config ADD COLUMN IF NOT EXISTS dsm_email TEXT;
 
 -- ---------------------------------------------------------------------------
+-- Migration for an ALREADY-created rate_overrides table: adds rename +
+-- soft-delete support for BUILT-IN catalog products.
+--
+-- name: lets an admin rename a built-in product (previously impossible —
+-- _OVERRIDABLE_FIELDS excluded it). rate_overrides.product_name stays the
+-- STABLE key (the product's original catalog.py literal name — that never
+-- changes, a rename only ever changes this `name` column, the admin-facing
+-- display value). See catalog.py's by_name()/product_aliases below for how
+-- an OLD display name keeps resolving after a rename.
+--
+-- is_deleted: lets an admin hide a built-in product from new selection
+-- without touching the CATALOG Python list (which stays a pure reflection
+-- of the rate card, per catalog.py's own module docstring) — a built-in
+-- can't be truly removed without a code change/deploy, but it can be
+-- soft-deleted. by_name() still resolves a soft-deleted product (so an
+-- already-saved proposal referencing it doesn't silently lose the line
+-- item); effective_catalog()/the parser's candidate list exclude it from
+-- NEW selection.
+-- ---------------------------------------------------------------------------
+ALTER TABLE rate_overrides ADD COLUMN IF NOT EXISTS name TEXT;
+ALTER TABLE rate_overrides ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- ---------------------------------------------------------------------------
+-- product_aliases — maps a FORMER product display name to its CURRENT one,
+-- recorded whenever an admin renames a product (built-in or custom). Lets
+-- by_name() and the free-text parser keep resolving old references (a
+-- planner's pasted text, or product_name on an already-saved proposal's
+-- line item) after a rename, with no code change/redeploy needed. Chained
+-- (alias_name -> current_name, repointed on each further rename) so a
+-- product renamed more than once still resolves in one hop from any of
+-- its historical names to the latest.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS product_aliases (
+    alias_name     TEXT PRIMARY KEY,
+    current_name   TEXT NOT NULL,
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- users / sessions — internal login (this app has no external users; it's
+-- meant to keep the tool off-limits to anyone who merely has the URL, not
+-- to support self-service signup). See app/auth.py.
+--
+-- password_hash/password_salt: hashlib.scrypt (stdlib — no new pip
+-- dependency, unlike bcrypt/argon2), a random salt per user, constant-time
+-- compare on login.
+--
+-- Sessions are SERVER-SIDE (an opaque random token in an HttpOnly cookie,
+-- looked up here on every request) rather than a signed/stateless cookie —
+-- specifically so disabling or deleting a user takes effect on their very
+-- next request instead of waiting out a token's natural expiry, which a
+-- stateless JWT/signed-cookie session can't do without extra revocation
+-- machinery of its own.
+--
+-- expires_at is refreshed (pushed forward) on every authenticated request
+-- (see app/auth.py's refresh_session) — an active user is effectively
+-- never interrupted, but a session nobody has used in 5 days stops
+-- working, which is the "long-lived but periodically reset" balance asked
+-- for rather than either a short hard timeout or a session that never expires.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS users (
+    id             TEXT PRIMARY KEY,
+    email          TEXT NOT NULL UNIQUE,
+    password_hash  TEXT NOT NULL,
+    password_salt  TEXT NOT NULL,
+    is_admin       BOOLEAN NOT NULL DEFAULT FALSE,
+    disabled       BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token       TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at  TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at);
+
+-- ---------------------------------------------------------------------------
 -- proposals — one row per generated proposal, replacing data/proposals/*.json.
 -- summary/reopen_state stay as JSONB (read back whole today, never queried
 -- field-by-field) rather than being normalized into more tables.
