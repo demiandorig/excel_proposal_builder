@@ -26,8 +26,8 @@
         <div class="step" data-step="3"><span>03</span> Strategy</div>
         <div class="step" data-step="4"><span>04</span> Curate</div>
         <div class="step" data-step="5"><span>05</span> Monthly</div>
-        <div class="step" data-step="6"><span>06</span> Roadblocks</div>
-        <div class="step" data-step="7"><span>07</span> Avails</div>
+        <div class="step" data-step="6"><span>06</span> Avails</div>
+        <div class="step" data-step="7"><span>07</span> Roadblocks</div>
         <div class="step" data-step="8"><span>08</span> Generate</div>
       </nav>
       <div id="account-widget" class="account-widget"></div>
@@ -420,11 +420,45 @@ Client name: ...
     </section>
 
     <!-- ====================================================================
-         STEP 6 — Roadblocks / Restrictions Check
+         STEP 6 — Avails (if needed) — moved ahead of Roadblocks so
+         Curate/Monthly/Avails stay adjacent (planners bounce between
+         Curate and Avails far more than either touches Roadblocks).
     ===================================================================== -->
     <section class="panel hidden" id="step-6">
       <div class="panel-head">
         <div class="kicker">Step 06</div>
+        <h1 class="display">Avails input <span id="avails-status-pill"></span></h1>
+        <p class="lede" id="avails-blurb">If this proposal needs avails, paste them from the platforms below. Otherwise, skip — avails columns will be left blank for later planner input.</p>
+      </div>
+
+      <div class="tier-switcher" id="tier-switcher-avails-wrap">
+        <div class="tier-tabs" id="tier-tabs-avails"></div>
+        <label class="copy-avails-control">
+          Copy avails from
+          <select id="copy-avails-source"></select>
+          <button class="btn-secondary" id="copy-avails-btn" type="button">Copy →</button>
+        </label>
+      </div>
+      <p class="tier-switcher-hint" id="tier-switcher-hint-avails">
+        Avails are entered separately per option — you're editing <strong id="tier-switcher-active-label">Option A</strong> below. Switch tabs above (or copy from another option) before generating, or that option ships with no avails.
+      </p>
+
+      <div class="avails-grid" id="avails-grid">
+        <!-- one block per product -->
+      </div>
+
+      <div class="panel-actions">
+        <button class="btn-secondary" data-back="5">← Back</button>
+        <button class="btn-primary" data-next="7">Continue →</button>
+      </div>
+    </section>
+
+    <!-- ====================================================================
+         STEP 7 — Roadblocks / Restrictions Check
+    ===================================================================== -->
+    <section class="panel hidden" id="step-7">
+      <div class="panel-head">
+        <div class="kicker">Step 07</div>
         <h1 class="display">Roadblocks Check</h1>
         <p class="lede">Entravision Intelligence searches the web for current platform ad policies — targeting restrictions, common rejection reasons, category requirements — for each product in this mix, grounded in the client context from Steps 02–03. Download the report to keep on hand for launch.</p>
       </div>
@@ -448,44 +482,12 @@ Client name: ...
       </div>
 
       <div class="panel-actions" id="roadblocks-actions">
-        <button class="btn-secondary" data-back="5">← Back</button>
+        <button class="btn-secondary" data-back="6">← Back</button>
         <button class="btn-secondary" id="roadblocks-skip-btn">Skip →</button>
         <div class="spacer"></div>
         <button class="btn-secondary" id="roadblocks-regenerate-btn" style="display:none">↺ Regenerate</button>
         <a class="btn-secondary hidden" id="roadblocks-download-link" download>⬇ Download Report (.docx)</a>
-        <button class="btn-primary" id="roadblocks-continue-btn" data-next="7">Continue →</button>
-      </div>
-    </section>
-
-    <!-- ====================================================================
-         STEP 7 — Avails (if needed)
-    ===================================================================== -->
-    <section class="panel hidden" id="step-7">
-      <div class="panel-head">
-        <div class="kicker">Step 07</div>
-        <h1 class="display">Avails input <span id="avails-status-pill"></span></h1>
-        <p class="lede" id="avails-blurb">If this proposal needs avails, paste them from the platforms below. Otherwise, skip — avails columns will be left blank for later planner input.</p>
-      </div>
-
-      <div class="tier-switcher" id="tier-switcher-avails-wrap">
-        <div class="tier-tabs" id="tier-tabs-avails"></div>
-        <label class="copy-avails-control">
-          Copy avails from
-          <select id="copy-avails-source"></select>
-          <button class="btn-secondary" id="copy-avails-btn" type="button">Copy →</button>
-        </label>
-      </div>
-      <p class="tier-switcher-hint" id="tier-switcher-hint-avails">
-        Avails are entered separately per option — you're editing <strong id="tier-switcher-active-label">Option A</strong> below. Switch tabs above (or copy from another option) before generating, or that option ships with no avails.
-      </p>
-
-      <div class="avails-grid" id="avails-grid">
-        <!-- one block per product -->
-      </div>
-
-      <div class="panel-actions">
-        <button class="btn-secondary" data-back="6">← Back</button>
-        <button class="btn-primary" data-next="8">Continue →</button>
+        <button class="btn-primary" id="roadblocks-continue-btn" data-next="8">Continue →</button>
       </div>
     </section>
 

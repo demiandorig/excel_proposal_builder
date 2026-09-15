@@ -633,6 +633,24 @@ def _populate_line_items(
             ws[f"K{row}"] = li.rate_override
             et._format_money_cell(ws[f"K{row}"], blue_input=True)
 
+        # IMPRESSIONS (I) — Fixed/estimated-CPM products only (Meta,
+        # YouTube, TikTok, LinkedIn, Spotify, Branded Content, ...).
+        # _write_product_row (excel_template.py) already wrote this cell
+        # using the CATALOG's own estimated_cpm_for_imps, before any
+        # per-line data existed — overwrite it here with the planner's own
+        # estimated_cpm_override when they set one in Curate, exactly like
+        # K{row} just above does for a real rate_override. This was a real,
+        # confirmed gap: the field exists specifically for this (see
+        # LineItem.estimated_cpm_override's own docstring) but nothing
+        # actually fed it back into the export's own IMPRESSIONS column —
+        # the Avails step's own "Max Recommended Monthly Imps/Spend"
+        # ceiling figures were never affected, only this column.
+        if not li.is_added_value and li.estimated_cpm_override is not None and (
+            product.buying_model == "Fixed" or product.estimated_impressions
+        ):
+            ws[f"I{row}"] = f'=IFERROR("Est. "&TEXT(L{row}*1000/{li.estimated_cpm_override},"#,##0"),"NA")'
+            ws[f"I{row}"].alignment = et.CENTER
+
         # NET BUDGET (L) — the planner's MONTHLY budget, not the flight total.
         # Every other formula on this sheet assumes that: "TOTAL DIGITAL
         # MONTHLY" is SUM(L), and the grand total then multiplies that by

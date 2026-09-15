@@ -1145,8 +1145,17 @@ def _write_product_row(ws: Worksheet, row: int, p: Product, gross: bool = False,
         ws[f"I{row}"] = f"=IFERROR(L{row}/K{row},0)"
         _format_imps_cell(ws[f"I{row}"])
     elif (p.buying_model == "Fixed" or p.estimated_impressions) and p.estimated_cpm_for_imps:
+        # This is the CATALOG default estimate, written once at sheet-
+        # creation time before the planner's own line-item data exists yet.
+        # _populate_line_items (proposal_generator.py) OVERWRITES this same
+        # cell with li.estimated_cpm_override's own figure when the planner
+        # set one in Curate — mirrors the K{row}/rate_override pattern
+        # right below this in the same file. IFERROR guards L{row} briefly
+        # holding non-numeric "Estimated $X value" text for an Added Value
+        # line (set moments later by that same function) rather than
+        # showing #VALUE! in between.
         ws[f"I{row}"] = (
-            f'="Est. "&TEXT(L{row}*1000/{p.estimated_cpm_for_imps},"#,##0")'
+            f'=IFERROR("Est. "&TEXT(L{row}*1000/{p.estimated_cpm_for_imps},"#,##0"),"NA")'
         )
         ws[f"I{row}"].alignment = CENTER
     else:

@@ -415,7 +415,7 @@ function wireEvents() {
       if (target === state.step || target > state.furthestStep) return;
       if (state.step === 2) syncFormToParsed();
       if (state.step === 4) syncLineItemsFromTable();
-      if (state.step === 7) syncAvailsFromGrid();
+      if (state.step === 6) syncAvailsFromGrid();
       goToStep(target);
     });
   });
@@ -435,7 +435,7 @@ function wireEvents() {
 
   // Roadblocks step
   document.getElementById("monthly-breakdown-skip-btn").addEventListener("click", () => onNext(6));
-  document.getElementById("roadblocks-skip-btn").addEventListener("click", () => onNext(7));
+  document.getElementById("roadblocks-skip-btn").addEventListener("click", () => onNext(8));
   document.getElementById("roadblocks-regenerate-btn").addEventListener("click", () => onRoadblocksGenerate());
 
   // Curation
@@ -651,7 +651,7 @@ function onNext(n) {
   // Capture form edits before advancing
   if (state.step === 2) syncFormToParsed();
   if (state.step === 4) syncLineItemsFromTable();
-  if (state.step === 7) syncAvailsFromGrid();
+  if (state.step === 6) syncAvailsFromGrid();
 
   if (n === 3) {
     // Trigger AI strategy brief generation
@@ -728,13 +728,13 @@ function onNext(n) {
     }
   }
   if (n === 5) renderMonthlyBreakdown();
-  if (n === 6) {
+  if (n === 6) renderAvailsGrid();
+  if (n === 7) {
     // Trigger AI roadblocks check
-    goToStep(6);
+    goToStep(7);
     onRoadblocksGenerate();
     return;
   }
-  if (n === 7) renderAvailsGrid();
   if (n === 8) renderGenerateSummary();
   goToStep(n);
 }

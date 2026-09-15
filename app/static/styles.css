@@ -37,6 +37,14 @@
 
 * { box-sizing: border-box; }
 
+/* A soft focus glow layered on top of every component's own border-color
+   change (never removed — this only adds the box-shadow) — one shared,
+   modern "focused" signal across the whole app (main wizard + admin)
+   instead of a bare color-only outline. */
+input:focus, textarea:focus, select:focus {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 html, body {
   margin: 0;
   padding: 0;
@@ -144,18 +152,24 @@ body::before {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
+  padding: 6px 12px 10px;
   color: var(--ink-faint);
-  border-radius: var(--radius);
-  transition: color 0.15s ease, background 0.15s ease;
+  border-radius: var(--radius) var(--radius) 0 0;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
 .step span {
   color: var(--ink-faint);
   font-weight: 700;
 }
+/* Same "bottom accent bar" language as the admin console's own tabs
+   (.admin-tab.active) — one consistent active-tab treatment across both
+   pages instead of two different ones (this used to be a translucent
+   fill here vs. a border-bottom there). */
 .step.active {
   color: var(--paper);
   background: rgba(255,255,255,0.06);
+  border-bottom-color: var(--accent);
 }
 .step.active span { color: var(--accent); }
 .step.done {
@@ -168,6 +182,7 @@ body::before {
 .step.clickable:hover {
   background: rgba(255,255,255,0.1);
   color: var(--paper);
+  border-bottom-color: var(--rule);
 }
 .step.clickable:hover span { color: var(--accent); }
 
@@ -189,6 +204,22 @@ body::before {
   box-shadow: var(--shadow-card);
 }
 .panel.hidden { display: none; }
+
+/* Shared hover-lift for every nested "card" component (tactic/roadblock/
+   ad-presence/avails/brief/AI-output/Monthly-Breakdown cards) — one
+   consistent "this is interactive/alive" signal instead of each card
+   family staying perfectly static. Border color shifts toward the accent
+   and a soft shadow lifts it slightly; nothing moves/resizes, so it
+   never disturbs surrounding layout. */
+.tactic-card, .roadblock-card, .adpresence-card, .avails-card,
+.brief-block, .ai-section, .mb-line-block {
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.tactic-card:hover, .roadblock-card:hover, .adpresence-card:hover, .avails-card:hover,
+.brief-block:hover, .ai-section:hover, .mb-line-block:hover {
+  border-color: var(--ink-faint);
+  box-shadow: var(--shadow-soft);
+}
 
 .panel-head { margin-bottom: 32px; }
 .kicker {
@@ -702,7 +733,6 @@ body::before {
   padding-left: 20px;
   border-left: 1px solid var(--rule);
 }
-.totals-gross .value { color: var(--ink-soft); }
 .totals-display > div {
   display: flex;
   flex-direction: column;
@@ -716,11 +746,22 @@ body::before {
   color: var(--ink-faint);
 }
 .totals-display .value {
+  /* Bolder/bigger than a plain body number — this is the single most
+     business-critical figure on the whole screen, styled to actually
+     read that way (matching the brand deck's own confident, colored,
+     big-numeral treatment for its headline stats) rather than sitting
+     at the same visual weight as everything around it. */
   font-family: var(--font-display);
-  font-size: 22px;
+  font-size: 30px;
   font-weight: 600;
-  color: var(--ink);
+  letter-spacing: -0.01em;
+  color: var(--accent);
 }
+/* Must stay AFTER .totals-display .value above — same specificity, so
+   source order is what makes this the one that actually wins for the
+   Gross figures (kept deliberately smaller/neutral so Net stays the one
+   confident "headline" number). */
+.totals-gross .value { font-size: 22px; color: var(--ink-soft); }
 
 .line-items-scroll {
   width: 100%;
@@ -1342,17 +1383,36 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 
 .result {
   margin-top: 32px;
-  padding: 28px;
-  background: var(--green-soft);
-  border: 1px solid var(--green);
-  border-radius: var(--radius);
+  padding: 28px 32px;
+  background: var(--paper-card);
+  border: 1px solid var(--rule);
+  border-left: 4px solid var(--green);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
 }
 .result.hidden { display: none; }
 .result-header h2 {
   margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-family: var(--font-display);
   font-size: 24px;
   font-weight: 600;
+}
+.result-header h2::before {
+  content: "✓";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--green-soft);
+  color: var(--green);
+  font-size: 15px;
+  font-family: var(--font-body);
 }
 .result-meta {
   margin-top: 8px;
