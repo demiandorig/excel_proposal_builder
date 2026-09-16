@@ -144,6 +144,7 @@ def generate_proposal(
     avails_data: Optional[dict] = None,   # product_name -> {max_imps, max_spend, est_uniques}
     tiers: Optional[list[dict]] = None,   # [{"label": "A", "line_items": [...], "avails_data": {...}}, ...]
     addons: Optional[list[AddonItem]] = None,   # Step 04's Add-Ons module picks — proposal-wide, not per-tier
+    monthly_distribution_mode: str = "even",   # Step 05's plan-wide default-split choice — "even" or "prorated"
 ) -> dict:
     """
     Generate an Excel proposal for the given request + line items.
@@ -172,6 +173,11 @@ def generate_proposal(
                 sheet, matching how the old hardcoded add-ons list already
                 behaved before it became planner-driven. None falls back to
                 that legacy hardcoded list; [] means "planner picked none."
+        monthly_distribution_mode: Step 05's plan-wide "even" (default) or
+                "prorated" (by days) choice — only affects the fallback
+                estimate shown for a line item that never got its own
+                monthly_allocations; a customized line's real numbers are
+                unaffected either way. See monthly_allocation.compute_default_allocation.
 
     Returns:
         dict with summary: {tabs_built: [...], total_net: float,
@@ -278,6 +284,11 @@ def generate_proposal(
         tier_uses_monthly_breakdown = bool(tier_months) and any(
             li.monthly_allocations for li in tier["line_items"]
         )
+        # How many Monthly Breakdown columns this tier's Net/Gross sheets
+        # need — 0 when unused, which is also the signal
+        # reposition_notes_adops() below uses to leave Planner Notes/AdOps
+        # at their original fixed columns instead of moving them.
+        tier_mb_width = len(tier_months) if tier_uses_monthly_breakdown else 0
         # Planner-given display name (e.g. "Independent") wins over the
         # generic "Option A" wherever a seller/client actually reads this —
         # proposal title, emails, AND (for a multi-tier proposal) the Excel
@@ -322,13 +333,15 @@ def generate_proposal(
             ws = et.build_proposal_a(wb, products, with_sections=False,
                                      start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
                                      sheet_name=sheet_title, addons=addons_dicts)
+            notes_col, _ = et.reposition_notes_adops(ws, 17, gross=False, mb_width=tier_mb_width)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=False, blurbs=blurbs,
-                                 avails_data=tier_avails, request=request)
+                                 avails_data=tier_avails, request=request, notes_col=notes_col)
             if tier_uses_monthly_breakdown:
-                _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=False)
+                _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=False,
+                                                   distribution_mode=monthly_distribution_mode)
             tabs_built.append(f"Proposal {label}")
 
         if tabs.get("wsections"):
@@ -336,13 +349,15 @@ def generate_proposal(
             ws = et.build_proposal_a(wb, products, with_sections=True,
                                      start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
                                      sheet_name=sheet_title, addons=addons_dicts)
+            notes_col, _ = et.reposition_notes_adops(ws, 17, gross=False, mb_width=tier_mb_width)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=False, with_sections=True, blurbs=blurbs,
-                                 avails_data=tier_avails, request=request)
+                                 avails_data=tier_avails, request=request, notes_col=notes_col)
             if tier_uses_monthly_breakdown:
-                _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=False, with_sections=True)
+                _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=False, with_sections=True,
+                                                   distribution_mode=monthly_distribution_mode)
             tabs_built.append(f"Proposal {label} (wsections)")
 
         if tabs.get("gross"):
@@ -350,13 +365,15 @@ def generate_proposal(
             ws = et.build_proposal_a_gross(wb, products,
                                            start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
                                            sheet_name=sheet_title, addons=addons_dicts)
+            notes_col, _ = et.reposition_notes_adops(ws, 17, gross=True, mb_width=tier_mb_width)
             _populate_meta(ws, request, gross=True, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=True, blurbs=blurbs,
-                                 avails_data=tier_avails, request=request)
+                                 avails_data=tier_avails, request=request, notes_col=notes_col)
             if tier_uses_monthly_breakdown:
-                _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=True)
+                _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=True,
+                                                   distribution_mode=monthly_distribution_mode)
             # Set agency fee in I14 (Gross sheet's variable input cell)
             if request.agency_fee is not None:
                 ws["I14"] = request.agency_fee
@@ -380,7 +397,8 @@ def generate_proposal(
         if tier_uses_monthly_breakdown:
             mb_sheet_name = f"Monthly Breakdown {label}" if multi_tier else "Monthly Breakdown"
             mb_sheet_title = _safe_sheet_name(tier_display_name, "(Monthly)", used_sheet_titles) if multi_tier else mb_sheet_name
-            et.build_monthly_breakdown_tab(wb, products, tier_line_items, tier_months, sheet_name=mb_sheet_title)
+            et.build_monthly_breakdown_tab(wb, products, tier_line_items, tier_months, sheet_name=mb_sheet_title,
+                                           distribution_mode=monthly_distribution_mode)
             tabs_built.append(mb_sheet_name)
 
         tier_total_net = sum(li.total_budget() for li in tier_line_items)
@@ -582,11 +600,19 @@ def _populate_line_items(
     blurbs: Optional[dict] = None,
     avails_data: Optional[dict] = None,
     request: Optional[ProposalRequest] = None,
+    notes_col: Optional[str] = None,
 ) -> None:
     """
     Walk the product rows already written by build_proposal_a / _gross and
     overwrite L (NET BUDGET), K (NET RATE if rate_override given), and the
     notes column with planner's values.
+
+    notes_col: which column Planner Notes actually landed in for THIS
+    tier's sheet — computed by et.reposition_notes_adops() (varies when
+    this tier uses Monthly Breakdown, since that pushes Notes/AdOps
+    rightward — see that function). Falls back to the original fixed
+    columns (T net / W gross) when not given, matching every caller that
+    predates this parameter (e.g. tests/test_generator.py).
 
     The template builders write product rows starting at PRODUCT_START_ROW.
     For with_sections=True they intersperse section banners — we walk the
@@ -698,8 +724,10 @@ def _populate_line_items(
             # Re-estimate row height for the (usually longer) combined text
             ws.row_dimensions[row].height = et._estimate_row_height(combined_details, col_width=50)
 
-        # Notes column — T for net, W for gross
-        notes_col = "W" if gross else "T"
+        # Notes column — caller-computed (reposition_notes_adops), falling
+        # back to the original fixed T (net) / W (gross) for any caller
+        # that doesn't pass one yet.
+        _notes_col = notes_col or ("W" if gross else "T")
         note_parts = [product.notes or ""]
         if li.is_added_value:
             # A $0 (or below-minimum) budget on this line is deliberate, not
@@ -716,7 +744,7 @@ def _populate_line_items(
             note_parts.append(li.notes_override)
         combined = "\n— ".join(p for p in note_parts if p)
         if combined:
-            ws[f"{notes_col}{row}"] = combined
+            ws[f"{_notes_col}{row}"] = combined
 
         # Avails (planner-entered from Step 06 of the app) — N/O/P net, P/Q/R gross,
         # plus the SOV% column right after (Q net, S gross). Always written,
@@ -743,19 +771,16 @@ def _populate_line_items(
 
 def _populate_monthly_breakdown_inline(
     ws, products: list[Product], line_items: list[LineItem], months: list[dict], *,
-    gross: bool, with_sections: bool = False,
+    gross: bool, with_sections: bool = False, distribution_mode: str = "even",
 ) -> None:
     """
     Writes the Monthly Breakdown columns to the right of the avails block
     (see excel_template.py's own module comment on exactly which columns)
     — one row per line item, aligned with that SAME line item's row on
-    this sheet. The plan-level "total spend by month" figure lives on the
-    dedicated Monthly Breakdown tab (build_monthly_breakdown_tab) instead
-    of being duplicated here too — this sheet's own existing grand-total
-    row already isn't per-month, so there's no natural single row here to
-    attach a per-month total to without guessing at its position (that
-    row's number is computed inside build_proposal_a/_gross, not exposed
-    to this caller).
+    this sheet, PLUS a per-month total row aligned with this sheet's own
+    "TOTAL DIGITAL MONTHLY" row, so the grand total reads as one
+    continuous line across the full sheet width instead of stopping short
+    right where Monthly Breakdown starts.
 
     Deliberately its OWN small row-tracking loop rather than sharing
     _populate_line_items' — that function is large, already-working, and
@@ -763,6 +788,17 @@ def _populate_monthly_breakdown_inline(
     row happen to be a section banner" is a safer choice than threading a
     shared row-map through it for one new caller. Keep this in sync with
     _populate_line_items' own copy of the same rule if that ever changes.
+    The row math below (start at 19, +1 per product, +1 more per section
+    banner) must also stay in sync with build_proposal_a/_gross's own
+    layout — it's how `total_row` here lands on the SAME row as those
+    functions' own "TOTAL DIGITAL MONTHLY" row without that row number
+    being passed in explicitly.
+
+    distribution_mode: only matters for a line that was never individually
+    customized (monthly_allocations empty/absent) — its contribution to
+    the per-month total row is an ESTIMATE in this mode (mirrors
+    build_monthly_breakdown_tab's identical fallback, and app.js's
+    _mbEffectiveDistribution preview), never a stored value.
     """
     if not months:
         return
@@ -770,6 +806,7 @@ def _populate_monthly_breakdown_inline(
     start_row = 19
     row = start_row
     last_family = None
+    per_month_totals = {m["key"]: 0.0 for m in months}
     for product, li in zip(products, line_items):
         if with_sections and product.family != last_family:
             row += 1
@@ -777,6 +814,15 @@ def _populate_monthly_breakdown_inline(
         if not li.is_added_value:
             total = li.monthly_budget * li.months
             et.write_monthly_breakdown_row(ws, row, months, li.monthly_allocations, total, start_col)
+            distribution = li.monthly_allocations or mo.compute_default_allocation(total, months, distribution_mode)
+            for m in months:
+                per_month_totals[m["key"]] += distribution.get(m["key"], 0.0)
         row += 1
 
     et.write_monthly_breakdown_header(ws, start_row - 2, months, start_col)
+
+    # Same row as this sheet's own "TOTAL DIGITAL MONTHLY" row (build_proposal_a
+    # / _gross compute it as `row + 1` from the exact same post-loop `row`
+    # this function's own loop above also lands on).
+    total_row = row + 1
+    et.write_monthly_breakdown_total_row(ws, total_row, months, per_month_totals, start_col)

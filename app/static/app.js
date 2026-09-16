@@ -22,6 +22,17 @@ const state = {
   // Proposal-wide: NOT part of the per-tier snapshot pattern below, since
   // the same add-ons apply regardless of which budget option is active.
   addons: {},               // product_name -> amount (presence = picked)
+  // Step 05's plan-wide default-split choice — "even" (equal $ per month)
+  // or "prorated" (weighted by each month's actual active days in the
+  // flight). Proposal-wide, not per-tier (one control "at the top" of the
+  // step, not per-option) — governs what a NEW default gets computed as
+  // (checkbox-check, reset button, a newly-added line auto-joining); never
+  // retroactively rewrites a line's already-set allocations, same "don't
+  // silently overwrite a planner's figure" rule Monthly Breakdown already
+  // applies to date changes. Defaults to "even" per explicit instruction
+  // (day-proration was this app's own earlier default; even is now what
+  // the planner actually wants, with day-proration kept as an opt-in).
+  mbDistributionMode: "even",
   rateOverrideOpen: new Set(),  // transient UI state — which row indices show the rate-override input
   objectiveOtherOpen: new Set(),  // transient UI state — which row indices show the free-text "Other" objective input
   proposalId: null,
@@ -210,7 +221,19 @@ Monthly budget:
 // --------------------------------------------------------------------------
 
 document.addEventListener("DOMContentLoaded", async () => {
-  await loadCatalog();
+  // loadCatalog() has no try/catch of its own (a plain `await res.json()`
+  // on whatever /api/catalog returns) — if that request ever fails for
+  // ANY reason (a DB hiccup, a deploy race, a transient 500), the
+  // uncaught exception used to propagate straight out of this whole
+  // handler, which meant wireEvents() below NEVER RAN — every button on
+  // the page silently dead, with no error shown at all. Caught here so a
+  // catalog failure degrades ONLY what actually needs the catalog
+  // (product picker, Suggest Mix) instead of the entire app.
+  try {
+    await loadCatalog();
+  } catch (err) {
+    console.error("Catalog failed to load — product picker / Suggest Mix will be unavailable until this is fixed:", err);
+  }
   wireEvents();
   await maybeReopenProposal();
 });
@@ -432,6 +455,19 @@ function wireEvents() {
     document.getElementById("reprompt-btn").style.display = "";
   });
   document.getElementById("reprompt-submit-btn").addEventListener("click", onStrategyReprompt);
+
+  // Monthly Breakdown — default-split mode toggle. Wired once here (not
+  // re-wired per render, unlike the per-line-item controls in
+  // _mbWireLineItemBlocks — this static pair of buttons never gets its
+  // innerHTML replaced); renderMonthlyBreakdown() just updates which one
+  // shows as .active each time it runs.
+  document.querySelectorAll("#mb-mode-tabs .tier-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (state.mbDistributionMode === btn.dataset.mode) return;
+      state.mbDistributionMode = btn.dataset.mode;
+      renderMonthlyBreakdown();
+    });
+  });
 
   // Roadblocks step
   document.getElementById("monthly-breakdown-skip-btn").addEventListener("click", () => onNext(6));
@@ -2324,10 +2360,10 @@ function _mbMonthsBetween(start, end) {
   return months;
 }
 
-// Day-prorated default split — mirrors default_allocation() exactly,
-// including "last month absorbs the rounding remainder" so dollars always
-// sum to EXACTLY totalBudget.
-function _mbDefaultAllocation(totalBudget, months) {
+// Day-prorated split — mirrors monthly_allocation.py's prorated_allocation()
+// exactly, including "last month absorbs the rounding remainder" so dollars
+// always sum to EXACTLY totalBudget.
+function _mbProratedDefaultAllocation(totalBudget, months) {
   if (!months.length) return {};
   const totalActiveDays = months.reduce((s, m) => s + m.active_days, 0) || 1;
   const allocations = {};
@@ -2339,6 +2375,36 @@ function _mbDefaultAllocation(totalBudget, months) {
   });
   allocations[months[months.length - 1].key] = Math.round((totalBudget - running) * 100) / 100;
   return allocations;
+}
+
+// Even split — mirrors monthly_allocation.py's even_allocation() exactly,
+// same "last month absorbs the rounding remainder" rule as the prorated
+// version above, so the two are interchangeable everywhere a default gets
+// computed.
+function _mbEvenDefaultAllocation(totalBudget, months) {
+  if (!months.length) return {};
+  const share = Math.round(totalBudget / months.length * 100) / 100;
+  const allocations = {};
+  let running = 0;
+  months.slice(0, -1).forEach(m => {
+    allocations[m.key] = share;
+    running += share;
+  });
+  allocations[months[months.length - 1].key] = Math.round((totalBudget - running) * 100) / 100;
+  return allocations;
+}
+
+// THE one place a "default" allocation gets computed from a total — every
+// existing call site (checkbox-check, reset button, a new line auto-
+// joining, the plan-summary's not-yet-customized preview) calls this one
+// dispatcher rather than either concrete implementation directly, so
+// state.mbDistributionMode is the single source of truth for what
+// "default" currently means, with zero other call sites needing to know
+// or care which mode is active.
+function _mbDefaultAllocation(totalBudget, months) {
+  return state.mbDistributionMode === "prorated"
+    ? _mbProratedDefaultAllocation(totalBudget, months)
+    : _mbEvenDefaultAllocation(totalBudget, months);
 }
 
 // Mirrors reconcile_allocation() exactly — the SAME balanced/remaining
@@ -2452,6 +2518,10 @@ function renderMonthlyBreakdown() {
   emptyState.classList.add("hidden");
   content.classList.remove("hidden");
 
+  document.querySelectorAll("#mb-mode-tabs .tier-tab").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.mode === state.mbDistributionMode);
+  });
+
   const eligibleLines = state.lineItems.filter(li => !li.is_added_value);
   const anyLineActive = eligibleLines.some(li => li.monthly_allocations && Object.keys(li.monthly_allocations).length);
 
@@ -2471,10 +2541,15 @@ function renderMonthlyBreakdown() {
       } else {
         li.monthly_allocations = _mbRescaleForBudgetChange(li);
       }
-    } else if (anyLineActive) {
-      // "Line item added" (or never touched) while the feature is already
-      // in use elsewhere on this tier — join it automatically rather than
-      // leaving the plan-level total silently incomplete for this line.
+    } else if (anyLineActive && li._mbBaseline === undefined) {
+      // "Line item added" (genuinely never seen by this render loop before
+      // — _mbBaseline is only ever undefined the first time) while the
+      // feature is already in use elsewhere on this tier — join it
+      // automatically rather than leaving the plan-level total silently
+      // incomplete for this line. The _mbBaseline check is what stops
+      // this from also re-triggering for a line the planner explicitly
+      // UNCHECKED (monthly_allocations is empty either way, but an
+      // unchecked line keeps its baseline — see the checkbox handler).
       _mbSetAllocation(li, _mbDefaultAllocation(li.monthly_budget * li.months, months));
     }
   });
@@ -2529,7 +2604,7 @@ function _mbLineItemBlockHtml(li, months) {
           <thead><tr><th>Month</th><th>%</th><th>$</th><th>Status</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
-        <button type="button" class="btn-secondary mb-reset-btn" data-line="${li.id}" ${enabled ? "" : "disabled"}>↺ Reset to day-prorated default</button>
+        <button type="button" class="btn-secondary mb-reset-btn" data-line="${li.id}" ${enabled ? "" : "disabled"}>↺ Reset to ${state.mbDistributionMode === "prorated" ? "day-prorated" : "even"} default</button>
       </div>
     </details>`;
 }
@@ -2544,8 +2619,16 @@ function _mbWireLineItemBlocks(months) {
       if (e.target.checked) {
         _mbSetAllocation(li, _mbDefaultAllocation(li.monthly_budget * li.months, months));
       } else {
+        // Deliberately keep li._mbBaseline (don't delete it) — it's the
+        // ONLY signal that distinguishes "this line was already through
+        // Monthly Breakdown and got explicitly turned off" from "this
+        // line has never been touched at all". Deleting it used to make
+        // an unchecked line indistinguishable from a brand-new one, so
+        // renderMonthlyBreakdown()'s "auto-join a new line while the
+        // feature's already active elsewhere" convenience immediately
+        // re-checked it on the very next render — the exact "checkbox
+        // isn't unselectable" bug this fixes.
         li.monthly_allocations = null;
-        delete li._mbBaseline;
       }
       renderMonthlyBreakdown();
     });
@@ -2565,8 +2648,9 @@ function _mbWireLineItemBlocks(months) {
       const total = li.monthly_budget * li.months;
       const pct = parseFloat(e.target.value);
       li.monthly_allocations[e.target.dataset.month] = isNaN(pct) ? 0 : Math.round(total * pct / 100 * 100) / 100;
-      renderMonthlyBreakdown();
+      _mbLiveUpdateAfterEdit(li, months, e.target);
     });
+    inp.addEventListener("blur", () => renderMonthlyBreakdown());
   });
   document.querySelectorAll(".mb-dollar-input").forEach(inp => {
     inp.addEventListener("input", (e) => {
@@ -2574,9 +2658,58 @@ function _mbWireLineItemBlocks(months) {
       if (!li || !li.monthly_allocations) return;
       const dollars = parseFloat(e.target.value);
       li.monthly_allocations[e.target.dataset.month] = isNaN(dollars) ? 0 : Math.round(dollars * 100) / 100;
-      renderMonthlyBreakdown();
+      _mbLiveUpdateAfterEdit(li, months, e.target);
     });
+    inp.addEventListener("blur", () => renderMonthlyBreakdown());
   });
+}
+
+// Non-destructive live update after a single %/$ keystroke in Monthly
+// Breakdown — patches only the paired field in this row, this row's own
+// status cell, this line's status badge, and the plan-level summary, all
+// via direct DOM writes. Deliberately never touches the input actually
+// being typed in and never rebuilds the table (that's what the full
+// renderMonthlyBreakdown() does by replacing #mb-line-items' innerHTML —
+// which destroys and recreates every <input> in it, dropping focus after
+// every single keystroke and forcing a re-click to keep typing: the exact
+// bug this fixes). blur on either input still triggers the full render
+// (wired above), so rounding/disabled-state always catch up once the
+// planner leaves the field.
+function _mbLiveUpdateAfterEdit(li, months, editedInput) {
+  const total = li.monthly_budget * li.months;
+  const monthKey = editedInput.dataset.month;
+  const dollars = li.monthly_allocations[monthKey] || 0;
+  const pct = total ? (dollars / total * 100) : 0;
+
+  const row = editedInput.closest("tr");
+  if (row) {
+    const pctInput = row.querySelector(".mb-pct-input");
+    const dollarInput = row.querySelector(".mb-dollar-input");
+    if (pctInput && pctInput !== editedInput) pctInput.value = Math.round(pct * 100) / 100;
+    if (dollarInput && dollarInput !== editedInput) dollarInput.value = dollars.toFixed(2);
+
+    const product = state.productIndex[li.product_name];
+    const minSpend = product ? (product.minimum_spend || 0) : 0;
+    const belowMin = minSpend > 0 && dollars + _MB_CENT < minSpend;
+    row.classList.toggle("mb-row-warn", belowMin);
+    const validationCell = row.querySelector(".mb-validation");
+    if (validationCell) validationCell.textContent = belowMin ? `⚠ Below min ($${minSpend.toLocaleString()})` : "✓";
+  }
+
+  const block = editedInput.closest(".mb-line-block");
+  const r = _mbReconcile(total, li.monthly_allocations);
+  const badge = block ? block.querySelector(".mb-status-badge") : null;
+  if (badge) {
+    const statusClass = r.balanced ? "mb-status-ok" : (r.over_allocated ? "mb-status-over" : "mb-status-under");
+    const statusText = r.balanced ? `Allocated: 100% / ${money(total)}`
+      : r.over_allocated ? `Over-allocated by ${Math.abs(r.remaining_pct).toFixed(1)}% / ${money(Math.abs(r.remaining))}`
+      : `Allocated: ${r.allocated_pct.toFixed(1)}% / ${money(r.allocated)} — Remaining: ${r.remaining_pct.toFixed(1)}% / ${money(r.remaining)}`;
+    badge.className = `mb-status-badge ${statusClass}`;
+    badge.textContent = statusText;
+  }
+
+  _mbRenderPlanSummary(months);
+  _mbUpdateContinueState(months);
 }
 
 function _mbRenderPlanSummary(months) {
@@ -2594,7 +2727,7 @@ function _mbRenderPlanSummary(months) {
       <div class="mb-summary-amount">${money(totals[m.key])}</div>
     </div>`).join("");
   document.getElementById("mb-plan-summary").innerHTML = `
-    <div class="mb-summary-label">Total plan spend by month <small>(day-prorated estimate for any line not yet customized)</small></div>
+    <div class="mb-summary-label">Total plan spend by month <small>(${state.mbDistributionMode === "prorated" ? "day-prorated" : "even-split"} estimate for any line not yet customized)</small></div>
     <div class="mb-summary-row">${cells}
       <div class="mb-summary-cell mb-summary-cell-total">
         <div class="mb-summary-month">Total</div>
@@ -2991,6 +3124,12 @@ async function onGenerate() {
     roadblocks: state.roadblocks || null,
     raw_notion_text: state.rawNotionText || null,
     addons: Object.entries(state.addons).map(([product_name, amount]) => ({ product_name, amount })),
+    // Step 05's plan-wide default-split choice — only matters for the
+    // export's own fallback estimate on a line that was never individually
+    // customized (build_monthly_breakdown_tab's per-month total, and the
+    // inline total row next to "TOTAL DIGITAL MONTHLY"); a line WITH its
+    // own monthly_allocations already carries real numbers regardless.
+    monthly_distribution_mode: state.mbDistributionMode,
   };
   const btn = document.getElementById("generate-btn");
   btn.disabled = true;

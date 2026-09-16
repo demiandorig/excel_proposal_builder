@@ -1588,6 +1588,22 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 .mb-summary-cell-total .mb-summary-amount { color: var(--accent); }
 .mb-summary-cell-total { border-left: 1px solid rgba(255,255,255,0.2); padding-left: 18px; }
 
+.mb-mode-select {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.mb-mode-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-soft);
+}
+.mb-mode-select .tier-switcher-hint { margin: 0; flex-basis: 100%; }
+
 .mb-line-block {
   border: 1px solid var(--rule);
   border-radius: var(--radius-lg);

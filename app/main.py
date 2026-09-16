@@ -513,6 +513,12 @@ class GenerateRequest(BaseModel):
     # That fallback only ever fires for generate_proposal()'s own default
     # (addons=None), which nothing reachable through this endpoint passes.
     addons: list[AddonItemModel] = []
+    # Step 05's plan-wide default-split choice ("even" or "prorated") —
+    # only affects the export's own fallback estimate for a line that was
+    # never individually customized (see monthly_allocation.compute_default_allocation);
+    # a line with its own monthly_allocations already carries real planner
+    # numbers regardless of this setting.
+    monthly_distribution_mode: str = "even"
 
 
 class StrategyRequest(BaseModel):
@@ -992,6 +998,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             avails_data=tiers[0]["avails_data"],
             tiers=tiers if multi_tier else None,
             addons=addons,
+            monthly_distribution_mode=body.monthly_distribution_mode,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")

@@ -133,14 +133,19 @@ def months_between(start: date, end: date) -> list[dict]:
 
 def default_allocation(total_budget: float, months: list[dict]) -> dict[str, float]:
     """
-    Day-prorated default: each month's share of `total_budget` is
+    Day-prorated split: each month's share of `total_budget` is
     proportional to its active_days out of the campaign's total active
     days (see months_between) — a half-active first/last month gets
-    roughly half a full month's share, not a naive equal split.
-    Recommended over equal-split for exactly this reason (see the
-    accompanying chat writeup); degrades to ~equal-split on its own for a
-    campaign whose months are all full anyway, so there's no real
-    downside to always using it as the default.
+    roughly half a full month's share, not a naive equal split. Degrades
+    to ~equal-split on its own for a campaign whose months are all full
+    anyway.
+
+    One of two selectable default modes (see compute_default_allocation
+    below) — the app's own default is EVEN (even_allocation), per explicit
+    planner preference; this one is the opt-in alternative for a planner
+    who specifically wants day-weighting, not the recommended choice for
+    everyone. Kept under its original name for backward compatibility with
+    anything already calling it directly.
 
     The LAST month absorbs whatever's left after every earlier month is
     rounded to the cent, so the dollars always sum to EXACTLY
@@ -158,6 +163,42 @@ def default_allocation(total_budget: float, months: list[dict]) -> dict[str, flo
         running += share
     allocations[months[-1]["key"]] = round(total_budget - running, 2)
     return allocations
+
+
+def even_allocation(total_budget: float, months: list[dict]) -> dict[str, float]:
+    """
+    Equal split: every month gets the same share of total_budget,
+    regardless of how many of its days actually fall inside the flight.
+    This app's own DEFAULT mode (see compute_default_allocation below) —
+    simpler and more predictable for a planner who just wants a flat
+    monthly figure without thinking about partial first/last months.
+
+    Same "last month absorbs the rounding remainder" rule as
+    default_allocation, for the same reason (dollars always sum to EXACTLY
+    total_budget).
+    """
+    if not months:
+        return {}
+    share = round(total_budget / len(months), 2)
+    allocations: dict[str, float] = {}
+    running = 0.0
+    for m in months[:-1]:
+        allocations[m["key"]] = share
+        running += share
+    allocations[months[-1]["key"]] = round(total_budget - running, 2)
+    return allocations
+
+
+def compute_default_allocation(total_budget: float, months: list[dict], mode: str = "even") -> dict[str, float]:
+    """
+    THE one place a caller should ask for "the default split" without
+    hardcoding which mode that means — mirrors app.js's own
+    _mbDefaultAllocation dispatcher exactly, so a planner's Step 05 choice
+    (sent as `monthly_distribution_mode` on /api/generate) produces the
+    SAME numbers server-side (proposal_generator.py's export fallback for
+    an uncustomized line) as it already showed them client-side.
+    """
+    return default_allocation(total_budget, months) if mode == "prorated" else even_allocation(total_budget, months)
 
 
 def reconcile_allocation(total_budget: float, allocations: dict[str, float]) -> dict:

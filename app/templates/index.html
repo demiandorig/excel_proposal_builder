@@ -403,6 +403,14 @@ Client name: ...
       </div>
 
       <div id="mb-content">
+        <div class="mb-mode-select">
+          <span class="mb-mode-label">Default split:</span>
+          <div class="tier-tabs" id="mb-mode-tabs">
+            <button type="button" class="tier-tab" data-mode="even">Even across months</button>
+            <button type="button" class="tier-tab" data-mode="prorated">Prorated by days</button>
+          </div>
+          <span class="tier-switcher-hint">Only affects NEW defaults (checkbox, reset, a newly-added line) — never rewrites a line you've already customized.</span>
+        </div>
         <div class="mb-plan-summary" id="mb-plan-summary">
           <!-- plan-level "total spend by month" bar — rendered by renderMonthlyBreakdown() -->
         </div>

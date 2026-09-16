@@ -856,8 +856,11 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
         ("O", "Max. Recommended\nMonthly Spend"),
         ("P", "Est. Monthly Uniques"),
         ("Q", "Est. % of\nAvails Used (SOV)"),
-        ("T", "Planner Notes — internal guidance"),
-        ("V", "AdOps (Internal Use)"),
+        # Planner Notes / AdOps headers are NOT written here — their column
+        # depends on whether/how wide this tier's Monthly Breakdown block
+        # is, which isn't known yet at sheet-creation time. See
+        # reposition_notes_adops(), called from proposal_generator.py once
+        # that's known.
     ])
     ws.row_dimensions[17].height = 40  # extra room for 2-line wrapped headers
 
@@ -1278,8 +1281,8 @@ def build_proposal_a_gross(wb: Workbook, products: list,
         ("Q", "Max. Recommended\nMonthly Spend"),
         ("R", "Est. Monthly Uniques"),
         ("S", "Est. % of\nAvails Used (SOV)"),
-        ("W", "Planner Notes — internal guidance"),
-        ("Y", "AdOps (Internal Use)"),
+        # Planner Notes / AdOps headers are NOT written here — see the
+        # matching comment in build_proposal_a above.
     ])
     ws.row_dimensions[17].height = 40  # extra room for 2-line wrapped headers
 
@@ -1831,6 +1834,69 @@ def build_process_faqs(wb: Workbook) -> Worksheet:
 
 MONTHLY_BREAKDOWN_START_COL = {False: 24, True: 27}  # Net -> X (one spacer past V), Gross -> AA (one spacer past Y)
 
+# Planner Notes / AdOps' ORIGINAL fixed columns — still correct whenever a
+# tier doesn't use Monthly Breakdown at all (nothing to place after, so
+# they stay right where they've always been). See reposition_notes_adops.
+_NOTES_ADOPS_DEFAULT_COLS = {False: ("T", "U", "V"), True: ("W", "X", "Y")}  # (notes, spacer, adops)
+
+
+def write_notes_adops_header(ws: Worksheet, row: int, notes_col: str, adops_col: str) -> None:
+    """
+    Writes just the Planner Notes / AdOps header labels at whatever
+    columns the caller has computed (see reposition_notes_adops). Same
+    per-cell styling _set_header applies to this sheet's OTHER header
+    cells, but deliberately does NOT touch row height — that's already
+    been set once (build_proposal_a/_gross bump it to 40 right after their
+    own _set_header call), and _set_header's own height reset would
+    silently undo that if called a second time here.
+    """
+    for col, label in ((notes_col, "Planner Notes — internal guidance"), (adops_col, "AdOps (Internal Use)")):
+        c = ws[f"{col}{row}"]
+        c.value = label
+        c.font = H_HEADER
+        c.fill = H_HEADER_FILL
+        c.alignment = CENTER
+        c.border = HEADER_BORDER
+
+
+def reposition_notes_adops(ws: Worksheet, header_row: int, *, gross: bool, mb_width: int) -> tuple[str, str]:
+    """
+    Computes where Planner Notes / AdOps land on THIS tier's sheet, writes
+    their header labels + column widths there, and returns
+    (notes_col, adops_col) so the caller (proposal_generator.py, which
+    writes the actual per-row Notes content) knows which column to use.
+
+    mb_width == 0 (this tier doesn't use Monthly Breakdown): Notes/AdOps
+    stay at their ORIGINAL fixed columns — build_proposal_a/_gross already
+    set their widths at sheet-creation time, so nothing else to do.
+
+    mb_width > 0: Monthly Breakdown occupies MONTHLY_BREAKDOWN_START_COL
+    through +mb_width-1 (see write_monthly_breakdown_header/_row) — per
+    explicit planner request, Notes/AdOps must come AFTER that, not before
+    it, so they move to just past the last month column (one spacer). The
+    columns they used to occupy become part of the blank gap before
+    Monthly Breakdown instead, and are narrowed down from their old wide
+    Notes(60)/AdOps(22) widths so that gap doesn't look like a stray
+    oversized blank column.
+    """
+    old_notes_col, old_gap_col, old_adops_col = _NOTES_ADOPS_DEFAULT_COLS[gross]
+    if mb_width <= 0:
+        notes_col, adops_col = old_notes_col, old_adops_col
+    else:
+        mb_start = MONTHLY_BREAKDOWN_START_COL[gross]
+        notes_idx = mb_start + mb_width + 1  # one spacer col past the last MB month column
+        notes_col = get_column_letter(notes_idx)
+        adops_col = get_column_letter(notes_idx + 2)  # matches the original 1-col Notes<->AdOps gap
+        for col in (old_notes_col, old_gap_col, old_adops_col):
+            ws.column_dimensions[col].width = 4
+        ws.column_dimensions[get_column_letter(notes_idx - 1)].width = 5  # new spacer before Notes
+        ws.column_dimensions[notes_col].width = 60
+        ws.column_dimensions[get_column_letter(notes_idx + 1)].width = 5  # spacer between Notes and AdOps
+        ws.column_dimensions[adops_col].width = 22
+
+    write_notes_adops_header(ws, header_row, notes_col, adops_col)
+    return notes_col, adops_col
+
 
 def _mb_cell_text(dollars: Optional[float], total: float) -> str:
     if dollars is None:
@@ -1893,7 +1959,8 @@ def write_monthly_breakdown_total_row(ws: Worksheet, row: int, months: list[dict
 
 
 def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
-                                 months: list[dict], sheet_name: str = "Monthly Breakdown") -> Worksheet:
+                                 months: list[dict], sheet_name: str = "Monthly Breakdown",
+                                 distribution_mode: str = "even") -> Worksheet:
     """
     Standalone tab: one row per (non-Added-Value) line item that has a
     Monthly Breakdown, a "TOTAL PLAN SPEND BY MONTH" row at the bottom —
@@ -1927,12 +1994,13 @@ def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
             continue
         total = li.monthly_budget * li.months
         allocations = li.monthly_allocations if li.monthly_allocations else None
-        # Every line item contributes to the plan-level total (day-prorated
-        # estimate if it was never individually customized) — see
-        # monthly_allocation.py's default_allocation(); mirrors exactly
+        # Every line item contributes to the plan-level total (an estimate,
+        # in the planner's chosen distribution_mode, if it was never
+        # individually customized) — see
+        # monthly_allocation.compute_default_allocation(); mirrors exactly
         # what app.js's _mbEffectiveDistribution shows on-screen, so the
         # export's total always matches what the planner last saw.
-        distribution = allocations or _monthly_allocation.default_allocation(total, months)
+        distribution = allocations or _monthly_allocation.compute_default_allocation(total, months, distribution_mode)
         for m in months:
             per_month_totals[m["key"]] += distribution.get(m["key"], 0.0)
 
