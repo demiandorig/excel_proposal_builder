@@ -32,10 +32,20 @@ except ImportError:
 
 from app.catalog import by_name
 from app.services.text_utils import normalize_newlines as _normalize_newlines
+from app.services.writing_style import HOUSE_VOICE_GUIDE
 
 
-_SEARCH_MODEL = "gpt-4o"
-_FALLBACK_MODEL = "gpt-4o"
+# Bumped from gpt-4o to gpt-5.1, OpenAI's current flagship as of Sep 2026 —
+# confirmed via live web search against OpenAI's own model docs, not
+# guessed from static training knowledge, since a wrong model string here
+# would hard-fail every call. Two things changed together with the model
+# and must not be separated: (1) the Responses API tool below is now
+# "web_search" — GPT-5-series models don't support the legacy
+# "web_search_preview" this used to call, they error on it outright; (2)
+# the chat.completions fallback below no longer passes `temperature=`,
+# since GPT-5-series models reject any value but the default (1).
+_SEARCH_MODEL = "gpt-5.1"
+_FALLBACK_MODEL = "gpt-5.1"
 
 
 def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = None) -> dict:
@@ -63,7 +73,7 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
     try:
         response = client.responses.create(
             model=_SEARCH_MODEL,
-            tools=[{"type": "web_search_preview"}],
+            tools=[{"type": "web_search"}],
             input=prompt,
             max_output_tokens=3500,
         )
@@ -79,7 +89,6 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
                 model=_FALLBACK_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=3500,
-                temperature=0.5,
             )
             raw = response.choices[0].message.content or ""
             result = _parse(raw, used_web_search=False)
@@ -184,6 +193,14 @@ Market context: {strategy_brief.get('market_context', '')}
 ## KNOWN INTERNAL POLICY FLAGS (Entravision catalog — supplement your web
 ## research with these, don't just repeat them verbatim)
 {known_policy_block}
+
+{HOUSE_VOICE_GUIDE}
+
+overall_summary/detail/recommended_mitigation should read like an ad-ops
+specialist telling a colleague what they actually found, per the VOICE
+section above — not a template restated per product. Keep every "source"
+citation itself factual and specific (that rigor is the point of this
+report); the writing AROUND each citation is what should sound human.
 
 ## YOUR TASK
 For EACH product listed above, run a SEPARATE web search for that specific

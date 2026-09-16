@@ -158,23 +158,43 @@ def _clean_text(text: str) -> str:
 # Shared browser helpers
 # ---------------------------------------------------------------------------
 
-async def _fetch_rendered_text(url: str) -> Optional[str]:
+async def _fetch_rendered_text(url: str) -> tuple[Optional[str], Optional[str]]:
     """
-    Loads `url` in a headless Chromium tab and returns the fully-rendered
-    page's visible text, or None if the browser/binary isn't available or
-    the page failed to load. One-shot: launches and tears down its own
-    browser per call (these checks run a handful of times per proposal,
-    not in a hot loop, so the launch overhead is not worth pooling yet).
+    Loads `url` in a headless Chromium tab and returns
+    (rendered_visible_text, fail_reason). fail_reason is None on success,
+    else:
+      - "no_browser" — Chromium itself never launched (almost always a
+        missing/incomplete `playwright install chromium` on THIS server —
+        nothing to do with Meta/Google/TikTok at all).
+      - "navigation" — the browser launched fine but the page itself
+        didn't load in time (a real network issue, a slow page, or the
+        site declining the request).
+
+    This distinction used to be collapsed into one indistinguishable "did
+    not load — timeout, network error, or missing browser binary" message,
+    which is exactly what let a real missing-browser-binary setup gap hide
+    until someone happened to check server logs for it (see
+    scripts/post-merge.sh). Surfacing it here means the very next "not
+    checked" result already says which of the two very different problems
+    it is, without needing log access.
+
+    One-shot: launches and tears down its own browser per call (these
+    checks run a handful of times per proposal, not in a hot loop, so the
+    launch overhead is not worth pooling yet).
     """
     if not _HAS_PLAYWRIGHT:
-        return None
+        return None, "no_browser"
     try:
         async with async_playwright() as pw:
             launch_options = {"headless": True, "env": _browser_env()}
             executable = _chromium_executable()
             if executable:
                 launch_options["executable_path"] = executable
-            browser = await pw.chromium.launch(**launch_options)
+            try:
+                browser = await pw.chromium.launch(**launch_options)
+            except Exception as e:
+                _logger.warning("ad_presence: Chromium failed to launch: %s: %s", type(e).__name__, e)
+                return None, "no_browser"
             try:
                 context = await browser.new_context(user_agent=_UA, locale="en-US")
                 page = await context.new_page()
@@ -183,23 +203,32 @@ async def _fetch_rendered_text(url: str) -> Optional[str]:
                 try:
                     await page.goto(url, wait_until="networkidle")
                 except Exception:
-                    await page.goto(url, wait_until="domcontentloaded")
+                    try:
+                        await page.goto(url, wait_until="domcontentloaded")
+                    except Exception as e:
+                        _logger.warning("ad_presence: page load failed for %s: %s: %s", url, type(e).__name__, e)
+                        return None, "navigation"
                 await page.wait_for_timeout(1500)  # let client-side results hydrate
-                return _clean_text(await page.inner_text("body"))
+                return _clean_text(await page.inner_text("body")), None
             finally:
                 await browser.close()
     except Exception as e:
         # Deliberately still returns None to the caller (a live ad-library
-        # check failing shouldn't break proposal generation) — but the
-        # caller's own error surfaces this as one generic, indistinguishable
-        # "timeout, network error, or missing browser binary" message with
-        # no way to tell which. Logging the real exception here is the only
-        # way to actually tell those apart afterward (this exact ambiguity
-        # is what hid a real missing-browser-binary setup gap — see
-        # scripts/post-merge.sh — until someone happened to check server
-        # logs for it).
-        _logger.warning("ad_presence: page load failed for %s: %s: %s", url, type(e).__name__, e)
-        return None
+        # check failing shouldn't break proposal generation) — anything
+        # unexpected this far in (browser launched, so past "no_browser")
+        # is treated as a navigation-class failure.
+        _logger.warning("ad_presence: unexpected failure for %s: %s: %s", url, type(e).__name__, e)
+        return None, "navigation"
+
+
+def _load_failure_note(label: str, reason: Optional[str]) -> str:
+    if reason == "no_browser":
+        return (f"{label} check couldn't run: no Chromium browser is installed on this "
+                "server. This is a server setup gap, not a Meta/Google/TikTok problem — "
+                "`playwright install chromium` needs to run as part of THIS server's own "
+                "deploy/build step (installing the `playwright` pip package alone does not "
+                "download the actual browser).")
+    return f"{label} did not load (timeout or network error)."
 
 
 # ---------------------------------------------------------------------------
@@ -344,12 +373,13 @@ async def _search_meta_once(query: str, country: str) -> dict:
     """One Meta Ad Library search for a single query string. Returns raw
     candidates — no confidence scoring yet (that needs the caller's
     client-name/domain context)."""
-    out = {"checked": False, "ad_count_estimate": 0, "candidates": [], "note": ""}
+    out = {"checked": False, "ad_count_estimate": 0, "candidates": [], "note": "", "fail_reason": None}
     url = ("https://www.facebook.com/ads/library/?active_status=active&ad_type=all"
            f"&country={country}&q={urllib.parse.quote(query)}")
-    text = await _fetch_rendered_text(url)
+    text, fail_reason = await _fetch_rendered_text(url)
     if text is None:
-        out["note"] = "Meta Ad Library did not load (timeout, network error, or missing browser binary)."
+        out["fail_reason"] = fail_reason
+        out["note"] = _load_failure_note("Meta Ad Library", fail_reason)
         return out
 
     out["checked"] = True
@@ -396,10 +426,12 @@ async def check_meta(client_name: str, client_website: str = "", country: str = 
     seen_ids: set[str] = set()
     samples: list[dict] = []
     any_checked = False
+    last_fail_reason = None
 
     for q in variants:
         r = await _search_meta_once(q, country)
         if not r["checked"]:
+            last_fail_reason = r.get("fail_reason") or last_fail_reason
             continue
         any_checked = True
         for cand in r["candidates"]:
@@ -413,7 +445,7 @@ async def check_meta(client_name: str, client_website: str = "", country: str = 
             samples.append(cand)
 
     if not any_checked:
-        result["note"] = "Meta Ad Library did not load for any name variant (timeout, network error, or missing browser binary)."
+        result["note"] = _load_failure_note("Meta Ad Library", last_fail_reason)
         return result
 
     result["checked"] = True
@@ -464,9 +496,9 @@ async def check_google(domain: str, region: str = "US") -> dict:
         return result
 
     url = f"https://adstransparency.google.com/?region={region}&domain={urllib.parse.quote(domain)}"
-    text = await _fetch_rendered_text(url)
+    text, fail_reason = await _fetch_rendered_text(url)
     if text is None:
-        result["note"] = "Google Ads Transparency Center did not load (timeout, network error, or missing browser binary)."
+        result["note"] = _load_failure_note("Google Ads Transparency Center", fail_reason)
         return result
 
     result["checked"] = True
@@ -497,15 +529,16 @@ async def check_google(domain: str, region: str = "US") -> dict:
 # ---------------------------------------------------------------------------
 
 async def _search_tiktok_once(query: str, country: str, lookback_days: int) -> dict:
-    out = {"checked": False, "ad_count_estimate": 0, "candidates": [], "note": ""}
+    out = {"checked": False, "ad_count_estimate": 0, "candidates": [], "note": "", "fail_reason": None}
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - lookback_days * 86400 * 1000
     url = ("https://library.tiktok.com/ads?"
            f"region={country}&query={urllib.parse.quote(query)}"
            f"&start_time={start_ms}&end_time={now_ms}")
-    text = await _fetch_rendered_text(url)
+    text, fail_reason = await _fetch_rendered_text(url)
     if text is None:
-        out["note"] = "TikTok Commercial Content Library did not load (timeout, network error, or missing browser binary)."
+        out["fail_reason"] = fail_reason
+        out["note"] = _load_failure_note("TikTok Commercial Content Library", fail_reason)
         return out
 
     out["checked"] = True
@@ -542,10 +575,12 @@ async def check_tiktok(client_name: str, client_website: str = "", country: str 
     samples: list[dict] = []
     any_checked = False
     total_ads = 0
+    last_fail_reason = None
 
     for q in variants:
         r = await _search_tiktok_once(q, country, lookback_days)
         if not r["checked"]:
+            last_fail_reason = r.get("fail_reason") or last_fail_reason
             continue
         any_checked = True
         total_ads += r["ad_count_estimate"]
@@ -555,7 +590,7 @@ async def check_tiktok(client_name: str, client_website: str = "", country: str 
             samples.append(cand)
 
     if not any_checked:
-        result["note"] = "TikTok Commercial Content Library did not load for any name variant."
+        result["note"] = _load_failure_note("TikTok Commercial Content Library", last_fail_reason)
         return result
 
     result["checked"] = True

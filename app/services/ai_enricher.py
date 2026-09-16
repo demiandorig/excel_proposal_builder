@@ -1,10 +1,12 @@
 """
 AI enrichment for the Entravision Proposal Builder.
 
-Uses OpenAI gpt-4.1 (see _SEARCH_MODEL/_FALLBACK_MODEL below) to generate in
+Uses OpenAI gpt-5.1 (see _SEARCH_MODEL/_FALLBACK_MODEL below) to generate in
 a single API call:
   - Campaign name (short, memorable, title-cased)
-  - Per-product strategic blurbs with data citations (~70 words each)
+  - Per-product strategic blurbs, grounded in the campaign's own numbers
+    (~70 words each; a real citation is a bonus, never mandatory — see
+    writing_style.HOUSE_VOICE_GUIDE)
   - Internal AE email (professional, friendly)
   - Client-facing email body (for the Word doc)
 
@@ -21,6 +23,7 @@ from typing import Optional
 
 from app.catalog import by_name as _catalog_by_name
 from app.services.text_utils import normalize_newlines as _normalize_newlines
+from app.services.writing_style import HOUSE_VOICE_GUIDE
 
 try:
     from openai import OpenAI as _OpenAI
@@ -204,14 +207,19 @@ def safe_filename(title: str) -> str:
 # Main enrichment call
 # ---------------------------------------------------------------------------
 
-# Bumped one tier up from gpt-4o per explicit request ("beefier... not the
-# mini one"). Not necessarily the newest OpenAI model available by the time
-# this runs — my own knowledge cutoff is Jan 2026 — but it's a real,
-# confirmed-capable step up that still supports the Responses API +
-# web_search_preview tool this file depends on; flag it if something newer
-# should be used instead.
-_SEARCH_MODEL = "gpt-4.1"
-_FALLBACK_MODEL = "gpt-4.1"
+# Bumped from gpt-4.1 to gpt-5.1, OpenAI's current flagship as of Sep 2026
+# — confirmed via live web search against OpenAI's own model docs, not
+# guessed from static training knowledge (my own cutoff is Jan 2026), since
+# a wrong model string here would hard-fail every call. Two things changed
+# together with the model and must not be separated: (1) the Responses API
+# tool below is now "web_search" — GPT-5-series models don't support the
+# legacy "web_search_preview" this used to call, they error on it
+# outright; (2) the chat.completions fallback below no longer passes
+# `temperature=`, since GPT-5-series models reject any value but the
+# default (1). Splitting these apart would silently kill web search
+# (quietly falls through to the fallback) and then break the fallback too.
+_SEARCH_MODEL = "gpt-5.1"
+_FALLBACK_MODEL = "gpt-5.1"
 
 
 def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional[dict] = None,
@@ -259,7 +267,7 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     try:
         response = client.responses.create(
             model=_SEARCH_MODEL,
-            tools=[{"type": "web_search_preview"}],
+            tools=[{"type": "web_search"}],
             input=prompt,
             max_output_tokens=6000,
         )
@@ -275,7 +283,6 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
                 model=_FALLBACK_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=5000,
-                temperature=0.7,
             )
             raw = response.choices[0].message.content
             result = _parse_response(raw, request, line_items, used_web_search=False)
@@ -379,8 +386,10 @@ Subject: {current_client_subject}
 ## PLANNER'S REQUESTED CHANGE
 {reprompt.strip()}
 
+{HOUSE_VOICE_GUIDE}
+
 ## YOUR TASK
-Revise BOTH emails to incorporate the planner's requested change. Keep everything else about each email's structure, tone, and content the same unless the requested change implies otherwise.
+Revise BOTH emails to incorporate the planner's requested change. Keep everything else about each email's structure, tone, and content the same unless the requested change implies otherwise — and if either email has drifted toward the generic AI-sounding style the VOICE section above warns against, fix that too while you're in there, not just the requested change.
 
 CRITICAL — PRESERVE THESE LINES VERBATIM, EXACTLY AS WRITTEN, WHEREVER THEY APPEAR:
 Any line starting with "Proposal:", "Presentation:", or "Google Drive Link:" is a system-inserted reference line, not AI-authored content — copy it into your revised email character-for-character, in the same position relative to the surrounding text. Never reword, remove, or relocate these lines even if the requested change is about tone or structure elsewhere in the email.
@@ -394,11 +403,14 @@ Respond with this exact JSON structure:
 }}"""
 
     try:
+        # gpt-5-mini, not gpt-4o-mini — same GPT-5-series bump/reasoning as
+        # _SEARCH_MODEL above (a small model is fine here, this is a
+        # narrower revise-in-place task); no `temperature=` for the same
+        # reason (GPT-5-series rejects anything but its default of 1).
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=3000,
-            temperature=0.6,
         )
         raw = response.choices[0].message.content or ""
         match = re.search(r"\{[\s\S]*\}", raw)
@@ -599,12 +611,12 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
     # tiers-recommendation paragraph can be inserted or omitted without
     # having to renumber everything after it.
     internal_email_instruction = (
-        f"Full internal email to {ae_first}, in a warm, casual, collegial voice — like a colleague sharing good news, not a stiff corporate memo. Write it as a sequence of short paragraphs, IN THIS ORDER: "
+        f"Full internal email to {ae_first}. Follow the VOICE section above exactly — this email is precisely the kind of writing it describes: explain the REAL thinking behind the plan (why this mix, why this budget split, any real constraint or trade-off that shaped it) the way you'd actually explain it to a colleague, grounded in the specific numbers already given above, never generic praise or a restated summary of the plan. Write it as a sequence of short paragraphs, IN THIS ORDER: "
         f'— Open warmly and casually by first name, e.g. \\"Hi {ae_first}, hope your week is going well!\\" (vary the exact phrasing naturally each time, but always keep it warm/casual, never stiff/formal). '
         f'— A short transition line introducing the deliverable link(s) below, e.g. \\"{deliverable_example}\\". This request is {"a Full Presentation, so it DOES include a separate presentation deck" if is_full_presentation else "NOT a Full Presentation — do not mention a presentation, deck, or slides; there is only the one proposal/plan deliverable"}. '
         "— Immediately after that, on its own line, the literal placeholder text '{{PROPOSAL_LINE}}' (exactly these characters, nothing else on that line — it will be replaced with the real proposal name(s) and Drive link(s)). "
         "— One sentence noting the client-facing talking points are attached separately below, ready to copy and send once reviewed. "
-        f"— A detailed strategy paragraph (2-4 sentences) that names the specific target audience/demo/geo by name, states the actual dollar budget split{' across every option and market/segment' if tiers_block else ''} using the REAL numbers given above (never invent or alter them), and names the recommended tactic/product-family strategy with a concrete reason grounded in the data above — never a generic restatement like 'reach the target audience.' "
+        f"— A detailed strategy paragraph (2-4 sentences) that names the specific target audience/demo/geo by name, states the actual dollar budget split{' across every option and market/segment' if tiers_block else ''} using the REAL numbers given above (never invent or alter them), and names the recommended tactic/product-family strategy with a concrete reason grounded in the data above — never a generic restatement like 'reach the target audience.' If the context above shows a real constraint that shaped this mix (a minimum-spend limit, an inventory or reach ceiling, a channel deliberately weighted down or up to fit the budget), say so plainly and explain the trade-off, the way the VOICE example does — that reads as real judgment, not a generic pitch. "
         "— ONLY when the context above gives a real, specific basis for it (a stated timeline, seasonality, or creative consideration — never invented), a short paragraph with concrete creative/execution guidance: how messaging should evolve over the flight, or which ad lengths/formats suit which objective. Skip this paragraph entirely when there's no real basis for it above — never invent a campaign calendar or creative plan that isn't grounded in the given context. "
         + ("— A paragraph that explicitly recommends WHICH option the client should run when budget allows, and why (grounded in the reach/frequency tradeoff or channel-fragmentation risk visible in the data above), plus what to do if the client stays at the lower option instead. "
            if tiers_block else "")
@@ -623,7 +635,7 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
     # rather than just eyeballing the source). \\" (double backslash) is
     # what's needed to make Python emit a literal backslash-quote pair.
     client_email_instruction = (
-        "Full client-facing email (no internal references). Sections: (1) Opening paragraph on why digital matters now for this specific audience, (2) "
+        "Full client-facing email (no internal references). Follow the VOICE section above throughout — specific and grounded in this client's real numbers and targeting, never generic. Sections: (1) Opening paragraph on why digital matters now for this specific audience, (2) "
         + ('For EACH budget option: its own heading (\\"Option A\\", \\"Option B\\", ...), its total investment, and for each product in that option — product name, net budget, then the strategic blurb'
            if tiers_block else
            'Total investment line, then for EACH product: product name as heading, net budget, then the strategic blurb')
@@ -663,13 +675,19 @@ industry-wide number. Only use a generic market-wide stat when nothing more
 specific is plausible, and say so if you do ("no audience-specific data
 available, using general market benchmark").
 
-## YOU HAVE LIVE WEB SEARCH — USE IT, DON'T GUESS
-This is a real capability, not a hypothetical. Before writing each product
-blurb, run an actual search for that stat — don't write a number that
-merely sounds plausible for the category. If the client's website is
-given above, search it too so the blurbs reflect what the client actually
-does, not an assumption from the name. A citation you can't actually
-verify via search should not be presented as sourced data.
+## YOU HAVE LIVE WEB SEARCH — USE IT WHEN A STAT GENUINELY HELPS, DON'T FORCE IT
+This is a real capability, not a hypothetical, and it's there for when a
+real external stat would genuinely strengthen a blurb — search for it
+rather than writing a number that merely sounds plausible for the
+category. It is NOT a requirement for every blurb: a blurb reasoning
+entirely from this campaign's own numbers and this product's own fit
+(no external citation at all) is a fully acceptable, often stronger,
+outcome — see VOICE below. If the client's website is given above, search
+it too so the blurbs reflect what the client actually does, not an
+assumption from the name. A citation you can't actually verify via search
+should not be presented as sourced data.
+
+{HOUSE_VOICE_GUIDE}
 
 BAD blurb (generic, reject this style): "Reach your target audience
 through premium video content that drives engagement and results."
@@ -684,11 +702,11 @@ in this blurb, no matter how well it reads.
 GOOD blurb (specific, required style): "[This product], per its own
 description above, does [the specific thing it does — paraphrase, don't
 just repeat the description verbatim]. For {request.demo or 'this demo'}
-in {request.geo or 'this market'}, that matters because [real stat found
-via search, tied to this product's actual category] (Source, Year).
-[One concrete, specific detail — a targeting capability, format, or
-placement this particular product offers — that makes it fit this
-audience, stated plainly, not dressed up as a claim about Entravision]."
+in {request.geo or 'this market'}, [a concrete, specific detail — a
+targeting capability, format, budget/reach trade-off, or placement this
+particular product offers — that makes it fit this audience, stated
+plainly]. Only add a real, search-verified stat (Source, Year) if it
+genuinely adds something beyond that — never as a mandatory add-on."
 
 Do NOT close a blurb with a generic "Entravision's [X] advantage/expertise
 makes this the right execution/choice for this client" sentence — that
@@ -718,7 +736,7 @@ Return this exact JSON structure (no deviation):
 }}
 
 RULES:
-- Each product blurb: 50–80 words, insightful (not a basic restatement of the category), include one real statistic with citation (Source Name, Year), and must name at least one specific targeting value from the Target Audience section above
+- Each product blurb: 50–80 words, insightful (not a basic restatement of the category), grounded first in this campaign's own real numbers/product fit (see VOICE above), and must name at least one specific targeting value from the Target Audience section above. A real statistic with citation (Source Name, Year) is a welcome addition when it genuinely strengthens the point — never a mandatory ingredient; a blurb with no external citation at all, reasoning entirely from this client's own specifics, is a perfectly good and often stronger outcome
 - Never close a blurb with a generic "Entravision's [X] expertise/advantage makes this the right execution/choice for this client" sentence — cut it outright rather than reword it. Every real, useful sentence in a blurb is specific to that product+audience; a sentence that would read the same with the product name swapped out doesn't belong
 - Before writing each blurb, re-read that product's own "What this actually is" line above and its own row in the Entravision Knowledge Base. That is the ONLY source of truth for what the product does and which Entravision advantage applies to it — not the product's name alone, not another product's blurb, not a family that merely sounds adjacent
 - Every citation must name a real, specific, searchable source (publisher + year) you actually found via search — never a vague placeholder like "Industry Report, 2025." If you can't find a specific real source, don't present a number as sourced data — fold it into the blurb as directional context instead

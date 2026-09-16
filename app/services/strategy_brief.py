@@ -24,6 +24,7 @@ except ImportError:
     _HAS_OPENAI = False
 
 from app.services.text_utils import normalize_newlines as _normalize_newlines
+from app.services.writing_style import HOUSE_VOICE_GUIDE
 from app.services import ad_presence as _ad_presence_svc
 
 
@@ -50,8 +51,19 @@ General: Entravision's deep expertise in creating culturally relevant, bilingual
 """.strip()
 
 
-_SEARCH_MODEL = "gpt-4o"
-_FALLBACK_MODEL = "gpt-4o"
+# Bumped from gpt-4o to gpt-5.1, OpenAI's current flagship as of Sep 2026 —
+# confirmed via live web search against OpenAI's own model docs, not
+# guessed from static training knowledge, since a wrong model string here
+# would hard-fail every call. Two things changed together with the model
+# and must not be separated: (1) the Responses API tool below is now
+# "web_search" — GPT-5-series models don't support the legacy
+# "web_search_preview" this used to call, they error on it outright; (2)
+# the chat.completions fallback below no longer passes `temperature=`,
+# since GPT-5-series models reject any value but the default (1).
+# Splitting these apart would silently kill web search (quietly falls
+# through to the fallback) and then break the fallback too.
+_SEARCH_MODEL = "gpt-5.1"
+_FALLBACK_MODEL = "gpt-5.1"
 
 
 async def generate_brief(request, reprompt: Optional[str] = None) -> dict:
@@ -96,7 +108,7 @@ async def generate_brief(request, reprompt: Optional[str] = None) -> dict:
     try:
         response = client.responses.create(
             model=_SEARCH_MODEL,
-            tools=[{"type": "web_search_preview"}],
+            tools=[{"type": "web_search"}],
             input=prompt,
             max_output_tokens=3000,
         )
@@ -112,7 +124,6 @@ async def generate_brief(request, reprompt: Optional[str] = None) -> dict:
                 model=_FALLBACK_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=2500,
-                temperature=0.7,
             )
             raw = response.choices[0].message.content or ""
             result = _parse(raw, used_web_search=False)
@@ -286,6 +297,15 @@ regional stat when a DMA is given), use that over a generic industry-wide
 stat. Only fall back to a generic market-wide statistic when nothing more
 specific is plausible — and when you do, say so explicitly (e.g. "no
 audience-specific data available, using general market benchmark").
+
+{HOUSE_VOICE_GUIDE}
+
+The client_summary/market_context/objectives_analysis/strategy_summary
+fields are exactly the kind of writing the VOICE section above describes —
+a senior planner's own reasoning, not a report generated about the client.
+recommended_tactics/key_insights keep their own citation-backed structure
+below (that rigor is the point of this document), but every rationale/
+insight sentence should still read like a person wrote it, not a template.
 
 ## YOUR TASK
 1. Briefly summarize who this client is and what they do (use your knowledge to infer from name/website/category).
