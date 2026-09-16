@@ -296,8 +296,8 @@ async function maybeReopenProposal() {
     renderLineItems();
     renderAllTierTabStrips();
     document.getElementById("tier-geo-input").value = state.activeTierGeo || "";
-    document.getElementById("tier-start-date-input").value = state.activeTierStartDate || "";
-    document.getElementById("tier-end-date-input").value = state.activeTierEndDate || "";
+    document.getElementById("tier-start-date-input").value = _toIsoDateString(state.activeTierStartDate);
+    document.getElementById("tier-end-date-input").value = _toIsoDateString(state.activeTierEndDate);
     // A reopened proposal already has every step's data (it was fully
     // generated once) — let the nav pills jump anywhere immediately
     // instead of only unlocking as the planner re-visits each step.
@@ -673,8 +673,8 @@ function onNext(n) {
       state.parsed.agency_fee != null ? state.parsed.agency_fee : "";
     // Per-tier geo/date override boxes — reflect whichever tier is currently active.
     document.getElementById("tier-geo-input").value = state.activeTierGeo || "";
-    document.getElementById("tier-start-date-input").value = state.activeTierStartDate || "";
-    document.getElementById("tier-end-date-input").value = state.activeTierEndDate || "";
+    document.getElementById("tier-start-date-input").value = _toIsoDateString(state.activeTierStartDate);
+    document.getElementById("tier-end-date-input").value = _toIsoDateString(state.activeTierEndDate);
     if (state.lineItems.length === 0) {
       state.lineItems = (state.parsed.products_selected || []).map(name => {
         const p = state.productIndex[name];
@@ -786,7 +786,7 @@ async function onParse() {
   }
   const btn = document.getElementById("parse-btn");
   btn.disabled = true;
-  btn.textContent = "Parsing…";
+  btn.innerHTML = '<span class="btn-inline-spinner"></span>Parsing…';
   try {
     const res = await fetch("/api/parse", {
       method: "POST",
@@ -830,6 +830,12 @@ function fillForm(req) {
     }
     if (req[f] === null || req[f] === undefined) {
       el.value = "";
+    } else if (el.type === "date") {
+      // A native date input silently renders blank for anything that
+      // isn't exactly YYYY-MM-DD — this app's dates come from free-text
+      // parsing, so they aren't guaranteed to already be that. Normalize
+      // rather than let a genuinely-parsed date look like a parse failure.
+      el.value = _toIsoDateString(req[f]);
     } else {
       el.value = req[f];
     }
@@ -1975,23 +1981,47 @@ async function onRecommend() {
     alert("Enter a target monthly budget first.");
     return;
   }
-  const res = await fetch("/api/recommend", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      request: state.parsed,
-      monthly_budget: budget,
-      strategy_brief: state.strategyBrief || null,
-    }),
-  });
-  if (!res.ok) {
-    alert("Recommend failed: " + res.statusText);
-    return;
+  const btn = document.getElementById("recommend-btn");
+  btn.disabled = true;
+  const originalLabel = btn.innerHTML;
+  btn.innerHTML = '<span class="btn-inline-spinner"></span>Suggesting…';
+  try {
+    const res = await fetch("/api/recommend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: state.parsed,
+        monthly_budget: budget,
+        strategy_brief: state.strategyBrief || null,
+      }),
+    });
+    if (!res.ok) {
+      alert("Recommend failed: " + res.statusText);
+      return;
+    }
+    const data = await res.json();
+    // Spread FIRST, id override SECOND — the server's own LineItem.id is
+    // always null (recommend_line_items() never sets one), so the other
+    // order (id first, `...li` after) let li.id:null clobber the freshly
+    // generated id right back to null on every single recommended line.
+    // That silently broke per-row identity everywhere line items are
+    // looked up by id instead of array index — most visibly Step 05
+    // Monthly Breakdown's _mbFindLineItem(), where every row resolved to
+    // the very first one regardless of which row was actually edited.
+    // Matches the same spread order onDuplicateLineItem already uses.
+    state.lineItems = data.line_items.map(li => ({ ...li, id: newLineItemId() }));
+    state.availsData = {};  // previous avails were keyed to the old line items' ids
+    // Stale indices from before this replacement shouldn't leave an
+    // unrelated row's rate-override editor or "Other…" objective box
+    // spontaneously expanded — every other function that wholesale-
+    // replaces state.lineItems already clears these.
+    state.rateOverrideOpen.clear();
+    state.objectiveOtherOpen.clear();
+    renderLineItems();
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalLabel;
   }
-  const data = await res.json();
-  state.lineItems = data.line_items.map(li => ({ id: newLineItemId(), ...li }));
-  state.availsData = {};  // previous avails were keyed to the old line items' ids
-  renderLineItems();
 }
 
 // --------------------------------------------------------------------------
@@ -2251,6 +2281,21 @@ function _mbParseDate(raw) {
 }
 
 function _mbMonthKey(d) { return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`; }
+
+// Coerces any of the loosely-formatted date strings this app already
+// accepts (parsed from a free-text Notion paste, so not guaranteed
+// ISO — could be "9/15/2026" etc.) into the strict YYYY-MM-DD a native
+// <input type="date"> requires to actually show the value instead of
+// silently rendering blank. Reuses _mbParseDate's own lenient parsing
+// (already proven against this app's real date formats) rather than a
+// second, separate parser. Returns "" (never null/undefined) for
+// anything unparseable, so a date <input>'s .value assignment is always
+// a valid, safe string.
+function _toIsoDateString(raw) {
+  const d = _mbParseDate(raw);
+  if (!d) return "";
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
 function _mbMonthLabel(d) {
   return d.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
 }
@@ -3345,7 +3390,7 @@ async function onDriveUpload() {
   if (!state.proposalId) return;
   const status = document.getElementById("drive-status");
   status.classList.remove("hidden", "ok", "warn");
-  status.textContent = "Uploading to Drive…";
+  status.innerHTML = '<span class="btn-inline-spinner"></span>Uploading to Drive…';
   // Everything below is awaited inside a try/catch on purpose — without it,
   // any failure (a network hiccup, a non-JSON error response, a timeout)
   // left the status text frozen on "Uploading to Drive…" forever with no

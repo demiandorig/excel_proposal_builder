@@ -1,5 +1,10 @@
 /* ========================================================================
-   Entravision Proposal Builder — editorial console aesthetic
+   Entravision Proposal Builder
+   Tokens below follow the company's own "Entravision HTML design system"
+   guidelines doc (Sep 2026) — colors, type, radius scale, and shadow style
+   are all taken from it directly rather than this file's own earlier,
+   independently-evolved choices. See each token group's comment for the
+   specific rule it encodes.
    ======================================================================== */
 
 :root {
@@ -11,28 +16,59 @@
   --paper-card: #ffffff;
   --rule: #d8d2c5;
   --rule-soft: #e8e3d8;
-  --accent: #910e95;            /* Entravision purple — used sparingly */
+
+  /* Official brand palette (Primary/Secondary/Tertiary/Quaternary/
+     Quinary, verbatim hex from the design-system doc). Usage rule from
+     the same doc: "Primary purple is the dominant, load-bearing brand
+     color... Secondary/tertiary/quaternary/quinary are high-energy
+     accents for charts, tags and emphasis — never backgrounds. At most
+     one accent per surface, alongside purple and neutral." —
+     --brand-tertiary/--brand-quaternary are kept available for a future
+     chart/tag surface but deliberately not forced into use everywhere. */
+  --accent: #910e95;             /* Primary */
   --accent-soft: #f3e5f4;
-  --green: #4d6e3a;
-  --green-soft: #e8f0dd;
-  --amber: #b87800;
-  --amber-soft: #fbeed1;
-  --red: #a8261c;
-  --red-soft: #fdf1f0;   /* was hardcoded #fdf1f0 in ~6 places — every OTHER status color already had its own -soft pairing */
+  --brand-secondary: #ff003c;
+  --brand-tertiary: #c800b4;
+  --brand-quaternary: #0098e2;
+  --brand-quinary: #ff6c02;
 
-  --font-display: "Fraunces", Georgia, serif;
-  --font-body: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* The brand palette above is brand-moment accents, not a semantic
+     status system — it has no "success" color at all. Danger/warning
+     map onto the brand's own Secondary (red) and Quinary (orange), which
+     already read that way; success stays a conventional, deliberately
+     quiet green (no brand equivalent exists) so it doesn't compete with
+     the vivid brand accents on the same surface. */
+  --green: #3f7a4f;
+  --green-soft: #e8f3ea;
+  --amber: var(--brand-quinary);
+  --amber-soft: #ffe8d6;
+  --red: var(--brand-secondary);
+  --red-soft: #ffe1e7;
+
+  /* Typography, per the design-system doc's own type slide:
+     "Poppins Bold: brand-voice moments — eyebrows, CTAs, stat callouts.
+     Used sparingly." / "Open Sans Light: headings h1-h3 (closest match
+     to 'Open Sans Thin' — flagged substitution)." / "Open Sans Regular:
+     all body copy, labels, and UI text." Replaces the previous
+     Fraunces/Inter pairing entirely. JetBrains Mono is kept, but scoped
+     down to genuinely tabular/id-like content (proposal IDs, rate/budget
+     table columns) rather than general labels, which move to Open Sans
+     per that last rule. */
+  --font-display: "Open Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-body: "Open Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
-  /* Small uppercase tracked labels (kickers, tab labels) — the one place
-     the brand deck's own Poppins-bold treatment layers cleanly onto this
-     app's existing serif-display + mono-label system without competing
-     with Fraunces for the same "distinctive headline" role. */
-  --font-kicker: "Poppins", var(--font-mono);
+  --font-kicker: "Poppins", var(--font-body);
 
-  --radius: 4px;
-  --radius-lg: 8px;
-  --shadow-soft: 0 1px 2px rgba(0,0,0,0.04), 0 2px 8px rgba(0,0,0,0.04);
-  --shadow-card: 0 1px 3px rgba(0,0,0,0.05), 0 4px 16px rgba(0,0,0,0.04);
+  /* "10px base corner radius; 6px for small controls, up to 24px for
+     large surfaces" (verbatim). */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 24px;
+
+  /* "Crisp, hairline-driven shadows — near-zero blur, never soft or
+     glossy" (verbatim) — replaces the previous soft/diffuse shadows. */
+  --shadow-soft: 0 1px 2px rgba(26,24,21,0.08);
+  --shadow-card: 0 1px 2px rgba(26,24,21,0.06), 0 0 0 1px rgba(26,24,21,0.04);
 }
 
 * { box-sizing: border-box; }
@@ -57,17 +93,9 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Subtle paper texture overlay */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    radial-gradient(circle at 25% 30%, rgba(145,14,149,0.015) 0%, transparent 50%),
-    radial-gradient(circle at 80% 70%, rgba(145,14,149,0.01) 0%, transparent 50%);
-  z-index: 0;
-}
+/* No body::before texture overlay — the design system calls for "flat
+   backgrounds only — no gradients, no textures, no photo overlays,"
+   which the previous subtle radial-gradient paper texture violated. */
 
 /* ----- Masthead ----- */
 .masthead {
@@ -100,11 +128,13 @@ body::before {
   width: auto;
   display: block;
 }
+.brand-title { min-width: 0; }
 .brand-name {
   font-family: var(--font-display);
   font-size: 17px;
   font-weight: 700;
   letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 .brand-tag {
   font-family: var(--font-mono);
@@ -112,6 +142,7 @@ body::before {
   color: var(--ink-faint);
   text-transform: uppercase;
   letter-spacing: 0.12em;
+  white-space: nowrap;
 }
 
 .step-nav {
@@ -233,12 +264,11 @@ body::before {
 }
 .display {
   font-family: var(--font-display);
-  font-size: 38px;
-  line-height: 1.05;
-  font-weight: 500;
-  letter-spacing: -0.02em;
+  font-size: 36px;
+  line-height: 1.15;
+  font-weight: 300;   /* Open Sans Light — "headings h1-h3" per the design system */
+  letter-spacing: -0.01em;
   margin: 0 0 12px;
-  font-variation-settings: "opsz" 80;
 }
 .lede {
   font-size: 16px;
@@ -746,14 +776,13 @@ body::before {
   color: var(--ink-faint);
 }
 .totals-display .value {
-  /* Bolder/bigger than a plain body number — this is the single most
-     business-critical figure on the whole screen, styled to actually
-     read that way (matching the brand deck's own confident, colored,
-     big-numeral treatment for its headline stats) rather than sitting
-     at the same visual weight as everything around it. */
-  font-family: var(--font-display);
-  font-size: 30px;
-  font-weight: 600;
+  /* "Poppins Bold: stat callouts" per the design system — this is the
+     single most business-critical figure on the whole screen, styled to
+     actually read that way rather than sitting at the same visual
+     weight as everything around it. */
+  font-family: var(--font-kicker);
+  font-size: 26px;
+  font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--accent);
 }
@@ -1342,9 +1371,9 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   margin-bottom: 2px;
 }
 .generate-summary .sum-row .val {
-  font-family: var(--font-display);
-  font-size: 18px;
-  font-weight: 500;
+  font-family: var(--font-kicker);   /* Poppins Bold — "stat callouts" per the design system */
+  font-size: 16px;
+  font-weight: 700;
 }
 .generate-summary .sum-row .val.mono {
   font-family: var(--font-mono);
@@ -1436,6 +1465,9 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   border-radius: var(--radius);
   font-size: 13px;
   font-family: var(--font-mono);
+  background: var(--paper-warm);
+  border: 1px solid var(--rule);
+  color: var(--ink-soft);
 }
 .drive-status.hidden { display: none; }
 .drive-status.ok {
@@ -1470,6 +1502,25 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   flex-shrink: 0;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* A small inline busy-spinner for a BUTTON's own label (Parse, Suggest
+   mix, Upload to Drive, ...) — as opposed to .strategy-spinner's bigger,
+   full-row loading state for Strategy/Roadblocks/Generate. Uses
+   currentColor for its ring so the same class works correctly inside
+   both a dark .btn-primary (white text) and an outlined .btn-secondary
+   (ink/accent text) with no color variant needed. */
+.btn-inline-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 7px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  opacity: 0.85;
+  vertical-align: -2px;
+  animation: spin 0.7s linear infinite;
+}
 
 .strategy-error {
   padding: 16px 20px;
@@ -1529,8 +1580,9 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   margin-bottom: 4px;
 }
 .mb-summary-amount {
-  font-family: var(--font-display);
-  font-size: 20px;
+  font-family: var(--font-kicker);   /* Poppins Bold — "stat callouts" per the design system */
+  font-weight: 700;
+  font-size: 18px;
   color: var(--paper);
 }
 .mb-summary-cell-total .mb-summary-amount { color: var(--accent); }
@@ -2085,6 +2137,18 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 .hidden { display: none !important; }
 
 /* Responsive */
+/* Medium: the masthead's 3 flex children (brand lockup, 8-step nav,
+   account widget) stop comfortably fitting on one row well before the
+   phone breakpoint below — collapse each step pill to its bare number
+   (title="" tooltip carries the label) rather than letting the row wrap
+   or the brand name break mid-phrase. */
+@media (max-width: 1180px) {
+  .masthead-inner { gap: 16px; padding: 16px 20px; }
+  .step-label { display: none; }
+  .step { padding: 6px 9px 10px; gap: 0; }
+  .account-widget .account-email { display: none; }  /* the email is the least-critical piece here — Log out/Admin stay */
+}
+
 @media (max-width: 800px) {
   .masthead-inner { flex-direction: column; gap: 16px; align-items: flex-start; }
   .step-nav { flex-wrap: wrap; }

@@ -7,7 +7,7 @@
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,700;9..144,900&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&family=Poppins:wght@700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500;700&family=Poppins:wght@700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -21,14 +21,14 @@
         </div>
       </a>
       <nav class="step-nav" aria-label="Progress">
-        <div class="step active" data-step="1"><span>01</span> Paste</div>
-        <div class="step" data-step="2"><span>02</span> Review</div>
-        <div class="step" data-step="3"><span>03</span> Strategy</div>
-        <div class="step" data-step="4"><span>04</span> Curate</div>
-        <div class="step" data-step="5"><span>05</span> Monthly</div>
-        <div class="step" data-step="6"><span>06</span> Avails</div>
-        <div class="step" data-step="7"><span>07</span> Roadblocks</div>
-        <div class="step" data-step="8"><span>08</span> Generate</div>
+        <div class="step active" data-step="1" title="Paste"><span>01</span><span class="step-label"> Paste</span></div>
+        <div class="step" data-step="2" title="Review"><span>02</span><span class="step-label"> Review</span></div>
+        <div class="step" data-step="3" title="Strategy"><span>03</span><span class="step-label"> Strategy</span></div>
+        <div class="step" data-step="4" title="Curate"><span>04</span><span class="step-label"> Curate</span></div>
+        <div class="step" data-step="5" title="Monthly"><span>05</span><span class="step-label"> Monthly</span></div>
+        <div class="step" data-step="6" title="Avails"><span>06</span><span class="step-label"> Avails</span></div>
+        <div class="step" data-step="7" title="Roadblocks"><span>07</span><span class="step-label"> Roadblocks</span></div>
+        <div class="step" data-step="8" title="Generate"><span>08</span><span class="step-label"> Generate</span></div>
       </nav>
       <div id="account-widget" class="account-widget"></div>
     </div>
@@ -129,8 +129,8 @@ Client name: ...
 
         <fieldset>
           <legend>Flight</legend>
-          <label>Start date <input data-field="start_date" /></label>
-          <label>End date <input data-field="end_date" /></label>
+          <label>Start date <input data-field="start_date" type="date" /></label>
+          <label>End date <input data-field="end_date" type="date" /></label>
           <label>Months <input data-field="total_months" type="number" min="1" /></label>
           <label>Monthly budget
             <input data-field="monthly_budget" type="number" step="0.01" min="0" />
@@ -309,11 +309,11 @@ Client name: ...
         </label>
         <label class="inline-input tier-date-override">
           <span>Start override <small>(blank = default)</small></span>
-          <input type="text" id="tier-start-date-input" placeholder="e.g. 2026-06-01" title="Blank uses Step 02's Start date" />
+          <input type="date" id="tier-start-date-input" title="Blank uses Step 02's Start date" />
         </label>
         <label class="inline-input tier-date-override">
           <span>End override <small>(blank = default)</small></span>
-          <input type="text" id="tier-end-date-input" placeholder="e.g. 2026-06-30" title="Blank uses Step 02's End date" />
+          <input type="date" id="tier-end-date-input" title="Blank uses Step 02's End date" />
         </label>
       </div>
 
