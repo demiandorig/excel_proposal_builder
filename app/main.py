@@ -1429,6 +1429,24 @@ async def admin_list_users() -> dict:
     return {"users": auth_svc.list_users()}
 
 
+@app.get("/api/admin/users/export")
+async def admin_export_users() -> Response:
+    """Download the user list as a CSV — same "at least see what's there
+    at a glance, outside the app" audit use as the Rates tab's export.
+    Never includes password hashes/salts — list_users() itself never
+    returns those (see auth_svc._public_user)."""
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["email", "is_admin", "disabled", "created_at"], extrasaction="ignore")
+    writer.writeheader()
+    for u in auth_svc.list_users():
+        writer.writerow(u)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=proposal_builder_users_export.csv"},
+    )
+
+
 @app.post("/api/admin/users")
 async def admin_create_user(body: NewUserRequest) -> dict:
     try:
@@ -1470,21 +1488,80 @@ async def admin_delete_user(user_id: str, request: Request) -> dict:
     return {"deleted": True}
 
 
+# Deliberately narrower than _PROPOSAL_COLUMNS (drops reopen_state,
+# email_doc_filename, pptx_net_filename, pptx_gross_filename) — the list
+# view below never reads any of those, but reopen_state in particular can
+# be a genuinely large JSON blob (the full request/line_items/avails_data
+# for every tier), and the old query pulled it across the wire for EVERY
+# row just to immediately discard it on every single admin page load.
+_PROPOSAL_LIST_COLUMNS = (
+    "proposal_id, client_name, seller_email, requested_by, notion_id, "
+    "proposal_title, filename, generated_at, requester_ip, "
+    "requester_user_agent, summary"
+)
+
+
 @app.get("/api/admin/proposals")
-async def admin_list_proposals() -> dict:
+async def admin_list_proposals(
+    request: Request,
+    page: int = 1,
+    page_size: int = 25,
+    mine: bool = True,
+    search: str = "",
+) -> dict:
     """
-    List every generated proposal this server knows about, newest first —
-    client, seller, Notion ID, title, and who/what
-    device generated it.
+    List generated proposals, newest first — client, seller, Notion ID,
+    title, and who/what device generated it. Paginated and filtered at
+    the DATABASE level (LIMIT/OFFSET + a WHERE clause), not fetch-
+    everything-then-slice-in-Python like the old version — a growing
+    proposals table was an unbounded, ever-slower query on every single
+    admin page load otherwise.
+
+    mine: True (the default) scopes to the LOGGED-IN admin's own
+    proposals (seller_email matches their login email, case-insensitive)
+    — per explicit request, planners land on "my work" first rather than
+    the whole company's history. False returns everyone's.
+
+    search: optional free-text filter (client, seller/AE, Notion ID, or
+    proposal title) — applied server-side now that the full list isn't
+    sitting in the browser to filter client-side anymore; a search
+    box keystroke is a real request now, not an instant in-memory filter.
     """
-    proposals = []
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 100)  # hard cap — this is a page size, not an export
+    offset = (page - 1) * page_size
+
+    where_clauses = []
+    params: list = []
+    if mine:
+        where_clauses.append("LOWER(seller_email) = LOWER(%s)")
+        params.append(request.state.user["email"])
+    search = search.strip()
+    if search:
+        like = f"%{search}%"
+        where_clauses.append(
+            "(client_name ILIKE %s OR seller_email ILIKE %s OR requested_by ILIKE %s "
+            "OR notion_id ILIKE %s OR proposal_title ILIKE %s)"
+        )
+        params.extend([like, like, like, like, like])
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    # COUNT(*) OVER() rides along with the page's own rows in one round
+    # trip, instead of a second full COUNT query just for the "N total"
+    # figure the pagination UI needs.
     rows = fetch_all(
         f"""
-        SELECT {_PROPOSAL_COLUMNS}
+        SELECT {_PROPOSAL_LIST_COLUMNS}, COUNT(*) OVER() AS total_count
         FROM proposals
+        {where_sql}
         ORDER BY generated_at DESC NULLS LAST, created_at DESC
-        """
+        LIMIT %s OFFSET %s
+        """,
+        (*params, page_size, offset),
     )
+
+    total_count = rows[0]["total_count"] if rows else 0
+    proposals = []
     for row in rows:
         meta = _proposal_metadata_from_row(row)
         proposals.append({
@@ -1502,8 +1579,14 @@ async def admin_list_proposals() -> dict:
             "total_gross": (meta.get("summary") or {}).get("total_gross"),
             "tabs_built": (meta.get("summary") or {}).get("tabs_built", []),
         })
-    proposals.sort(key=lambda p: p["generated_at"] or "", reverse=True)
-    return {"proposals": proposals, "count": len(proposals)}
+    return {
+        "proposals": proposals,
+        "count": len(proposals),
+        "total_count": total_count,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, -(-total_count // page_size)),  # ceil division
+    }
 
 
 def _resolve_admin_product_key(product_name: str) -> tuple[str, bool]:
@@ -1958,6 +2041,38 @@ async def admin_get_market_config() -> dict:
         })
     markets.sort(key=lambda m: (not m["is_default"], m["market_key"].lower()))
     return {"markets": markets, "base_ccs": config.get(BASE_CCS_KEY, []), "t1_ccs": config.get(T1_CCS_KEY, [])}
+
+
+@app.get("/api/admin/market-config/export")
+async def admin_export_market_config() -> Response:
+    """Download the market config table as a CSV — same audit/at-a-glance
+    use as the Rates and Users exports. Base/T1 CC lists aren't per-market
+    rows, so they're included as two extra summary rows at the top rather
+    than left out of the export entirely."""
+    config = load_market_config()
+    buf = io.StringIO()
+    fieldnames = ["market_key", "is_default", "address_line1", "address_line2", "dsc_email", "dsm_email", "ccs"]
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerow({"market_key": "(base CCs — every proposal, every market)", "ccs": "; ".join(config.get(BASE_CCS_KEY, []))})
+    writer.writerow({"market_key": "(T1 escalation CCs)", "ccs": "; ".join(config.get(T1_CCS_KEY, []))})
+    for key, entry in config.items():
+        if key in (BASE_CCS_KEY, T1_CCS_KEY):
+            continue
+        writer.writerow({
+            "market_key": key,
+            "is_default": key == DEFAULT_KEY,
+            "address_line1": entry.get("address_line1", ""),
+            "address_line2": entry.get("address_line2", ""),
+            "dsc_email": entry.get("dsc_email") or "",
+            "dsm_email": entry.get("dsm_email") or "",
+            "ccs": "; ".join(entry.get("ccs", [])),
+        })
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=proposal_builder_markets_export.csv"},
+    )
 
 
 class BaseCcsRequest(BaseModel):

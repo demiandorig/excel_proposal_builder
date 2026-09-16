@@ -4,6 +4,16 @@
 
 const adminState = {
   proposals: [],
+  // Server-side pagination/filter state for the Proposals tab — the full
+  // list no longer lives in the browser (see loadProposals()), so every
+  // one of these triggers a real re-fetch, not an in-memory re-filter.
+  proposalsPage: 1,
+  proposalsPageSize: 25,
+  proposalsMineOnly: true,   // per explicit request: land on "my work" first, not the whole company's history
+  proposalsSearch: "",
+  proposalsTotalCount: 0,
+  proposalsTotalPages: 1,
+  proposalsLoading: false,
   rates: [],
   ratesLoaded: false,
   markets: [],
@@ -16,11 +26,13 @@ const adminState = {
 document.addEventListener("DOMContentLoaded", () => {
   wireTabs();
   wireSearch();
+  wireProposalsControls();
   wireAddProduct();
   wireEditProduct();
   wireBulkUpload();
   wireMarketConfig();
   wireAddUser();
+  wireCsvExports();
   loadProposals();
 });
 
@@ -44,13 +56,102 @@ function wireTabs() {
   });
 }
 
+// Debounces a function — waits `ms` after the LAST call before actually
+// running, cancelling any pending run each time it's called again. Used
+// for the proposals search box now that a keystroke means a real network
+// request (server-side search) instead of an instant in-memory filter —
+// without this, typing a 6-character search would fire 6 separate
+// requests, working against the exact "don't hammer the DB" goal this
+// whole pagination change exists for.
+function _debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
 function wireSearch() {
-  document.getElementById("proposals-search").addEventListener("input", e => {
-    renderProposals(filterProposals(e.target.value));
-  });
+  document.getElementById("proposals-search").addEventListener(
+    "input",
+    _debounce(e => {
+      adminState.proposalsSearch = e.target.value;
+      adminState.proposalsPage = 1;  // a new search always restarts at page 1
+      loadProposals();
+    }, 350)
+  );
   document.getElementById("rates-search").addEventListener("input", e => {
     renderRates(filterRates(e.target.value));
   });
+}
+
+function wireProposalsControls() {
+  document.querySelectorAll("#proposals-scope-tabs .tier-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const mineOnly = btn.dataset.scope === "mine";
+      if (adminState.proposalsMineOnly === mineOnly) return;
+      adminState.proposalsMineOnly = mineOnly;
+      adminState.proposalsPage = 1;
+      loadProposals();
+    });
+  });
+  document.getElementById("proposals-prev-btn").addEventListener("click", () => {
+    if (adminState.proposalsPage <= 1) return;
+    adminState.proposalsPage -= 1;
+    loadProposals();
+  });
+  document.getElementById("proposals-next-btn").addEventListener("click", () => {
+    if (adminState.proposalsPage >= adminState.proposalsTotalPages) return;
+    adminState.proposalsPage += 1;
+    loadProposals();
+  });
+}
+
+// --------------------------------------------------------------------------
+// CSV exports (Rates, Markets, Users) — all three used to be (or, for
+// Markets/Users, would otherwise have become) a plain `<a href=... download>`
+// link, which gives the browser no hook to show any custom UI while the
+// file is actually being generated/downloaded — clicking one just sits
+// there with zero feedback until the browser's own download UI appears.
+// Fetched via JS instead so a spinner can show for exactly as long as the
+// request actually takes, then handed to the browser as a real download
+// via a throwaway Blob URL.
+// --------------------------------------------------------------------------
+
+function wireCsvExports() {
+  document.querySelectorAll("[data-csv-export]").forEach(btn => {
+    btn.addEventListener("click", () => downloadCsv(btn.dataset.csvExport, btn));
+  });
+}
+
+async function downloadCsv(url, btn) {
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="btn-inline-spinner"></span>Exporting…';
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error((await res.text().catch(() => "")) || res.statusText);
+    const blob = await res.blob();
+    // Filename from the server's Content-Disposition header when present
+    // (all three export endpoints set one) — falls back to a generic name
+    // rather than failing the download outright if that's ever missing.
+    const disposition = res.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : "export.csv";
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(blobUrl);
+  } catch (err) {
+    alert("Export failed: " + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -101,36 +202,78 @@ function renderBulkUploadResult(body) {
 // --------------------------------------------------------------------------
 
 async function loadProposals() {
+  // Guards the loading-indicator/table against an OLDER, slower request
+  // finishing after a NEWER one (e.g. flipping Mine->All then immediately
+  // typing a search) — only the request that's still current when it
+  // resolves gets to touch the DOM.
+  const requestToken = Symbol();
+  adminState._proposalsRequestToken = requestToken;
+  adminState.proposalsLoading = true;
+  renderProposalsLoading();
+
+  const params = new URLSearchParams({
+    page: String(adminState.proposalsPage),
+    page_size: String(adminState.proposalsPageSize),
+    mine: String(adminState.proposalsMineOnly),
+    search: adminState.proposalsSearch,
+  });
   try {
-    const res = await fetch("/api/admin/proposals");
+    const res = await fetch(`/api/admin/proposals?${params}`);
+    if (adminState._proposalsRequestToken !== requestToken) return;  // superseded
     const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
     adminState.proposals = data.proposals || [];
+    adminState.proposalsTotalCount = data.total_count || 0;
+    adminState.proposalsTotalPages = data.total_pages || 1;
+    // The server clamps page to what it actually has available (e.g. a
+    // filter change shrinks total_pages below the page we asked for) —
+    // mirror that back so Prev/Next and the "Page X of Y" text agree
+    // with what's really on screen.
+    adminState.proposalsPage = data.page || adminState.proposalsPage;
     renderProposals(adminState.proposals);
   } catch (e) {
+    if (adminState._proposalsRequestToken !== requestToken) return;
     document.getElementById("proposals-body").innerHTML =
-      `<tr><td colspan="9" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+      `<tr><td colspan="10" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+  } finally {
+    if (adminState._proposalsRequestToken === requestToken) {
+      adminState.proposalsLoading = false;
+      renderProposalsPagination();
+    }
   }
 }
 
-function filterProposals(query) {
-  const q = query.trim().toLowerCase();
-  if (!q) return adminState.proposals;
-  return adminState.proposals.filter(p =>
-    (p.client_name || "").toLowerCase().includes(q) ||
-    (p.seller_email || "").toLowerCase().includes(q) ||
-    (p.requested_by || "").toLowerCase().includes(q) ||
-    (p.notion_id || "").toLowerCase().includes(q) ||
-    (p.proposal_title || "").toLowerCase().includes(q)
-  );
+// Shown WHILE a (re-)fetch is in flight — the search box, the Mine/All
+// toggle, and Prev/Next all now trigger a real network request instead
+// of an instant client-side filter, so each of those deserves visible
+// feedback instead of the table just sitting there looking unresponsive
+// for however long that request takes.
+function renderProposalsLoading() {
+  document.getElementById("proposals-body").innerHTML =
+    `<tr><td colspan="10" class="admin-empty"><span class="btn-inline-spinner"></span>Loading…</td></tr>`;
+  document.getElementById("proposals-prev-btn").disabled = true;
+  document.getElementById("proposals-next-btn").disabled = true;
+}
+
+function renderProposalsPagination() {
+  const { proposalsPage, proposalsTotalPages, proposalsTotalCount, proposalsMineOnly } = adminState;
+  document.getElementById("proposals-page-info").textContent =
+    `Page ${proposalsPage} of ${proposalsTotalPages}`;
+  document.getElementById("proposals-prev-btn").disabled = proposalsPage <= 1;
+  document.getElementById("proposals-next-btn").disabled = proposalsPage >= proposalsTotalPages;
+  document.getElementById("proposals-count").textContent =
+    `${proposalsTotalCount} proposal${proposalsTotalCount === 1 ? "" : "s"}`;
+  document.querySelectorAll("#proposals-scope-tabs .tier-tab").forEach(btn => {
+    btn.classList.toggle("active", (btn.dataset.scope === "mine") === proposalsMineOnly);
+  });
 }
 
 function renderProposals(list) {
   const body = document.getElementById("proposals-body");
-  document.getElementById("proposals-count").textContent =
-    `${list.length} proposal${list.length === 1 ? "" : "s"}`;
+  renderProposalsPagination();
 
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="10" class="admin-empty">No proposals generated yet.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="10" class="admin-empty">No proposals match.</td></tr>`;
     return;
   }
 

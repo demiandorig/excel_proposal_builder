@@ -11,6 +11,17 @@
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
+  <!-- Full-page overlay while a past proposal is being reopened
+       (?reopen=... — see app.js's maybeReopenProposal()). That fetch +
+       the prefill work after it can take a few seconds, during which the
+       page would otherwise just be sitting on Step 01's blank paste box
+       with zero indication anything is happening, then jump straight to
+       Step 04 once it's done. -->
+  <div id="reopen-loading-overlay" class="reopen-loading-overlay hidden">
+    <div class="strategy-spinner"></div>
+    <span>Reopening proposal…</span>
+  </div>
+
   <header class="masthead">
     <div class="masthead-inner">
       <a class="brand" href="#" id="logo-reset" title="Start new proposal">

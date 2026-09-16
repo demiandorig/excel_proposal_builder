@@ -64,6 +64,18 @@
   color: var(--ink-faint);
 }
 
+.admin-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 16px;
+}
+.admin-pagination .mono {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+}
+
 .table-scroll {
   width: 100%;
   overflow-x: auto;

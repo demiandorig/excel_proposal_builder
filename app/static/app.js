@@ -248,6 +248,14 @@ async function maybeReopenProposal() {
   const reopenId = params.get("reopen");
   if (!reopenId) return;
 
+  // The fetch below + everything that follows it (pre-filling a dozen+
+  // pieces of state, rendering line items/tier strips, then jumping to
+  // Step 04) can visibly take a few seconds — without this, the page
+  // just sits on Step 01's blank paste box the whole time with no
+  // indication anything is happening, then jumps straight to Step 04.
+  const overlay = document.getElementById("reopen-loading-overlay");
+  overlay.classList.remove("hidden");
+
   try {
     const res = await fetch(`/api/proposal/${encodeURIComponent(reopenId)}/reopen`);
     if (!res.ok) {
@@ -328,6 +336,8 @@ async function maybeReopenProposal() {
     goToStep(4);  // straight to Curate — the paste/review content is already known
   } catch (e) {
     alert("Reopen failed: " + e.message);
+  } finally {
+    overlay.classList.add("hidden");
   }
 }
 

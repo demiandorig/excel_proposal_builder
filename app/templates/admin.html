@@ -43,6 +43,10 @@
 
       <div class="admin-toolbar">
         <input type="text" id="proposals-search" placeholder="Filter by client, seller, or Notion ID…" />
+        <div class="tier-tabs" id="proposals-scope-tabs">
+          <button type="button" class="tier-tab active" data-scope="mine">My proposals</button>
+          <button type="button" class="tier-tab" data-scope="all">All proposals</button>
+        </div>
         <span class="admin-count" id="proposals-count"></span>
       </div>
 
@@ -63,9 +67,15 @@
             </tr>
           </thead>
           <tbody id="proposals-body">
-            <tr><td colspan="9" class="admin-empty">Loading…</td></tr>
+            <tr><td colspan="10" class="admin-empty">Loading…</td></tr>
           </tbody>
         </table>
+      </div>
+
+      <div class="admin-pagination">
+        <button type="button" class="btn-secondary" id="proposals-prev-btn" disabled>← Prev</button>
+        <span id="proposals-page-info" class="mono"></span>
+        <button type="button" class="btn-secondary" id="proposals-next-btn" disabled>Next →</button>
       </div>
     </section>
 
@@ -189,7 +199,7 @@
         <input type="text" id="rates-search" placeholder="Filter by product or family…" />
         <span class="admin-count" id="rates-count"></span>
         <div class="spacer"></div>
-        <a href="/api/admin/products/export" class="btn-secondary" download>⬇ Export CSV</a>
+        <button type="button" class="btn-secondary" data-csv-export="/api/admin/products/export">⬇ Export CSV</button>
         <label class="btn-secondary bulk-upload-btn">
           ⬆ Bulk Upload CSV
           <input type="file" id="bulk-upload-input" accept=".csv" hidden />
@@ -241,6 +251,8 @@
         <input type="text" id="new-market-name" placeholder="New market name, e.g. Los Angeles…" />
         <button type="button" class="btn-secondary" id="add-market-btn">+ Add market</button>
         <span class="admin-count" id="markets-count"></span>
+        <div class="spacer"></div>
+        <button type="button" class="btn-secondary" data-csv-export="/api/admin/market-config/export">⬇ Export CSV</button>
       </div>
 
       <div class="table-scroll">
@@ -292,6 +304,11 @@
           </div>
         </form>
       </details>
+
+      <div class="admin-toolbar">
+        <div class="spacer"></div>
+        <button type="button" class="btn-secondary" data-csv-export="/api/admin/users/export">⬇ Export CSV</button>
+      </div>
 
       <div class="table-scroll">
         <table class="admin-table" id="users-table">
