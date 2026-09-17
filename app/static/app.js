@@ -1104,16 +1104,27 @@ function renderStrategyBrief(brief) {
     ? `Based on $${money(budget).replace("$","")}/mo × ${months} mo = ${money(budget * months)} total`
     : "";
 
-  // Tactics cards
+  // Tactics cards — each has a "include in brief" checkbox (defaults
+  // checked/selected: undefined and selected: true both count as
+  // selected, so a brief from before this feature existed, or a fresh
+  // one that never explicitly set the flag, starts fully selected
+  // rather than empty). Selection is stored directly on each tactic
+  // object in state.strategyBrief — see _selectedTactics() for where
+  // it's actually consulted (Suggest Mix, Generate) and
+  // onTacticSelectionChange() for the downloadable .docx rebuild.
   const tacticsEl = document.getElementById("brief-tactics");
   tacticsEl.innerHTML = "";
-  (brief.recommended_tactics || []).forEach(t => {
+  (brief.recommended_tactics || []).forEach((t, idx) => {
+    if (t.selected === undefined) t.selected = true;
     const pct = t.suggested_budget_pct || 0;
     const alloc = budget ? Math.round(budget * pct / 100 / 50) * 50 : null;
     const card = document.createElement("div");
-    card.className = "tactic-card";
+    card.className = "tactic-card" + (t.selected ? "" : " tactic-card-deselected");
     card.innerHTML = `
       <div class="tactic-header">
+        <label class="tactic-select" title="Include this tactic in the brief (and what feeds Suggest Mix / the final proposal)">
+          <input type="checkbox" class="tactic-select-checkbox" data-idx="${idx}" ${t.selected ? "checked" : ""} />
+        </label>
         <span class="tactic-family">${escapeHtml(t.product_family)}</span>
         <span class="tactic-pct">${pct}%${alloc ? ` · ~${money(alloc)}/mo` : ""}</span>
       </div>
@@ -1123,6 +1134,9 @@ function renderStrategyBrief(brief) {
       <p class="tactic-min-note">ⓘ This % is a ceiling for the whole ${escapeHtml(t.product_family)} tactic — if you curate more than one product under it in Step 04, each one still has its own separate minimum spend, not a shared pool.</p>
     `;
     tacticsEl.appendChild(card);
+  });
+  tacticsEl.querySelectorAll(".tactic-select-checkbox").forEach(cb => {
+    cb.addEventListener("change", (e) => onTacticSelectionChange(parseInt(e.target.dataset.idx, 10), e.target.checked));
   });
 
   // Key insights
@@ -1142,6 +1156,72 @@ function renderStrategyBrief(brief) {
     dlLink.classList.add("hidden");
   }
 }
+
+// Debounces a function — waits `ms` after the LAST call before actually
+// running, cancelling any pending run each time it's called again.
+function _debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+// The tactics actually feeding downstream (Suggest Mix, the final
+// Generate call) — everything EXCEPT one the planner explicitly
+// unchecked. Never mutates state.strategyBrief itself, so re-checking a
+// box later still has the tactic's original rationale/data intact —
+// this is a read-time filter, not a destructive one.
+function _selectedTactics() {
+  const tactics = (state.strategyBrief && state.strategyBrief.recommended_tactics) || [];
+  return tactics.filter(t => t.selected !== false);
+}
+
+// What every downstream AI call (Suggest Mix, Roadblocks, Generate)
+// should actually send as `strategy_brief` — the confirmed brief, but
+// with recommended_tactics narrowed to what the planner has checked.
+// null when there's no brief at all (Step 03 was skipped), matching
+// every existing call site's own `|| null` fallback.
+function _briefWithSelectedTactics() {
+  if (!state.strategyBrief) return null;
+  return { ...state.strategyBrief, recommended_tactics: _selectedTactics() };
+}
+
+function onTacticSelectionChange(idx, checked) {
+  const tactics = state.strategyBrief.recommended_tactics;
+  if (!tactics || !tactics[idx]) return;
+  tactics[idx].selected = checked;
+  const card = document.querySelectorAll(".tactic-card")[idx];
+  if (card) card.classList.toggle("tactic-card-deselected", !checked);
+  _debouncedRebuildStrategyDoc();
+}
+
+// Debounced so flipping a few checkboxes in a row doesn't fire a rebuild
+// request per click — same reasoning as the admin proposals search box.
+const _debouncedRebuildStrategyDoc = _debounce(async () => {
+  const brief = state.strategyBrief;
+  if (!brief || !brief.doc_token) return;
+  try {
+    await fetch(`/api/strategy/${brief.doc_token}/rebuild`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: state.parsed,
+        client_summary: brief.client_summary,
+        market_context: brief.market_context,
+        objectives_analysis: brief.objectives_analysis,
+        strategy_summary: brief.strategy_summary,
+        recommended_tactics: _selectedTactics(),
+        key_insights: brief.key_insights,
+        ad_presence: brief.ad_presence,
+      }),
+    });
+  } catch (e) {
+    // Non-fatal — the download link still serves whatever was last
+    // successfully built; the planner can just re-toggle to retry.
+    console.error("Strategy brief doc rebuild failed:", e);
+  }
+}, 600);
 
 const AD_PRESENCE_LANG_LABELS = { en: "English", es: "Spanish" };
 
@@ -1234,7 +1314,7 @@ async function onRoadblocksGenerate() {
       body: JSON.stringify({
         request: state.parsed,
         line_items: [...unionByProduct.values()],
-        strategy_brief: state.strategyBrief || null,
+        strategy_brief: _briefWithSelectedTactics(),
       }),
     });
     const data = await res.json();
@@ -2111,7 +2191,7 @@ async function onRecommend() {
       body: JSON.stringify({
         request: state.parsed,
         monthly_budget: budget,
-        strategy_brief: state.strategyBrief || null,
+        strategy_brief: _briefWithSelectedTactics(),
       }),
     });
     if (!res.ok) {
@@ -3223,7 +3303,7 @@ async function onGenerate() {
     tiers: allTiersForSubmit(),
     force_tabs: forceTabs,
     avails_data: state.availsData,
-    strategy_brief: state.strategyBrief || null,
+    strategy_brief: _briefWithSelectedTactics(),
     roadblocks: state.roadblocks || null,
     raw_notion_text: state.rawNotionText || null,
     addons: Object.entries(state.addons).map(([product_name, amount]) => ({ product_name, amount })),

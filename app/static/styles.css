@@ -1875,6 +1875,22 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   align-items: center;
   gap: 8px;
 }
+.tactic-select {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  margin-right: -2px;
+}
+.tactic-select-checkbox {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.tactic-card-deselected {
+  opacity: 0.5;
+}
+.tactic-card-deselected .tactic-select-checkbox { opacity: 1; }
 .tactic-family {
   font-family: var(--font-mono);
   font-size: 11px;

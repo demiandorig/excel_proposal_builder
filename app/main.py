@@ -741,6 +741,64 @@ async def download_strategy(doc_token: str) -> FileResponse:
     )
 
 
+class StrategyDocRebuildRequest(BaseModel):
+    request: dict
+    client_summary: str = ""
+    market_context: str = ""
+    objectives_analysis: str = ""
+    strategy_summary: str = ""
+    recommended_tactics: list = []
+    key_insights: list = []
+    ad_presence: Optional[dict] = None
+
+
+@app.post("/api/strategy/{doc_token}/rebuild")
+async def rebuild_strategy_doc(doc_token: str, body: StrategyDocRebuildRequest) -> dict:
+    """
+    Rebuilds the downloadable Strategy Brief .docx IN PLACE (same
+    doc_token/file path, so the existing download link on Step 03 keeps
+    working without the planner needing a new one) — same "revise the
+    already-generated doc without re-running the AI" pattern
+    reprompt_emails() already uses for the client email doc.
+
+    Exists specifically for the tactic-card checkboxes (see app.js's
+    renderStrategyBrief): recommended_tactics here is whatever the
+    PLANNER currently has selected, already filtered client-side —
+    deliberately not the full, unfiltered brief. The AI itself never runs
+    again; this only re-renders the same content into the .docx.
+    """
+    meta_file = PROPOSALS_DIR / f"strategy_{doc_token}.json"
+    if not meta_file.exists():
+        raise HTTPException(status_code=404, detail="Strategy brief not found")
+    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    doc_path = Path(meta["path"])
+
+    from app.services.notion_parser import ProductSpecifics
+    raw = dict(body.request)
+    if "specifics" in raw and isinstance(raw["specifics"], dict):
+        raw["specifics"] = ProductSpecifics(**raw["specifics"])
+    valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
+    raw = {k: v for k, v in raw.items() if k in valid_fields}
+    req = ProposalRequest(**raw)
+
+    built = docx_builder.build_strategy_brief_docx(
+        output_path=doc_path,
+        title=req.client_name or "Proposal",
+        client_summary=body.client_summary,
+        market_context=body.market_context,
+        objectives_analysis=body.objectives_analysis,
+        strategy_summary=body.strategy_summary,
+        recommended_tactics=body.recommended_tactics,
+        key_insights=body.key_insights,
+        monthly_budget=req.monthly_budget or 0.0,
+        total_months=req.total_months or 0,
+        ad_presence=body.ad_presence,
+    )
+    if not built:
+        raise HTTPException(status_code=500, detail="Could not rebuild strategy brief doc.")
+    return {"rebuilt": True}
+
+
 @app.post("/api/roadblocks")
 async def roadblocks(body: RoadblocksRequest) -> dict:
     """
