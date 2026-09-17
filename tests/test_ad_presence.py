@@ -1,4 +1,6 @@
 import asyncio
+import os
+import stat
 
 from app.services import ad_presence
 
@@ -46,3 +48,13 @@ def test_ad_presence_distinguishes_missing_browser_from_navigation_failure(monke
     assert result2["meta"]["checked"] is False
     assert "chromium" not in result2["meta"]["note"].lower()
     assert "timeout or network error" in result2["meta"]["note"].lower()
+
+
+def test_chromium_executable_prefers_explicit_deployment_path(monkeypatch, tmp_path):
+    executable = tmp_path / "chromium"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("CHROMIUM_EXECUTABLE_PATH", str(executable))
+    monkeypatch.setattr(ad_presence.shutil, "which", lambda _name: None)
+
+    assert ad_presence._chromium_executable() == str(executable)

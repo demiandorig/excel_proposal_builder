@@ -146,8 +146,30 @@ def _browser_env() -> dict[str, str]:
 
 
 def _chromium_executable() -> Optional[str]:
-    """Prefer Replit's managed Chromium wrapper with its Nix runtime setup."""
-    return shutil.which("chromium")
+    """Return a usable Chromium path before Playwright's cache fallback.
+
+    The interactive Replit workspace exposes managed Chromium at
+    ``/repl/tools/bin/chromium``. Published runtimes may not put that wrapper
+    on PATH, so deployment can also provide an explicit path through
+    ``CHROMIUM_EXECUTABLE_PATH``. If none of these are present, returning None
+    deliberately lets Playwright use the browser installed by the deployment
+    build.
+    """
+    candidates = [
+        os.environ.get("CHROMIUM_EXECUTABLE_PATH"),
+        "/repl/tools/bin/chromium",
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+        shutil.which("google-chrome"),
+    ]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def _clean_text(text: str) -> str:
@@ -190,6 +212,9 @@ async def _fetch_rendered_text(url: str) -> tuple[Optional[str], Optional[str]]:
             executable = _chromium_executable()
             if executable:
                 launch_options["executable_path"] = executable
+                _logger.info("ad_presence: using Chromium executable %s", executable)
+            else:
+                _logger.info("ad_presence: using Playwright-managed Chromium")
             try:
                 browser = await pw.chromium.launch(**launch_options)
             except Exception as e:
