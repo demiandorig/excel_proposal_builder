@@ -370,10 +370,26 @@ html, body {
   white-space: nowrap;
   flex: 1;
 }
-.proposal-name-copy {
+.proposal-name-copy, .proposal-name-edit {
   flex-shrink: 0;
   padding: 3px 10px;
   font-size: 10px;
+}
+.proposal-name-edit-input {
+  flex: 1;
+  min-width: 160px;
+  max-width: 420px;
+  padding: 5px 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  background: var(--paper-card);
+  color: var(--ink);
+}
+.proposal-name-edit-input:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
 @media (max-width: 760px) {
@@ -742,11 +758,27 @@ html, body {
 }
 .agency-fee-box input { width: 100px; }
 .tier-geo-override input { width: 240px; }
+.tier-override-panel {
+  margin-bottom: 14px;
+}
+.tier-override-panel summary {
+  list-style: none;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+  user-select: none;
+}
+.tier-override-panel summary::-webkit-details-marker { display: none; }
+.tier-override-panel summary::before { content: "▸ "; }
+.tier-override-panel[open] summary::before { content: "▾ "; }
+.tier-override-panel summary:hover { color: var(--accent); }
 .tier-override-row {
   display: flex;
   align-items: center;
   gap: 20px;
   flex-wrap: wrap;
+  margin-top: 12px;
   margin-bottom: 14px;
 }
 .tier-override-row .inline-input { margin-bottom: 0; flex: 0 0 auto; }
@@ -1600,6 +1632,12 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 }
 .mb-summary-cell-total .mb-summary-amount { color: var(--accent); }
 .mb-summary-cell-total { border-left: 1px solid rgba(255,255,255,0.2); padding-left: 18px; }
+
+.mb-units-ref {
+  font-size: 12px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
 
 .mb-mode-select {
   display: flex;

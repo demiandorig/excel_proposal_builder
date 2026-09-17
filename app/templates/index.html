@@ -50,11 +50,19 @@
        convention title on hand (e.g. to name a Drive folder or Slack
        thread mid-workflow) without hunting back to the paste screen. -->
   <div class="proposal-name-bar hidden" id="proposal-name-bar">
-    <div class="proposal-name-bar-inner">
+    <div class="proposal-name-bar-inner" id="proposal-name-view">
       <span class="proposal-name-label">Proposal name</span>
       <span class="proposal-name-text" id="proposal-name-text"></span>
+      <button class="btn-copy proposal-name-edit" id="proposal-name-edit-btn" title="Edit the campaign name">✎ Edit</button>
       <button class="btn-copy proposal-name-copy" id="proposal-name-copy-btn"
               data-copy-target="proposal-name-text" title="Copy proposal name">⧉ Copy</button>
+    </div>
+    <div class="proposal-name-bar-inner proposal-name-edit-row hidden" id="proposal-name-edit-row">
+      <span class="proposal-name-label">Campaign name</span>
+      <input type="text" id="proposal-name-edit-input" class="proposal-name-edit-input"
+             title="This is only the campaign-name part of the full naming convention — the ID/date/doc-type segments stay derived automatically." />
+      <button class="btn-copy" id="proposal-name-save-btn" title="Save">✓ Save</button>
+      <button class="btn-copy" id="proposal-name-cancel-btn" title="Cancel">✕ Cancel</button>
     </div>
   </div>
 
@@ -300,8 +308,8 @@ Client name: ...
         <p class="lede">The salesperson's picks are pre-loaded. Add, remove, and adjust budgets. Minimums and rates from the AdFlo catalog show as you go.</p>
       </div>
 
-      <label class="inline-input agency-fee-box">
-        <span>Agency fee <small>(parsed from Step 02 — override here if needed; shows Gross alongside Net below when set)</small></span>
+      <label class="inline-input agency-fee-box" title="Parsed from Step 02 — override here if needed. Shows Gross alongside Net below once set.">
+        <span>Agency fee</span>
         <input type="number" id="curate-agency-fee-input" step="0.01" min="0" max="0.99" placeholder="0.00" />
       </label>
 
@@ -313,20 +321,23 @@ Client name: ...
         Multiple budget options — each generates its own tab (and gets outlined in the emails) when you generate the proposal.
       </p>
 
-      <div class="tier-override-row">
-        <label class="inline-input tier-geo-override">
-          <span>Geo override for this option <small>(blank uses Step 02's Geo)</small></span>
-          <input type="text" id="tier-geo-input" placeholder="e.g. Los Angeles DMA only" />
-        </label>
-        <label class="inline-input tier-date-override">
-          <span>Start override <small>(blank = default)</small></span>
-          <input type="date" id="tier-start-date-input" title="Blank uses Step 02's Start date" />
-        </label>
-        <label class="inline-input tier-date-override">
-          <span>End override <small>(blank = default)</small></span>
-          <input type="date" id="tier-end-date-input" title="Blank uses Step 02's End date" />
-        </label>
-      </div>
+      <details class="tier-override-panel" id="tier-override-panel">
+        <summary>Override geo or dates for this option</summary>
+        <div class="tier-override-row">
+          <label class="inline-input tier-geo-override">
+            <span>Geo override</span>
+            <input type="text" id="tier-geo-input" placeholder="e.g. Los Angeles DMA only" title="Blank uses Step 02's Geo" />
+          </label>
+          <label class="inline-input tier-date-override">
+            <span>Start override</span>
+            <input type="date" id="tier-start-date-input" title="Blank uses Step 02's Start date" />
+          </label>
+          <label class="inline-input tier-date-override">
+            <span>End override</span>
+            <input type="date" id="tier-end-date-input" title="Blank uses Step 02's End date" />
+          </label>
+        </div>
+      </details>
 
       <div class="curation-toolbar">
         <label class="inline-input">

@@ -44,6 +44,13 @@ const state = {
   // whenever the planner goes back to Step 02, since editing client name/
   // request type/start date there can change the real title on next Generate.
   finalProposalTitle: null,
+  // Planner override for the proposal name bar's campaign-name segment
+  // (the one AI-guessed/client-name-derived part of the naming
+  // convention) — null means "use the usual guess". Cleared whenever the
+  // planner returns to Step 02, same invalidation rule finalProposalTitle
+  // already follows, since editing client name there changes what the
+  // un-overridden guess would even be.
+  manualCampaignNameOverride: null,
   // Tiered budget options (up to 10 — "A".."J"). state.lineItems/availsData
   // ALWAYS hold the currently-active tier's data (same as before tiers
   // existed — no other code needs to change); `tiers` holds a snapshot for
@@ -329,6 +336,7 @@ async function maybeReopenProposal() {
     document.getElementById("tier-geo-input").value = state.activeTierGeo || "";
     document.getElementById("tier-start-date-input").value = _toIsoDateString(state.activeTierStartDate);
     document.getElementById("tier-end-date-input").value = _toIsoDateString(state.activeTierEndDate);
+    _syncTierOverridePanelOpen();
     // A reopened proposal already has every step's data (it was fully
     // generated once) — let the nav pills jump anywhere immediately
     // instead of only unlocking as the planner re-visits each step.
@@ -466,6 +474,15 @@ function wireEvents() {
   });
   document.getElementById("reprompt-submit-btn").addEventListener("click", onStrategyReprompt);
 
+  // Proposal name bar — editable campaign-name segment.
+  document.getElementById("proposal-name-edit-btn").addEventListener("click", onEditProposalNameClick);
+  document.getElementById("proposal-name-save-btn").addEventListener("click", onSaveProposalNameEdit);
+  document.getElementById("proposal-name-cancel-btn").addEventListener("click", onCancelProposalNameEdit);
+  document.getElementById("proposal-name-edit-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") onSaveProposalNameEdit();
+    if (e.key === "Escape") onCancelProposalNameEdit();
+  });
+
   // Monthly Breakdown — default-split mode toggle. Wired once here (not
   // re-wired per render, unlike the per-line-item controls in
   // _mbWireLineItemBlocks — this static pair of buttons never gets its
@@ -570,6 +587,7 @@ function resetAll() {
   state.activeTierGeo = null;
   state.activeTierStartDate = null;
   state.activeTierEndDate = null;
+  state.manualCampaignNameOverride = null;
   state.proposalId = null;
   state.proposalSummary = null;
   state.enrichment = null;
@@ -586,6 +604,7 @@ function resetAll() {
   document.getElementById("tier-geo-input").value = "";
   document.getElementById("tier-start-date-input").value = "";
   document.getElementById("tier-end-date-input").value = "";
+  _syncTierOverridePanelOpen();
   document.getElementById("line-items-body").innerHTML = "";
   document.getElementById("avails-grid").innerHTML = "";
   document.getElementById("parse-warnings").classList.add("hidden");
@@ -631,10 +650,30 @@ function _previewTitleCase(text) {
   return text.split(" ").map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(" ");
 }
 
+// The Geo/Start/End override fields sit inside a collapsed-by-default
+// <details> now (decluttering Step 04's header — most proposals never
+// set these, they use Step 02's campaign-level values) — but a
+// COLLAPSED panel must never SILENTLY hide an override that's already
+// active. Called anywhere the 3 fields' values get (re)assigned from
+// state, so switching to a tier that already has one auto-expands it,
+// and clearing them (a fresh parse) collapses it back.
+function _syncTierOverridePanelOpen() {
+  const panel = document.getElementById("tier-override-panel");
+  if (!panel) return;
+  const hasOverride = !!(
+    document.getElementById("tier-geo-input").value ||
+    document.getElementById("tier-start-date-input").value ||
+    document.getElementById("tier-end-date-input").value
+  );
+  panel.open = hasOverride;
+}
+
 function buildProposalNamePreview(parsed) {
   if (!parsed) return "";
   const shortId = (parsed.notion_id || "").trim() || "----";
-  const campaignName = _previewTitleCase((parsed.client_name || "Campaign").trim()) || "Campaign";
+  const campaignName = state.manualCampaignNameOverride
+    || _previewTitleCase((parsed.client_name || "Campaign").trim())
+    || "Campaign";
   const docType = _previewDocType(parsed.request_type);
   let monYY;
   const d = parsed.start_date ? new Date(parsed.start_date + "T00:00:00") : new Date();
@@ -649,6 +688,11 @@ function buildProposalNamePreview(parsed) {
 
 function updateProposalNameBar() {
   const bar = document.getElementById("proposal-name-bar");
+  // Any re-render (switching steps/tiers, a fresh parse) closes a
+  // still-open edit box rather than leaving a stray input floating
+  // around showing a now-possibly-stale value.
+  document.getElementById("proposal-name-edit-row").classList.add("hidden");
+  document.getElementById("proposal-name-view").classList.remove("hidden");
   if (!state.parsed) {
     bar.classList.add("hidden");
     return;
@@ -660,6 +704,34 @@ function updateProposalNameBar() {
   }
   document.getElementById("proposal-name-text").textContent = title;
   bar.classList.remove("hidden");
+}
+
+// The campaign-name segment is the ONE AI-guessed/client-name-derived
+// part of the naming convention — editable here without touching the
+// ID/date/doc-type segments, which stay derived automatically (see
+// build_proposal_title on the server, buildProposalNamePreview() here).
+function onEditProposalNameClick() {
+  const current = state.manualCampaignNameOverride
+    || _previewTitleCase(((state.parsed && state.parsed.client_name) || "Campaign").trim());
+  document.getElementById("proposal-name-edit-input").value = current;
+  document.getElementById("proposal-name-view").classList.add("hidden");
+  document.getElementById("proposal-name-edit-row").classList.remove("hidden");
+  document.getElementById("proposal-name-edit-input").focus();
+}
+
+function onSaveProposalNameEdit() {
+  const value = document.getElementById("proposal-name-edit-input").value.trim();
+  state.manualCampaignNameOverride = value || null;
+  // A previously-generated REAL title can't retroactively change — fall
+  // back to the live preview (which DOES pick up the new override
+  // immediately) until the planner regenerates; the next /api/generate
+  // call also sends this override, so the eventual real title matches.
+  state.finalProposalTitle = null;
+  updateProposalNameBar();
+}
+
+function onCancelProposalNameEdit() {
+  updateProposalNameBar();
 }
 
 // --------------------------------------------------------------------------
@@ -721,6 +793,7 @@ function onNext(n) {
     document.getElementById("tier-geo-input").value = state.activeTierGeo || "";
     document.getElementById("tier-start-date-input").value = _toIsoDateString(state.activeTierStartDate);
     document.getElementById("tier-end-date-input").value = _toIsoDateString(state.activeTierEndDate);
+    _syncTierOverridePanelOpen();
     if (state.lineItems.length === 0) {
       state.lineItems = (state.parsed.products_selected || []).map(name => {
         const p = state.productIndex[name];
@@ -2571,6 +2644,22 @@ function renderMonthlyBreakdown() {
   _mbUpdateContinueState(months);
 }
 
+// "For reference" — impressions (or, for a CPP/rating-point product,
+// points) that this month's $ figure would buy. Reuses calcMaxImpsFromSpend()
+// exactly as Step 06's Avails grid does (through _effectiveProduct, so a
+// Step 04 rate/estimated-CPM override is respected here too) — never a
+// second, separately-maintained conversion formula. Returns "" when the
+// product has no rate/estimated-CPM to convert with at all (a pure
+// custom-quote Fixed product) — nothing to show, not a guessed number.
+function _mbUnitsRefText(li, product, dollars) {
+  if (!product || !dollars) return "";
+  const eff = _effectiveProduct(li, product);
+  const result = calcMaxImpsFromSpend(eff, dollars);
+  if (!result) return "";
+  const formatted = formatImpsDisplay(result.value, result.estimated);
+  return (eff.pricing_model || "").toUpperCase() === "CPP" ? `${formatted} pts` : `${formatted} imps`;
+}
+
 function _mbLineItemBlockHtml(li, months) {
   const product = state.productIndex[li.product_name];
   const total = li.monthly_budget * li.months;
@@ -2583,11 +2672,13 @@ function _mbLineItemBlockHtml(li, months) {
     const dollars = allocations[m.key] || 0;
     const pct = total ? (dollars / total * 100) : 0;
     const belowMin = enabled && minSpend > 0 && dollars + _MB_CENT < minSpend;
+    const unitsRef = enabled ? _mbUnitsRefText(li, product, dollars) : "";
     return `
       <tr data-month="${m.key}" class="${belowMin ? "mb-row-warn" : ""}">
         <td class="mono">${escapeHtml(m.label)}</td>
         <td><input type="number" step="0.01" min="0" max="100" class="mb-pct-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? Math.round(pct * 100) / 100 : ""}" ${enabled ? "" : "disabled"} /></td>
-        <td><input type="number" step="0.01" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
+        <td><input type="number" step="1" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
+        <td class="mb-units-ref mono">${escapeHtml(unitsRef)}</td>
         <td class="mb-validation">${belowMin ? `⚠ Below min ($${minSpend.toLocaleString()})` : (enabled ? "✓" : "")}</td>
       </tr>`;
   }).join("");
@@ -2611,7 +2702,7 @@ function _mbLineItemBlockHtml(li, months) {
       </summary>
       <div class="mb-line-body">
         <table class="mb-table">
-          <thead><tr><th>Month</th><th>%</th><th>$</th><th>Status</th></tr></thead>
+          <thead><tr><th>Month</th><th>%</th><th>$</th><th>Reference</th><th>Status</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
         <button type="button" class="btn-secondary mb-reset-btn" data-line="${li.id}" ${enabled ? "" : "disabled"}>↺ Reset to ${state.mbDistributionMode === "prorated" ? "day-prorated" : "even"} default</button>
@@ -2704,6 +2795,8 @@ function _mbLiveUpdateAfterEdit(li, months, editedInput) {
     row.classList.toggle("mb-row-warn", belowMin);
     const validationCell = row.querySelector(".mb-validation");
     if (validationCell) validationCell.textContent = belowMin ? `⚠ Below min ($${minSpend.toLocaleString()})` : "✓";
+    const unitsRefCell = row.querySelector(".mb-units-ref");
+    if (unitsRefCell) unitsRefCell.textContent = _mbUnitsRefText(li, product, dollars);
   }
 
   const block = editedInput.closest(".mb-line-block");
@@ -3140,6 +3233,10 @@ async function onGenerate() {
     // inline total row next to "TOTAL DIGITAL MONTHLY"); a line WITH its
     // own monthly_allocations already carries real numbers regardless.
     monthly_distribution_mode: state.mbDistributionMode,
+    // Planner override for the campaign-name segment of the naming
+    // convention (see the proposal-name-bar's Edit button) — null unless
+    // explicitly set, in which case it wins over the AI's own guess.
+    campaign_name_override: state.manualCampaignNameOverride,
   };
   const btn = document.getElementById("generate-btn");
   btn.disabled = true;

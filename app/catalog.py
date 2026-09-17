@@ -69,6 +69,7 @@ minimum_spend / estimated_cpm_for_imps without a code change, or the admin
 "Add Product" form for anything genuinely missing from this rate card.
 """
 
+import time
 from dataclasses import dataclass, field, asdict, replace
 from typing import Optional, Union
 
@@ -1801,22 +1802,73 @@ _OVERRIDABLE_FIELDS = (
     "family", "short_label", "buying_model", "sizes", "tech_platform",
     "proposal_description", "notes", "is_addon",
 )
+
+
+class _TTLCache:
+    """
+    Tiny read-through cache for one DB-backed loader function below.
+
+    WHY THIS EXISTS (read before touching): _apply_override() calls
+    load_rate_overrides() — a full-table SELECT — and effective_catalog()
+    calls _apply_override() ONCE PER PRODUCT (56+). by_family() calls
+    effective_catalog() fresh every time, and recommend_line_items()'s
+    AI-brief path calls by_family() once per recommended tactic (2-5). A
+    single Suggest Mix click was therefore triggering on the order of
+    hundreds of separate DB round trips (tactics × products, each doing
+    its own rate_overrides fetch) — this is the actual, confirmed root
+    cause of the reported "Suggest Mix takes forever," not a vaguer
+    "several serial round-trips" as an earlier pass characterized it.
+
+    Every mutation path below calls .invalidate() itself the moment it
+    writes — an admin's own edit is NEVER left waiting on the TTL to see
+    its own change. The TTL is purely a backstop (a second app instance
+    writing, or a direct DB edit bypassing this module entirely) — should
+    basically never be what makes a value refresh in normal operation.
+    `None` is the "not loaded yet" sentinel; every loader below returns a
+    dict/list/set that's falsy-but-never-None when genuinely empty, so
+    this can't be confused with "loaded, but empty."
+    """
+    def __init__(self, ttl_seconds: float = 30.0):
+        self._ttl = ttl_seconds
+        self._value = None
+        self._loaded_at = 0.0
+
+    def get(self, loader):
+        now = time.monotonic()
+        if self._value is None or (now - self._loaded_at) > self._ttl:
+            self._value = loader()
+            self._loaded_at = now
+        return self._value
+
+    def invalidate(self) -> None:
+        self._value = None
+
+
+_rate_overrides_cache = _TTLCache()
+_custom_products_cache = _TTLCache()
+_deleted_builtin_names_cache = _TTLCache()
+
+
 def load_rate_overrides() -> dict:
-    """Return {product_name: {field: value, ...}} from PostgreSQL."""
-    columns = ", ".join(("product_name",) + _OVERRIDABLE_FIELDS)
-    with get_connection() as conn:
-        rows = conn.execute(f"SELECT {columns} FROM rate_overrides").fetchall()
-    numeric_fields = {"base_rate", "minimum_spend", "estimated_cpm_for_imps"}
-    overrides = {}
-    for row in rows:
-        fields_ = {}
-        for field_name in _OVERRIDABLE_FIELDS:
-            value = row[field_name]
-            if value is not None:
-                fields_[field_name] = float(value) if field_name in numeric_fields else value
-        if fields_:
-            overrides[row["product_name"]] = fields_
-    return overrides
+    """Return {product_name: {field: value, ...}} from PostgreSQL. Cached
+    (see _TTLCache) — this used to run fresh on every _apply_override()
+    call, i.e. once PER PRODUCT per effective_catalog() call."""
+    def _fetch():
+        columns = ", ".join(("product_name",) + _OVERRIDABLE_FIELDS)
+        with get_connection() as conn:
+            rows = conn.execute(f"SELECT {columns} FROM rate_overrides").fetchall()
+        numeric_fields = {"base_rate", "minimum_spend", "estimated_cpm_for_imps"}
+        overrides = {}
+        for row in rows:
+            fields_ = {}
+            for field_name in _OVERRIDABLE_FIELDS:
+                value = row[field_name]
+                if value is not None:
+                    fields_[field_name] = float(value) if field_name in numeric_fields else value
+            if fields_:
+                overrides[row["product_name"]] = fields_
+        return overrides
+    return _rate_overrides_cache.get(_fetch)
 
 
 def save_rate_overrides(overrides: dict) -> None:
@@ -1852,12 +1904,14 @@ def save_rate_overrides(overrides: dict) -> None:
                 """,
                 [name] + [fields_.get(field_name) for field_name in _OVERRIDABLE_FIELDS],
             )
+    _rate_overrides_cache.invalidate()
 
 
 def clear_rate_override(product_name: str) -> None:
     """Remove a single product's override (revert to catalog default)."""
     with get_connection() as conn:
         conn.execute("DELETE FROM rate_overrides WHERE product_name = %s", (product_name,))
+    _rate_overrides_cache.invalidate()
 
 
 def _apply_override(p: Product) -> Product:
@@ -1926,12 +1980,17 @@ def all_product_aliases() -> dict[str, str]:
 def load_deleted_builtin_names() -> set[str]:
     """Stable (original catalog.py literal) names of every soft-deleted
     built-in product. Independent of load_rate_overrides()/_OVERRIDABLE_FIELDS
-    — is_deleted is a delete/restore action, not an editable form field."""
-    with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT product_name FROM rate_overrides WHERE is_deleted"
-        ).fetchall()
-    return {r["product_name"] for r in rows}
+    — is_deleted is a delete/restore action, not an editable form field.
+    Cached (see _TTLCache) — effective_catalog()'s default (include_deleted=
+    False) path calls this on every invocation, same hot-path reasoning as
+    load_rate_overrides() above."""
+    def _fetch():
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT product_name FROM rate_overrides WHERE is_deleted"
+            ).fetchall()
+        return {r["product_name"] for r in rows}
+    return _deleted_builtin_names_cache.get(_fetch)
 
 
 def set_builtin_deleted(stable_name: str, deleted: bool) -> None:
@@ -1949,6 +2008,13 @@ def set_builtin_deleted(stable_name: str, deleted: bool) -> None:
             """,
             (stable_name, deleted),
         )
+    _deleted_builtin_names_cache.invalidate()
+    # is_deleted lives in the SAME rate_overrides row load_rate_overrides()
+    # reads (just a different column) — a set_builtin_deleted() call
+    # doesn't change any of the OVERRIDABLE fields that cache actually
+    # holds, but invalidating it too costs nothing and rules out any
+    # future field added to this same upsert silently going stale.
+    _rate_overrides_cache.invalidate()
 
 
 # ---------------------------------------------------------------------------
@@ -1963,38 +2029,43 @@ def set_builtin_deleted(stable_name: str, deleted: bool) -> None:
 # ---------------------------------------------------------------------------
 
 def load_custom_products() -> list[Product]:
-    """Return the admin-added products from PostgreSQL, or [] if none saved."""
-    columns = (
-        "name, family, short_label, proposal_description, sizes, buying_model, "
-        "base_rate, estimated_impressions, discloses_impressions, minimum_spend, "
-        "minimum_flight_days_min, minimum_flight_days_max, sla_data_days, "
-        "sla_creative_days, sla_activate_days, sla_total_days, media_allocation_pct, "
-        "margin_upper, margin_lower, tech_platform, wide_orbit_code, billing_interval, "
-        "billing_calendar, billing_source, national_supported, notes, "
-        "estimated_cpm_for_imps, hispanic_targeting_forced, cannabis_policy, "
-        "political_policy, is_addon"
-    )
-    with get_connection() as conn:
-        rows = conn.execute(f"SELECT {columns} FROM custom_products ORDER BY name").fetchall()
-    products = []
-    numeric_fields = {
-        "base_rate", "minimum_spend", "media_allocation_pct", "margin_upper",
-        "margin_lower", "estimated_cpm_for_imps",
-    }
-    for row in rows:
-        data = dict(row)
-        for field_name in numeric_fields:
-            if data[field_name] is not None:
-                data[field_name] = float(data[field_name])
-        data["minimum_flight_days"] = (
-            data.pop("minimum_flight_days_min"),
-            data.pop("minimum_flight_days_max"),
+    """Return the admin-added products from PostgreSQL, or [] if none saved.
+    Cached (see _TTLCache) — effective_catalog()/by_name()/families() all
+    call this fresh on every invocation otherwise, same hot-path reasoning
+    as load_rate_overrides() above."""
+    def _fetch():
+        columns = (
+            "name, family, short_label, proposal_description, sizes, buying_model, "
+            "base_rate, estimated_impressions, discloses_impressions, minimum_spend, "
+            "minimum_flight_days_min, minimum_flight_days_max, sla_data_days, "
+            "sla_creative_days, sla_activate_days, sla_total_days, media_allocation_pct, "
+            "margin_upper, margin_lower, tech_platform, wide_orbit_code, billing_interval, "
+            "billing_calendar, billing_source, national_supported, notes, "
+            "estimated_cpm_for_imps, hispanic_targeting_forced, cannabis_policy, "
+            "political_policy, is_addon"
         )
-        try:
-            products.append(Product(**data))
-        except TypeError:
-            continue  # preserve the old behavior for malformed legacy records
-    return products
+        with get_connection() as conn:
+            rows = conn.execute(f"SELECT {columns} FROM custom_products ORDER BY name").fetchall()
+        products = []
+        numeric_fields = {
+            "base_rate", "minimum_spend", "media_allocation_pct", "margin_upper",
+            "margin_lower", "estimated_cpm_for_imps",
+        }
+        for row in rows:
+            data = dict(row)
+            for field_name in numeric_fields:
+                if data[field_name] is not None:
+                    data[field_name] = float(data[field_name])
+            data["minimum_flight_days"] = (
+                data.pop("minimum_flight_days_min"),
+                data.pop("minimum_flight_days_max"),
+            )
+            try:
+                products.append(Product(**data))
+            except TypeError:
+                continue  # preserve the old behavior for malformed legacy records
+        return products
+    return _custom_products_cache.get(_fetch)
 
 
 def _save_custom_products(products: list[Product]) -> None:
@@ -2058,6 +2129,7 @@ def _save_custom_products(products: list[Product]) -> None:
                     product.is_addon,
                 ],
             )
+    _custom_products_cache.invalidate()
 
 
 def add_custom_product(fields: dict) -> Product:

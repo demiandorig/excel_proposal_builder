@@ -519,6 +519,12 @@ class GenerateRequest(BaseModel):
     # a line with its own monthly_allocations already carries real planner
     # numbers regardless of this setting.
     monthly_distribution_mode: str = "even"
+    # Planner-set override for the proposal name bar's editable campaign-
+    # name segment (see app.js's proposal-name-edit UI) — when present,
+    # replaces whatever the AI enrichment call itself would have guessed,
+    # so the real generated title/filename matches what the planner
+    # explicitly chose rather than the AI's own invention.
+    campaign_name_override: Optional[str] = None
 
 
 class StrategyRequest(BaseModel):
@@ -966,6 +972,12 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     enrichment = ai_enricher.enrich_proposal(
         req, union_line_items, short_id, strategy_brief=body.strategy_brief, tiers=tier_context,
     )
+    # A planner-set name override wins over whatever the AI itself guessed
+    # — used verbatim (not re-run through the AI) so it can't drift from
+    # what was explicitly typed. Only the NAME segment changes; blurbs/
+    # emails still come from the same real enrichment call above.
+    if body.campaign_name_override and body.campaign_name_override.strip():
+        enrichment.campaign_name = body.campaign_name_override.strip()
 
     # 3. Build the naming-convention title
     proposal_title = ai_enricher.build_proposal_title(

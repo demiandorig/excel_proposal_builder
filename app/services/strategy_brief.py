@@ -309,7 +309,7 @@ insight sentence should still read like a person wrote it, not a template.
 
 ## YOUR TASK
 1. Briefly summarize who this client is and what they do (use your knowledge to infer from name/website/category).
-2. Identify the key market context: local competitive landscape, relevant seasonality or trends — tied to the actual geo/demo above, not a generic market.
+2. Identify the key market context: local competitive landscape, relevant seasonality or trends — tied to the actual geo/demo above, not a generic market. Any specific number here (a market size, a growth rate, a competitor count) needs the same real citation as a tactic's data_point below — see the RULE right after this list.
 3. Analyze the campaign objectives — what does success look like for THIS audience, and why the recommended tactics reach exactly the people described in the Target Audience section.
 4. Recommend 2–5 media tactics (by catalog family). For each include:
    - Strategic rationale (1–2 sentences) that names the specific demo/geo/behavioral/contextual value it's built around — not a generic restatement of the tactic
@@ -318,7 +318,20 @@ insight sentence should still read like a person wrote it, not a template.
    - Suggested budget allocation as a percentage (all tactics must sum to 100)
    - **If the rationale names more than one specific product within the family** (e.g. "Pre-Roll OLV and YouTube" both under Online Video), say explicitly that the suggested % is the family's combined ceiling and each named product still carries its OWN separate minimum spend — never imply they share one pooled minimum. When only one product is named, this doesn't apply.
 5. Write a 2–3 sentence overall strategy summary that ties directly back to the named audience and client.
-6. List 3 key insights the AE should highlight to the client — each one must reference the specific audience/client context, not generic advice that could apply to any campaign.
+6. List 3 key insights the AE should highlight to the client — each one must reference the specific audience/client context, not generic advice that could apply to any campaign. Same citation rule as #2 applies here too — a specific number needs a named source right in the sentence, e.g. "...(Nielsen, 2025)."
+
+RULE — EVERY SPECIFIC NUMBER ANYWHERE IN THIS BRIEF NEEDS A REAL SOURCE, NOT
+JUST THE TACTICS' OWN data_point/citation FIELDS: client_summary,
+market_context, and key_insights are free-form prose with no dedicated
+citation field, which makes it easy to slip in an unattributed-but-
+specific-sounding number ("the local market grew 12% last year") that
+reads as sourced without actually being verified. If you state a specific
+figure in ANY field, name where it came from inline in that same sentence
+(publisher + year, e.g. "(Pew Research Center, 2025)") — a real one you
+actually found via search, never a plausible-sounding placeholder. If you
+don't have a real source for a number, don't state that number — describe
+the point directionally instead ("a fast-growing local market" rather
+than an invented "12% growth").
 
 Respond ONLY with valid JSON — no markdown fences, no preamble:
 
