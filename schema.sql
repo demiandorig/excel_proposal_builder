@@ -243,7 +243,8 @@ CREATE TABLE proposals (
     requester_user_agent                          TEXT,
     summary                                         JSONB,
     reopen_state                                      JSONB,
-    created_at                                          TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at                                          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by_email                                   TEXT
 );
 
 CREATE INDEX idx_proposals_generated_at ON proposals (generated_at DESC);
