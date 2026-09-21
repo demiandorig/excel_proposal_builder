@@ -93,3 +93,84 @@ def test_unparseable_dates_skip_minimum_check_but_still_validate_balance():
     )
     assert len(errors) == 1  # balance check doesn't need parsed dates
     assert warnings == []    # minimum check DOES need them — skipped, not guessed
+
+
+# --- Week/Quarter toggle + period-merge wiring (Round E) ------------------
+
+def test_week_granularity_checks_allocations_keyed_by_week_not_month():
+    product = m.by_name("Search - SEM")
+    assert product is not None and (product.minimum_spend or 0) > 0
+    li = LineItem(product_name="Search - SEM", monthly_budget=1000, months=1, id="8",
+                  monthly_allocations={"W1-2026-09-01": 1000.0})
+    errors, warnings = m._validate_monthly_breakdown(
+        [_tier([li], start_date="2026-09-01", end_date="2026-09-07")], _REQ, multi_tier=False,
+        granularity="week",
+    )
+    assert errors == []  # balances against the flat total regardless of key format
+    assert warnings == []  # $1000 clears even the un-scaled monthly minimum, so definitely the smaller weekly one
+
+
+def test_week_granularity_scales_minimum_down_so_a_small_weekly_amount_is_fine():
+    product = m.by_name("Search - SEM")
+    weekly_min = (product.minimum_spend or 0) * (12 / 52)
+    assert weekly_min > 0
+    # An amount just above the SCALED weekly minimum but far below the raw
+    # monthly figure — only passes if the endpoint actually uses the
+    # granularity-scaled minimum, not the flat monthly one.
+    amount = round(weekly_min + 1, 2)
+    li = LineItem(product_name="Search - SEM", monthly_budget=amount, months=1, id="9",
+                  monthly_allocations={"W1-2026-09-01": amount})
+    _, warnings = m._validate_monthly_breakdown(
+        [_tier([li], start_date="2026-09-01", end_date="2026-09-07")], _REQ, multi_tier=False,
+        granularity="week",
+    )
+    assert warnings == []
+
+
+def test_quarter_granularity_checks_allocations_keyed_by_quarter():
+    li = LineItem(product_name="Search - SEM", monthly_budget=3000, months=1, id="10",
+                  monthly_allocations={"2026-09+2026-10+2026-11": 3000.0})
+    errors, _ = m._validate_monthly_breakdown(
+        [_tier([li], start_date="2026-09-01", end_date="2026-11-30")], _REQ, multi_tier=False,
+        granularity="quarter",
+    )
+    assert errors == []
+
+
+def test_period_merge_groups_lets_a_combined_stub_period_clear_the_minimum():
+    product = m.by_name("Search - SEM")
+    monthly_min = product.minimum_spend or 0
+    assert monthly_min > 0
+    # Sep 28 start -> September is a ~3-day stub. Split unevenly so Sep
+    # ALONE is below minimum but the September+October COMBINED total
+    # clears 2x the monthly minimum comfortably.
+    combined_total = monthly_min * 2 + 200
+    li = LineItem(
+        product_name="Search - SEM", monthly_budget=combined_total, months=1, id="11",
+        monthly_allocations={"2026-09+2026-10": combined_total},
+        period_merge_groups=[["2026-09", "2026-10"]],
+    )
+    errors, warnings = m._validate_monthly_breakdown(
+        [_tier([li], start_date="2026-09-28", end_date="2026-10-31")], _REQ, multi_tier=False,
+        granularity="month",
+    )
+    assert errors == []
+    assert warnings == []  # merged bucket clears the combined (2x) minimum
+
+
+def test_unmerged_tiny_stub_period_still_warns_below_minimum():
+    # Same Sep-28 start as above, but WITHOUT merging — September's ~3
+    # active days still get held to the full unprorated monthly minimum,
+    # which a small allocation won't clear. Confirms the merge test above
+    # is actually exercising the merge path, not something that always passes.
+    product = m.by_name("Search - SEM")
+    monthly_min = product.minimum_spend or 0
+    li = LineItem(
+        product_name="Search - SEM", monthly_budget=monthly_min + 50, months=1, id="12",
+        monthly_allocations={"2026-09": 10.0, "2026-10": monthly_min + 40},
+    )
+    _, warnings = m._validate_monthly_breakdown(
+        [_tier([li], start_date="2026-09-28", end_date="2026-10-31")], _REQ, multi_tier=False,
+        granularity="month",
+    )
+    assert any(w["month_key"] == "2026-09" for w in warnings)

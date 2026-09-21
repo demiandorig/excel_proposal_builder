@@ -19,6 +19,7 @@ from typing import Optional
 from app.catalog import CATALOG, by_name, by_family
 from app.services.notion_parser import ProposalRequest, compose_target_fallback
 from app.services.proposal_generator import LineItem
+from app.services.monthly_allocation import granularity_scale
 
 
 # ---------------------------------------------------------------------------
@@ -105,15 +106,22 @@ def recommend_line_items(
     request: ProposalRequest,
     monthly_budget: float,
     strategy_brief: Optional[dict] = None,
+    time_unit: str = "month",
 ) -> list[LineItem]:
     """
-    Build a suggested set of LineItems given a target monthly budget.
+    Build a suggested set of LineItems given a target budget for ONE
+    {time_unit} period (despite the param name — kept as `monthly_budget`
+    for backward compatibility with every existing caller, which always
+    means "month" anyway; see LineItem.monthly_budget's own module-wide
+    convention of never renaming this field per granularity).
 
     Strategy:
         1. Seed with whatever the salesperson already selected (matched products).
         2. If budget remains, add goal-priority products until budget is exhausted
            OR the priority list is empty.
-        3. Each addition respects the product's monthly minimum.
+        3. Each addition respects the product's minimum, SCALED to time_unit
+           (see monthly_allocation.granularity_scale — catalog minimum_spend
+           is always stated as a flat MONTHLY figure).
         4. Allocate remaining budget proportionally to a sensible split.
 
     Returns a list of LineItem objects with sensible default flight length.
@@ -122,11 +130,12 @@ def recommend_line_items(
         return []
 
     months = request.total_months or 3
+    scale = granularity_scale(time_unit)
 
     # If a confirmed AI strategy brief is provided, use its tactic recommendations
     # as the primary product priority + budget weights instead of goal-based rules.
     if strategy_brief and strategy_brief.get("recommended_tactics"):
-        return _recommend_from_brief(request, monthly_budget, months, strategy_brief)
+        return _recommend_from_brief(request, monthly_budget, months, strategy_brief, time_unit=time_unit)
 
     goal = _classify_goal(request.campaign_goal)
     priority = GOAL_PRIORITIES.get(goal, GOAL_PRIORITIES["default"])
@@ -146,7 +155,7 @@ def recommend_line_items(
         p = by_name(name)
         if p is None:
             continue
-        min_spend = p.minimum_spend or 0.0
+        min_spend = (p.minimum_spend or 0.0) * scale
         if min_spend <= monthly_budget:
             fitting.append((name, min_spend))
 
@@ -158,7 +167,7 @@ def recommend_line_items(
         )
         return [LineItem(
             product_name=cheapest.name,
-            monthly_budget=cheapest.minimum_spend or monthly_budget,
+            monthly_budget=(cheapest.minimum_spend or 0.0) * scale or monthly_budget,
             months=months,
         )]
 
@@ -183,7 +192,7 @@ def recommend_line_items(
         )
         return [LineItem(
             product_name=cheapest.name,
-            monthly_budget=cheapest.minimum_spend or monthly_budget,
+            monthly_budget=(cheapest.minimum_spend or 0.0) * scale or monthly_budget,
             months=months,
         )]
 
@@ -220,8 +229,8 @@ def recommend_line_items(
         largest.monthly_budget = round(largest.monthly_budget - overage, 2)
         # Don't drop below minimum
         p = by_name(largest.product_name)
-        if p and largest.monthly_budget < (p.minimum_spend or 0):
-            largest.monthly_budget = p.minimum_spend or 0.0
+        if p and largest.monthly_budget < (p.minimum_spend or 0) * scale:
+            largest.monthly_budget = (p.minimum_spend or 0.0) * scale
 
     return line_items
 
@@ -235,12 +244,14 @@ def _recommend_from_brief(
     monthly_budget: float,
     months: int,
     strategy_brief: dict,
+    time_unit: str = "month",
 ) -> list[LineItem]:
     """
     Build line items driven by the AI strategy brief's recommended tactics.
     Each tactic maps to a catalog family; we pick the first (cheapest-minimum)
     product from that family that fits the budget allocation.
     """
+    scale = granularity_scale(time_unit)
     tactics = strategy_brief.get("recommended_tactics") or []
 
     # Normalise percentages so they sum to 100
@@ -280,7 +291,7 @@ def _recommend_from_brief(
             preferred = min(candidates, key=lambda p: p.minimum_spend or 0)
 
         alloc = round(monthly_budget * pct / 50) * 50  # round to $50
-        min_spend = preferred.minimum_spend or 0.0
+        min_spend = (preferred.minimum_spend or 0.0) * scale
         alloc = max(alloc, min_spend)
 
         if alloc > monthly_budget:
@@ -295,7 +306,7 @@ def _recommend_from_brief(
 
     # If brief mapping yielded nothing, fall back to goal-based logic
     if not line_items:
-        return recommend_line_items(request, monthly_budget, strategy_brief=None)
+        return recommend_line_items(request, monthly_budget, strategy_brief=None, time_unit=time_unit)
 
     # Trim total to budget (adjust largest if over)
     total = sum(li.monthly_budget for li in line_items)
@@ -304,6 +315,6 @@ def _recommend_from_brief(
         largest = max(line_items, key=lambda li: li.monthly_budget)
         p = by_name(largest.product_name)
         adjusted = largest.monthly_budget - overage
-        largest.monthly_budget = max(adjusted, p.minimum_spend or 0.0) if p else max(adjusted, 0.0)
+        largest.monthly_budget = max(adjusted, (p.minimum_spend or 0.0) * scale) if p else max(adjusted, 0.0)
 
     return line_items

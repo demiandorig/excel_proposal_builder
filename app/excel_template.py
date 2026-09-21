@@ -298,13 +298,20 @@ def _is_live_sports_product(product: Product) -> bool:
 
 def compute_sov_pct(product: Product, monthly_budget: float, avail: dict,
                     cpm_override: Optional[float] = None,
-                    rate_override: Optional[float] = None) -> Optional[float]:
+                    rate_override: Optional[float] = None,
+                    time_unit: str = "month") -> Optional[float]:
     """
-    % of the planner-entered avails ceiling that the curated monthly budget
+    % of the planner-entered avails ceiling that the curated budget
     would consume — the "Share of Voice" figure: how much of the available
     inventory this campaign is claiming at that product's rate. Compared
     against max_spend when given; falls back to deriving an equivalent spend
     from max_imps via the product's own rate model when spend isn't entered.
+
+    `monthly_budget` (despite the name — kept for backward compatibility,
+    see LineItem.monthly_budget's own convention of never renaming this
+    per granularity) is "$ per one time_unit period"; converted to a
+    monthly-EQUIVALENT rate via _sov_monthly_equivalent_budget before
+    comparing against the avails ceiling, which is always stated monthly.
 
     cpm_override: a per-line override of the product's catalog
     estimated_cpm_for_imps (Step 04's estimated-CPM editor), taking
@@ -320,10 +327,11 @@ def compute_sov_pct(product: Product, monthly_budget: float, avail: dict,
     """
     if not monthly_budget:
         return None
+    monthly_equivalent_budget = _sov_monthly_equivalent_budget(monthly_budget, time_unit)
 
     max_spend = avail.get("max_spend")
     if max_spend:
-        return monthly_budget / max_spend * 100
+        return monthly_equivalent_budget / max_spend * 100
 
     max_imps = avail.get("max_imps")
     if not max_imps:
@@ -341,7 +349,7 @@ def compute_sov_pct(product: Product, monthly_budget: float, avail: dict,
         return None
     if not implied_spend:
         return None
-    return monthly_budget / implied_spend * 100
+    return monthly_equivalent_budget / implied_spend * 100
 
 
 SOV_RED = "FFF8D7DA"
@@ -429,7 +437,7 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
                        gross: bool = False, cols: Optional[tuple] = None, sov_pct: Optional[float] = None,
                        sov_col: Optional[str] = None, budget_col: Optional[str] = None,
                        rate_col: str = "K", est_cpm_col: Optional[str] = None,
-                       cpm_override: Optional[float] = None) -> None:
+                       cpm_override: Optional[float] = None, time_unit: str = "month") -> None:
     """
     Write planner-entered avails (from the app's Step 06) into the
     Max. Recommended Monthly Imps / Spend / Est. Monthly Uniques columns.
@@ -439,6 +447,13 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
     cpm_override: Step 04's per-line estimated-CPM override (LineItem.
     estimated_cpm_override) — takes precedence over the product's catalog
     estimated_cpm_for_imps for this line's derived imps/spend formula.
+
+    time_unit: scales the LIVE SOV formula's budget-cell reference to a
+    monthly equivalent (see SOV_MONTHLY_EQUIVALENT_SCALE) — the static
+    `sov_pct` param (when the spend side is "Est." text, not a real
+    formula-able number) must already be pre-scaled by the caller via
+    compute_sov_pct(..., time_unit=...); this function only handles the
+    LIVE-formula case itself.
 
     `avail` shape: {max_imps, max_spend, est_uniques, basis?,
                     max_imps_estimated?, max_spend_estimated?,
@@ -601,7 +616,8 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
     if sov_col:
         cell = ws[f"{sov_col}{row}"]
         if budget_col and (max_spend is not None or spend_formula) and not spend_is_text:
-            cell.value = f'=IFERROR({budget_col}{row}/{spend_cell_ref},"")'
+            budget_term = _sov_budget_formula_term(budget_col, row, time_unit)
+            cell.value = f'=IFERROR({budget_term}/{spend_cell_ref},"")'
         elif sov_pct is not None:
             cell.value = round(sov_pct, 1) / 100
         else:
@@ -789,13 +805,78 @@ def build_product_name_cell_value(product_name: str, fallback_label: str, object
 
 
 # -----------------------------------------------------------------------------
+# Week/Month/Quarter toggle — export-side labels
+# -----------------------------------------------------------------------------
+# THE one place a "Months:"/"TOTAL DIGITAL MONTHLY"/"-MONTH CAMPAIGN" style
+# label picks its wording — every sheet builder below reads from this
+# rather than hardcoding "Month" text, so a proposal generated with
+# time_unit="week"/"quarter" reads consistently across the whole workbook.
+# Deliberately NOT applied to "Max. Recommended Monthly Imps/Spend" and
+# similar avails-ceiling column headers elsewhere in this file — those
+# describe a standard monthly avails-forecasting window (an industry
+# convention for "how much inventory exists"), not this flight's own
+# billing cadence, and relabeling them would misrepresent what that
+# figure actually means.
+_UNIT_LABELS = {
+    "week": {"noun": "Week", "noun_plural": "Weeks", "adjective": "Weekly", "input_label": "Weeks:"},
+    "month": {"noun": "Month", "noun_plural": "Months", "adjective": "Monthly", "input_label": "Months:"},
+    "quarter": {"noun": "Quarter", "noun_plural": "Quarters", "adjective": "Quarterly", "input_label": "Quarters:"},
+}
+
+
+def _unit_labels(time_unit: str) -> dict:
+    return _UNIT_LABELS.get(time_unit, _UNIT_LABELS["month"])
+
+
+# Public alias — proposal_generator.py needs this too (for the Monthly
+# Breakdown tab's own NAME, not just its in-sheet content), and reaching
+# into a leading-underscore "private" function across a module boundary
+# isn't a pattern to add more of.
+unit_labels = _unit_labels
+
+# SOV ("Share of Voice") compares the curated budget against the catalog's
+# avails ceiling, which is always a MONTHLY figure (see _UNIT_LABELS'
+# comment above on why that ceiling itself stays unrelabeled). A budget
+# that's no longer monthly (Week/Quarter toggle) needs converting to a
+# monthly-EQUIVALENT rate first, or SOV% reads wildly low in Weekly mode
+# or wildly high in Quarterly mode with no real change in pacing.
+# Deliberately simple round factors (×4 / ÷3), not the more precise 12/52
+# used for minimum-spend scaling elsewhere — explicit planner preference
+# for this specific comparison (mirrors app.js's own
+# _SOV_MONTHLY_EQUIVALENT_SCALE — keep both in sync if this ever changes).
+SOV_MONTHLY_EQUIVALENT_SCALE = {"week": 4.0, "month": 1.0, "quarter": 1.0 / 3.0}
+
+
+def _sov_monthly_equivalent_budget(budget: float, time_unit: str) -> float:
+    return budget * SOV_MONTHLY_EQUIVALENT_SCALE.get(time_unit, 1.0)
+
+
+def _sov_budget_formula_term(budget_col: str, row: int, time_unit: str) -> str:
+    """Same conversion as _sov_monthly_equivalent_budget, but as an Excel
+    formula fragment referencing the LIVE budget cell — written as a
+    literal "*4"/"/3" (matching the planner's own stated preference)
+    rather than embedding a float literal, so the formula stays readable
+    if anyone inspects it in Excel."""
+    ref = f"{budget_col}{row}"
+    scale = SOV_MONTHLY_EQUIVALENT_SCALE.get(time_unit, 1.0)
+    if scale == 1.0:
+        return ref
+    if scale == 4.0:
+        return f"({ref}*4)"
+    if abs(scale - 1.0 / 3.0) < 1e-9:
+        return f"({ref}/3)"
+    return f"({ref}*{scale})"
+
+
+# -----------------------------------------------------------------------------
 # Sheet builders
 # -----------------------------------------------------------------------------
 
 
 def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
                      start_date: str = "", end_date: str = "", total_months: int = 3,
-                     sheet_name: Optional[str] = None, addons: Optional[list[dict]] = None) -> Worksheet:
+                     sheet_name: Optional[str] = None, addons: Optional[list[dict]] = None,
+                     time_unit: str = "month") -> Worksheet:
     """Build the Net-only proposal sheet. Returns the worksheet.
 
     sheet_name: override the default "Proposal A" / "Proposal A (wsections)"
@@ -804,7 +885,14 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
 
     addons: see _write_addons_grand_total_footer — planner picks from Step
     04's Add-Ons module, or None to fall back to the legacy hardcoded list.
+
+    time_unit: Step 04's "week"/"month"/"quarter" toggle — relabels the
+    "Months:" input cell and "TOTAL DIGITAL MONTHLY" row (see _unit_labels).
+    total_months/I10 itself is unit-agnostic (just a multiplier the grand-
+    total formula reads — see monthly_allocation.py's module docstring on
+    why LineItem.months never gets renamed), so only the LABEL changes.
     """
+    labels = _unit_labels(time_unit)
     if sheet_name is None:
         sheet_name = "Proposal A (wsections)" if with_sections else "Proposal A"
     ws = wb.create_sheet(sheet_name)
@@ -820,7 +908,7 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     _write_meta_block(ws, "Digital Plan / Avails")
 
     # Months input cell (I10) — blue = planner can adjust
-    ws["H10"] = "Months:"
+    ws["H10"] = labels["input_label"]
     ws["H10"].alignment = RIGHT
     ws["H10"].font = BODY_BOLD
     ws["I10"] = total_months
@@ -900,7 +988,7 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     # Totals
     last_data_row = row - 1
     total_row = row + 1
-    ws[f"C{total_row}"] = "TOTAL DIGITAL MONTHLY"
+    ws[f"C{total_row}"] = f"TOTAL DIGITAL {labels['adjective'].upper()}"
     ws[f"C{total_row}"].font = TOTAL_FONT
     ws[f"C{total_row}"].fill = TOTAL_FILL
     ws[f"L{total_row}"] = f"=ROUNDDOWN(SUM(L19:L{last_data_row}),0)"
@@ -927,6 +1015,7 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     _write_addons_grand_total_footer(
         ws, total_row, gross=False, box_max_col="L", addons=addons,
         show_live_sports_disclaimer=any(_is_live_sports_product(p) for p in products),
+        time_unit=time_unit,
     )
 
     ws.freeze_panes = "C18"
@@ -941,7 +1030,8 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
 def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bool,
                                      box_max_col: str, months_cell: str = "I10",
                                      addons: Optional[list[dict]] = None,
-                                     show_live_sports_disclaimer: bool = False) -> int:
+                                     show_live_sports_disclaimer: bool = False,
+                                     time_unit: str = "month") -> int:
     """
     Shared by build_proposal_a and build_proposal_a_gross: the ADD-ONS /
     ONE-TIME FEES block, the campaign-length grand total row, the footer
@@ -1021,7 +1111,8 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     # multiplication below, instead of concatenating raw garbage text into
     # the label or breaking the dollar total's arithmetic.
     safe_months = f'IF(ISNUMBER({months_cell}),{months_cell},3)'
-    ws[f"C{grand_row}"] = f'="TOTAL DIGITAL — "&{safe_months}&"-MONTH CAMPAIGN"'
+    campaign_unit_suffix = f"-{_unit_labels(time_unit)['noun'].upper()} CAMPAIGN"
+    ws[f"C{grand_row}"] = f'="TOTAL DIGITAL — "&{safe_months}&"{campaign_unit_suffix}"'
     ws[f"C{grand_row}"].font = TOTAL_FONT
     ws[f"C{grand_row}"].fill = TOTAL_FILL
     # Impressions grand total — same monthly-figure * months-in-campaign
@@ -1218,14 +1309,17 @@ def _write_product_row(ws: Worksheet, row: int, p: Product, gross: bool = False,
 
 def build_proposal_a_gross(wb: Workbook, products: list,
                            start_date: str = "", end_date: str = "", total_months: int = 3,
-                           sheet_name: Optional[str] = None, addons: Optional[list[dict]] = None) -> Worksheet:
+                           sheet_name: Optional[str] = None, addons: Optional[list[dict]] = None,
+                           time_unit: str = "month") -> Worksheet:
     """Build the Gross variant.
 
     sheet_name: override the default "Proposal A (Gross)" — used for
     tiered-budget proposals ("Proposal B (Gross)", etc.).
 
     addons: see _write_addons_grand_total_footer.
+    time_unit: see build_proposal_a's own comment — same relabeling.
     """
+    labels = _unit_labels(time_unit)
     ws = wb.create_sheet(sheet_name or "Proposal A (Gross)")
     ws.sheet_view.showGridLines = False  # clean white margins outside the boxed tables
 
@@ -1239,7 +1333,7 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     _write_meta_block(ws, "Digital Plan / Avails (Gross)")
 
     # Months input
-    ws["H10"] = "Months:"
+    ws["H10"] = labels["input_label"]
     ws["H10"].alignment = RIGHT
     ws["H10"].font = BODY_BOLD
     ws["I10"] = total_months
@@ -1298,7 +1392,7 @@ def build_proposal_a_gross(wb: Workbook, products: list,
 
     last_data_row = row - 1
     total_row = row + 1
-    ws[f"C{total_row}"] = "TOTAL DIGITAL MONTHLY"
+    ws[f"C{total_row}"] = f"TOTAL DIGITAL {labels['adjective'].upper()}"
     ws[f"C{total_row}"].font = TOTAL_FONT
     ws[f"C{total_row}"].fill = TOTAL_FILL
     ws[f"L{total_row}"] = f"=ROUNDDOWN(SUM(L19:L{last_data_row}),0)"
@@ -1327,6 +1421,7 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     _write_addons_grand_total_footer(
         ws, total_row, gross=True, box_max_col="N", addons=addons,
         show_live_sports_disclaimer=any(_is_live_sports_product(p) for p in products),
+        time_unit=time_unit,
     )
 
     ws.freeze_panes = "C18"
@@ -1342,7 +1437,8 @@ def build_avails_only(wb: Workbook, products: list, *,
                       avails_data: Optional[dict] = None,
                       campaign_name: str = "",
                       start_date: str = "", end_date: str = "",
-                      sheet_name: Optional[str] = None) -> Worksheet:
+                      sheet_name: Optional[str] = None,
+                      time_unit: str = "month") -> Worksheet:
     """Avails-only sheet — layout per spec:
     LINE NAME | TARGET | GEO | BUY TYPE | CPM | Est. CPM |
     Max. Recommended Monthly Imps | Max. Recommended Monthly Spend | Est. Monthly Uniques
@@ -1516,9 +1612,10 @@ def build_avails_only(wb: Workbook, products: list, *,
         if avail and (avail.get("max_imps") is not None or avail.get("max_spend") is not None or avail.get("freeform")):
             # Planner already computed avails in the app (Step 06) — write directly.
             sov_pct = compute_sov_pct(p, li.monthly_budget if li else 0, avail,
-                                       cpm_override=cpm_override, rate_override=rate_override)
+                                       cpm_override=cpm_override, rate_override=rate_override, time_unit=time_unit)
             write_avails_cells(ws, row, avail, p, cols=("J", "K", "L"), sov_pct=sov_pct, sov_col="M",
-                               budget_col="I", rate_col="G", est_cpm_col="H", cpm_override=cpm_override)
+                               budget_col="I", rate_col="G", est_cpm_col="H", cpm_override=cpm_override,
+                               time_unit=time_unit)
         else:
             # Fallback: leave J open for manual planner input, auto-calc K from
             # it live. J and L are greyed out (not just left blank) to flag
@@ -1905,8 +2002,9 @@ def _mb_cell_text(dollars: Optional[float], total: float) -> str:
     return f"${dollars:,.0f} ({pct:.0f}%)"
 
 
-def write_monthly_breakdown_header(ws: Worksheet, row: int, months: list[dict], start_col: int) -> None:
-    """Month labels, styled exactly like this sheet's own header row (row
+def write_monthly_breakdown_header(ws: Worksheet, row: int, months: list[dict], start_col: int,
+                                    time_unit: str = "month") -> None:
+    """Period labels, styled exactly like this sheet's own header row (row
     17 on Net/Gross — passing that same row number here just extends it
     rightward, rather than inventing a second header style)."""
     banner_row = row - 1
@@ -1914,7 +2012,7 @@ def write_monthly_breakdown_header(ws: Worksheet, row: int, months: list[dict], 
         ws.merge_cells(start_row=banner_row, start_column=start_col, end_row=banner_row,
                         end_column=start_col + max(len(months) - 1, 0))
         banner_cell = ws.cell(row=banner_row, column=start_col)
-        banner_cell.value = "MONTHLY BREAKDOWN"
+        banner_cell.value = f"{_unit_labels(time_unit)['adjective'].upper()} BREAKDOWN"
         banner_cell.font = SECTION_FONT
         banner_cell.fill = SECTION_FILL
         banner_cell.alignment = CENTER
@@ -1960,14 +2058,16 @@ def write_monthly_breakdown_total_row(ws: Worksheet, row: int, months: list[dict
 
 def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
                                  months: list[dict], sheet_name: str = "Monthly Breakdown",
-                                 distribution_mode: str = "even") -> Worksheet:
+                                 distribution_mode: str = "even", time_unit: str = "month") -> Worksheet:
     """
     Standalone tab: one row per (non-Added-Value) line item that has a
-    Monthly Breakdown, a "TOTAL PLAN SPEND BY MONTH" row at the bottom —
-    plain grid, independent of the Net/Gross column layout entirely.
+    Breakdown, a "TOTAL PLAN SPEND BY {UNIT}" row at the bottom — plain
+    grid, independent of the Net/Gross column layout entirely.
     """
+    labels = _unit_labels(time_unit)
+    default_title = f"{labels['adjective']} Breakdown"
     ws = wb.create_sheet(sheet_name[:31])
-    ws["B2"] = f"Monthly Breakdown — {sheet_name}" if sheet_name != "Monthly Breakdown" else "Monthly Breakdown"
+    ws["B2"] = f"{default_title} — {sheet_name}" if sheet_name not in ("Monthly Breakdown", default_title) else default_title
     ws["B2"].font = TITLE_FONT
     ws.column_dimensions["A"].width = 2
     ws.column_dimensions["B"].width = 34
@@ -2012,11 +2112,11 @@ def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
         row += 1
 
     if not any_row_written:
-        ws.cell(row=row, column=2, value="No line items use Monthly Breakdown for this option.").font = NOTE_FONT
+        ws.cell(row=row, column=2, value=f"No line items use {default_title} for this option.").font = NOTE_FONT
         row += 1
 
     total_row = row + 1
-    total_label_cell = ws.cell(row=total_row, column=2, value="TOTAL PLAN SPEND BY MONTH")
+    total_label_cell = ws.cell(row=total_row, column=2, value=f"TOTAL PLAN SPEND BY {labels['noun'].upper()}")
     total_label_cell.font = TOTAL_FONT
     total_label_cell.fill = TOTAL_FILL
     write_monthly_breakdown_total_row(ws, total_row, months, per_month_totals, start_col=3)

@@ -23,6 +23,7 @@
       </a>
       <nav class="admin-tabs" aria-label="Admin sections">
         <button class="admin-tab active" data-tab="proposals">Proposal History</button>
+        <button class="admin-tab" data-tab="analytics">Analytics</button>
         <button class="admin-tab" data-tab="rates">Rate Overrides</button>
         <button class="admin-tab" data-tab="markets">Markets</button>
         <button class="admin-tab" data-tab="users">Users</button>
@@ -76,6 +77,63 @@
         <button type="button" class="btn-secondary" id="proposals-prev-btn" disabled>← Prev</button>
         <span id="proposals-page-info" class="mono"></span>
         <button type="button" class="btn-secondary" id="proposals-next-btn" disabled>Next →</button>
+      </div>
+    </section>
+
+    <!-- ================= ANALYTICS TAB ================= -->
+    <section class="panel hidden" id="tab-analytics">
+      <div class="panel-head">
+        <div class="kicker">Admin</div>
+        <h1 class="display">Analytics Dashboard</h1>
+        <p class="lede">Who's generating proposals, how many are reworked versions of the same Notion request, volume over time, and average value/flight length — computed from every proposal on this server.</p>
+      </div>
+
+      <div class="admin-toolbar">
+        <div class="tier-tabs" id="analytics-window-tabs">
+          <button type="button" class="tier-tab" data-window="30d">Last 30 days</button>
+          <button type="button" class="tier-tab" data-window="90d">Last 90 days</button>
+          <button type="button" class="tier-tab" data-window="12m">Last 12 months</button>
+          <button type="button" class="tier-tab active" data-window="all">All time</button>
+        </div>
+        <div class="spacer"></div>
+        <span id="analytics-loading" class="mono hidden">Loading…</span>
+      </div>
+
+      <div id="analytics-content">
+        <div class="analytics-stat-grid" id="analytics-stat-grid"></div>
+
+        <div class="analytics-grid-2">
+          <div class="analytics-card">
+            <h3>Who's Creating Proposals</h3>
+            <table class="admin-table" id="analytics-planner-table">
+              <thead><tr><th>Planner</th><th>Proposals</th><th>Total Value</th><th>Avg Value</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="analytics-card">
+            <h3>Most Reworked Requests <small>(same Notion ID, generated more than once)</small></h3>
+            <table class="admin-table" id="analytics-regen-table">
+              <thead><tr><th>Notion ID</th><th>Client</th><th>Times Generated</th><th>Most Recent</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="analytics-grid-2">
+          <div class="analytics-card">
+            <h3>Volume by Month</h3>
+            <div class="analytics-bars" id="analytics-month-bars"></div>
+          </div>
+          <div class="analytics-card">
+            <h3>Request Type Breakdown</h3>
+            <div class="analytics-bars" id="analytics-request-type-bars"></div>
+          </div>
+        </div>
+
+        <div class="analytics-card">
+          <h3>Billing Period Toggle Adoption <small>(Weekly / Monthly / Quarterly)</small></h3>
+          <div class="analytics-bars" id="analytics-time-unit-bars"></div>
+        </div>
       </div>
     </section>
 

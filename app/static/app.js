@@ -33,6 +33,21 @@ const state = {
   // (day-proration was this app's own earlier default; even is now what
   // the planner actually wants, with day-proration kept as an opt-in).
   mbDistributionMode: "even",
+  // Step 04's Week/Month/Quarter toggle — "week" | "month" | "quarter".
+  // Proposal-wide (not per-tier — the toggle lives once at Step 04 and
+  // governs the whole proposal, same reasoning as mbDistributionMode
+  // above), drives which of the _mbPeriodsBetween granularities Curate/
+  // Avails/Step 05/the export all use. Defaults to "month" — this app's
+  // original, only-ever behavior before the toggle existed.
+  timeUnit: "month",
+  // Step 05's "combine adjacent periods into one bucket" control for the
+  // ACTIVE tier — [["2026-09","2026-10"], ...], each inner array 2+
+  // period keys. TIER-scoped (like lineItems/availsData below, swapped by
+  // switchTier/addTier/removeTier) because every line item in a tier
+  // shares the same resolved dates and therefore the same period list —
+  // see TierModel.period_merge_groups' own comment in main.py for why
+  // this isn't per-line-item.
+  activeTierPeriodMergeGroups: [],
   rateOverrideOpen: new Set(),  // transient UI state — which row indices show the rate-override input
   objectiveOtherOpen: new Set(),  // transient UI state — which row indices show the free-text "Other" objective input
   proposalId: null,
@@ -175,6 +190,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     console.error("Catalog failed to load — product picker / Suggest Mix will be unavailable until this is fixed:", err);
   }
   wireEvents();
+  // Positions the toggle's sliding thumb (and every dependent label) for
+  // the very first render — without this, a fresh (non-reopened) session
+  // never gets a transform on the thumb at all (it only otherwise runs on
+  // a toggle click or inside maybeReopenProposal), leaving it sitting at
+  // its CSS default position while the logically-active "Monthly" option
+  // renders white text with nothing behind it — invisible against the
+  // track's own white background. Redundant-but-harmless for a reopened
+  // session, which calls this again itself once state.timeUnit is restored.
+  _applyTimeUnitLabels();
   await maybeReopenProposal();
 });
 
@@ -294,6 +318,15 @@ async function maybeReopenProposal() {
     // Reopening carries the REAL title from when this proposal was last
     // generated — show it verbatim rather than a fresh live-guess.
     state.finalProposalTitle = data.proposal_title || null;
+    // MUST be restored before renderLineItems()/renderMonthlyBreakdown()
+    // run below — unlike mbDistributionMode (a preview-only default that
+    // always resets to "even"), time_unit determines the FORMAT of the
+    // monthly_allocations keys this same payload is about to restore
+    // (see reopen_state's own comment in main.py). Absent entirely on a
+    // proposal generated before this feature existed — defaults to
+    // "month", correct for every such proposal since that was the only
+    // granularity that existed then.
+    state.timeUnit = data.time_unit || "month";
 
     // Restore Add-Ons picks (absent entirely on a proposal generated before
     // this feature existed — defaults to none picked, not an error).
@@ -323,7 +356,9 @@ async function maybeReopenProposal() {
     state.activeTierEndDate = active.endDate;
     state.lineItems = active.lineItems;
     state.availsData = active.availsData;
+    state.activeTierPeriodMergeGroups = active.periodMergeGroups || [];
     state.tiers = rest;
+    _applyTimeUnitLabels();
 
     // Forced export-tab selections, if the planner had overridden any
     // before generating — reuses suggestedTabs' own existing checkbox-sync
@@ -383,6 +418,7 @@ function _migrateReopenedTier(t) {
     endDate: t.end_date || null,
     lineItems,
     availsData,
+    periodMergeGroups: t.period_merge_groups || [],
   };
 }
 
@@ -527,6 +563,12 @@ function wireEvents() {
   document.getElementById("roadblocks-regenerate-btn").addEventListener("click", () => onRoadblocksGenerate());
 
   // Curation
+  // Week/Month/Quarter toggle. Wired once (not re-wired per render — see
+  // the mb-mode-tabs comment above for why); renderLineItems()/onTimeUnitChange
+  // keep .active in sync.
+  document.querySelectorAll("#time-unit-toggle .time-unit-slider-option").forEach(btn => {
+    btn.addEventListener("click", () => onTimeUnitChange(btn.dataset.unit));
+  });
   document.getElementById("add-product-btn").addEventListener("click", onAddProduct);
   document.getElementById("recommend-btn").addEventListener("click", onRecommend);
   document.getElementById("add-tier-btn").addEventListener("click", () => addTier());
@@ -710,9 +752,22 @@ function _syncTierOverridePanelOpen() {
 function buildProposalNamePreview(parsed) {
   if (!parsed) return "";
   const shortId = (parsed.notion_id || "").trim() || "----";
-  const campaignName = state.manualCampaignNameOverride
-    || _previewTitleCase((parsed.client_name || "Campaign").trim())
-    || "Campaign";
+  // Mirrors ai_enricher.build_proposal_title()'s "{Client Name} - {Order
+  // Description}" convention — the client name appears exactly once,
+  // never duplicated inside the order-description segment. Pre-Generate,
+  // the only possible "order description" is a manual override (no AI
+  // enrichment has run yet); with none set, this just shows the client
+  // name alone, same as before this convention existed.
+  const clientName = _previewTitleCase((parsed.client_name || "").trim());
+  const override = (state.manualCampaignNameOverride || "").trim();
+  let campaignName;
+  if (override && clientName && !override.toLowerCase().startsWith(clientName.toLowerCase())) {
+    campaignName = `${clientName} - ${override}`;
+  } else if (override) {
+    campaignName = override;
+  } else {
+    campaignName = clientName || "Campaign";
+  }
   const docType = _previewDocType(parsed.request_type);
   let monYY;
   const d = parsed.start_date ? new Date(parsed.start_date + "T00:00:00") : new Date();
@@ -848,7 +903,11 @@ function onNext(n) {
         return {
           id: newLineItemId(),
           product_name: name,
-          monthly_budget: p ? (p.minimum_spend || 0) : 0,
+          // state.timeUnit is always "month" (its default) the first time
+          // this pre-fill runs — nothing earlier in the flow can have
+          // changed it yet — so no scaling needed here specifically, but
+          // _timeUnitMinimumScale() is a no-op (×1) for "month" anyway.
+          monthly_budget: p ? (p.minimum_spend || 0) * _timeUnitMinimumScale() : 0,
           months: state.parsed.total_months || 3,
           rate_override: null,
           notes_override: null,
@@ -931,7 +990,7 @@ function distributeBudgetProportionally(items, totalBudget) {
   items.forEach((li, i) => {
     const share = Math.round((weights[i] / totalWeight) * totalBudget / 50) * 50;
     const p = state.productIndex[li.product_name];
-    li.monthly_budget = Math.max(share, p ? (p.minimum_spend || 0) : 0);
+    li.monthly_budget = Math.max(share, p ? (p.minimum_spend || 0) * _timeUnitMinimumScale() : 0);
   });
   // Adjust last item to make sum exact
   const sum = items.reduce((s, li) => s + li.monthly_budget, 0);
@@ -1450,8 +1509,8 @@ function renderRoadblocks(data) {
 
 function allTiersForSubmit() {
   return [
-    { label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, start_date: state.activeTierStartDate, end_date: state.activeTierEndDate, line_items: state.lineItems, avails_data: state.availsData },
-    ...state.tiers.map(t => ({ label: t.label, name: t.name, geo: t.geo, start_date: t.startDate, end_date: t.endDate, line_items: t.lineItems, avails_data: t.availsData })),
+    { label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, start_date: state.activeTierStartDate, end_date: state.activeTierEndDate, line_items: state.lineItems, avails_data: state.availsData, period_merge_groups: state.activeTierPeriodMergeGroups },
+    ...state.tiers.map(t => ({ label: t.label, name: t.name, geo: t.geo, start_date: t.startDate, end_date: t.endDate, line_items: t.lineItems, avails_data: t.availsData, period_merge_groups: t.periodMergeGroups || [] })),
   ].sort((a, b) => a.label.localeCompare(b.label));
 }
 
@@ -1513,7 +1572,7 @@ function switchTier(label) {
   // Replace the target's snapshot (about to become active) with a fresh
   // snapshot of the tier we're leaving — one swap, order doesn't matter
   // since every lookup here is by label, not position.
-  state.tiers.splice(idx, 1, { label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, startDate: state.activeTierStartDate, endDate: state.activeTierEndDate, lineItems: state.lineItems, availsData: state.availsData });
+  state.tiers.splice(idx, 1, { label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, startDate: state.activeTierStartDate, endDate: state.activeTierEndDate, lineItems: state.lineItems, availsData: state.availsData, periodMergeGroups: state.activeTierPeriodMergeGroups });
 
   state.activeTierLabel = label;
   state.activeTierName = target.name || null;
@@ -1522,6 +1581,7 @@ function switchTier(label) {
   state.activeTierEndDate = target.endDate || null;
   state.lineItems = target.lineItems;
   state.availsData = target.availsData;
+  state.activeTierPeriodMergeGroups = target.periodMergeGroups || [];
   state.rateOverrideOpen.clear();
   state.objectiveOtherOpen.clear();
 
@@ -1547,7 +1607,7 @@ function addTier(targetBudget) {
   if (!nextLabel) return;
 
   // Snapshot the tier we're leaving active...
-  state.tiers.push({ label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, startDate: state.activeTierStartDate, endDate: state.activeTierEndDate, lineItems: state.lineItems, availsData: state.availsData });
+  state.tiers.push({ label: state.activeTierLabel, name: state.activeTierName, geo: state.activeTierGeo, startDate: state.activeTierStartDate, endDate: state.activeTierEndDate, lineItems: state.lineItems, availsData: state.availsData, periodMergeGroups: state.activeTierPeriodMergeGroups });
 
   // ...then make the NEW tier active, starting as a clone of it — "Add
   // Option" copies the current mix so the planner adjusts from there,
@@ -1574,6 +1634,10 @@ function addTier(targetBudget) {
   state.activeTierEndDate = null;
   state.lineItems = clonedItems;
   state.availsData = clonedAvails;
+  // Same "don't silently inherit" reasoning as the date reset above — a
+  // merge decision made for the source option's own calendar/minimums
+  // isn't necessarily right for a brand-new budget option.
+  state.activeTierPeriodMergeGroups = [];
   state.rateOverrideOpen.clear();
   state.objectiveOtherOpen.clear();
 
@@ -1731,7 +1795,10 @@ function renderLineItems() {
   state.lineItems.forEach((li, idx) => {
     const p = state.productIndex[li.product_name] || {};
     const tr = document.createElement("tr");
-    const minSpend = p.minimum_spend || 0;
+    // Catalog's minimum_spend is a MONTHLY figure; li.monthly_budget is
+    // "$ per one state.timeUnit period" — scale before comparing, same
+    // rule Step 05 uses (see _mbEffectiveMinimumForPeriod).
+    const minSpend = (p.minimum_spend || 0) * _timeUnitMinimumScale();
     // Added Value: a $0 (or below-minimum) budget is deliberate here, not
     // an oversight — don't flag it.
     const belowMin = !li.is_added_value && li.monthly_budget < minSpend;
@@ -1790,7 +1857,7 @@ function renderLineItems() {
         ${(state.parsed.agency_fee > 0 && !li.is_added_value) ? `
           <div class="budget-gross-row">
             <span class="budget-gross-label">Gross</span>
-            <input type="number" step="0.01" min="0"
+            <input type="number" step="50" min="0"
                    value="${_netToGross(li.monthly_budget || 0, state.parsed.agency_fee).toFixed(2)}"
                    data-idx="${idx}" data-gross-budget-input
                    title="Gross budget for this line — editing recalculates the Net figure above" />
@@ -2071,7 +2138,7 @@ function onLineItemEdit(e) {
   if (key === "monthly_budget") {
     const li = state.lineItems[idx];
     const p = state.productIndex[li.product_name] || {};
-    const minSpend = p.minimum_spend || 0;
+    const minSpend = (p.minimum_spend || 0) * _timeUnitMinimumScale();
     e.target.classList.toggle("below-min", !li.is_added_value && (v || 0) < minSpend);
     // Keep this row's Gross budget input (if shown) in sync with the Net
     // value that was just typed — the two stay mirrored regardless of
@@ -2122,6 +2189,82 @@ function syncLineItemsFromTable() {
   // No-op: state.lineItems is already in sync via onLineItemEdit
 }
 
+// Every static "Month"/"Monthly"/"Months" label this toggle governs, in
+// one place — called on toggle change AND once at page init/reopen so a
+// non-default state.timeUnit (a reopened proposal) shows correctly from
+// the start. Deliberately does NOT touch any $ or count NUMBER (see
+// onTimeUnitChange's own comment on why those are left for the planner
+// to manually review rather than auto-converted).
+function _applyTimeUnitLabels() {
+  const noun = _mbUnitNoun();
+  const nounPlural = _mbUnitNounPlural();
+  const adjective = _mbUnitAdjective();
+
+  const sliderOptions = Array.from(document.querySelectorAll("#time-unit-toggle .time-unit-slider-option"));
+  const activeIdx = sliderOptions.findIndex(btn => btn.dataset.unit === state.timeUnit);
+  sliderOptions.forEach((btn, i) => btn.classList.toggle("active", i === activeIdx));
+  const thumb = document.getElementById("time-unit-slider-thumb");
+  // Percentages here are relative to the THUMB's own width (one segment),
+  // not the track's — translateX(100%) moves it exactly one thumb-width
+  // right, landing it on the middle segment regardless of the track's
+  // actual pixel width. Falls back to the "month" position (index 1) if
+  // state.timeUnit somehow doesn't match any option.
+  if (thumb) thumb.style.transform = `translateX(${(activeIdx === -1 ? 1 : activeIdx) * 100}%)`;
+
+  const setText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+  setText("budget-target-label", `Total ${adjective.toLowerCase()} budget`);
+  setText("monthly-total-label", `${adjective} total`);
+  setText("monthly-total-gross-label", `${adjective} total (Gross)`);
+  setText("col-budget-header", `${adjective} $`);
+  setText("col-months-header", nounPlural);
+  setText("mb-step-title", `${adjective} breakdown`);
+  setText("mb-step-lede", `Split each line item's budget across the ${nounPlural.toLowerCase()} your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat ${adjective.toLowerCase()} figure is all you need; nothing else changes if you do.`);
+  setText("mb-step-name", `${adjective} Breakdown`);
+  setText("mb-no-dates-text", `${adjective} Breakdown needs a campaign flight to divide into ${nounPlural.toLowerCase()}. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.`);
+  setText("mb-mode-even-btn", `Even across ${nounPlural.toLowerCase()}`);
+  setText("nav-step-5-label", ` ${adjective}`);
+  const navStep5 = document.getElementById("nav-step-5");
+  if (navStep5) navStep5.title = adjective;
+}
+
+// Step 04's Week/Month/Quarter toggle. Deliberately does NOT auto-convert
+// any existing $ or count number when the unit changes (e.g. rescale a
+// curated "$2,000/month" line into "$461/week") — that's real billing
+// data, and a silent automatic conversion is exactly the kind of thing
+// that could ship a wrong number into a client-facing proposal if this
+// logic ever had a subtle bug. Instead the raw numbers stay exactly as
+// curated and the planner reviews/adjusts them under the new labels,
+// same as any other curation field. What DOES get cleared: every option's
+// Step 05 Monthly Breakdown allocations and merge groups, since their
+// period KEYS (e.g. "2026-09" for month, "W1-2026-09-01" for week) are
+// tied to the OLD granularity and become meaningless under the new one.
+function onTimeUnitChange(newUnit) {
+  if (newUnit === state.timeUnit || !(newUnit in _MB_UNIT_ADJECTIVE)) return;
+
+  const allTiers = allTiersForSubmit();
+  const hasAllocations = allTiers.some(t => (t.line_items || []).some(li => li.monthly_allocations && Object.keys(li.monthly_allocations).length));
+  const hasMerges = allTiers.some(t => (t.period_merge_groups || []).length);
+  if (hasAllocations || hasMerges) {
+    const ok = confirm(
+      `Switching to ${_MB_UNIT_ADJECTIVE[newUnit]} will clear every budget option's Step 05 breakdown and combined periods — ` +
+      `the old ${_mbUnitNoun().toLowerCase()}-based numbers won't carry over. Curated budgets and product mix are untouched either way. Continue?`
+    );
+    if (!ok) return;
+  }
+
+  state.timeUnit = newUnit;
+
+  const clearLine = (li) => { li.monthly_allocations = null; delete li._mbBaseline; };
+  state.lineItems.forEach(clearLine);
+  state.tiers.forEach(t => { (t.lineItems || []).forEach(clearLine); t.periodMergeGroups = []; });
+  state.activeTierPeriodMergeGroups = [];
+
+  _applyTimeUnitLabels();
+  renderLineItems();
+  updateTotals();
+  renderMonthlyBreakdown();
+}
+
 function updateTotals() {
   const monthly = state.lineItems.reduce((s, li) => s + (li.monthly_budget || 0), 0);
   const flight = state.lineItems.reduce((s, li) => s + (li.monthly_budget || 0) * (li.months || 1), 0);
@@ -2152,7 +2295,7 @@ function onAddProduct() {
   state.lineItems.push({
     id: newLineItemId(),
     product_name: name,
-    monthly_budget: p.minimum_spend || 0,
+    monthly_budget: (p.minimum_spend || 0) * _timeUnitMinimumScale(),
     months: state.parsed?.total_months || 3,
     rate_override: null,
     notes_override: null,
@@ -2251,7 +2394,7 @@ function onDuplicateLineItem(idx) {
 async function onRecommend() {
   const budget = parseFloat(document.getElementById("total-budget-target").value);
   if (!budget || budget <= 0) {
-    alert("Enter a target monthly budget first.");
+    alert(`Enter a target ${_mbUnitAdjective().toLowerCase()} budget first.`);
     return;
   }
   const btn = document.getElementById("recommend-btn");
@@ -2266,6 +2409,7 @@ async function onRecommend() {
         request: state.parsed,
         monthly_budget: budget,
         strategy_brief: _briefWithSelectedTactics(),
+        time_unit: state.timeUnit,
       }),
     });
     if (!res.ok) {
@@ -2445,19 +2589,36 @@ function calcMaxImpsFromSpend(p, maxSpend) {
 // <65% green/ok, 65-79% yellow, 80-89% orange, >=90% red.
 // --------------------------------------------------------------------------
 
+// entry.max_spend/max_imps are always stated against the catalog's own
+// MONTHLY avails ceiling ("Max Recommended Monthly Imps/Spend" — a
+// standard monthly inventory-forecasting window, deliberately NOT
+// relabeled by the Week/Month/Quarter toggle, see that toggle's own
+// docs). li.monthly_budget is "$ per one state.timeUnit period" — convert
+// it to a monthly-EQUIVALENT rate before comparing, or SOV% would read
+// wildly low in Weekly mode (a week's $ is naturally ~1/4 of a month's)
+// or wildly high in Quarterly mode, with no change in real pacing.
+// Deliberately simple round factors (×4 / ÷3), not the more precise
+// 12/52 used for minimum-spend scaling elsewhere — explicit planner
+// preference for this specific comparison.
+const _SOV_MONTHLY_EQUIVALENT_SCALE = { week: 4, month: 1, quarter: 1 / 3 };
+function _sovMonthlyEquivalentBudget(budget) {
+  return budget * (_SOV_MONTHLY_EQUIVALENT_SCALE[state.timeUnit] ?? 1);
+}
+
 function computeSovPct(li, p, entry) {
   // Free-form has nothing to calculate this FROM (no real imps/spend
   // numbers) — a planner-declared value stands in directly, still driving
   // the same badge/conditional-formatting pipeline as a computed one.
   if (entry.sov_pct_freeform != null) return entry.sov_pct_freeform;
   if (!li || !li.monthly_budget) return null;
+  const monthlyEquivalentBudget = _sovMonthlyEquivalentBudget(li.monthly_budget);
   if (entry.max_spend) {
-    return li.monthly_budget / entry.max_spend * 100;
+    return monthlyEquivalentBudget / entry.max_spend * 100;
   }
   if (entry.max_imps) {
     const spendResult = calcMaxSpendFromImps(_effectiveProduct(li, p), entry.max_imps);
     if (spendResult && spendResult.value) {
-      return li.monthly_budget / spendResult.value * 100;
+      return monthlyEquivalentBudget / spendResult.value * 100;
     }
   }
   return null;
@@ -2575,6 +2736,21 @@ function _mbMonthLabel(d) {
 function _mbLastDayOfMonth(d) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)); }
 function _mbDaysBetweenInclusive(a, b) { return Math.round((b - a) / 86400000) + 1; }
 
+// 'Sep 28 – Oct 4, 2026' / 'Sep 1 – 30, 2026' / 'Dec 15, 2026 – Jan 4,
+// 2027' — mirrors monthly_allocation.py's _date_range_label() exactly.
+// Shown alongside every period's own label in Step 05 so a planner can
+// see exactly which real dates a period covers, at any granularity.
+function _mbDateRangeLabel(start, end) {
+  const fmt = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  if (start.getUTCFullYear() === end.getUTCFullYear() && start.getUTCMonth() === end.getUTCMonth()) {
+    return `${fmt(start)} – ${end.getUTCDate()}, ${start.getUTCFullYear()}`;
+  }
+  if (start.getUTCFullYear() === end.getUTCFullYear()) {
+    return `${fmt(start)} – ${fmt(end)}, ${start.getUTCFullYear()}`;
+  }
+  return `${fmt(start)}, ${start.getUTCFullYear()} – ${fmt(end)}, ${end.getUTCFullYear()}`;
+}
+
 // Every calendar month overlapping [start, end] — mirrors
 // monthly_allocation.py's months_between() exactly, including active_days
 // per month for day-proration.
@@ -2589,13 +2765,171 @@ function _mbMonthsBetween(start, end) {
     months.push({
       key: _mbMonthKey(cursor),
       label: _mbMonthLabel(cursor),
+      date_range_label: _mbDateRangeLabel(activeStart, activeEnd),
+      start: activeStart,
+      end: activeEnd,
       days_in_month: _mbDaysBetweenInclusive(cursor, monthEnd),
       active_days: _mbDaysBetweenInclusive(activeStart, activeEnd),
+      period_count: 1,
     });
     cursor = new Date(Date.UTC(cursor.getUTCMonth() === 11 ? cursor.getUTCFullYear() + 1 : cursor.getUTCFullYear(), (cursor.getUTCMonth() + 1) % 12, 1));
   }
   return months;
 }
+
+// Every 7-day period from [start, end], anchored to the campaign's OWN
+// start date (not ISO Mon-Sun weeks) — mirrors monthly_allocation.py's
+// weeks_between() exactly. The last week may be shorter than 7 days.
+function _mbWeeksBetween(start, end) {
+  if (end < start) { const t = start; start = end; end = t; }
+  const weeks = [];
+  let cursor = start;
+  let idx = 1;
+  while (cursor <= end) {
+    const weekEnd = new Date(Math.min(+(new Date(cursor.getTime() + 6 * 86400000)), +end));
+    weeks.push({
+      key: `W${idx}-${cursor.toISOString().slice(0, 10)}`,
+      label: `Week ${idx}`,
+      date_range_label: _mbDateRangeLabel(cursor, weekEnd),
+      start: cursor,
+      end: weekEnd,
+      days_in_month: _mbDaysBetweenInclusive(cursor, weekEnd),
+      active_days: _mbDaysBetweenInclusive(cursor, weekEnd),
+      period_count: 1,
+    });
+    cursor = new Date(cursor.getTime() + 7 * 86400000);
+    idx += 1;
+  }
+  return weeks;
+}
+
+// Groups _mbMonthsBetween()'s own months into chunks of 3, from the
+// campaign's own start month — mirrors monthly_allocation.py's
+// quarters_between() exactly ("3-month lines" from the campaign's own
+// start, not aligned to standard calendar quarters).
+function _mbQuartersBetween(start, end) {
+  const months = _mbMonthsBetween(start, end);
+  const quarters = [];
+  for (let i = 0; i < months.length; i += 3) {
+    const chunk = months.slice(i, i + 3);
+    const first = chunk[0], last = chunk[chunk.length - 1];
+    let label;
+    if (chunk.length === 1) {
+      label = first.label;
+    } else {
+      const fmtAbbrev = (d) => d.toLocaleDateString("en-US", { month: "short", timeZone: "UTC" });
+      label = first.start.getUTCFullYear() === last.end.getUTCFullYear()
+        ? `${fmtAbbrev(first.start)}–${fmtAbbrev(last.end)} ${last.end.getUTCFullYear()}`
+        : `${fmtAbbrev(first.start)} ${first.start.getUTCFullYear()}–${fmtAbbrev(last.end)} ${last.end.getUTCFullYear()}`;
+    }
+    quarters.push({
+      key: chunk.map(m => m.key).join("+"),
+      label,
+      date_range_label: _mbDateRangeLabel(first.start, last.end),
+      start: first.start,
+      end: last.end,
+      days_in_month: chunk.reduce((s, m) => s + m.days_in_month, 0),
+      active_days: chunk.reduce((s, m) => s + m.active_days, 0),
+      period_count: 1,  // one quarter = one granularity unit, regardless of how many real months compose it (see minimum-scaling)
+    });
+  }
+  return quarters;
+}
+
+// THE one place a caller asks for "the periods this flight touches"
+// without hardcoding which granularity that means — mirrors
+// monthly_allocation.py's periods_between() dispatcher exactly.
+function _mbPeriodsBetween(start, end, granularity) {
+  if (granularity === "week") return _mbWeeksBetween(start, end);
+  if (granularity === "quarter") return _mbQuartersBetween(start, end);
+  return _mbMonthsBetween(start, end);
+}
+
+// Combines specific ADJACENT periods (by key) into one bucket — mirrors
+// monthly_allocation.py's apply_period_merges() exactly, including the
+// "ignore a group that isn't actually contiguous in this periods list"
+// safety check. See that function's own docstring for the full rationale.
+function _mbApplyPeriodMerges(periods, mergeGroups) {
+  if (!mergeGroups || !mergeGroups.length) return periods.slice();
+  const keyToIdx = {};
+  periods.forEach((p, i) => { keyToIdx[p.key] = i; });
+  const validGroups = [];
+  mergeGroups.forEach(group => {
+    if (!group || group.length < 2) return;
+    const idxs = group.map(k => keyToIdx[k]).filter(i => i !== undefined);
+    if (idxs.length !== group.length) return;
+    idxs.sort((a, b) => a - b);
+    for (let i = 1; i < idxs.length; i++) {
+      if (idxs[i] !== idxs[i - 1] + 1) return;  // not contiguous — ignore rather than misrepresent the date range
+    }
+    validGroups.push(idxs);
+  });
+
+  const mergedIdxToGroup = {};
+  validGroups.forEach(idxs => idxs.forEach(i => { mergedIdxToGroup[i] = idxs; }));
+
+  const result = [];
+  const consumed = new Set();
+  periods.forEach((p, i) => {
+    if (consumed.has(i)) return;
+    const group = mergedIdxToGroup[i];
+    if (!group) { result.push(p); return; }
+    const chunk = group.map(j => periods[j]);
+    group.forEach(j => consumed.add(j));
+    const first = chunk[0], last = chunk[chunk.length - 1];
+    result.push({
+      key: chunk.map(m => m.key).join("+"),
+      label: _mbCombinedPeriodLabel(first, last),
+      date_range_label: (first.start && last.end) ? _mbDateRangeLabel(first.start, last.end) : `${first.date_range_label} – ${last.date_range_label}`,
+      start: first.start,
+      end: last.end,
+      days_in_month: chunk.reduce((s, m) => s + m.days_in_month, 0),
+      active_days: chunk.reduce((s, m) => s + m.active_days, 0),
+      period_count: chunk.reduce((s, m) => s + (m.period_count || 1), 0),
+    });
+  });
+  return result;
+}
+
+// 'September–October 2026' for two merged MONTHS (matches the planner's
+// own phrasing); falls back to a generic '{label}–{label}' join for any
+// other granularity — mirrors monthly_allocation.py's _combined_label().
+function _mbCombinedPeriodLabel(first, last) {
+  const firstWords = first.label.split(" ");
+  const lastWords = last.label.split(" ");
+  const isMonthStyle = firstWords.length === 2 && lastWords.length === 2 && /^\d+$/.test(firstWords[1]) && /^\d+$/.test(lastWords[1]);
+  if (isMonthStyle && firstWords[1] === lastWords[1]) return `${firstWords[0]}–${last.label}`;
+  return `${first.label}–${last.label}`;
+}
+
+// catalog minimum_spend is a MONTHLY figure — scales it to "one unit of
+// state.timeUnit" the same way monthly_allocation.py's
+// _GRANULARITY_MINIMUM_SCALE does. Shared by Step 04's own flat
+// below-minimum check (li.monthly_budget is "$ per one {unit} period",
+// same as everywhere else in this app — see the module-level note by
+// state.timeUnit) AND _mbEffectiveMinimumForPeriod below (which further
+// multiplies by a specific period's period_count, >1 only for a merged
+// Step 05 bucket).
+const _MB_GRANULARITY_MIN_SCALE = { week: 12 / 52, month: 1, quarter: 3 };
+function _timeUnitMinimumScale() { return _MB_GRANULARITY_MIN_SCALE[state.timeUnit] ?? 1; }
+
+// Deliberately NOT further prorated by the period's own active_days —
+// see monthly_allocation.py's _effective_minimum_for_period docstring for
+// why a partial period still gets the FULL per-granularity minimum
+// (that's what makes merging necessary rather than redundant).
+function _mbEffectiveMinimumForPeriod(minimumSpend, period) {
+  return (minimumSpend || 0) * _timeUnitMinimumScale() * (period.period_count || 1);
+}
+
+// Granularity-aware display text — the single source every "Month"/
+// "Monthly"/"# of months" string in Step 04/05/06 reads from, so the
+// toggle actually relabels everywhere rather than just changing the math.
+const _MB_UNIT_NOUN = { week: "Week", month: "Month", quarter: "Quarter" };
+const _MB_UNIT_NOUN_PLURAL = { week: "Weeks", month: "Months", quarter: "Quarters" };
+const _MB_UNIT_ADJECTIVE = { week: "Weekly", month: "Monthly", quarter: "Quarterly" };
+function _mbUnitNoun() { return _MB_UNIT_NOUN[state.timeUnit] || "Month"; }
+function _mbUnitNounPlural() { return _MB_UNIT_NOUN_PLURAL[state.timeUnit] || "Months"; }
+function _mbUnitAdjective() { return _MB_UNIT_ADJECTIVE[state.timeUnit] || "Monthly"; }
 
 // Day-prorated split — mirrors monthly_allocation.py's prorated_allocation()
 // exactly, including "last month absorbs the rounding remainder" so dollars
@@ -2669,7 +3003,20 @@ function _mbEffectiveMonths() {
   const start = _mbParseDate(startRaw);
   const end = _mbParseDate(endRaw);
   if (!start || !end) return null;
-  return _mbMonthsBetween(start, end);
+  const basePeriods = _mbPeriodsBetween(start, end, state.timeUnit);
+  return _mbApplyPeriodMerges(basePeriods, state.activeTierPeriodMergeGroups);
+}
+
+// The BASE (pre-merge) period list for the active tier — needed by the
+// merge-controls UI, which offers "combine with next" on the real
+// underlying periods, not whatever's already been merged.
+function _mbEffectiveMonthsUnmerged() {
+  const startRaw = _effectiveStartDate(state.activeTierLabel);
+  const endRaw = _effectiveEndDate(state.activeTierLabel);
+  const start = _mbParseDate(startRaw);
+  const end = _mbParseDate(endRaw);
+  if (!start || !end) return null;
+  return _mbPeriodsBetween(start, end, state.timeUnit);
 }
 
 // Line-item budget changed SINCE THIS ALLOCATION WAS LAST (RE)BUILT —
@@ -2716,19 +3063,43 @@ function _mbSetAllocation(li, allocations) {
   li._mbBaseline = li.monthly_budget * li.months;
 }
 
-// Campaign dates changed since this allocation was set — preserve every
-// month that still exists UNCHANGED (never silently destroy a planner's
-// figure), drop months no longer in the flight, and leave a brand-new
-// month at $0 — any resulting imbalance surfaces through the normal
-// validation state rather than being silently auto-fixed.
+// Campaign dates, the time-unit toggle, OR the active tier's period-merge
+// groups changed since this allocation was set — preserve every dollar
+// that still applies (never silently destroy a planner's figure), drop
+// periods no longer in the flight, and leave a brand-new period at $0 —
+// any resulting imbalance surfaces through the normal validation state
+// rather than being silently auto-fixed.
+//
+// A NEW period's key is looked up by SUMMING whatever old allocation(s)
+// its own `key.split("+")` covers — for an unchanged period (no "+") this
+// is just its own old value (identical to the old month-only behavior);
+// for a period newly formed by merging (e.g. "2026-09+2026-10"), this
+// sums the two old separate values, so merging PRESERVES the combined
+// total exactly rather than resetting it. Un-merging (or switching time
+// units entirely) can't recover a since-collapsed split the same way —
+// there's no old "2026-09" key left once it was already merged into
+// "2026-09+2026-10" — so a freshly-split period legitimately starts at
+// $0, same as any other brand-new period; the planner re-splits manually.
 function _mbReconcileMonthsForDateChange(li, months) {
   if (!li.monthly_allocations) return li.monthly_allocations;
-  const validKeys = new Set(months.map(m => m.key));
+  const old = li.monthly_allocations;
   const next = {};
-  Object.keys(li.monthly_allocations).forEach(k => {
-    if (validKeys.has(k)) next[k] = li.monthly_allocations[k];
+  months.forEach(m => {
+    // An EXACT match first — covers "this period's key is unchanged from
+    // before", including an already-merged period staying merged the
+    // same way on a re-render (old[m.key] holds the combined value
+    // directly; decomposing "A+B" and looking up old["A"]/old["B"]
+    // separately would miss it, since old never had those split back out
+    // once merged — that was the actual bug this exact-match check
+    // fixes). Only falls through to split-and-sum for a period that's
+    // NEWLY combining previously-separate old entries.
+    if (Object.prototype.hasOwnProperty.call(old, m.key)) {
+      next[m.key] = old[m.key];
+      return;
+    }
+    const baseKeys = m.key.split("+");
+    next[m.key] = Math.round(baseKeys.reduce((s, k) => s + (old[k] || 0), 0) * 100) / 100;
   });
-  months.forEach(m => { if (!(m.key in next)) next[m.key] = 0; });
   return next;
 }
 
@@ -2825,20 +3196,21 @@ function _mbLineItemBlockHtml(li, months) {
   const rows = months.map(m => {
     const dollars = allocations[m.key] || 0;
     const pct = total ? (dollars / total * 100) : 0;
-    const belowMin = enabled && minSpend > 0 && dollars + _MB_CENT < minSpend;
+    const effectiveMin = _mbEffectiveMinimumForPeriod(minSpend, m);
+    const belowMin = enabled && effectiveMin > 0 && dollars + _MB_CENT < effectiveMin;
     const unitsRef = enabled ? _mbUnitsRefText(li, product, dollars) : "";
     return `
       <tr data-month="${m.key}" class="${belowMin ? "mb-row-warn" : ""}">
-        <td class="mono">${escapeHtml(m.label)}</td>
+        <td class="mono mb-period-cell"><span class="mb-period-label">${escapeHtml(m.label)}</span><span class="mb-period-range">${escapeHtml(m.date_range_label || "")}</span></td>
         <td><input type="number" step="0.01" min="0" max="100" class="mb-pct-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? Math.round(pct * 100) / 100 : ""}" ${enabled ? "" : "disabled"} /></td>
         <td><input type="number" step="1" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
         <td class="mb-units-ref mono">${escapeHtml(unitsRef)}</td>
-        <td class="mb-validation">${belowMin ? `⚠ Below min ($${minSpend.toLocaleString()})` : (enabled ? "✓" : "")}</td>
+        <td class="mb-validation">${belowMin ? `⚠ Below min ($${effectiveMin.toLocaleString(undefined, { maximumFractionDigits: 0 })})` : (enabled ? "✓" : "")}</td>
       </tr>`;
   }).join("");
 
   const statusClass = !enabled ? "mb-status-off" : (r.balanced ? "mb-status-ok" : (r.over_allocated ? "mb-status-over" : "mb-status-under"));
-  const statusText = !enabled ? "Not using Monthly Breakdown"
+  const statusText = !enabled ? `Not using ${_mbUnitAdjective()} Breakdown`
     : r.balanced ? `Allocated: 100% / ${money(total)}`
     : r.over_allocated ? `Over-allocated by ${Math.abs(r.remaining_pct).toFixed(1)}% / ${money(Math.abs(r.remaining))}`
     : `Allocated: ${r.allocated_pct.toFixed(1)}% / ${money(r.allocated)} — Remaining: ${r.remaining_pct.toFixed(1)}% / ${money(r.remaining)}`;
@@ -2850,13 +3222,13 @@ function _mbLineItemBlockHtml(li, months) {
         <span class="mb-line-total">Total: ${money(total)}</span>
         <label class="mb-enable-toggle" onclick="event.stopPropagation()">
           <input type="checkbox" class="mb-enable-checkbox" data-line="${li.id}" ${enabled ? "checked" : ""} />
-          Use Monthly Breakdown
+          Use ${_mbUnitAdjective()} Breakdown
         </label>
         <span class="mb-status-badge ${statusClass}">${escapeHtml(statusText)}</span>
       </summary>
       <div class="mb-line-body">
         <table class="mb-table">
-          <thead><tr><th>Month</th><th>%</th><th>$</th><th>Reference</th><th>Status</th></tr></thead>
+          <thead><tr><th>${escapeHtml(_mbUnitNoun())}</th><th>%</th><th>$</th><th>Reference</th><th>Status</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
         <button type="button" class="btn-secondary mb-reset-btn" data-line="${li.id}" ${enabled ? "" : "disabled"}>↺ Reset to ${state.mbDistributionMode === "prorated" ? "day-prorated" : "even"} default</button>
@@ -2945,10 +3317,12 @@ function _mbLiveUpdateAfterEdit(li, months, editedInput) {
 
     const product = state.productIndex[li.product_name];
     const minSpend = product ? (product.minimum_spend || 0) : 0;
-    const belowMin = minSpend > 0 && dollars + _MB_CENT < minSpend;
+    const period = months.find(m => m.key === monthKey);
+    const effectiveMin = period ? _mbEffectiveMinimumForPeriod(minSpend, period) : minSpend;
+    const belowMin = effectiveMin > 0 && dollars + _MB_CENT < effectiveMin;
     row.classList.toggle("mb-row-warn", belowMin);
     const validationCell = row.querySelector(".mb-validation");
-    if (validationCell) validationCell.textContent = belowMin ? `⚠ Below min ($${minSpend.toLocaleString()})` : "✓";
+    if (validationCell) validationCell.textContent = belowMin ? `⚠ Below min ($${effectiveMin.toLocaleString(undefined, { maximumFractionDigits: 0 })})` : "✓";
     const unitsRefCell = row.querySelector(".mb-units-ref");
     if (unitsRefCell) unitsRefCell.textContent = _mbUnitsRefText(li, product, dollars);
   }
@@ -2978,19 +3352,78 @@ function _mbRenderPlanSummary(months) {
     months.forEach(m => { totals[m.key] += dist[m.key] || 0; });
   });
   const grandTotal = months.reduce((s, m) => s + totals[m.key], 0);
-  const cells = months.map(m => `
-    <div class="mb-summary-cell">
+  const cells = months.map((m, i) => {
+    const isMerged = m.key.includes("+");
+    // "Combine with next" only makes sense before the LAST cell, and
+    // ties this option's whole period list together — see _mbMergePeriodWithNext.
+    const mergeBtn = !isMerged && i < months.length - 1
+      ? `<button type="button" class="mb-merge-btn" data-merge-key="${escapeHtml(m.key)}" title="Combine this ${_mbUnitNoun().toLowerCase()} with the next one — useful when a partial ${_mbUnitNoun().toLowerCase()} is too small to clear a product's minimum on its own">⛓ Combine with next</button>`
+      : "";
+    const unmergeBtn = isMerged
+      ? `<button type="button" class="mb-unmerge-btn" data-unmerge-key="${escapeHtml(m.key)}" title="Split this combined ${_mbUnitNoun().toLowerCase()} back into its separate parts">✕ Split apart</button>`
+      : "";
+    return `
+    <div class="mb-summary-cell ${isMerged ? "mb-summary-cell-merged" : ""}">
       <div class="mb-summary-month">${escapeHtml(m.label)}</div>
+      <div class="mb-summary-range">${escapeHtml(m.date_range_label || "")}</div>
       <div class="mb-summary-amount">${money(totals[m.key])}</div>
-    </div>`).join("");
+      ${mergeBtn}${unmergeBtn}
+    </div>`;
+  }).join("");
   document.getElementById("mb-plan-summary").innerHTML = `
-    <div class="mb-summary-label">Total plan spend by month <small>(${state.mbDistributionMode === "prorated" ? "day-prorated" : "even-split"} estimate for any line not yet customized)</small></div>
+    <div class="mb-summary-label">Total plan spend by ${_mbUnitNoun().toLowerCase()} <small>(${state.mbDistributionMode === "prorated" ? "day-prorated" : "even-split"} estimate for any line not yet customized)</small></div>
     <div class="mb-summary-row">${cells}
       <div class="mb-summary-cell mb-summary-cell-total">
         <div class="mb-summary-month">Total</div>
         <div class="mb-summary-amount">${money(grandTotal)}</div>
       </div>
     </div>`;
+  _mbWireMergeControls();
+}
+
+function _mbWireMergeControls() {
+  document.querySelectorAll(".mb-merge-btn").forEach(btn => {
+    btn.addEventListener("click", () => _mbMergePeriodWithNext(btn.dataset.mergeKey));
+  });
+  document.querySelectorAll(".mb-unmerge-btn").forEach(btn => {
+    btn.addEventListener("click", () => _mbUnmergePeriod(btn.dataset.unmergeKey));
+  });
+}
+
+// Combines the (already-possibly-merged) period `periodKey` with whichever
+// period immediately follows it in the CURRENT effective (post-merge)
+// list, into one bigger group — chaining this repeatedly builds up an
+// N-way merge (e.g. "combine with next" twice chains 3 base periods into
+// one). Tier-wide, not per-line (see state.activeTierPeriodMergeGroups'
+// own comment) — every line's allocation is reconciled against the new
+// merged key on the next renderMonthlyBreakdown() (see
+// _mbReconcileMonthsForDateChange, which sums old values into the new
+// combined key so this never silently drops a planner's numbers).
+function _mbMergePeriodWithNext(periodKey) {
+  const current = _mbEffectiveMonths();
+  if (!current) return;
+  const idx = current.findIndex(m => m.key === periodKey);
+  if (idx === -1 || idx >= current.length - 1) return;
+  const thisKeys = current[idx].key.split("+");
+  const nextKeys = current[idx + 1].key.split("+");
+  // Drop any existing group(s) that exactly match either side being
+  // joined — they're being subsumed into the new, bigger group below,
+  // and apply_period_merges only supports one group per base period.
+  const combinedKey = current[idx].key;
+  const nextKey = current[idx + 1].key;
+  const remaining = (state.activeTierPeriodMergeGroups || []).filter(g => g.join("+") !== combinedKey && g.join("+") !== nextKey);
+  remaining.push([...thisKeys, ...nextKeys]);
+  state.activeTierPeriodMergeGroups = remaining;
+  renderMonthlyBreakdown();
+}
+
+// Fully splits a merged period back into its individual base periods
+// (not a partial un-chain — see _mbReconcileMonthsForDateChange's own
+// comment on why a freshly-split period starts at $0 rather than trying
+// to recover a since-collapsed split).
+function _mbUnmergePeriod(periodKey) {
+  state.activeTierPeriodMergeGroups = (state.activeTierPeriodMergeGroups || []).filter(g => g.join("+") !== periodKey);
+  renderMonthlyBreakdown();
 }
 
 // Blocks "Continue" (never "Skip") while ANY enabled line item is
@@ -3387,6 +3820,10 @@ async function onGenerate() {
     // inline total row next to "TOTAL DIGITAL MONTHLY"); a line WITH its
     // own monthly_allocations already carries real numbers regardless.
     monthly_distribution_mode: state.mbDistributionMode,
+    // Step 04's Week/Month/Quarter toggle — drives which period
+    // granularity the server validates monthly_allocations against and
+    // which one the export's Monthly Breakdown columns/labels use.
+    time_unit: state.timeUnit,
     // Planner override for the campaign-name segment of the naming
     // convention (see the proposal-name-bar's Edit button) — null unless
     // explicitly set, in which case it wins over the AI's own guess.

@@ -74,12 +74,20 @@ class LineItem:
     # None falls back to the catalog's own short_label in the export,
     # exactly what column C showed before this field existed.
     objective_override: Optional[str] = None
-    # Optional Step 04.5 "Monthly Breakdown" — {"YYYY-MM": dollars, ...}.
+    # Optional Step 04.5 "Monthly Breakdown" — {period_key: dollars, ...}.
     # See app/services/monthly_allocation.py's module docstring: dollars
     # are the source of truth, percentage is always derived from these,
     # and an empty/None dict means this line simply doesn't use the
     # feature (no separate enabled flag to fall out of sync with this).
+    # period_key's format tracks the proposal's time_unit (see
+    # GenerateRequest.time_unit in main.py) — "YYYY-MM" for month,
+    # "W{n}-YYYY-MM-DD" for week, "YYYY-MM+YYYY-MM+YYYY-MM" for quarter.
     monthly_allocations: Optional[dict[str, float]] = None
+    # Step 05's "combine adjacent periods into one bucket" control — see
+    # monthly_allocation.apply_period_merges. Each inner list is 2+
+    # period keys (in this SAME line's own granularity) to merge into one
+    # combined period before allocation/reconciliation/minimum-checking.
+    period_merge_groups: Optional[list[list[str]]] = None
 
     def total_budget(self) -> float:
         return self.monthly_budget * self.months
@@ -142,9 +150,10 @@ def generate_proposal(
     enrichment=None,        # ProposalEnrichment | None
     proposal_title: Optional[str] = None,
     avails_data: Optional[dict] = None,   # product_name -> {max_imps, max_spend, est_uniques}
-    tiers: Optional[list[dict]] = None,   # [{"label": "A", "line_items": [...], "avails_data": {...}}, ...]
+    tiers: Optional[list[dict]] = None,   # [{"label": "A", "line_items": [...], "avails_data": {...}, "period_merge_groups": [...]}, ...]
     addons: Optional[list[AddonItem]] = None,   # Step 04's Add-Ons module picks — proposal-wide, not per-tier
     monthly_distribution_mode: str = "even",   # Step 05's plan-wide default-split choice — "even" or "prorated"
+    time_unit: str = "month",   # Step 04's toggle — "week" | "month" | "quarter", proposal-wide
 ) -> dict:
     """
     Generate an Excel proposal for the given request + line items.
@@ -178,6 +187,13 @@ def generate_proposal(
                 estimate shown for a line item that never got its own
                 monthly_allocations; a customized line's real numbers are
                 unaffected either way. See monthly_allocation.compute_default_allocation.
+        time_unit: Step 04's plan-wide "week"/"month" (default)/"quarter"
+                toggle — decides which of monthly_allocation.py's period
+                functions builds each tier's Monthly Breakdown column set
+                (and, combined with each tier's own period_merge_groups,
+                whether adjacent periods get combined into one column).
+                Also relabels the Curate/Avails-adjacent "months" language
+                app.js renders — this function only cares about periods.
 
     Returns:
         dict with summary: {tabs_built: [...], total_net: float,
@@ -264,13 +280,20 @@ def generate_proposal(
         # Monthly Breakdown — see app/services/monthly_allocation.py.
         # Computed once per tier from ITS OWN effective dates (so a
         # per-tier date override, added the same round as this feature,
-        # is respected). None when the dates don't parse — Monthly
-        # Breakdown is simply skipped for this tier's export either way,
-        # same as if no line item had used it.
+        # is respected) AND at the proposal-wide time_unit granularity.
+        # None when the dates don't parse — Monthly Breakdown is simply
+        # skipped for this tier's export either way, same as if no line
+        # item had used it. tier.period_merge_groups (also tier-wide — see
+        # TierModel's own comment on why merging isn't per-line-item) is
+        # applied on top, so every line's row and the shared column
+        # header both see the SAME already-merged period list.
         _tier_start_parsed = mo.parse_flexible_date(tier_start_date)
         _tier_end_parsed = mo.parse_flexible_date(tier_end_date)
         tier_months = (
-            mo.months_between(_tier_start_parsed, _tier_end_parsed)
+            mo.apply_period_merges(
+                mo.periods_between(_tier_start_parsed, _tier_end_parsed, time_unit),
+                tier.get("period_merge_groups"),
+            )
             if (_tier_start_parsed and _tier_end_parsed) else []
         )
         # Whether to build the Monthly Breakdown columns/tab at all for
@@ -332,48 +355,48 @@ def generate_proposal(
             sheet_title = _safe_sheet_name(tier_display_name, "", used_sheet_titles) if multi_tier else f"Proposal {label}"
             ws = et.build_proposal_a(wb, products, with_sections=False,
                                      start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
-                                     sheet_name=sheet_title, addons=addons_dicts)
+                                     sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=False, mb_width=tier_mb_width)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=False, blurbs=blurbs,
-                                 avails_data=tier_avails, request=request, notes_col=notes_col)
+                                 avails_data=tier_avails, request=request, notes_col=notes_col, time_unit=time_unit)
             if tier_uses_monthly_breakdown:
                 _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=False,
-                                                   distribution_mode=monthly_distribution_mode)
+                                                   distribution_mode=monthly_distribution_mode, time_unit=time_unit)
             tabs_built.append(f"Proposal {label}")
 
         if tabs.get("wsections"):
             sheet_title = _safe_sheet_name(tier_display_name, "(wsections)", used_sheet_titles) if multi_tier else f"Proposal {label} (wsections)"
             ws = et.build_proposal_a(wb, products, with_sections=True,
                                      start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
-                                     sheet_name=sheet_title, addons=addons_dicts)
+                                     sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=False, mb_width=tier_mb_width)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=False, with_sections=True, blurbs=blurbs,
-                                 avails_data=tier_avails, request=request, notes_col=notes_col)
+                                 avails_data=tier_avails, request=request, notes_col=notes_col, time_unit=time_unit)
             if tier_uses_monthly_breakdown:
                 _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=False, with_sections=True,
-                                                   distribution_mode=monthly_distribution_mode)
+                                                   distribution_mode=monthly_distribution_mode, time_unit=time_unit)
             tabs_built.append(f"Proposal {label} (wsections)")
 
         if tabs.get("gross"):
             sheet_title = _safe_sheet_name(tier_display_name, "(Gross)", used_sheet_titles) if multi_tier else f"Proposal {label} (Gross)"
             ws = et.build_proposal_a_gross(wb, products,
                                            start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
-                                           sheet_name=sheet_title, addons=addons_dicts)
+                                           sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=True, mb_width=tier_mb_width)
             _populate_meta(ws, request, gross=True, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             _populate_line_items(ws, products, tier_line_items, gross=True, blurbs=blurbs,
-                                 avails_data=tier_avails, request=request, notes_col=notes_col)
+                                 avails_data=tier_avails, request=request, notes_col=notes_col, time_unit=time_unit)
             if tier_uses_monthly_breakdown:
                 _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=True,
-                                                   distribution_mode=monthly_distribution_mode)
+                                                   distribution_mode=monthly_distribution_mode, time_unit=time_unit)
             # Set agency fee in I14 (Gross sheet's variable input cell)
             if request.agency_fee is not None:
                 ws["I14"] = request.agency_fee
@@ -387,7 +410,7 @@ def generate_proposal(
             sheet_title = _safe_sheet_name(tier_display_name, "(Avails)", used_sheet_titles) if multi_tier else avails_sheet_name
             ws = et.build_avails_only(wb, products, line_items=tier_line_items, request=request,
                                       start_date=tier_start_date, end_date=tier_end_date, avails_data=tier_avails,
-                                      campaign_name=campaign_name, sheet_name=sheet_title)
+                                      campaign_name=campaign_name, sheet_name=sheet_title, time_unit=time_unit)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            title_suffix=f" (Avails-Only){tier_title_suffix}",
                            include_billing=False, include_campaign_meta=False, tier_geo=tier_geo,
@@ -395,10 +418,11 @@ def generate_proposal(
             tabs_built.append(avails_sheet_name)
 
         if tier_uses_monthly_breakdown:
-            mb_sheet_name = f"Monthly Breakdown {label}" if multi_tier else "Monthly Breakdown"
+            mb_tab_adjective = et.unit_labels(time_unit)["adjective"]
+            mb_sheet_name = f"{mb_tab_adjective} Breakdown {label}" if multi_tier else f"{mb_tab_adjective} Breakdown"
             mb_sheet_title = _safe_sheet_name(tier_display_name, "(Monthly)", used_sheet_titles) if multi_tier else mb_sheet_name
             et.build_monthly_breakdown_tab(wb, products, tier_line_items, tier_months, sheet_name=mb_sheet_title,
-                                           distribution_mode=monthly_distribution_mode)
+                                           distribution_mode=monthly_distribution_mode, time_unit=time_unit)
             tabs_built.append(mb_sheet_name)
 
         tier_total_net = sum(li.total_budget() for li in tier_line_items)
@@ -601,6 +625,7 @@ def _populate_line_items(
     avails_data: Optional[dict] = None,
     request: Optional[ProposalRequest] = None,
     notes_col: Optional[str] = None,
+    time_unit: str = "month",
 ) -> None:
     """
     Walk the product rows already written by build_proposal_a / _gross and
@@ -759,9 +784,10 @@ def _populate_line_items(
         if avail is None:
             avail = avails_by.get(product.name)
         sov_pct = et.compute_sov_pct(product, li.monthly_budget, avail or {},
-                                      cpm_override=li.estimated_cpm_override, rate_override=li.rate_override)
+                                      cpm_override=li.estimated_cpm_override, rate_override=li.rate_override,
+                                      time_unit=time_unit)
         et.write_avails_cells(ws, row, avail or {}, product, gross=gross, sov_pct=sov_pct, sov_col=sov_col,
-                              budget_col="L", cpm_override=li.estimated_cpm_override)
+                              budget_col="L", cpm_override=li.estimated_cpm_override, time_unit=time_unit)
 
         row += 1
 
@@ -771,7 +797,7 @@ def _populate_line_items(
 
 def _populate_monthly_breakdown_inline(
     ws, products: list[Product], line_items: list[LineItem], months: list[dict], *,
-    gross: bool, with_sections: bool = False, distribution_mode: str = "even",
+    gross: bool, with_sections: bool = False, distribution_mode: str = "even", time_unit: str = "month",
 ) -> None:
     """
     Writes the Monthly Breakdown columns to the right of the avails block
@@ -819,7 +845,7 @@ def _populate_monthly_breakdown_inline(
                 per_month_totals[m["key"]] += distribution.get(m["key"], 0.0)
         row += 1
 
-    et.write_monthly_breakdown_header(ws, start_row - 2, months, start_col)
+    et.write_monthly_breakdown_header(ws, start_row - 2, months, start_col, time_unit=time_unit)
 
     # Same row as this sheet's own "TOTAL DIGITAL MONTHLY" row (build_proposal_a
     # / _gross compute it as `row + 1` from the exact same post-loop `row`

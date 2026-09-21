@@ -21,8 +21,9 @@ import os
 import re
 import secrets
 import tempfile
+from collections import Counter
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -400,6 +401,10 @@ class LineItemModel(BaseModel):
     # there's deliberately no separate enabled/disabled flag). Dollars are
     # the source of truth; percentage is always derived from these on
     # both the client and server, never stored separately.
+    # Key format tracks GenerateRequest.time_unit: "YYYY-MM" for month,
+    # "W{n}-YYYY-MM-DD" for week, "YYYY-MM+YYYY-MM+YYYY-MM" for quarter
+    # (see monthly_allocation.periods_between) — always whatever the
+    # PROPOSAL-wide granularity toggle currently is, never mixed.
     monthly_allocations: Optional[dict[str, float]] = None
 
 
@@ -460,6 +465,19 @@ class TierModel(BaseModel):
     end_date: Optional[str] = None
     line_items: list[LineItemModel]
     avails_data: Optional[dict[str, AvailsEntry]] = None
+    # Step 05's "combine adjacent periods into one bucket" control — e.g.
+    # [["2026-09", "2026-10"]] merges those two period keys into one
+    # "September–October" line so a too-small partial period (a flight
+    # starting Sep 28 gives September ~3 active days) is checked against
+    # the MINIMUM as one combined total instead of failing on its own.
+    # TIER-wide (not per-line-item): every line in a tier already shares
+    # the SAME resolved start/end dates (see start_date/end_date above),
+    # so they share one period list and one merge decision — the Excel
+    # export's Monthly Breakdown columns are one shared grid per tier,
+    # which couldn't represent two lines disagreeing about what's merged
+    # anyway. Each inner list is 2+ period keys that must be adjacent in
+    # this tier's own period list — see monthly_allocation.apply_period_merges.
+    period_merge_groups: Optional[list[list[str]]] = None
 
     @field_validator("label")
     @classmethod
@@ -522,6 +540,13 @@ class GenerateRequest(BaseModel):
     # a line with its own monthly_allocations already carries real planner
     # numbers regardless of this setting.
     monthly_distribution_mode: str = "even"
+    # The Step 04 toggle's granularity — "week" | "month" | "quarter".
+    # Proposal-wide (not per-tier, matching where the toggle actually
+    # lives in the UI), drives how Curate/Avails/Step 05 label totals and
+    # which of monthly_allocation.py's period functions Step 05 and the
+    # export use to build each line's breakdown. Defaults to "month" —
+    # this app's original, only-ever behavior before the toggle existed.
+    time_unit: str = "month"
     # Planner-set override for the proposal name bar's editable campaign-
     # name segment (see app.js's proposal-name-edit UI) — when present,
     # replaces whatever the AI enrichment call itself would have guessed,
@@ -539,6 +564,11 @@ class RecommendRequest(BaseModel):
     request: dict
     monthly_budget: float
     strategy_brief: Optional[dict] = None
+    # Step 04's toggle — without this, Suggest Mix would seed every line's
+    # budget against the catalog's raw MONTHLY minimum_spend regardless of
+    # what unit the planner is actually curating in (a ~4x overshoot in
+    # Weekly mode). See recommender.granularity_scale.
+    time_unit: str = "month"
 
 
 class RoadblocksRequest(BaseModel):
@@ -700,6 +730,7 @@ async def strategy(body: StrategyRequest) -> dict:
             request_type=req.request_type,
             ref_date=req.start_date or "",
             doc_type_override="Strategy Brief",
+            client_name=req.client_name or "",
         )
         doc_filename = ai_enricher.safe_filename(doc_title) + ".docx"
         doc_path = PROPOSALS_DIR / f"strategy_{doc_token}.docx"
@@ -834,6 +865,7 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
             campaign_name=ai_enricher._fallback_campaign_name(req),
             request_type=req.request_type,
             ref_date=req.start_date or "",
+            client_name=req.client_name or "",
             doc_type_override="Roadblocks Report",
         )
         doc_filename = ai_enricher.safe_filename(doc_title) + ".docx"
@@ -884,11 +916,13 @@ async def recommend(body: RecommendRequest) -> dict:
     raw = {k: v for k, v in raw.items() if k in valid_fields}
     req = ProposalRequest(**raw)
 
-    items = recommend_line_items(req, body.monthly_budget, strategy_brief=body.strategy_brief)
+    items = recommend_line_items(req, body.monthly_budget, strategy_brief=body.strategy_brief, time_unit=body.time_unit)
     return {"line_items": [asdict(li) for li in items]}
 
 
-def _validate_monthly_breakdown(tiers: list[dict], req: ProposalRequest, multi_tier: bool) -> tuple[list[str], list[dict]]:
+def _validate_monthly_breakdown(
+    tiers: list[dict], req: ProposalRequest, multi_tier: bool, granularity: str = "month",
+) -> tuple[list[str], list[dict]]:
     """
     Extracted from /api/generate so it's independently testable. Returns
     (balance_errors, minimum_warnings):
@@ -900,6 +934,15 @@ def _validate_monthly_breakdown(tiers: list[dict], req: ProposalRequest, multi_t
         regardless of balance errors — never blocks generation (the
         planner may have a deliberate reason to go under), surfaced back
         on the response instead so it's never silently swallowed either.
+
+    `granularity` is the proposal-wide Step 04 toggle ("week"/"month"/
+    "quarter", from GenerateRequest.time_unit) — it decides which period
+    list monthly_allocations keys are checked against, and how each
+    product's minimum_spend is scaled (see
+    monthly_allocation._effective_minimum_for_period). Each line item's
+    own period_merge_groups (if any) are applied on top of that period
+    list before either the balance or minimum check runs — see
+    monthly_allocation.apply_period_merges.
     """
     balance_errors: list[str] = []
     minimum_warnings: list[dict] = []
@@ -909,10 +952,11 @@ def _validate_monthly_breakdown(tiers: list[dict], req: ProposalRequest, multi_t
         effective_end = (t.get("end_date") or req.end_date or "").strip()
         start_d = monthly_allocation.parse_flexible_date(effective_start)
         end_d = monthly_allocation.parse_flexible_date(effective_end)
-        months = monthly_allocation.months_between(start_d, end_d) if (start_d and end_d) else []
+        base_periods = monthly_allocation.periods_between(start_d, end_d, granularity) if (start_d and end_d) else []
         for li in t["line_items"]:
             if not li.monthly_allocations:
                 continue
+            months = monthly_allocation.apply_period_merges(base_periods, li.period_merge_groups)
             total = li.monthly_budget * li.months
             result = monthly_allocation.reconcile_allocation(total, li.monthly_allocations)
             if not result["balanced"]:
@@ -931,6 +975,7 @@ def _validate_monthly_breakdown(tiers: list[dict], req: ProposalRequest, multi_t
                     is_added_value=li.is_added_value,
                     months=months,
                     allocations=li.monthly_allocations,
+                    granularity=granularity,
                 ))
     return balance_errors, minimum_warnings
 
@@ -982,6 +1027,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
                 "end_date": t.end_date,
                 "line_items": _to_line_items(t.line_items),
                 "avails_data": {name: entry.model_dump() for name, entry in (t.avails_data or {}).items()},
+                "period_merge_groups": t.period_merge_groups,
             }
             for t in body.tiers
         ]
@@ -993,6 +1039,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             "end_date": None,
             "line_items": _to_line_items(body.line_items),
             "avails_data": {name: entry.model_dump() for name, entry in (body.avails_data or {}).items()},
+            "period_merge_groups": None,
         }]
     multi_tier = len(tiers) > 1
 
@@ -1001,7 +1048,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     # app.js's _mbUpdateContinueState; this is what makes it actually
     # enforced rather than just a UI hint someone could route around,
     # e.g. by clicking "Skip" past an unbalanced line).
-    balance_errors, minimum_warnings = _validate_monthly_breakdown(tiers, req, multi_tier)
+    balance_errors, minimum_warnings = _validate_monthly_breakdown(tiers, req, multi_tier, granularity=body.time_unit)
     if balance_errors:
         raise HTTPException(status_code=400, detail={
             "message": "Monthly Breakdown doesn't balance yet — fix these before generating.",
@@ -1046,6 +1093,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         campaign_name=enrichment.campaign_name or req.client_name or "Campaign",
         request_type=req.request_type,
         ref_date=req.start_date or "",
+        client_name=req.client_name or "",
     )
 
     # 4. Derive filenames from the title
@@ -1069,9 +1117,16 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             enrichment=enrichment,
             proposal_title=proposal_title,
             avails_data=tiers[0]["avails_data"],
-            tiers=tiers if multi_tier else None,
+            # Always pass the resolved tiers list (never None) — it
+            # already carries period_merge_groups per tier, and
+            # generate_proposal computes its own multi_tier from
+            # len(tiers), so a 1-element list behaves identically to the
+            # old `None` (which made it rebuild an equivalent 1-element
+            # list internally, just without period_merge_groups).
+            tiers=tiers,
             addons=addons,
             monthly_distribution_mode=body.monthly_distribution_mode,
+            time_unit=body.time_unit,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
@@ -1095,6 +1150,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
                 campaign_name=enrichment.campaign_name or req.client_name or "Campaign",
                 request_type=req.request_type,
                 ref_date=req.start_date or "",
+                client_name=req.client_name or "",
                 doc_type_override="Digital Media Deck",
             )
             proposal_line += f"\n\nPresentation: {deck_title}\nGoogle Drive Link: [paste link here]"
@@ -1106,6 +1162,24 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             first_line = lines[0]
             rest = lines[1] if len(lines) > 1 else ""
             internal_email_body = f"{first_line}\n\n{proposal_line}\n\n{rest.lstrip()}"
+
+        # Sign the email as the ACTUAL logged-in planner (request.state.user,
+        # set by _require_login) rather than trusting the model to invent or
+        # reproduce a real name/email verbatim — same "AI leaves a literal
+        # placeholder, code substitutes the real value" pattern as
+        # {{PROPOSAL_LINE}} above. There's no display-name field stored
+        # anywhere in this app (see schema.sql's users table), so the name
+        # is derived from the email's own dot-separated local part (see
+        # ai_enricher._display_name_from_email's own comment) — falls back
+        # to the bare email if that yields nothing (an unusual address with
+        # no dot AND an empty local part, practically never).
+        planner_email = request.state.user["email"]
+        planner_name = ai_enricher._display_name_from_email(planner_email)
+        signature = f"{planner_name}, part of your digital strategy team\n{planner_email}" if planner_name else planner_email
+        if "{{PLANNER_SIGNATURE}}" in internal_email_body:
+            internal_email_body = internal_email_body.replace("{{PLANNER_SIGNATURE}}", signature)
+        else:
+            internal_email_body = f"{internal_email_body.rstrip()}\n\n{signature}"
 
     # 8. Build client email Word doc (if AI produced content)
     if enrichment.client_email_body:
@@ -1205,6 +1279,16 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         "addons": [a.model_dump() for a in body.addons],
         "raw_notion_text": body.raw_notion_text,
         "enrichment": enrichment_out,
+        # Each tier's own period_merge_groups already rides along inside
+        # "tiers" above (TierModel.model_dump() includes it) — time_unit
+        # is the one PROPOSAL-wide granularity field with no tier home, so
+        # it needs its own explicit key here. Without it, reopening a
+        # non-month proposal would default state.timeUnit back to "month"
+        # client-side while monthly_allocations keys stay in the OLD
+        # format (e.g. "W1-2026-09-01"), which _mbReconcileMonthsForDateChange
+        # would then treat as entirely unrecognized — silently wiping the
+        # reopened breakdown's apparent numbers.
+        "time_unit": body.time_unit,
     }
     _save_proposal_metadata(
         proposal_id=proposal_id,
@@ -1731,6 +1815,192 @@ async def my_proposals(request: Request, page: int = 1, page_size: int = 10, sea
         mine_email=request.state.user["email"],
         search=search, page=page, page_size=page_size,
     )
+
+
+# ---------------------------------------------------------------------------
+# Admin analytics dashboard
+# ---------------------------------------------------------------------------
+# Aggregates come from summary/reopen_state (JSONB columns) rather than
+# their own dedicated columns — nothing here is a new schema.sql change.
+# Every value is pulled as JSON TEXT (Postgres's ->> operator), never CAST
+# in SQL (::numeric/::int) — a single malformed/legacy row would abort the
+# WHOLE query with a Postgres cast error, whereas text extraction never
+# fails; each field is parsed defensively in Python instead, skipping only
+# the one bad value rather than the whole row. jsonb_typeof(...) = 'array'
+# (not "IS NOT NULL") is the correct way to detect a real JSON array vs.
+# summary's own JSON `null` (Python's `None`, which IS a JSON value, not
+# SQL NULL — `'null'::jsonb IS NOT NULL` is TRUE in Postgres, a real trap
+# for exactly this check).
+_ANALYTICS_WINDOWS = {"30d": 30, "90d": 90, "12m": 365, "all": None}
+
+
+def _analytics_since(window: str) -> Optional[datetime]:
+    days = _ANALYTICS_WINDOWS.get(window, None)
+    if not days:
+        return None
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def _parse_number(raw: Optional[str]) -> Optional[float]:
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_int(raw: Optional[str]) -> Optional[int]:
+    n = _parse_number(raw)
+    return int(n) if n is not None else None
+
+
+def _isoformat_or_none(value) -> Optional[str]:
+    """Same explicit datetime->str conversion _proposal_metadata_from_row
+    already applies before a dict response leaves this module — a plain
+    `-> dict` return (no Pydantic model) needs it done by hand."""
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def compute_admin_analytics(window: str = "all") -> dict:
+    """
+    THE aggregation logic behind GET /api/admin/analytics — extracted so
+    it's independently testable against a mocked fetch_all() (same
+    pattern as _validate_monthly_breakdown), since the real query needs a
+    live Postgres this dev environment doesn't have.
+
+    "Duplicated" proposals: rows sharing the same non-blank notion_id —
+    confirmed as a REAL, already-happening pattern (reopening a past
+    proposal and generating again creates a brand-new proposal_id/row
+    carrying the SAME notion_id forward, and notion_id has no UNIQUE
+    constraint) rather than a hypothetical. A blank/missing notion_id
+    never counts toward this — grouping every no-ID proposal together as
+    if they were the same request would be a false positive, not a
+    genuine duplicate.
+    """
+    since = _analytics_since(window)
+    where_sql = "WHERE generated_at >= %s" if since else ""
+    params = (since,) if since else ()
+    rows = fetch_all(
+        f"""
+        SELECT
+            proposal_id,
+            client_name,
+            notion_id,
+            created_by_email,
+            seller_email,
+            generated_at,
+            summary->>'total_net' AS total_net_raw,
+            summary->>'total_gross' AS total_gross_raw,
+            jsonb_typeof(summary->'tiers') AS tiers_type,
+            reopen_state->'request'->>'total_months' AS total_months_raw,
+            reopen_state->'request'->>'request_type' AS request_type_raw,
+            reopen_state->>'time_unit' AS time_unit_raw
+        FROM proposals
+        {where_sql}
+        ORDER BY generated_at DESC NULLS LAST
+        """,
+        params,
+    )
+
+    total_count = len(rows)
+
+    # --- Who creates plans ---------------------------------------------
+    planner_counts: Counter = Counter()
+    planner_net_totals: dict[str, float] = {}
+    for r in rows:
+        email = (r.get("created_by_email") or "").strip().lower() or "(unknown)"
+        planner_counts[email] += 1
+        net = _parse_number(r.get("total_net_raw"))
+        if net is not None:
+            planner_net_totals[email] = planner_net_totals.get(email, 0.0) + net
+    by_planner = [
+        {
+            "email": email,
+            "count": count,
+            "total_net": round(planner_net_totals.get(email, 0.0), 2),
+            "avg_net": round(planner_net_totals.get(email, 0.0) / count, 2) if email in planner_net_totals else None,
+        }
+        for email, count in planner_counts.most_common()
+    ]
+
+    # --- Duplicated / reworked requests (shared notion_id) --------------
+    notion_id_rows: dict[str, list[dict]] = {}
+    for r in rows:
+        nid = (r.get("notion_id") or "").strip()
+        if not nid:
+            continue
+        notion_id_rows.setdefault(nid, []).append(r)
+    unique_request_count = len(notion_id_rows)
+    proposals_with_notion_id = sum(len(v) for v in notion_id_rows.values())
+    duplicate_count = proposals_with_notion_id - unique_request_count
+    most_regenerated = sorted(
+        (
+            {
+                "notion_id": nid,
+                "count": len(group),
+                "client_name": group[0].get("client_name") or "",
+                "latest_generated_at": _isoformat_or_none(
+                    max((g.get("generated_at") for g in group if g.get("generated_at")), default=None)
+                ),
+            }
+            for nid, group in notion_id_rows.items() if len(group) > 1
+        ),
+        key=lambda x: (-x["count"], x["notion_id"]),
+    )[:20]
+
+    # --- Proposal value / flight length ---------------------------------
+    net_values = [v for v in (_parse_number(r.get("total_net_raw")) for r in rows) if v is not None]
+    months_values = [v for v in (_parse_int(r.get("total_months_raw")) for r in rows) if v is not None]
+    multi_tier_count = sum(1 for r in rows if r.get("tiers_type") == "array")
+
+    # --- Volume over time (monthly buckets) ------------------------------
+    month_counts: Counter = Counter()
+    for r in rows:
+        gen = r.get("generated_at")
+        if gen:
+            month_counts[gen.strftime("%Y-%m")] += 1
+    by_month = [{"month": k, "count": v} for k, v in sorted(month_counts.items())]
+
+    # --- Request type breakdown ------------------------------------------
+    request_type_counts = Counter((r.get("request_type_raw") or "(unspecified)") for r in rows)
+    by_request_type = [
+        {"request_type": k, "count": v} for k, v in request_type_counts.most_common()
+    ]
+
+    # --- Week/Month/Quarter toggle adoption -------------------------------
+    time_unit_counts = Counter((r.get("time_unit_raw") or "month") for r in rows)
+    by_time_unit = [{"time_unit": k, "count": v} for k, v in time_unit_counts.most_common()]
+
+    return {
+        "window": window,
+        "total_proposals": total_count,
+        "unique_requests": unique_request_count + (total_count - proposals_with_notion_id),
+        "duplicate_count": duplicate_count,
+        "avg_total_net": round(sum(net_values) / len(net_values), 2) if net_values else None,
+        "total_net_sum": round(sum(net_values), 2) if net_values else 0.0,
+        "avg_months": round(sum(months_values) / len(months_values), 2) if months_values else None,
+        "multi_tier_pct": round(multi_tier_count / total_count * 100, 1) if total_count else 0.0,
+        "by_planner": by_planner,
+        "most_regenerated": most_regenerated,
+        "by_month": by_month,
+        "by_request_type": by_request_type,
+        "by_time_unit": by_time_unit,
+    }
+
+
+@app.get("/api/admin/analytics")
+async def admin_analytics(window: str = "all") -> dict:
+    """
+    Admin-only (gated by the blanket /api/admin/* middleware rule — see
+    _require_login) usage dashboard: who's generating proposals, how many
+    are reworked/regenerated versions of the same Notion request, volume
+    over time, average value/flight length, and adoption of the Week/
+    Month/Quarter toggle. window: "30d" | "90d" | "12m" | "all" (default).
+    """
+    if window not in _ANALYTICS_WINDOWS:
+        window = "all"
+    return compute_admin_analytics(window)
 
 
 def _resolve_admin_product_key(product_name: str) -> tuple[str, bool]:

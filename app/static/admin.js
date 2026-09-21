@@ -14,6 +14,9 @@ const adminState = {
   proposalsTotalCount: 0,
   proposalsTotalPages: 1,
   proposalsLoading: false,
+  analytics: null,
+  analyticsLoaded: false,
+  analyticsWindow: "all",  // "30d" | "90d" | "12m" | "all"
   rates: [],
   ratesLoaded: false,
   markets: [],
@@ -27,6 +30,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireTabs();
   wireSearch();
   wireProposalsControls();
+  wireAnalyticsControls();
   wireAddProduct();
   wireEditProduct();
   wireBulkUpload();
@@ -46,14 +50,126 @@ function wireTabs() {
       const tab = btn.dataset.tab;
       document.querySelectorAll(".admin-tab").forEach(b => b.classList.toggle("active", b === btn));
       document.getElementById("tab-proposals").classList.toggle("hidden", tab !== "proposals");
+      document.getElementById("tab-analytics").classList.toggle("hidden", tab !== "analytics");
       document.getElementById("tab-rates").classList.toggle("hidden", tab !== "rates");
       document.getElementById("tab-markets").classList.toggle("hidden", tab !== "markets");
       document.getElementById("tab-users").classList.toggle("hidden", tab !== "users");
+      if (tab === "analytics" && !adminState.analyticsLoaded) loadAnalytics();
       if (tab === "rates" && !adminState.ratesLoaded) loadRates();
       if (tab === "markets" && !adminState.marketsLoaded) loadMarketConfig();
       if (tab === "users" && !adminState.usersLoaded) loadUsers();
     });
   });
+}
+
+// --------------------------------------------------------------------------
+// Analytics dashboard
+// --------------------------------------------------------------------------
+
+function wireAnalyticsControls() {
+  document.querySelectorAll("#analytics-window-tabs .tier-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (adminState.analyticsWindow === btn.dataset.window) return;
+      adminState.analyticsWindow = btn.dataset.window;
+      document.querySelectorAll("#analytics-window-tabs .tier-tab").forEach(b => b.classList.toggle("active", b === btn));
+      loadAnalytics();
+    });
+  });
+}
+
+async function loadAnalytics() {
+  const loadingEl = document.getElementById("analytics-loading");
+  const contentEl = document.getElementById("analytics-content");
+  loadingEl.classList.remove("hidden");
+  contentEl.classList.add("analytics-loading-dim");
+  try {
+    const res = await fetch(`/api/admin/analytics?window=${encodeURIComponent(adminState.analyticsWindow)}`);
+    if (!res.ok) throw new Error(res.statusText);
+    adminState.analytics = await res.json();
+    adminState.analyticsLoaded = true;
+    renderAnalytics(adminState.analytics);
+  } catch (e) {
+    contentEl.innerHTML = `<p class="admin-empty">Failed to load analytics: ${escapeHtml(e.message)}</p>`;
+  } finally {
+    loadingEl.classList.add("hidden");
+    contentEl.classList.remove("analytics-loading-dim");
+  }
+}
+
+function _analyticsStatCard(label, value, hint) {
+  return `
+    <div class="analytics-stat-card">
+      <div class="analytics-stat-value">${escapeHtml(String(value))}</div>
+      <div class="analytics-stat-label">${escapeHtml(label)}</div>
+      ${hint ? `<div class="analytics-stat-hint">${escapeHtml(hint)}</div>` : ""}
+    </div>`;
+}
+
+// Simple dependency-free horizontal bar list — a <div> per row, width set
+// to that row's % of the largest value in the set. No charting library;
+// this app has stayed zero-frontend-dependency throughout, no reason to
+// add one just for a handful of admin-only bar charts.
+function _analyticsBarList(rows, labelKey, countKey, formatLabel) {
+  if (!rows.length) return `<p class="admin-empty">No data yet for this window.</p>`;
+  const max = Math.max(...rows.map(r => r[countKey]), 1);
+  return rows.map(r => {
+    const pct = Math.round((r[countKey] / max) * 100);
+    const label = formatLabel ? formatLabel(r[labelKey]) : r[labelKey];
+    return `
+      <div class="analytics-bar-row">
+        <div class="analytics-bar-label">${escapeHtml(label)}</div>
+        <div class="analytics-bar-track"><div class="analytics-bar-fill" style="width:${pct}%"></div></div>
+        <div class="analytics-bar-count">${r[countKey]}</div>
+      </div>`;
+  }).join("");
+}
+
+const _ANALYTICS_MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function _formatMonthBucket(ym) {
+  const [y, m] = ym.split("-");
+  return `${_ANALYTICS_MONTH_NAMES[parseInt(m, 10) - 1]} ${y}`;
+}
+
+function renderAnalytics(data) {
+  const statCards = [
+    _analyticsStatCard("Total Proposals", data.total_proposals),
+    _analyticsStatCard("Unique Requests", data.unique_requests, "distinct Notion IDs (+ proposals with none)"),
+    _analyticsStatCard("Reworked Proposals", data.duplicate_count, "extra generations of an existing Notion ID"),
+    _analyticsStatCard("Avg. Proposal Value", money(data.avg_total_net)),
+    _analyticsStatCard("Total Pipeline Value", money(data.total_net_sum)),
+    _analyticsStatCard("Avg. Flight Length", data.avg_months != null ? `${data.avg_months} mo` : "—"),
+    _analyticsStatCard("Multi-Option Proposals", `${data.multi_tier_pct}%`, "offered more than one budget option"),
+  ];
+  document.getElementById("analytics-stat-grid").innerHTML = statCards.join("");
+
+  const plannerBody = document.querySelector("#analytics-planner-table tbody");
+  plannerBody.innerHTML = data.by_planner.length
+    ? data.by_planner.map(p => `
+        <tr>
+          <td class="mono">${escapeHtml(p.email)}</td>
+          <td>${p.count}</td>
+          <td>${money(p.total_net)}</td>
+          <td>${money(p.avg_net)}</td>
+        </tr>`).join("")
+    : `<tr><td colspan="4" class="admin-empty">No proposals yet for this window.</td></tr>`;
+
+  const regenBody = document.querySelector("#analytics-regen-table tbody");
+  regenBody.innerHTML = data.most_regenerated.length
+    ? data.most_regenerated.map(r => `
+        <tr>
+          <td class="mono">${escapeHtml(r.notion_id)}</td>
+          <td>${escapeHtml(r.client_name || "—")}</td>
+          <td>${r.count}</td>
+          <td class="mono">${formatDate(r.latest_generated_at)}</td>
+        </tr>`).join("")
+    : `<tr><td colspan="4" class="admin-empty">No Notion ID has been generated more than once in this window.</td></tr>`;
+
+  document.getElementById("analytics-month-bars").innerHTML =
+    _analyticsBarList(data.by_month, "month", "count", _formatMonthBucket);
+  document.getElementById("analytics-request-type-bars").innerHTML =
+    _analyticsBarList(data.by_request_type, "request_type", "count");
+  document.getElementById("analytics-time-unit-bars").innerHTML =
+    _analyticsBarList(data.by_time_unit, "time_unit", "count", u => u.charAt(0).toUpperCase() + u.slice(1));
 }
 
 // Debounces a function — waits `ms` after the LAST call before actually

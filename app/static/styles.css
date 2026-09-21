@@ -684,6 +684,76 @@ html, body {
   font-size: 12px;
   color: var(--ink-faint);
 }
+.time-unit-toggle-wrap {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin: 4px 0 20px;
+  padding: 14px 18px;
+  background: var(--paper-warm);
+  border-radius: var(--radius);
+  border: 1px solid var(--rule-soft);
+}
+.time-unit-toggle-label {
+  font-family: var(--font-kicker);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+}
+.time-unit-toggle-hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+/* Sliding 3-way segmented control — an oval track with a smaller purple
+   oval "thumb" that slides to whichever of the 3 positions is selected,
+   the selected label turning white/bold over it while the other two stay
+   plain/grey. Position is set via a translateX() on the thumb (see
+   _applyTimeUnitLabels in app.js) — percentages there are relative to
+   the THUMB's own width, so 0%/100%/200% land it exactly on each of the
+   3 equal segments regardless of the track's actual pixel width. */
+.time-unit-slider {
+  position: relative;
+  display: inline-flex;
+  width: 300px;
+  max-width: 100%;
+  background: var(--paper-card);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 4px;
+}
+.time-unit-slider-thumb {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc((100% - 8px) / 3);
+  background: var(--accent);
+  border-radius: 999px;
+  transition: transform 0.2s ease;
+  z-index: 1;
+}
+.time-unit-slider-option {
+  position: relative;
+  z-index: 2;
+  flex: 1 1 0;
+  border: none;
+  background: transparent;
+  padding: 7px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color 0.2s ease;
+  white-space: nowrap;
+}
+.time-unit-slider-option.active { color: white; }
 .copy-avails-control {
   display: flex;
   align-items: center;
@@ -784,18 +854,40 @@ html, body {
 .tier-override-row .inline-input { margin-bottom: 0; flex: 0 0 auto; }
 .tier-override-row .tier-geo-override input { width: 200px; }
 .tier-date-override input { width: 130px; }
+/* A bounded card (matching .time-unit-toggle-wrap's own box treatment
+   directly above it in Step 04, so the two read as one coherent summary
+   area rather than a loose numbers-floating-in-space toolbar) — Net on
+   top, a horizontal rule, Gross below when an agency fee is set.
+   Previously Net/Gross sat side-by-side in ONE wide row separated by a
+   vertical border — four numbers crammed horizontally read as cluttered
+   once the time-unit toggle above it started competing for the same
+   visual weight; stacking is both cleaner and reads top-to-bottom in
+   the natural "the real number, then its billed equivalent" order. */
 .totals-display {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 20px;
+  background: var(--paper-warm);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+}
+.totals-row {
   display: flex;
   gap: 24px;
   flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .totals-gross {
   display: flex;
-  gap: 24px;
-  padding-left: 20px;
-  border-left: 1px solid var(--rule);
+  flex-direction: column;
+  gap: 10px;
 }
-.totals-display > div {
+.totals-divider {
+  height: 1px;
+  background: var(--rule);
+}
+.totals-row > div {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -1692,6 +1784,28 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 }
 .mb-summary-cell-total .mb-summary-amount { color: var(--accent); }
 .mb-summary-cell-total { border-left: 1px solid rgba(255,255,255,0.2); padding-left: 18px; }
+.mb-summary-range {
+  font-size: 11px;
+  color: var(--paper);
+  opacity: 0.55;
+  margin-bottom: 2px;
+}
+.mb-summary-cell-merged { background: rgba(255,255,255,0.06); border-radius: var(--radius-sm); padding: 8px 10px; margin: -8px -10px; }
+.mb-merge-btn, .mb-unmerge-btn {
+  display: block;
+  margin-top: 8px;
+  font-family: var(--font-body);
+  font-size: 11px;
+  background: rgba(255,255,255,0.1);
+  color: var(--paper);
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mb-merge-btn:hover, .mb-unmerge-btn:hover { background: rgba(255,255,255,0.18); }
+.mb-unmerge-btn { color: var(--amber); }
 
 .mb-units-ref {
   font-size: 12px;
@@ -1771,6 +1885,8 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   border-bottom: 2px solid var(--rule);
 }
 .mb-table td { padding: 6px 10px; border-bottom: 1px solid var(--rule-soft); }
+.mb-period-cell { display: flex; flex-direction: column; gap: 2px; }
+.mb-period-range { font-size: 10px; color: var(--ink-faint); text-transform: none; letter-spacing: 0; }
 .mb-table input[type="number"] {
   width: 90px;
   padding: 6px 8px;

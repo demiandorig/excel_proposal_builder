@@ -73,7 +73,7 @@
         <div class="step" data-step="2" title="Review"><span>02</span><span class="step-label"> Review</span></div>
         <div class="step" data-step="3" title="Strategy"><span>03</span><span class="step-label"> Strategy</span></div>
         <div class="step" data-step="4" title="Curate"><span>04</span><span class="step-label"> Curate</span></div>
-        <div class="step" data-step="5" title="Monthly"><span>05</span><span class="step-label"> Monthly</span></div>
+        <div class="step" data-step="5" title="Monthly" id="nav-step-5"><span>05</span><span class="step-label" id="nav-step-5-label"> Monthly</span></div>
         <div class="step" data-step="6" title="Avails"><span>06</span><span class="step-label"> Avails</span></div>
         <div class="step" data-step="7" title="Roadblocks"><span>07</span><span class="step-label"> Roadblocks</span></div>
         <div class="step" data-step="8" title="Generate"><span>08</span><span class="step-label"> Generate</span></div>
@@ -378,19 +378,35 @@ Client name: ...
         </div>
       </details>
 
+      <div class="time-unit-toggle-wrap">
+        <span class="time-unit-toggle-label">Billing period</span>
+        <div class="time-unit-slider" id="time-unit-toggle">
+          <div class="time-unit-slider-thumb" id="time-unit-slider-thumb"></div>
+          <button type="button" class="time-unit-slider-option" data-unit="week">Weekly</button>
+          <button type="button" class="time-unit-slider-option active" data-unit="month">Monthly</button>
+          <button type="button" class="time-unit-slider-option" data-unit="quarter">Quarterly</button>
+        </div>
+        <p class="time-unit-toggle-hint">Changes how totals, avails, the Step 05 breakdown, and the export all read — everywhere this proposal says "month."</p>
+      </div>
+
       <div class="curation-toolbar">
         <label class="inline-input">
-          <span>Total monthly budget</span>
+          <span id="budget-target-label">Total monthly budget</span>
           <input type="number" id="total-budget-target" step="50" placeholder="0.00" />
         </label>
         <button class="btn-secondary" id="recommend-btn">⚡ Suggest mix</button>
         <div class="spacer"></div>
         <div class="totals-display">
-          <div><span class="label">Monthly total</span><span class="value" id="monthly-total">$0</span></div>
-          <div><span class="label">Flight total</span><span class="value" id="flight-total">$0</span></div>
+          <div class="totals-row">
+            <div><span class="label" id="monthly-total-label">Monthly total</span><span class="value" id="monthly-total">$0</span></div>
+            <div><span class="label">Flight total</span><span class="value" id="flight-total">$0</span></div>
+          </div>
           <div class="totals-gross hidden" id="totals-gross-wrap">
-            <div><span class="label">Monthly total (Gross)</span><span class="value" id="monthly-total-gross">$0</span></div>
-            <div><span class="label">Flight total (Gross)</span><span class="value" id="flight-total-gross">$0</span></div>
+            <div class="totals-divider"></div>
+            <div class="totals-row">
+              <div><span class="label" id="monthly-total-gross-label">Monthly total (Gross)</span><span class="value" id="monthly-total-gross">$0</span></div>
+              <div><span class="label">Flight total (Gross)</span><span class="value" id="flight-total-gross">$0</span></div>
+            </div>
           </div>
         </div>
       </div>
@@ -405,8 +421,8 @@ Client name: ...
               <th>Model</th>
               <th>Rate</th>
               <th>Min</th>
-              <th>Monthly $</th>
-              <th>Months</th>
+              <th id="col-budget-header">Monthly $</th>
+              <th id="col-months-header">Months</th>
               <th>Target override</th>
               <th>Objective</th>
               <th>Planner note</th>
@@ -455,26 +471,26 @@ Client name: ...
     <section class="panel hidden" id="step-5">
       <div class="panel-head">
         <div class="kicker">Step 05 · Optional</div>
-        <h1 class="display">Monthly breakdown</h1>
-        <p class="lede">Split each line item's budget across the calendar months your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat monthly figure is all you need; nothing else changes if you do.</p>
+        <h1 class="display" id="mb-step-title">Monthly breakdown</h1>
+        <p class="lede" id="mb-step-lede">Split each line item's budget across the calendar months your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat monthly figure is all you need; nothing else changes if you do.</p>
       </div>
 
       <div class="tier-switcher" id="tier-switcher-monthly-wrap">
         <div class="tier-tabs" id="tier-tabs-monthly"></div>
       </div>
       <p class="tier-switcher-hint" id="tier-switcher-hint-monthly">
-        Monthly Breakdown is entered separately per option — you're editing <strong id="tier-switcher-active-label-monthly">Option A</strong> below. Switch tabs above before generating, or that option's export has none.
+        <span id="mb-step-name">Monthly Breakdown</span> is entered separately per option — you're editing <strong id="tier-switcher-active-label-monthly">Option A</strong> below. Switch tabs above before generating, or that option's export has none.
       </p>
 
       <div id="mb-no-dates" class="mb-empty-state hidden">
-        <p>Monthly Breakdown needs a campaign flight to divide into months. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.</p>
+        <p id="mb-no-dates-text">Monthly Breakdown needs a campaign flight to divide into months. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.</p>
       </div>
 
       <div id="mb-content">
         <div class="mb-mode-select">
-          <span class="mb-mode-label">Default split:</span>
+          <span class="mb-mode-label" id="mb-mode-label">Default split:</span>
           <div class="tier-tabs" id="mb-mode-tabs">
-            <button type="button" class="tier-tab" data-mode="even">Even across months</button>
+            <button type="button" class="tier-tab" data-mode="even" id="mb-mode-even-btn">Even across months</button>
             <button type="button" class="tier-tab" data-mode="prorated">Prorated by days</button>
           </div>
           <span class="tier-switcher-hint">Only affects NEW defaults (checkbox, reset, a newly-added line) — never rewrites a line you've already customized.</span>

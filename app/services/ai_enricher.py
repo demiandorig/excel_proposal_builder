@@ -118,6 +118,37 @@ def _to_title_case(text: str) -> str:
     )
 
 
+def _first_name_from_requested_by(requested_by: Optional[str], salesperson_email: Optional[str] = "") -> str:
+    """The AE's first name for the internal email's opening greeting
+    ("Hi {ae_first}, ..."). requested_by (the Notion paste's own
+    "Requested by:" field) is a plain human name like "Lauren Sandford",
+    NOT an email — the old .split("@")[0].split(".")[0] logic silently
+    did nothing against a plain multi-word name (no "@" or "." to split
+    on), which is why the greeting used to show the AE's FULL name
+    instead of just their first. salesperson_email (the fallback when
+    requested_by is blank) IS an email, so this still needs to handle
+    that shape too — take the email local-part if there's an "@", else
+    the raw string as-is, then split on whitespace/./_ and take the
+    first token, covering both "Lauren Sandford" and
+    "lauren.sandford@entravision.com" alike."""
+    ae_raw = requested_by or salesperson_email or ""
+    ae_local = ae_raw.split("@")[0].strip()
+    return re.split(r"[.\s_]+", ae_local)[0].title() if ae_local else ""
+
+
+def _display_name_from_email(email: str) -> str:
+    """'irvin.villa@entravision.com' -> 'Irvin Villa'; 'irvin@entravision.com'
+    (no dot to split on) -> just 'Irvin'. There's no real display-name
+    field stored anywhere in this app (see schema.sql's users table —
+    email/password/is_admin only) — this dot-separated-local-part
+    convention is the same assumption this file already makes elsewhere
+    for the AE greeting (see `ae_first` below), extended here to also
+    capture a last-name segment when present, for a full-name signature."""
+    local_part = (email or "").split("@")[0]
+    segments = [s.replace("_", " ").title() for s in local_part.split(".") if s]
+    return " ".join(segments)
+
+
 def _get_doc_type(request_type: str) -> str:
     """
     Map a Notion request type to its naming-convention Doc Type. Checks
@@ -151,12 +182,22 @@ def build_proposal_title(
     request_type: str,
     ref_date: Optional[str] = None,
     doc_type_override: Optional[str] = None,
+    client_name: str = "",
 ) -> str:
     """
     Build the full proposal title following the Entravision naming convention:
-      {ID} | {Title Case Campaign Name} | Entravision | {MonYY} | {Doc Type}
+      {ID} | {Client Name} - {Order Description} | Entravision | {MonYY} | {Doc Type}
 
-    Example: "0042 | Texmex Curios July Awareness | Entravision | Jun26 | Digital Media Proposal"
+    Example: "0042 | Texmex Curios - July Awareness Push | Entravision | Jun26 | Digital Media Proposal"
+
+    client_name: prepended before campaign_name with a " - " separator —
+    campaign_name (the AI's "order description," e.g. "July Awareness
+    Push") is instructed to never include the client's own name (see
+    _build_prompt's campaign_name schema/RULES entries), so this is the
+    ONE place the client name appears rather than it showing up twice.
+    Omitted/blank falls back to just the order description alone, same as
+    before this param existed — every pre-existing caller that doesn't
+    pass it keeps its exact prior title shape.
 
     doc_type_override: skip the request_type -> Doc Type inference and use
     this instead — e.g. "Digital Media Deck" for the companion presentation
@@ -164,7 +205,18 @@ def build_proposal_title(
     from the Excel proposal and always carries that fixed Doc Type
     regardless of what request_type would otherwise map to.
     """
-    title_name = _to_title_case(campaign_name.strip()) if campaign_name else "Campaign"
+    order_description = _to_title_case(campaign_name.strip()) if campaign_name else "Campaign"
+    client_name = (client_name or "").strip()
+    # Don't double up if the order description somehow still starts with
+    # the client's own name (a model that ignores the prompt instruction,
+    # or a manual campaign_name_override) — comparison is case-insensitive
+    # since Title Case may differ from however the client name is typed.
+    if client_name and order_description.lower().startswith(client_name.lower()):
+        title_name = order_description
+    elif client_name:
+        title_name = f"{client_name} - {order_description}"
+    else:
+        title_name = order_description
     doc_type = doc_type_override or _get_doc_type(request_type)
 
     try:
@@ -393,6 +445,7 @@ Revise BOTH emails to incorporate the planner's requested change. Keep everythin
 
 CRITICAL — PRESERVE THESE LINES VERBATIM, EXACTLY AS WRITTEN, WHEREVER THEY APPEAR:
 Any line starting with "Proposal:", "Presentation:", or "Google Drive Link:" is a system-inserted reference line, not AI-authored content — copy it into your revised email character-for-character, in the same position relative to the surrounding text. Never reword, remove, or relocate these lines even if the requested change is about tone or structure elsewhere in the email.
+The INTERNAL email's final two lines (a "{{Name}}, part of your digital strategy team" line followed by an email address line) are the real planner's system-inserted signature, not AI-authored content — keep them character-for-character, at the very end, exactly as given. Never invent a different sign-off in their place.
 
 Respond with this exact JSON structure:
 {{
@@ -610,8 +663,7 @@ reference impressions; never compute or guess your own.
         target_lines.append(f"  - Contextual environment: {request.contextual}")
     target_block = "\n".join(target_lines) if target_lines else "  - (not specified — infer a reasonable target from the client/category)"
 
-    ae_raw = request.requested_by or request.salesperson_email or ""
-    ae_first = ae_raw.split("@")[0].split(".")[0].replace("_", " ").title()
+    ae_first = _first_name_from_requested_by(request.requested_by, request.salesperson_email)
 
     is_hispanic = any(
         word in (request.language or "").lower() + (request.demo or "").lower() + (request.behavioral or "").lower()
@@ -689,7 +741,9 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
         + ("— A paragraph that explicitly recommends WHICH option the client should run when budget allows, and why (grounded in the reach/frequency tradeoff or channel-fragmentation risk visible in the data above), plus what to do if the client stays at the lower option instead. "
            if tiers_block else "")
         + "— Offer to adjust if needed. "
-        "— Sign-off as 'Your Entravision Strategy Team'."
+        "— End with, on its own final line, the literal placeholder text '{{PLANNER_SIGNATURE}}' "
+        "(exactly these characters, nothing else on that line, no sign-off text of your own before or after it — "
+        "it will be replaced with the real planner's name/role and email)."
     )
 
     # Same reasoning as above — a separate variable so \" escaping needed
@@ -790,7 +844,7 @@ boilerplate praise.
 Return this exact JSON structure (no deviation):
 
 {{
-  "campaign_name": "Short memorable 4–6 word name in Title Case (e.g. 'Bill Luke July Awareness'). No quotes inside the string.",
+  "campaign_name": "Short memorable 4–6 word name in Title Case describing the CAMPAIGN ITSELF — objective, timing, and/or audience (e.g. 'July Awareness Push', 'Back-to-School Conquesting'). Do NOT include the client/advertiser's own name — it's already shown separately alongside this. No quotes inside the string.",
   "product_blurbs": [
     {{
       "product_name": "exact product name as listed above",
@@ -814,7 +868,7 @@ RULES:
 - Internal email: warm and collegial; do NOT include the client email body inline — just reference it
 - Client email: professional but readable; absolutely no internal document references
 - Do not mention a presentation, deck, or any deliverable that isn't actually part of this request (see Request Type above) — only reference what's really being delivered
-- Campaign name: no quotes, no special characters
+- Campaign name: no quotes, no special characters, and must NOT contain the client/advertiser's name (it's combined with the client name separately downstream — including it here would repeat it)
 - Respond ONLY with the JSON object, starting with {{ and ending with }}"""
 
 

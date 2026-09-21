@@ -684,6 +684,22 @@ def parse_notion(text: str, catalog_names: list[str], db_aliases: Optional[dict]
     if req.renewal_client and not req.client_name:
         req.client_name = req.renewal_client
 
+    # Same promotion for dates — a renewal paste's own "Start date:"/"End
+    # date:" lines are blank (the real dates only exist in "Campaign
+    # dates:", parsed above into renewal_campaign_dates as one unsplit
+    # string). Every downstream step (avails, the Week/Month/Quarter
+    # breakdown, the Excel export's own date cells) reads request.start_date/
+    # end_date directly and has no renewal-specific fallback of its own —
+    # without this, a renewal's real flight dates never reach any of them.
+    # Split on a HYPHEN WITH SURROUNDING WHITESPACE only (" - "), which an
+    # ISO date's own internal hyphens ("2026-10-01") never have — safe
+    # against splitting a date apart by mistake.
+    if req.renewal_campaign_dates and not req.start_date and not req.end_date:
+        parts = re.split(r"\s+-\s+", req.renewal_campaign_dates.strip(), maxsplit=1)
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            req.start_date = parts[0].strip()
+            req.end_date = parts[1].strip()
+
     # "Question details" — Quick Question / Need Guidance requests carry
     # their own free-text field under this label, separate from the main
     # branch's "Additional comments from the salesperson" above. Captured

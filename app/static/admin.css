@@ -358,3 +358,104 @@ tr.row-deleted td { background: var(--paper-warm); }
 .bulk-upload-result strong { color: var(--ink); }
 .bulk-upload-result .bur-error { color: var(--red, #a8261c); }
 .bulk-upload-result ul { margin: 4px 0 10px 18px; padding: 0; max-height: 160px; overflow-y: auto; }
+
+/* Analytics dashboard */
+.analytics-loading-dim { opacity: 0.5; pointer-events: none; }
+
+.analytics-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.analytics-stat-card {
+  padding: 16px 18px;
+  background: var(--paper-card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+}
+.analytics-stat-value {
+  font-family: var(--font-kicker);
+  font-weight: 700;
+  font-size: 24px;
+  color: var(--accent);
+}
+.analytics-stat-label {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+}
+.analytics-stat-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+.analytics-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+@media (max-width: 900px) {
+  .analytics-grid-2 { grid-template-columns: 1fr; }
+}
+
+.analytics-card {
+  padding: 18px 20px;
+  background: var(--paper-card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+}
+.analytics-card h3 {
+  margin: 0 0 14px;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.analytics-card h3 small {
+  font-weight: 400;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  text-transform: none;
+  letter-spacing: 0;
+}
+.analytics-card .admin-table { margin: 0; }
+
+.analytics-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+}
+.analytics-bar-label {
+  flex: 0 0 140px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.analytics-bar-track {
+  flex: 1;
+  height: 16px;
+  background: var(--paper-warm);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.analytics-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+  min-width: 3px;
+}
+.analytics-bar-count {
+  flex: 0 0 32px;
+  text-align: right;
+  font-family: var(--font-mono);
+  color: var(--ink-soft);
+}
