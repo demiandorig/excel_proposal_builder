@@ -249,6 +249,27 @@ CREATE TABLE proposals (
 CREATE INDEX idx_proposals_generated_at ON proposals (generated_at DESC);
 
 -- ---------------------------------------------------------------------------
+-- Migration for an ALREADY-created proposals table: adds created_by_email,
+-- which fixes a real bug — "My Proposal History" (and the admin Proposals
+-- tab's own "My proposals" default) filtered on `seller_email`, but that
+-- column has ALWAYS held whatever the pasted Notion request's own
+-- "Salesperson email:" field said (the AE the DEAL belongs to — genuinely
+-- useful on its own, e.g. an ops coordinator generating on someone else's
+-- behalf, and left untouched here), which is NOT necessarily the same
+-- person as whoever is actually logged in and clicked Generate. A planner
+-- whose own login email didn't happen to match that pasted field would
+-- never see their own generated proposals in their own history. This
+-- column is the actual, reliable "who was logged in when this was
+-- generated" signal (request.state.user["email"], set by the auth
+-- session) — _query_proposals()'s mine-filter now uses THIS, not
+-- seller_email. NULL for any proposal generated before this column
+-- existed (there's no way to retroactively know who that really was) —
+-- those rows simply won't appear in anyone's "mine" view, which is
+-- correct/expected, not a bug to work around.
+-- ---------------------------------------------------------------------------
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS created_by_email TEXT;
+
+-- ---------------------------------------------------------------------------
 -- drive_tokens — the single stored Google OAuth2 token for Drive uploads
 -- (app/services/drive_uploader.py), replacing the local file
 -- ~/.entravision_drive_token.json. One row, fixed id — there's only ever

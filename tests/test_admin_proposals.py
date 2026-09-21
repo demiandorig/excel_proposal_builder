@@ -31,7 +31,7 @@ def _row(proposal_id: str, seller_email: str, total_count: int) -> dict:
     }
 
 
-def test_mine_filter_matches_on_seller_email_case_insensitively(monkeypatch):
+def test_mine_filter_matches_on_created_by_email_case_insensitively(monkeypatch):
     captured = {}
 
     def fake_fetch_all(sql, params):
@@ -42,7 +42,11 @@ def test_mine_filter_matches_on_seller_email_case_insensitively(monkeypatch):
     monkeypatch.setattr(main, "fetch_all", fake_fetch_all)
     result = asyncio.run(main.admin_list_proposals(_fake_request("planner@entravision.com"), mine=True))
 
-    assert "LOWER(seller_email) = LOWER(%s)" in captured["sql"]
+    # created_by_email (the actual logged-in session), NOT seller_email
+    # (whatever the pasted Notion text's own field said) — see
+    # schema.sql's migration comment for why these are deliberately
+    # different fields.
+    assert "LOWER(created_by_email) = LOWER(%s)" in captured["sql"]
     # email param, then LIMIT, OFFSET (page=1/page_size=25 defaults)
     assert captured["params"] == ("planner@entravision.com", 25, 0)
     assert result["count"] == 1
@@ -61,7 +65,7 @@ def test_all_scope_omits_the_mine_filter_entirely(monkeypatch):
     monkeypatch.setattr(main, "fetch_all", fake_fetch_all)
     asyncio.run(main.admin_list_proposals(_fake_request(), mine=False))
 
-    assert "LOWER(seller_email)" not in captured["sql"]
+    assert "LOWER(created_by_email)" not in captured["sql"]
     assert "WHERE" not in captured["sql"]
     assert captured["params"] == (25, 0)
 
@@ -116,7 +120,7 @@ def test_my_proposals_always_scopes_to_the_callers_own_email(monkeypatch):
     # unlike /api/admin/proposals which can see everyone's.
     result = asyncio.run(main.my_proposals(_fake_request("planner@entravision.com")))
 
-    assert "LOWER(seller_email) = LOWER(%s)" in captured["sql"]
+    assert "LOWER(created_by_email) = LOWER(%s)" in captured["sql"]
     assert captured["params"][0] == "planner@entravision.com"
     assert result["proposals"][0]["proposal_id"] == "p1"
 
@@ -125,6 +129,47 @@ def test_my_proposals_defaults_to_a_smaller_page_size_than_admin(monkeypatch):
     monkeypatch.setattr(main, "fetch_all", lambda sql, params: [_row("p1", "x", 1)])
     result = asyncio.run(main.my_proposals(_fake_request()))
     assert result["page_size"] == 10  # a compact in-wizard lookup, not a full admin table
+
+
+class _CapturingConn:
+    def __init__(self, calls: list):
+        self._calls = calls
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=()):
+        self._calls.append((sql, params))
+        return SimpleNamespace(fetchone=lambda: None, fetchall=lambda: [])
+
+
+def test_save_proposal_metadata_persists_created_by_email_separately_from_seller_email(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "get_connection", lambda: _CapturingConn(calls))
+
+    # seller_email deliberately DIFFERENT from created_by_email here — the
+    # exact real-world case this fixes: the pasted Notion text names one
+    # AE, but a different logged-in person is the one who actually clicked
+    # Generate.
+    main._save_proposal_metadata(
+        proposal_id="p1", client_name="Acme", seller_email="ae@entravision.com",
+        created_by_email="planner@entravision.com", requested_by="Jane AE",
+        notion_id="EVC-1", proposal_title="t", filename="f.xlsx",
+        email_doc_filename=None, pptx_net_filename=None, pptx_gross_filename=None,
+        generated_at=None, requester_ip="1.2.3.4", requester_user_agent="UA",
+        summary={}, reopen_state={},
+    )
+
+    assert len(calls) == 1
+    sql, params = calls[0]
+    assert "created_by_email" in sql
+    # seller_email is params[2], created_by_email is params[3] — matches
+    # the column order in the INSERT column list.
+    assert params[2] == "ae@entravision.com"
+    assert params[3] == "planner@entravision.com"
 
 
 def test_users_export_csv_never_includes_password_fields(monkeypatch):

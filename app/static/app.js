@@ -484,6 +484,11 @@ function wireEvents() {
   // Strategy step
   document.getElementById("strategy-skip-btn").addEventListener("click", () => onNext(4));
   document.getElementById("strategy-confirm-btn").addEventListener("click", () => onNext(4));
+  // Plain "start over, no specific feedback" regenerate — distinct from
+  // "Refine this plan" below, which requires typed feedback. Same
+  // no-confirmation-dialog pattern Roadblocks' own equivalent button
+  // already uses.
+  document.getElementById("strategy-regenerate-btn").addEventListener("click", () => onStrategyGenerate());
   document.getElementById("reprompt-btn").addEventListener("click", () => {
     document.getElementById("reprompt-area").classList.remove("hidden");
     document.getElementById("reprompt-btn").style.display = "none";
@@ -806,9 +811,18 @@ function onNext(n) {
   if (state.step === 6) syncAvailsFromGrid();
 
   if (n === 3) {
-    // Trigger AI strategy brief generation
     goToStep(3);
-    onStrategyGenerate();
+    // Only auto-generate on the FIRST visit (state.strategyBrief is only
+    // ever set on a SUCCESSFUL renderStrategyBrief() call — see that
+    // function — so a prior failed attempt still correctly auto-retries
+    // here, only a genuine existing brief blocks it). Before this gate,
+    // clicking Continue from Step 02 unconditionally regenerated the
+    // brief EVERY time, discarding whatever was already there and
+    // burning a real API call even when nothing had changed — exactly
+    // the "goes back, then it reruns" behavior reported. The explicit
+    // Regenerate/Refine buttons (see renderStrategyBrief) are how a
+    // planner gets a fresh one on purpose now.
+    if (!state.strategyBrief) onStrategyGenerate();
     return;
   }
   if (n === 4) {
@@ -883,9 +897,13 @@ function onNext(n) {
   if (n === 5) renderMonthlyBreakdown();
   if (n === 6) renderAvailsGrid();
   if (n === 7) {
-    // Trigger AI roadblocks check
     goToStep(7);
-    onRoadblocksGenerate();
+    // Same "only auto-generate once" gate as Step 3 above — state.roadblocks
+    // is only ever set on a successful renderRoadblocks() call, so a prior
+    // failure still correctly auto-retries; an existing result does not.
+    // The always-visible "↺ Regenerate" button is how a planner gets a
+    // fresh one on purpose (e.g. after changing the curated mix).
+    if (!state.roadblocks) onRoadblocksGenerate();
     return;
   }
   if (n === 8) renderGenerateSummary();
@@ -1068,6 +1086,7 @@ function _resetStrategyUI() {
   document.getElementById("strategy-brief").classList.add("hidden");
   document.getElementById("reprompt-area").classList.add("hidden");
   document.getElementById("reprompt-btn").style.display = "none";
+  document.getElementById("strategy-regenerate-btn").style.display = "none";
   document.getElementById("strategy-confirm-btn").style.display = "none";
   document.getElementById("strategy-download-link").classList.add("hidden");
   document.getElementById("strategy-search-note").classList.add("hidden");
@@ -1180,6 +1199,7 @@ function renderStrategyBrief(brief) {
 
   document.getElementById("strategy-brief").classList.remove("hidden");
   document.getElementById("reprompt-btn").style.display = "";
+  document.getElementById("strategy-regenerate-btn").style.display = "";
   document.getElementById("strategy-confirm-btn").style.display = "";
 
   const dlLink = document.getElementById("strategy-download-link");

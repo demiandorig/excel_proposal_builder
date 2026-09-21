@@ -264,7 +264,7 @@ def _get_next_short_id() -> str:
 
 
 _PROPOSAL_COLUMNS = (
-    "proposal_id, client_name, seller_email, requested_by, notion_id, "
+    "proposal_id, client_name, seller_email, created_by_email, requested_by, notion_id, "
     "proposal_title, filename, email_doc_filename, pptx_net_filename, "
     "pptx_gross_filename, generated_at, requester_ip, requester_user_agent, "
     "summary, reopen_state"
@@ -301,6 +301,7 @@ def _save_proposal_metadata(
     proposal_id: str,
     client_name: str,
     seller_email: str,
+    created_by_email: str,
     requested_by: str,
     notion_id: str | None,
     proposal_title: str,
@@ -318,15 +319,16 @@ def _save_proposal_metadata(
         conn.execute(
             """
             INSERT INTO proposals (
-                proposal_id, client_name, seller_email, requested_by, notion_id,
+                proposal_id, client_name, seller_email, created_by_email, requested_by, notion_id,
                 proposal_title, filename, email_doc_filename, pptx_net_filename,
                 pptx_gross_filename, generated_at, requester_ip,
                 requester_user_agent, summary, reopen_state
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (proposal_id) DO UPDATE SET
                 client_name = EXCLUDED.client_name,
                 seller_email = EXCLUDED.seller_email,
+                created_by_email = EXCLUDED.created_by_email,
                 requested_by = EXCLUDED.requested_by,
                 notion_id = EXCLUDED.notion_id,
                 proposal_title = EXCLUDED.proposal_title,
@@ -344,6 +346,7 @@ def _save_proposal_metadata(
                 proposal_id,
                 client_name,
                 seller_email,
+                created_by_email,
                 requested_by,
                 notion_id,
                 proposal_title,
@@ -1207,6 +1210,15 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         proposal_id=proposal_id,
         client_name=req.client_name,
         seller_email=req.salesperson_email,
+        # The ACTUAL logged-in user (from the session, set by _require_login)
+        # — NOT necessarily the same as req.salesperson_email above, which
+        # is just whatever the pasted Notion text's own "Salesperson
+        # email:" field said (the AE the deal belongs to, which someone
+        # else — an ops coordinator, a covering planner — may be the one
+        # actually generating). "My Proposal History" filters on THIS
+        # field specifically so it reliably means "proposals I generated",
+        # not "proposals where the pasted text happened to name me."
+        created_by_email=request.state.user["email"],
         requested_by=req.requested_by,
         notion_id=notion_id,
         proposal_title=proposal_title,
@@ -1611,7 +1623,13 @@ def _query_proposals(*, mine_email: Optional[str], search: str, page: int, page_
     where_clauses = []
     params: list = []
     if mine_email:
-        where_clauses.append("LOWER(seller_email) = LOWER(%s)")
+        # created_by_email (the actual logged-in session that clicked
+        # Generate) — NOT seller_email (whatever the pasted Notion text's
+        # own "Salesperson email:" field said, which someone else may be
+        # the one generating on behalf of). See schema.sql's migration
+        # comment for the full reasoning; NULL for any proposal generated
+        # before this column existed, so those correctly never match here.
+        where_clauses.append("LOWER(created_by_email) = LOWER(%s)")
         params.append(mine_email)
     search = search.strip()
     if search:
