@@ -1303,6 +1303,23 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
     return result
 
 
+class GammaOutlineRefineRequest(BaseModel):
+    outline: str
+    reprompt: str
+
+
+@app.post("/api/refine-gamma-outline")
+async def refine_gamma_outline_endpoint(body: GammaOutlineRefineRequest) -> dict:
+    """
+    Revise the Gamma/media-strategy-co-pilot outline text based on the
+    planner's free-text feedback. This is the ONLY AI call anywhere in
+    that feature — the outline itself is built entirely client-side (see
+    app.js's buildGammaOutline, no fetch at all) and stays that way; this
+    endpoint only runs when the planner explicitly clicks "Refine".
+    """
+    return ai_enricher.refine_gamma_outline(body.outline, body.reprompt)
+
+
 @app.get("/api/download/{proposal_id}")
 async def download(proposal_id: str) -> FileResponse:
     """Download a previously generated proposal."""
@@ -1571,31 +1588,21 @@ _PROPOSAL_LIST_COLUMNS = (
 )
 
 
-@app.get("/api/admin/proposals")
-async def admin_list_proposals(
-    request: Request,
-    page: int = 1,
-    page_size: int = 25,
-    mine: bool = True,
-    search: str = "",
-) -> dict:
+def _query_proposals(*, mine_email: Optional[str], search: str, page: int, page_size: int) -> dict:
     """
-    List generated proposals, newest first — client, seller, Notion ID,
-    title, and who/what device generated it. Paginated and filtered at
-    the DATABASE level (LIMIT/OFFSET + a WHERE clause), not fetch-
-    everything-then-slice-in-Python like the old version — a growing
-    proposals table was an unbounded, ever-slower query on every single
-    admin page load otherwise.
+    Shared query behind both /api/admin/proposals (any admin, defaults to
+    their own but can see everyone's) and /api/my-proposals (any logged-in
+    user, ALWAYS their own — see that endpoint for why it's a separate,
+    non-admin-namespaced route rather than a relaxed permission check on
+    this one). Paginated and filtered at the DATABASE level (LIMIT/OFFSET
+    + a WHERE clause), not fetch-everything-then-slice-in-Python — a
+    growing proposals table was an unbounded, ever-slower query on every
+    single page load otherwise.
 
-    mine: True (the default) scopes to the LOGGED-IN admin's own
-    proposals (seller_email matches their login email, case-insensitive)
-    — per explicit request, planners land on "my work" first rather than
-    the whole company's history. False returns everyone's.
-
-    search: optional free-text filter (client, seller/AE, Notion ID, or
-    proposal title) — applied server-side now that the full list isn't
-    sitting in the browser to filter client-side anymore; a search
-    box keystroke is a real request now, not an instant in-memory filter.
+    mine_email: None means no seller_email filter at all (admin "All
+    proposals"); any other value scopes to that exact email
+    (case-insensitive) — the CALLER decides which, this function just
+    applies whatever it's given.
     """
     page = max(page, 1)
     page_size = min(max(page_size, 1), 100)  # hard cap — this is a page size, not an export
@@ -1603,9 +1610,9 @@ async def admin_list_proposals(
 
     where_clauses = []
     params: list = []
-    if mine:
+    if mine_email:
         where_clauses.append("LOWER(seller_email) = LOWER(%s)")
-        params.append(request.state.user["email"])
+        params.append(mine_email)
     search = search.strip()
     if search:
         like = f"%{search}%"
@@ -1657,6 +1664,55 @@ async def admin_list_proposals(
         "page_size": page_size,
         "total_pages": max(1, -(-total_count // page_size)),  # ceil division
     }
+
+
+@app.get("/api/admin/proposals")
+async def admin_list_proposals(
+    request: Request,
+    page: int = 1,
+    page_size: int = 25,
+    mine: bool = True,
+    search: str = "",
+) -> dict:
+    """
+    List generated proposals, newest first — client, seller, Notion ID,
+    title, and who/what device generated it. Admin-only (see
+    /api/my-proposals for the non-admin equivalent).
+
+    mine: True (the default) scopes to the LOGGED-IN admin's own
+    proposals (seller_email matches their login email, case-insensitive)
+    — per explicit request, planners land on "my work" first rather than
+    the whole company's history. False returns everyone's — an admin
+    privilege /api/my-proposals deliberately doesn't have.
+
+    search: optional free-text filter (client, seller/AE, Notion ID, or
+    proposal title) — applied server-side now that the full list isn't
+    sitting in the browser to filter client-side anymore; a search
+    box keystroke is a real request now, not an instant in-memory filter.
+    """
+    return _query_proposals(
+        mine_email=request.state.user["email"] if mine else None,
+        search=search, page=page, page_size=page_size,
+    )
+
+
+@app.get("/api/my-proposals")
+async def my_proposals(request: Request, page: int = 1, page_size: int = 10, search: str = "") -> dict:
+    """
+    A non-admin planner's OWN proposal history — same paginated/searched
+    query /api/admin/proposals uses, but deliberately a separate route
+    outside the /api/admin/* namespace (reachable by any logged-in user,
+    not just admins — see _require_login's blanket "/api/admin/* needs
+    is_admin" rule, which this is intentionally NOT under) rather than a
+    carved-out exception inside that admin-only gate. Always scoped to
+    the CALLER's own email server-side — there's no `mine` param to
+    override, unlike the admin endpoint, so a non-admin can never see
+    anyone else's history no matter what they pass.
+    """
+    return _query_proposals(
+        mine_email=request.state.user["email"],
+        search=search, page=page, page_size=page_size,
+    )
 
 
 def _resolve_admin_product_key(product_name: str) -> tuple[str, bool]:

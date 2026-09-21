@@ -428,6 +428,74 @@ Respond with this exact JSON structure:
         return _unchanged(f"Reprompt failed: {exc}")
 
 
+def refine_gamma_outline(outline: str, reprompt: str) -> dict:
+    """
+    Revises the Gamma/media-strategy-co-pilot outline text based on the
+    planner's free-text feedback — same "revise in place, don't
+    regenerate from scratch" shape as reprompt_emails() above, but
+    simpler: the outline itself (built entirely CLIENT-SIDE from data
+    already on the page — see app.js's buildGammaOutline, which makes no
+    AI call at all) IS the full context here, so there's no separate
+    structured request/line-items payload to re-supply. This function is
+    the ONLY AI call anywhere in the Gamma-outline feature — it only
+    runs when the planner explicitly clicks "Refine", so the always-free
+    base outline stays exactly that.
+
+    Returns {outline, error}. On any failure, returns the ORIGINAL
+    outline unchanged (with `error` set) rather than blanking it out —
+    same failure-safety as reprompt_emails().
+    """
+    def _unchanged(msg: str) -> dict:
+        return {"outline": outline, "error": msg}
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not _HAS_OPENAI:
+        return _unchanged("openai package not installed — run: pip install openai")
+    if not api_key:
+        return _unchanged("OPENAI_API_KEY not set — reprompt skipped.")
+
+    client = _OpenAI(api_key=api_key)
+    prompt = f"""You are revising a plain-text media-plan outline (a handoff doc fed into a separate presentation-building co-pilot, not shown to the client directly) based on the planner's feedback. Respond ONLY with valid JSON — no preamble, no markdown fences.
+
+## CURRENT OUTLINE
+{outline}
+
+## PLANNER'S REQUESTED CHANGE
+{reprompt.strip()}
+
+## YOUR TASK
+Revise the outline to incorporate the planner's requested change. Keep
+its section headers and overall structure, and keep every real number,
+date, product name, and client detail EXACTLY as given — never invent or
+alter a figure that's already in the outline. Change only what the
+planner actually asked for.
+
+Respond with this exact JSON structure:
+{{"outline": "the full revised outline text"}}"""
+
+    try:
+        # gpt-5-mini — a narrow revise-in-place task, same model tier
+        # reprompt_emails() above uses for the same reason; no
+        # `temperature=` since GPT-5-series rejects anything but its
+        # default (see the model-choice comment on _SEARCH_MODEL above).
+        response = client.chat.completions.create(
+            model="gpt-5-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=2000,
+        )
+        raw = response.choices[0].message.content or ""
+        match = re.search(r"\{[\s\S]*\}", raw)
+        if not match:
+            return _unchanged("No structured response received — outline left unchanged.")
+        data = json.loads(match.group(0))
+        revised = data.get("outline")
+        if not revised:
+            return _unchanged("No structured response received — outline left unchanged.")
+        return {"outline": _normalize_newlines(revised), "error": None}
+    except Exception as exc:
+        return _unchanged(f"Reprompt failed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Prompt builder
 # ---------------------------------------------------------------------------

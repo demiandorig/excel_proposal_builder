@@ -9,6 +9,11 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500;700&family=Poppins:wght@700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css" />
+  <!-- Reused (not duplicated) for the "My Proposal History" modal's table/
+       toolbar/pagination — admin.css is written as a layer on top of
+       styles.css's own tokens, safe to load here too; verified no
+       selector in it collides with anything styles.css already defines. -->
+  <link rel="stylesheet" href="/static/admin.css" />
 </head>
 <body>
   <!-- Full-page overlay while a past proposal is being reopened
@@ -20,6 +25,38 @@
   <div id="reopen-loading-overlay" class="reopen-loading-overlay hidden">
     <div class="strategy-spinner"></div>
     <span>Reopening proposal…</span>
+  </div>
+
+  <!-- "My Proposal History" — reachable by ANY logged-in planner (not
+       admin-gated), always scoped server-side to their own proposals
+       (see GET /api/my-proposals). Reuses the admin console's own
+       table/pagination look via admin.css rather than a second copy. -->
+  <div id="my-proposals-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2>My Proposal History</h2>
+        <button type="button" class="modal-close-btn" id="my-proposals-close-btn" title="Close">✕</button>
+      </div>
+      <div class="admin-toolbar">
+        <input type="text" id="my-proposals-search" placeholder="Filter by client, Notion ID, or title…" />
+        <span class="admin-count" id="my-proposals-count"></span>
+      </div>
+      <div class="table-scroll">
+        <table class="admin-table" id="my-proposals-table">
+          <thead>
+            <tr><th>Generated</th><th>Notion ID</th><th>Client</th><th>Proposal Title</th><th>Net</th><th></th></tr>
+          </thead>
+          <tbody id="my-proposals-body">
+            <tr><td colspan="6" class="admin-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="admin-pagination">
+        <button type="button" class="btn-secondary" id="my-proposals-prev-btn" disabled>← Prev</button>
+        <span id="my-proposals-page-info" class="mono"></span>
+        <button type="button" class="btn-secondary" id="my-proposals-next-btn" disabled>Next →</button>
+      </div>
+    </div>
   </div>
 
   <header class="masthead">
@@ -72,10 +109,13 @@
          STEP 1 — Paste Notion
     ===================================================================== -->
     <section class="panel" id="step-1">
-      <div class="panel-head">
-        <div class="kicker">Step 01</div>
-        <h1 class="display">Paste the Notion request</h1>
-        <p class="lede">Start with the Notion request ID, then copy the full request text below. The parser handles markdown formatting, blank fields, and both Avails-Only and Renewal branches.</p>
+      <div class="panel-head-row">
+        <div class="panel-head">
+          <div class="kicker">Step 01</div>
+          <h1 class="display">Paste the Notion request</h1>
+          <p class="lede">Start with the Notion request ID, then copy the full request text below. The parser handles markdown formatting, blank fields, and both Avails-Only and Renewal branches.</p>
+        </div>
+        <button type="button" class="btn-secondary" id="my-proposals-btn">📜 My Proposal History</button>
       </div>
 
       <div class="notion-id-row">
@@ -101,8 +141,6 @@ Client name: ...
 ..."></textarea>
 
         <div class="paste-actions">
-          <button class="btn-secondary" id="load-example-1">Load Example 1 (Avails-Only)</button>
-          <button class="btn-secondary" id="load-example-2">Load Example 2 (Renewal)</button>
           <button class="btn-primary" id="parse-btn">Parse →</button>
         </div>
       </div>
@@ -420,6 +458,13 @@ Client name: ...
         <p class="lede">Split each line item's budget across the calendar months your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat monthly figure is all you need; nothing else changes if you do.</p>
       </div>
 
+      <div class="tier-switcher" id="tier-switcher-monthly-wrap">
+        <div class="tier-tabs" id="tier-tabs-monthly"></div>
+      </div>
+      <p class="tier-switcher-hint" id="tier-switcher-hint-monthly">
+        Monthly Breakdown is entered separately per option — you're editing <strong id="tier-switcher-active-label-monthly">Option A</strong> below. Switch tabs above before generating, or that option's export has none.
+      </p>
+
       <div id="mb-no-dates" class="mb-empty-state hidden">
         <p>Monthly Breakdown needs a campaign flight to divide into months. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.</p>
       </div>
@@ -565,10 +610,10 @@ Client name: ...
           <div class="result-meta" id="result-meta"></div>
         </div>
         <div class="result-actions">
-          <a id="download-link" class="btn-primary" download>⬇ Download .xlsx</a>
+          <button class="btn-primary" id="drive-upload-btn">↗ Upload .xlsx to Google Drive</button>
+          <a id="download-link" class="btn-secondary" download>⬇ Download .xlsx</a>
           <a id="download-pptx-net-link" class="btn-secondary hidden" download>⬇ PowerPoint (Net)</a>
           <a id="download-pptx-gross-link" class="btn-secondary hidden" download>⬇ PowerPoint (Gross)</a>
-          <button class="btn-secondary" id="drive-upload-btn">↗ Upload .xlsx to Google Drive</button>
           <button class="btn-secondary" id="new-proposal-btn">+ New Proposal</button>
         </div>
         <div id="drive-status" class="drive-status hidden"></div>
@@ -583,7 +628,7 @@ Client name: ...
               <h3>Internal Email — For the AE</h3>
               <div class="ai-section-actions">
                 <button class="btn-copy" data-copy-target="internal-email-body">Copy</button>
-                <a id="internal-email-mailto-link" class="btn-secondary hidden" href="#">✉ Open in Email</a>
+                <a id="internal-email-mailto-link" class="btn-secondary hidden" href="#" target="_blank" rel="noopener">✉ Open in Email</a>
               </div>
             </div>
             <div class="email-subject" id="internal-email-subject"></div>
@@ -642,6 +687,23 @@ Client name: ...
           </div>
           <p class="gamma-outline-hint">Copy the outline below, then paste it into either co-pilot (opens in a new tab) to build the Gamma presentation.</p>
           <pre class="email-body" id="gamma-outline-body"></pre>
+
+          <!-- Reprompt area — the ONLY AI call in this whole section; the
+               outline itself above is built client-side from data already
+               on the page, no request involved. -->
+          <div id="gamma-reprompt-area" class="reprompt-area hidden">
+            <label class="reprompt-label">What would you like to change about this outline?
+              <textarea id="gamma-reprompt-input" rows="3"
+                placeholder="e.g. 'Shorten the media plan section' or 'Emphasize the CTV tactic more'"></textarea>
+            </label>
+            <div class="reprompt-actions">
+              <button class="btn-secondary" id="gamma-reprompt-cancel-btn">Cancel</button>
+              <button class="btn-primary" id="gamma-reprompt-submit-btn">↺ Regenerate Outline</button>
+            </div>
+          </div>
+          <div class="ai-section-actions">
+            <button class="btn-secondary" id="gamma-reprompt-btn">↺ Refine this outline</button>
+          </div>
         </div>
       </div>
     </section>
@@ -649,7 +711,7 @@ Client name: ...
   </main>
 
   <footer class="footer">
-    <span>Entravision Digital Ops · Proposal Builder v0.1 · AdFlo catalog · <span id="footer-product-count">…</span> products</span>
+    <span>Entravision Digital Ops · Proposal Builder v2.0 · <span id="footer-product-count">…</span> products</span>
   </footer>
 
   <script src="/static/session-guard.js"></script>

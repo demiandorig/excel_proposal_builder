@@ -51,6 +51,10 @@ const state = {
   // already follows, since editing client name there changes what the
   // un-overridden guess would even be.
   manualCampaignNameOverride: null,
+  // "My Proposal History" modal (Step 01) — a compact, always-scoped-to-
+  // the-caller-own-email view (see GET /api/my-proposals), independent
+  // of the wizard's own state and never sent anywhere.
+  myProposals: { page: 1, pageSize: 10, search: "", totalPages: 1, totalCount: 0 },
   // Tiered budget options (up to 10 — "A".."J"). state.lineItems/availsData
   // ALWAYS hold the currently-active tier's data (same as before tiers
   // existed — no other code needs to change); `tiers` holds a snapshot for
@@ -153,77 +157,6 @@ function newLineItemId() {
 }
 
 // --------------------------------------------------------------------------
-// Examples (loaded from textarea, not server)
-// --------------------------------------------------------------------------
-
-const EXAMPLE_1 = `Requested by: Carlos Renteria
-Salesperson market: Phoenix (Tier 1) (R ana.gomez@entravision.com)
-Salesperson email: carlos.renteria@entravision.com
-CCs:
-Request type: Avails / Estimates Only (I don't need a proposal right now)
-────────────
->>> Avails/Presentation/Proposal Page details <<<
-Client name: Bill Luke Auto Group
-Client website: https://billluke.com/servicedepartment
-Agency name:
-Agency Fee:
-────────────
-Start date:
-End date:
-Total months: 3
-Monthly budget:
-Tiered budget?: false
-Tier #1: | Tier #2:
-Tier #3: | Tier #4:
-────────────
-Chosen campaign goal: Traffic / Drive To Website and Clicks
-────────────
-Target details:
-Language of campaign: English AND Spanish (Separate)
-Geo: 15 Mile Radius from 2425 W Camelback Rd, Phoenix AZ 85015
-Demo: A21+
-Behavioral: Owners of Chrysler, Jeep, Dodge, and Ram vehicles
-Contextual: Entertainment & Sports
-────────────
-Products selected: Connected TV (OTT) - Entravision Plus
-CTV/OTT specifics:
-Device type: Connected TV (Large Screens) AND OTT (Mobile Devices)
-Inventory language: Spanish & English Content targeting Hispanics.
-────────────
-Additional comments from the salesperson:
-Client wants to promote their service department to brand owners in a 15 mile radius around their main store. Looking for Max avails, recommended budget, and they are CPM sensitive.`;
-
-const EXAMPLE_2 = `Requested by: Camilo Arias
-Salesperson market: Los Angeles (Tier 1) (R amartindelcampo@entravision.com)
-Salesperson email: camilo.arias@entravision.com
-CCs:
-Request type: Renewal Proposal Request
-────────────
-## **>>> Avails/Presentation/Proposal Page details <<<**
-Client name:
-Client website:
-Agency name:
-Agency Fee:
-────────────
-Start date:
-End date:
-Total months:
-Monthly budget:
-────────────
-**Products selected:**
-────────────
-## **>>> Renewal Request <<<**
-> AE or AM Requesting: Account Executive / DSM / SVP
-> Type of changes request: Renewal Proposal With Minor Changes Request
-> Client: Fronteras Del Norte
-> Changes description: Fronteras Del Norte is returning and has increased their monthly budget from $5k to $7.5k. The $5k is currently split evenly with $2.5k focused on Los Angeles and $2.5k on Northern California. I believe the new budget should be $5k Los Angeles and keep the $2.5k in Northern California. I think we should grow Meta and Google SEM instead of adding more digital products. The client wants to add retargeting to the campaign. He also mentioned he was interested in Email marketing.
-> Campaign dates: 2026-06-01 - 2026-06-30
-> Renewal budget: 7500 | $5k for Los Angeles and $2.5k for Northern California
-> Former AE/AM:
-> Additional comments: Lets meet if needed!
-> Due date: 2026-05-15`;
-
-// --------------------------------------------------------------------------
 // Init
 // --------------------------------------------------------------------------
 
@@ -244,6 +177,79 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireEvents();
   await maybeReopenProposal();
 });
+
+// --------------------------------------------------------------------------
+// "My Proposal History" modal (Step 01) — any logged-in planner's own
+// past proposals, always scoped server-side (GET /api/my-proposals never
+// takes a `mine` override the way the admin endpoint does). Deliberately
+// a much simpler view than the admin console's own Proposals tab (no
+// seller/IP/device columns — a planner looking at their OWN history
+// doesn't need to be told it's theirs) but reuses its table/pagination
+// styling directly (admin.css, loaded on this page too).
+// --------------------------------------------------------------------------
+
+function formatDate(iso) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "2-digit", hour: "numeric", minute: "2-digit" });
+  } catch {
+    return iso;
+  }
+}
+
+function openMyProposalsModal() {
+  document.getElementById("my-proposals-modal").classList.remove("hidden");
+  loadMyProposals();
+}
+
+function closeMyProposalsModal() {
+  document.getElementById("my-proposals-modal").classList.add("hidden");
+}
+
+async function loadMyProposals() {
+  const body = document.getElementById("my-proposals-body");
+  body.innerHTML = `<tr><td colspan="6" class="admin-empty"><span class="btn-inline-spinner"></span>Loading…</td></tr>`;
+  document.getElementById("my-proposals-prev-btn").disabled = true;
+  document.getElementById("my-proposals-next-btn").disabled = true;
+
+  const { page, pageSize, search } = state.myProposals;
+  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize), search });
+  try {
+    const res = await fetch(`/api/my-proposals?${params}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    state.myProposals.totalPages = data.total_pages || 1;
+    state.myProposals.totalCount = data.total_count || 0;
+    state.myProposals.page = data.page || page;
+    renderMyProposalsTable(data.proposals || []);
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="6" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+  } finally {
+    document.getElementById("my-proposals-page-info").textContent = `Page ${state.myProposals.page} of ${state.myProposals.totalPages}`;
+    document.getElementById("my-proposals-prev-btn").disabled = state.myProposals.page <= 1;
+    document.getElementById("my-proposals-next-btn").disabled = state.myProposals.page >= state.myProposals.totalPages;
+    document.getElementById("my-proposals-count").textContent =
+      `${state.myProposals.totalCount} proposal${state.myProposals.totalCount === 1 ? "" : "s"}`;
+  }
+}
+
+function renderMyProposalsTable(list) {
+  const body = document.getElementById("my-proposals-body");
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="6" class="admin-empty">No proposals yet.</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map(p => `
+    <tr>
+      <td class="mono">${escapeHtml(formatDate(p.generated_at))}</td>
+      <td class="mono">${escapeHtml(p.notion_id || "—")}</td>
+      <td>${escapeHtml(p.client_name || "—")}</td>
+      <td class="wrap">${escapeHtml(p.proposal_title || p.filename || "—")}</td>
+      <td class="mono">${money(p.total_net)}</td>
+      <td><a class="reopen-link" href="/?reopen=${encodeURIComponent(p.proposal_id)}" target="_blank" rel="noopener">Reopen ↗</a></td>
+    </tr>
+  `).join("");
+}
 
 // --------------------------------------------------------------------------
 // Reopen an existing proposal (e.g. from the Admin console's "Reopen" link,
@@ -416,15 +422,29 @@ async function loadCatalog() {
 }
 
 function wireEvents() {
-  document.getElementById("load-example-1").addEventListener("click", () => {
-    document.getElementById("notion-input").value = EXAMPLE_1;
-    document.getElementById("notion-id-input").value = "48213";
-  });
-  document.getElementById("load-example-2").addEventListener("click", () => {
-    document.getElementById("notion-input").value = EXAMPLE_2;
-    document.getElementById("notion-id-input").value = "50127";
-  });
   document.getElementById("parse-btn").addEventListener("click", onParse);
+
+  // "My Proposal History" modal (Step 01)
+  document.getElementById("my-proposals-btn").addEventListener("click", openMyProposalsModal);
+  document.getElementById("my-proposals-close-btn").addEventListener("click", closeMyProposalsModal);
+  document.getElementById("my-proposals-modal").addEventListener("click", (e) => {
+    if (e.target.id === "my-proposals-modal") closeMyProposalsModal();  // backdrop click
+  });
+  document.getElementById("my-proposals-search").addEventListener("input", _debounce((e) => {
+    state.myProposals.search = e.target.value;
+    state.myProposals.page = 1;
+    loadMyProposals();
+  }, 350));
+  document.getElementById("my-proposals-prev-btn").addEventListener("click", () => {
+    if (state.myProposals.page <= 1) return;
+    state.myProposals.page -= 1;
+    loadMyProposals();
+  });
+  document.getElementById("my-proposals-next-btn").addEventListener("click", () => {
+    if (state.myProposals.page >= state.myProposals.totalPages) return;
+    state.myProposals.page += 1;
+    loadMyProposals();
+  });
 
   // Notion ID — digits only, max 5
   document.getElementById("notion-id-input").addEventListener("input", (e) => {
@@ -534,6 +554,20 @@ function wireEvents() {
     document.getElementById("email-reprompt-input").value = "";
   });
   document.getElementById("email-reprompt-submit-btn").addEventListener("click", onEmailReprompt);
+
+  // Gamma outline — same reprompt UI shape as the emails above, but this
+  // is the ONLY AI call anywhere in the Gamma-outline feature (building
+  // the outline itself is pure client-side string assembly, no request).
+  document.getElementById("gamma-reprompt-btn").addEventListener("click", () => {
+    document.getElementById("gamma-reprompt-area").classList.remove("hidden");
+    document.getElementById("gamma-reprompt-btn").style.display = "none";
+  });
+  document.getElementById("gamma-reprompt-cancel-btn").addEventListener("click", () => {
+    document.getElementById("gamma-reprompt-area").classList.add("hidden");
+    document.getElementById("gamma-reprompt-btn").style.display = "";
+    document.getElementById("gamma-reprompt-input").value = "";
+  });
+  document.getElementById("gamma-reprompt-submit-btn").addEventListener("click", onGammaOutlineReprompt);
 
   // Copy-to-clipboard buttons (delegated — buttons may not exist yet)
   document.addEventListener("click", e => {
@@ -1473,6 +1507,12 @@ function switchTier(label) {
 
   renderLineItems();
   renderAvailsGrid();
+  // Safe to call regardless of which step is actually showing right now
+  // (it only ever writes into Step 05's own DOM nodes) — needed so
+  // switching tiers FROM Step 05 itself (via the new tier-tabs-monthly
+  // strip) actually shows the newly-active tier's own Monthly Breakdown
+  // instead of leaving the PREVIOUS tier's content on screen.
+  renderMonthlyBreakdown();
 }
 
 // targetBudget: when given, the clone's line-item budgets are rescaled to
@@ -1541,6 +1581,7 @@ function removeTier(label) {
 function renderAllTierTabStrips() {
   renderTierTabStrip("tier-tabs", { removable: true });
   renderTierTabStrip("tier-tabs-avails", { removable: false });
+  renderTierTabStrip("tier-tabs-monthly", { removable: false });
 
   const totalTiers = 1 + state.tiers.length;
   const multiTier = totalTiers > 1;
@@ -1561,6 +1602,19 @@ function renderAllTierTabStrips() {
   if (availsHint) availsHint.classList.toggle("hidden", !multiTier);
   const activeLabelEl = document.getElementById("tier-switcher-active-label");
   if (activeLabelEl) activeLabelEl.textContent = _tierDisplayName(state.activeTierLabel);
+
+  // Same reasoning as Avails above — Monthly Breakdown is per-tier too
+  // (each line item's own monthly_allocations, carried across a tier
+  // swap untouched since switchTier() just swaps which array is active),
+  // but until this tab strip existed there was no way to reach any
+  // option but whichever was active when the planner happened to land on
+  // Step 05 — which is exactly what made it look "only tied to option 1."
+  const monthlyWrap = document.getElementById("tier-switcher-monthly-wrap");
+  if (monthlyWrap) monthlyWrap.classList.toggle("hidden", !multiTier);
+  const monthlyHint = document.getElementById("tier-switcher-hint-monthly");
+  if (monthlyHint) monthlyHint.classList.toggle("hidden", !multiTier);
+  const activeLabelMonthlyEl = document.getElementById("tier-switcher-active-label-monthly");
+  if (activeLabelMonthlyEl) activeLabelMonthlyEl.textContent = _tierDisplayName(state.activeTierLabel);
 
   // "Copy avails from" dropdown — every OTHER tier, so copying is one click.
   const copySource = document.getElementById("copy-avails-source");
@@ -3445,6 +3499,48 @@ function buildGammaOutline() {
   }
 
   return lines.join("\n").trim();
+}
+
+// Refines the Gamma outline via the ONE AI call this whole feature makes
+// — building the outline itself (above) is pure client-side string
+// assembly with zero request, so this only runs when the planner
+// explicitly clicks "Refine".
+async function onGammaOutlineReprompt() {
+  const text = document.getElementById("gamma-reprompt-input").value.trim();
+  if (!text) { alert("Enter what you'd like to change first."); return; }
+
+  const btn = document.getElementById("gamma-reprompt-submit-btn");
+  btn.disabled = true;
+  btn.textContent = "Regenerating…";
+
+  try {
+    const res = await fetch("/api/refine-gamma-outline", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        outline: document.getElementById("gamma-outline-body").textContent,
+        reprompt: text,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert("Reprompt failed: " + (data.detail || res.statusText));
+      return;
+    }
+    if (data.error) {
+      alert("Reprompt didn't fully succeed: " + data.error);
+    }
+    document.getElementById("gamma-outline-body").textContent = data.outline || document.getElementById("gamma-outline-body").textContent;
+
+    document.getElementById("gamma-reprompt-area").classList.add("hidden");
+    document.getElementById("gamma-reprompt-btn").style.display = "";
+    document.getElementById("gamma-reprompt-input").value = "";
+  } catch (e) {
+    alert("Reprompt failed: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "↺ Regenerate Outline";
+  }
 }
 
 // --------------------------------------------------------------------------

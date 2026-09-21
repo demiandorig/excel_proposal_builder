@@ -103,6 +103,30 @@ def test_empty_result_has_sane_defaults(monkeypatch):
     assert result["total_pages"] == 1  # never zero — an empty state is still "page 1 of 1"
 
 
+def test_my_proposals_always_scopes_to_the_callers_own_email(monkeypatch):
+    captured = {}
+
+    def fake_fetch_all(sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [_row("p1", "planner@entravision.com", 1)]
+
+    monkeypatch.setattr(main, "fetch_all", fake_fetch_all)
+    # No `mine` param exists on this endpoint at all — it's always scoped,
+    # unlike /api/admin/proposals which can see everyone's.
+    result = asyncio.run(main.my_proposals(_fake_request("planner@entravision.com")))
+
+    assert "LOWER(seller_email) = LOWER(%s)" in captured["sql"]
+    assert captured["params"][0] == "planner@entravision.com"
+    assert result["proposals"][0]["proposal_id"] == "p1"
+
+
+def test_my_proposals_defaults_to_a_smaller_page_size_than_admin(monkeypatch):
+    monkeypatch.setattr(main, "fetch_all", lambda sql, params: [_row("p1", "x", 1)])
+    result = asyncio.run(main.my_proposals(_fake_request()))
+    assert result["page_size"] == 10  # a compact in-wizard lookup, not a full admin table
+
+
 def test_users_export_csv_never_includes_password_fields(monkeypatch):
     monkeypatch.setattr(
         main.auth_svc, "list_users",
