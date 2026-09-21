@@ -136,6 +136,7 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
             proposal_id=proposal_id,
             client_name="Persistence Test Client",
             seller_email="seller@example.test",
+            created_by_email="planner@example.test",
             requested_by="Pytest",
             notion_id=f"notion-{suffix}",
             proposal_title="Persistence Test Proposal",
@@ -184,6 +185,7 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
             metadata = _get_proposal_metadata({proposal_id!r})
             assert metadata["summary"] == {{"total_net": 1234.5, "tabs_built": ["Net"]}}
             assert metadata["notion_id"] == {"notion-" + suffix!r}
+            assert metadata["created_by_email"] == "planner@example.test"
 
             reopened = asyncio.run(reopen_proposal({proposal_id!r}))
             assert reopened["proposal_title"] == "Persistence Test Proposal"
