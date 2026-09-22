@@ -1954,9 +1954,7 @@ def build_process_faqs(wb: Workbook) -> Worksheet:
 # design). Two presentations, both built from the SAME data:
 #   1. Inline columns on the Net/Gross sheet, one row per line item,
 #      aligned with that line item's own row — placed one spacer column
-#      past whatever that sheet already uses (V/AdOps on Net, Y/AdOps on
-#      Gross — both header-only, never written to on a per-row basis, see
-#      the column-map comment at the top of this file).
+#      past SOV (Q net / S gross — see sov_col in proposal_generator.py).
 #   2. A standalone "Monthly Breakdown" tab, one per tier (see
 #      proposal_generator.py's tier loop) — a plain grid, not tied to
 #      either sheet's own column layout.
@@ -1966,7 +1964,18 @@ def build_process_faqs(wb: Workbook) -> Worksheet:
 # without doubling the row/column count.
 # ---------------------------------------------------------------------------
 
-MONTHLY_BREAKDOWN_START_COL = {False: 24, True: 27}  # Net -> X (one spacer past V), Gross -> AA (one spacer past Y)
+# Net -> S (one spacer past Q/SOV), Gross -> U (one spacer past S/SOV).
+# Previously a much wider fixed gap (Net->X, Gross->AA) — leftover from
+# when Planner Notes/AdOps used to sit BEFORE Monthly Breakdown at their
+# own original fixed columns (V/Net, Y/Gross) and this left one spacer
+# past THEM; reposition_notes_adops below now always moves Notes/AdOps to
+# AFTER Monthly Breakdown instead (per explicit planner request), which
+# made that extra room obsolete — it just sat empty as a several-column-
+# wide gap for any tier with a short (1-3 month) breakdown. A LONGER
+# breakdown can still reach into where Notes/AdOps used to default to;
+# reposition_notes_adops accounts for that overlap explicitly rather than
+# assuming this starting column is always past them.
+MONTHLY_BREAKDOWN_START_COL = {False: 19, True: 21}  # Net -> S, Gross -> U
 
 # Planner Notes / AdOps' ORIGINAL fixed columns — still correct whenever a
 # tier doesn't use Monthly Breakdown at all (nothing to place after, so
@@ -2008,20 +2017,28 @@ def reposition_notes_adops(ws: Worksheet, header_row: int, *, gross: bool, mb_wi
     through +mb_width-1 (see write_monthly_breakdown_header/_row) — per
     explicit planner request, Notes/AdOps must come AFTER that, not before
     it, so they move to just past the last month column (one spacer). The
-    columns they used to occupy become part of the blank gap before
-    Monthly Breakdown instead, and are narrowed down from their old wide
-    Notes(60)/AdOps(22) widths so that gap doesn't look like a stray
-    oversized blank column.
+    OLD Notes/AdOps columns are narrowed down from their old wide
+    Notes(60)/AdOps(22) widths so a short breakdown's leftover space
+    doesn't look like a stray oversized blank column — UNLESS a longer
+    breakdown's own month columns reach as far as one of those old
+    columns (MONTHLY_BREAKDOWN_START_COL now starts right after SOV, with
+    only one spacer column, so this isn't rare), in which case that column
+    is genuinely in use for real per-row month data and must keep its own
+    width instead of being squeezed to 4.
     """
+    from openpyxl.utils import column_index_from_string
     old_notes_col, old_gap_col, old_adops_col = _NOTES_ADOPS_DEFAULT_COLS[gross]
     if mb_width <= 0:
         notes_col, adops_col = old_notes_col, old_adops_col
     else:
         mb_start = MONTHLY_BREAKDOWN_START_COL[gross]
+        mb_end = mb_start + mb_width - 1  # inclusive last MB month column
         notes_idx = mb_start + mb_width + 1  # one spacer col past the last MB month column
         notes_col = get_column_letter(notes_idx)
         adops_col = get_column_letter(notes_idx + 2)  # matches the original 1-col Notes<->AdOps gap
         for col in (old_notes_col, old_gap_col, old_adops_col):
+            if mb_start <= column_index_from_string(col) <= mb_end:
+                continue  # inside the actual Monthly Breakdown block — leave its width alone
             ws.column_dimensions[col].width = 4
         ws.column_dimensions[get_column_letter(notes_idx - 1)].width = 5  # new spacer before Notes
         ws.column_dimensions[notes_col].width = 60

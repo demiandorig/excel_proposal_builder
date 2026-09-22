@@ -805,6 +805,21 @@ def _populate_line_items(
         if combined:
             ws[f"{_notes_col}{row}"] = combined
 
+        # When Monthly Breakdown repositions Notes elsewhere (see
+        # reposition_notes_adops), _write_product_row (excel_template.py)
+        # already wrote this line's catalog product.notes into the OLD
+        # fixed column at sheet-creation time, before repositioning was
+        # even decided — clear that stray leftover so it doesn't sit,
+        # half-truncated, in the narrow gap column left behind (this was
+        # the "there's sometimes info in that gap" bug: real note text,
+        # orphaned in a column squeezed to width 4). Harmless no-op when
+        # the old column now falls inside the actual Monthly Breakdown
+        # block instead — _populate_monthly_breakdown_inline runs right
+        # after this function and overwrites it with real month data anyway.
+        _old_notes_col_default = "W" if gross else "T"
+        if _notes_col != _old_notes_col_default:
+            ws[f"{_old_notes_col_default}{row}"] = None
+
         # Avails (planner-entered from Step 05 of the app) — N/O/P net, P/Q/R gross,
         # plus the SOV% column right after (Q net, S gross). Always written,
         # even with an empty avails dict, so a line with nothing entered gets

@@ -600,6 +600,10 @@ class RepromptEmailsRequest(BaseModel):
     current_client_subject: str = ""
     current_client_body: str = ""
     reprompt: str
+    # "both" (default, original behavior): revise both emails. "internal"/
+    # "client": revise only that one — see ai_enricher.reprompt_emails()'s
+    # own docstring for the guardrail that enforces this server-side.
+    scope: str = "both"
 
 
 # ---------------------------------------------------------------------------
@@ -1390,11 +1394,14 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
         req, line_items, body.campaign_name,
         body.current_internal_subject, body.current_internal_body,
         body.current_client_subject, body.current_client_body,
-        body.reprompt,
+        body.reprompt, scope=body.scope,
     )
 
+    # scope="internal" guarantees client_email_body is unchanged (see the
+    # guardrail in ai_enricher.reprompt_emails()) — skip rebuilding the
+    # client-facing .docx in that case, nothing in it actually changed.
     meta = _get_proposal_metadata(proposal_id)
-    if meta is not None and not result.get("error") and result.get("client_email_body"):
+    if meta is not None and body.scope != "internal" and not result.get("error") and result.get("client_email_body"):
         email_doc_path_str = meta.get("email_doc_path")
         if email_doc_path_str:
             docx_builder.build_client_email_docx(

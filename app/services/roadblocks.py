@@ -88,7 +88,10 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
             response = client.chat.completions.create(
                 model=_FALLBACK_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=3500,
+                # GPT-5-series rejects the legacy `max_tokens` param outright
+                # — see strategy_brief.py's identical fix for the full
+                # explanation (same migration gap, same fallback shape).
+                max_completion_tokens=3500,
             )
             raw = response.choices[0].message.content or ""
             result = _parse(raw, used_web_search=False)

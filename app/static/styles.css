@@ -2294,6 +2294,22 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   margin-top: 12px;
   justify-content: flex-end;
 }
+.reprompt-scope-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.reprompt-scope-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.reprompt-scope-row input[type="radio"] { width: auto; margin: 0; }
 
 /* Shared "generated without live web search" transparency note — Steps 03, 05, 07 */
 .search-note {
@@ -2446,6 +2462,19 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   display: flex;
   gap: 8px;
   align-items: center;
+}
+/* The trailing "↺ Refine..." row (outside .ai-section-head, so it doesn't
+   inherit that context's own padding) needs its own. For the Gamma
+   outline specifically this div is the LAST child directly inside
+   .ai-section (which has overflow:hidden and no padding of its own) —
+   with none of its own, the button sat flush against the card's rounded
+   bottom border/corner instead of reading as a normal padded row like
+   every sibling above it. The email version sits just outside its two
+   .ai-section cards (a sibling in #ai-content), so this is purely a
+   left-alignment/breathing-room fix there — same class, same fix. */
+.ai-section > .ai-section-actions,
+#ai-content > .ai-section-actions {
+  padding: 12px 20px 20px;
 }
 
 .btn-copy {

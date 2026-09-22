@@ -727,15 +727,23 @@ Client name: ...
             <pre class="email-body" id="client-email-body"></pre>
           </div>
 
-          <!-- Reprompt area — final-review adjustments to both emails above -->
+          <!-- Reprompt area — final-review adjustments to either or both
+               emails above. Scope defaults to "Both" (this control's
+               absence used to mean "both, always" — same effective
+               behavior when left on the default). -->
           <div id="email-reprompt-area" class="reprompt-area hidden">
-            <label class="reprompt-label">What would you like to change about these emails?
+            <div class="reprompt-scope-row" role="radiogroup" aria-label="Which email to regenerate">
+              <label><input type="radio" name="email-reprompt-scope" value="both" checked /> Both emails</label>
+              <label><input type="radio" name="email-reprompt-scope" value="internal" /> Internal only</label>
+              <label><input type="radio" name="email-reprompt-scope" value="client" /> Client-facing only</label>
+            </div>
+            <label class="reprompt-label">What would you like to change?
               <textarea id="email-reprompt-input" rows="3"
                 placeholder="e.g. 'Make the client email shorter' or 'Emphasize the Q4 start date more'"></textarea>
             </label>
             <div class="reprompt-actions">
               <button class="btn-secondary" id="email-reprompt-cancel-btn">Cancel</button>
-              <button class="btn-primary" id="email-reprompt-submit-btn">↺ Regenerate Emails</button>
+              <button class="btn-primary" id="email-reprompt-submit-btn">↺ Regenerate</button>
             </div>
           </div>
           <div class="ai-section-actions">

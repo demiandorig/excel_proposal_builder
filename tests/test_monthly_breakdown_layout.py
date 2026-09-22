@@ -47,22 +47,48 @@ def test_reposition_notes_adops_unused_keeps_original_columns():
 def test_reposition_notes_adops_moves_past_monthly_breakdown():
     wb = Workbook()
     ws = wb.active
-    # Net: MB starts at X(24). A 3-month block occupies X,Y,Z(24-26);
-    # Notes must land one spacer past that (28=AB), AdOps 2 past Notes (AD).
+    # Net: MB starts at S(19) — one spacer past Q/SOV, not the old far-out
+    # X(24) — see MONTHLY_BREAKDOWN_START_COL's own comment for why. A
+    # 3-month block occupies S,T,U(19-21); Notes lands one spacer past
+    # that (W=23), AdOps 2 past Notes (Y=25).
     notes_col, adops_col = et.reposition_notes_adops(ws, 17, gross=False, mb_width=3)
-    assert notes_col == "AB"
-    assert adops_col == "AD"
+    assert notes_col == "W"
+    assert adops_col == "Y"
     assert ws[f"{notes_col}17"].value == "Planner Notes — internal guidance"
     assert ws[f"{adops_col}17"].value == "AdOps (Internal Use)"
-    # The columns Notes/AdOps used to occupy are narrowed to a plain gap,
-    # not left at their old wide (60/22) widths.
-    assert ws.column_dimensions["T"].width == 4
-    assert ws.column_dimensions["V"].width == 4
+    # T/U are the OLD default notes/gap columns, but with the tightened MB
+    # start they now sit INSIDE the actual 3-month Monthly Breakdown block
+    # (S-U) — real per-row $ data lands there (written later by
+    # write_monthly_breakdown_row), so their width must NOT be squeezed to
+    # a bare gap-filler size; this asserts they're left alone here.
+    assert ws.column_dimensions["T"].width != 4
+    assert ws.column_dimensions["U"].width != 4
+    # V (old adops col) sits just past the MB block — narrow either way.
+    assert ws.column_dimensions["V"].width <= 5
 
-    # Gross: MB starts at AA(27).
+    # Gross: MB starts at U(21) — one spacer past S/SOV.
     notes_col, adops_col = et.reposition_notes_adops(ws, 17, gross=True, mb_width=2)
-    assert notes_col == "AD"
-    assert adops_col == "AF"
+    assert notes_col == "X"
+    assert adops_col == "Z"
+
+
+def test_reposition_notes_adops_leaves_old_columns_alone_when_inside_mb_block():
+    """A longer breakdown's own month columns can reach past where
+    Planner Notes/AdOps used to default to (now that the starting column
+    is tight, right after SOV) — those old columns must be left at
+    whatever width the Monthly Breakdown writer itself sets (not squeezed
+    to 4), since they're genuinely holding real per-row month data, not
+    empty gap space. Regression test for the "stray narrow column" bug
+    this tightened layout could otherwise reintroduce."""
+    wb = Workbook()
+    ws = wb.active
+    # Gross, 6 months: MB spans U..Z (21-26) — old notes/gap/adops
+    # columns (W,X,Y = 23,24,25) fall entirely inside that range.
+    notes_col, adops_col = et.reposition_notes_adops(ws, 17, gross=True, mb_width=6)
+    assert notes_col == "AB"
+    assert adops_col == "AD"
+    for col in ("W", "X", "Y"):
+        assert ws.column_dimensions[col].width != 4
 
 
 def test_reposition_notes_adops_does_not_reset_row_height():

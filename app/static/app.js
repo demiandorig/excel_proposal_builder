@@ -789,6 +789,7 @@ function wireEvents() {
     document.getElementById("email-reprompt-area").classList.add("hidden");
     document.getElementById("email-reprompt-btn").style.display = "";
     document.getElementById("email-reprompt-input").value = "";
+    _resetEmailRepromptScope();
   });
   document.getElementById("email-reprompt-submit-btn").addEventListener("click", onEmailReprompt);
 
@@ -2215,7 +2216,7 @@ function renderLineItems() {
         <div class="budget-box">
           <div class="budget-net-row">
             <span class="budget-field-label">Net</span>
-            <input type="number" step="50" min="0" value="${li.monthly_budget}"
+            <input type="text" inputmode="decimal" value="${formatBudgetInputValue(li.monthly_budget)}"
                    class="budget-net-input ${belowMin ? "below-min" : ""}"
                    ${li.is_added_value ? "disabled" : ""}
                    data-idx="${idx}" data-key="monthly_budget" />
@@ -2224,8 +2225,8 @@ function renderLineItems() {
             <div class="budget-divider"></div>
             <div class="budget-gross-row">
               <span class="budget-field-label budget-gross-label">Gross</span>
-              <input type="number" step="50" min="0"
-                     value="${_netToGross(li.monthly_budget || 0, state.parsed.agency_fee).toFixed(2)}"
+              <input type="text" inputmode="decimal"
+                     value="${formatBudgetInputValue(_netToGross(li.monthly_budget || 0, state.parsed.agency_fee))}"
                      class="budget-gross-input"
                      data-idx="${idx}" data-gross-budget-input
                      title="Gross budget for this line — editing recalculates the Net figure above" />
@@ -2288,7 +2289,7 @@ function renderLineItems() {
     tbody.appendChild(tr);
   });
   // Wire row events
-  tbody.querySelectorAll("input:not([data-secondary-toggle]):not([data-added-value-toggle]):not([data-av-pct]), textarea").forEach(inp => {
+  tbody.querySelectorAll("input:not([data-secondary-toggle]):not([data-added-value-toggle]):not([data-av-pct]):not([data-gross-budget-input]), textarea").forEach(inp => {
     inp.addEventListener("input", onLineItemEdit);
   });
   tbody.querySelectorAll("[data-secondary-toggle]").forEach(cb => {
@@ -2369,12 +2370,31 @@ function renderLineItems() {
       const idx = parseInt(inp.dataset.idx);
       const li = state.lineItems[idx];
       const fee = state.parsed.agency_fee || 0;
-      const gross = inp.value === "" ? 0 : parseFloat(inp.value);
+      const gross = parseFormattedInput(inp.value) ?? 0;
       li.monthly_budget = _grossToNet(gross, fee);
       const netInput = inp.closest("td").querySelector('input[data-key="monthly_budget"]');
-      if (netInput) netInput.value = li.monthly_budget;
+      if (netInput) netInput.value = formatBudgetInputValue(li.monthly_budget);
       updateTotals();
       _curateRefreshImpsRef(idx);
+    });
+  });
+  // Comma-formatted display layer for the Net/Gross budget inputs above —
+  // each one's own "input" listener already parses/stores/syncs on every
+  // keystroke; this just strips commas on focus (raw digits are easier to
+  // edit) and reformats with commas on blur, same pattern the avails
+  // max_imps/max_spend fields already use.
+  tbody.querySelectorAll('input[data-key="monthly_budget"], [data-gross-budget-input]').forEach(inp => {
+    inp.addEventListener("focus", () => {
+      const raw = parseFormattedInput(inp.value);
+      inp.value = raw === null ? "" : String(raw);
+    });
+    inp.addEventListener("blur", () => {
+      const idx = parseInt(inp.dataset.idx);
+      const li = state.lineItems[idx];
+      if (!li) return;
+      const isGross = inp.hasAttribute("data-gross-budget-input");
+      const value = isGross ? _netToGross(li.monthly_budget || 0, state.parsed.agency_fee || 0) : li.monthly_budget;
+      inp.value = formatBudgetInputValue(value);
     });
   });
   tbody.querySelectorAll("[data-added-value-toggle]").forEach(cb => {
@@ -2510,11 +2530,17 @@ function onLineItemEdit(e) {
   const idx = parseInt(e.target.dataset.idx);
   const key = e.target.dataset.key;
   let v = e.target.value;
-  if (e.target.type === "number") {
+  if (key === "monthly_budget") {
+    // A comma-formatted text input now (see formatBudgetInputValue/
+    // parseFormattedInput below) — parseFloat alone would stop at the
+    // first comma ("35,000" -> 35), same reasoning as the avails max_imps/
+    // max_spend fields already handle this way.
+    v = parseFormattedInput(v) ?? 0;
+  } else if (e.target.type === "number") {
     // rate_override / estimated_cpm_override are optional — an emptied
     // field means "no override, fall back to the catalog default", not 0.
-    // Required numeric fields (monthly_budget, months) fall back to 0 so
-    // the payload sent to the backend always stays a valid number.
+    // Required numeric fields (months) fall back to 0 so the payload sent
+    // to the backend always stays a valid number.
     const isOptionalOverride = key === "rate_override" || key === "estimated_cpm_override";
     v = v === "" ? (isOptionalOverride ? null : 0) : parseFloat(v);
   }
@@ -2531,7 +2557,7 @@ function onLineItemEdit(e) {
     const grossInput = e.target.closest("td")?.querySelector("[data-gross-budget-input]");
     if (grossInput) {
       const fee = state.parsed.agency_fee || 0;
-      grossInput.value = _netToGross(v || 0, fee).toFixed(2);
+      grossInput.value = formatBudgetInputValue(_netToGross(v || 0, fee));
     }
     // Any AV line's estimated value is a % of every OTHER line's budget —
     // editing this one shifts that basis for all of them.
@@ -3085,6 +3111,15 @@ function formatSpendDisplay(n, estimated) {
 function formatPlainDisplay(n) {
   if (n === null || n === undefined || isNaN(n)) return "";
   return Math.round(n).toLocaleString("en-US");
+}
+// Same comma-grouped-text-input approach as the three formatters above,
+// for Step 04's own Net/Gross budget inputs — cents only shown when
+// non-zero (a Gross-derived value like 2045.51 keeps its real cents; a
+// round Net budget like 35000 shows "35,000", not "35,000.00").
+function formatBudgetInputValue(n) {
+  if (n === null || n === undefined || isNaN(n)) return "";
+  const hasCents = Math.round((n % 1) * 100) !== 0;
+  return n.toLocaleString("en-US", { minimumFractionDigits: hasCents ? 2 : 0, maximumFractionDigits: 2 });
 }
 function parseFormattedInput(s) {
   if (!s) return null;
@@ -4618,10 +4653,17 @@ async function showResult(data) {
 // Step 7: reprompt the emails based on the planner's final review
 // --------------------------------------------------------------------------
 
+function _resetEmailRepromptScope() {
+  const bothRadio = document.querySelector('input[name="email-reprompt-scope"][value="both"]');
+  if (bothRadio) bothRadio.checked = true;
+}
+
 async function onEmailReprompt() {
   const text = document.getElementById("email-reprompt-input").value.trim();
   if (!text) { alert("Enter what you'd like to change first."); return; }
   if (!state.proposalId || !state.enrichment) return;
+  const scopeInput = document.querySelector('input[name="email-reprompt-scope"]:checked');
+  const scope = scopeInput ? scopeInput.value : "both";
 
   const btn = document.getElementById("email-reprompt-submit-btn");
   btn.disabled = true;
@@ -4640,6 +4682,7 @@ async function onEmailReprompt() {
         current_client_subject: state.enrichment.client_email_subject || "",
         current_client_body: state.enrichment.client_email_body || "",
         reprompt: text,
+        scope,
       }),
     });
     const data = await res.json();
@@ -4664,6 +4707,7 @@ async function onEmailReprompt() {
     document.getElementById("email-reprompt-area").classList.add("hidden");
     document.getElementById("email-reprompt-btn").style.display = "";
     document.getElementById("email-reprompt-input").value = "";
+    _resetEmailRepromptScope();
 
     // The mailto link's subject/body are frozen at the moment they were
     // built — refresh it now so "Open in Email" reflects the just-revised text.

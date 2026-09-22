@@ -174,7 +174,12 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
             response = client.chat.completions.create(
                 model=_FALLBACK_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=2500,
+                # GPT-5-series rejects the legacy `max_tokens` param outright
+                # ("Unsupported parameter... Use 'max_completion_tokens'
+                # instead") — same class of migration gap as the
+                # `temperature=`/`web_search` rename noted on _SEARCH_MODEL
+                # above, just missed for this param at the time.
+                max_completion_tokens=2500,
             )
             raw = response.choices[0].message.content or ""
             result = _parse(raw, used_web_search=False)
@@ -194,10 +199,22 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
         # but not exact). Whatever slips through gets dropped here rather
         # than reaching Step 04's "Suggest Mix" and seeding a product
         # family the planner never selected.
-        result["recommended_tactics"] = [
+        filtered = [
             t for t in result["recommended_tactics"]
             if t.get("product_family") in allowed_families
         ]
+        # ...but never let this filter empty the whole list out — a real,
+        # confirmed case: with only one allowed family (a single-family
+        # product selection, e.g. two Audio products), the model gave
+        # several genuinely on-topic tactics but labeled product_family
+        # with a specific sub-product/channel name instead of the family
+        # itself, so an exact-match filter dropped every single one,
+        # leaving the brief's tactics section completely blank even
+        # though the free-text strategy_summary was clearly on-scope. An
+        # unfiltered-but-imperfectly-labeled set of tactics the planner
+        # can see and edit is a far better failure mode than an empty
+        # section with no explanation.
+        result["recommended_tactics"] = filtered or result["recommended_tactics"]
 
     result["ad_presence"] = ad_intel
     return result
@@ -375,7 +392,7 @@ insight sentence should still read like a person wrote it, not a template.
 1. Briefly summarize who this client is and what they do (use your knowledge to infer from name/website/category).
 2. Identify the key market context: local competitive landscape, relevant seasonality or trends — tied to the actual geo/demo above, not a generic market. Any specific number here (a market size, a growth rate, a competitor count) needs the same real citation as a tactic's data_point below — see the RULE right after this list.
 3. Analyze the campaign objectives — what does success look like for THIS audience, and why the recommended tactics reach exactly the people described in the Target Audience section.
-4. Recommend 2–5 media tactics{" — one per family already listed above, never a family outside that list" if allowed_families else " (by catalog family)"}. For each include:
+4. Recommend {"1–5 media tactics — every single one MUST use the product_family field set to one of the EXACT family names listed above, verbatim, even when that means multiple tactics share the same family (e.g. two tactics both using product_family \"Audio\" but naming different specific products/channels within it for variety — that's expected when only one or two families are available, not an error). Never invent a new/different family name or use a specific product name in the product_family field" if allowed_families else "2–5 media tactics (by catalog family)"}. For each include:
    - Strategic rationale (1–2 sentences) that names the specific demo/geo/behavioral/contextual value it's built around — not a generic restatement of the tactic
    - One supporting data point with citation in format (Source, Year) — audience-specific where possible, general market only as a fallback (and say so if you fall back)
    - Entravision's specific advantage for this tactic

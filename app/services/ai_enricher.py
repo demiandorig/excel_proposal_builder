@@ -334,7 +334,10 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
             response = client.chat.completions.create(
                 model=_FALLBACK_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=5000,
+                # GPT-5-series rejects the legacy `max_tokens` param outright
+                # — see strategy_brief.py's identical fix for the full
+                # explanation (same migration gap, same fallback shape).
+                max_completion_tokens=5000,
             )
             raw = response.choices[0].message.content
             result = _parse_response(raw, request, line_items, used_web_search=False)
@@ -385,6 +388,7 @@ def reprompt_emails(
     current_client_subject: str,
     current_client_body: str,
     reprompt: str,
+    scope: str = "both",
 ) -> dict:
     """
     Step 07 — revise the internal + client-facing emails in place, based on
@@ -392,6 +396,15 @@ def reprompt_emails(
     shorter", "emphasize the Q4 start date"), WITHOUT touching campaign_name,
     product blurbs, or the already-generated Excel file/title — those are
     fixed by the time the planner is reviewing emails at this step.
+
+    scope: "both" (default) revises both emails, the original behavior.
+    "internal"/"client" revises only that one — enforced as a hard
+    guardrail below (not just a prompt ask, same "don't trust the model to
+    follow the instruction alone" reasoning strategy_brief.py's family
+    filter uses): the OTHER email's subject/body is force-set back to its
+    exact original value regardless of what the model returned, so a
+    single-sided regenerate can never accidentally drift the email the
+    planner didn't ask to change.
 
     Returns {internal_email_subject, internal_email_body,
              client_email_subject, client_email_body, error}. On any
@@ -415,6 +428,17 @@ def reprompt_emails(
 
     client = _OpenAI(api_key=api_key)
     total_budget = sum(li.monthly_budget * li.months for li in line_items)
+
+    # Built as its own plain variable, not inline in the f-string below —
+    # an inline dict-literal/ternary with its own quotes nested inside an
+    # f-string is exactly the class of prompt-string-escaping bug that
+    # bit this codebase before (see AI writing-voice project notes on the
+    # client_email_body ternary): easy to get the brace/quote nesting
+    # subtly wrong and hard to catch without actually rendering the prompt.
+    scope_instruction = {
+        "internal": "Revise ONLY the INTERNAL email (to the AE) to incorporate the planner's requested change. Return the CLIENT-FACING email's subject and body EXACTLY as shown above, character-for-character unchanged — the planner only asked to change the internal one this time.",
+        "client": "Revise ONLY the CLIENT-FACING email to incorporate the planner's requested change. Return the INTERNAL email's subject and body EXACTLY as shown above, character-for-character unchanged — the planner only asked to change the client-facing one this time.",
+    }.get(scope, "Revise BOTH emails to incorporate the planner's requested change.")
 
     prompt = f"""You are revising two already-drafted emails for a digital media proposal, based on the planner's final review feedback. Respond ONLY with valid JSON — no preamble, no markdown fences.
 
@@ -441,7 +465,7 @@ Subject: {current_client_subject}
 {HOUSE_VOICE_GUIDE}
 
 ## YOUR TASK
-Revise BOTH emails to incorporate the planner's requested change. Keep everything else about each email's structure, tone, and content the same unless the requested change implies otherwise — and if either email has drifted toward the generic AI-sounding style the VOICE section above warns against, fix that too while you're in there, not just the requested change.
+{scope_instruction} Keep everything else about each email's structure, tone, and content the same unless the requested change implies otherwise — and if the email(s) you ARE revising have drifted toward the generic AI-sounding style the VOICE section above warns against, fix that too while you're in there, not just the requested change.
 
 CRITICAL — PRESERVE THESE LINES VERBATIM, EXACTLY AS WRITTEN, WHEREVER THEY APPEAR:
 Any line starting with "Proposal:", "Presentation:", or "Google Drive Link:" is a system-inserted reference line, not AI-authored content — copy it into your revised email character-for-character, in the same position relative to the surrounding text. Never reword, remove, or relocate these lines even if the requested change is about tone or structure elsewhere in the email.
@@ -459,24 +483,37 @@ Respond with this exact JSON structure:
         # gpt-5-mini, not gpt-4o-mini — same GPT-5-series bump/reasoning as
         # _SEARCH_MODEL above (a small model is fine here, this is a
         # narrower revise-in-place task); no `temperature=` for the same
-        # reason (GPT-5-series rejects anything but its default of 1).
+        # reason (GPT-5-series rejects anything but its default of 1), and
+        # `max_completion_tokens` not `max_tokens` — GPT-5-series rejects
+        # that legacy param outright, same migration gap as the other two.
         response = client.chat.completions.create(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=3000,
+            max_completion_tokens=3000,
         )
         raw = response.choices[0].message.content or ""
         match = re.search(r"\{[\s\S]*\}", raw)
         if not match:
             return _unchanged("No structured response received — emails left unchanged.")
         data = json.loads(match.group(0))
-        return {
+        result = {
             "internal_email_subject": data.get("internal_email_subject") or current_internal_subject,
             "internal_email_body": _normalize_newlines(data.get("internal_email_body") or current_internal_body),
             "client_email_subject": data.get("client_email_subject") or current_client_subject,
             "client_email_body": _normalize_newlines(data.get("client_email_body") or current_client_body),
             "error": None,
         }
+        # Hard guardrail, not just the prompt instruction above — force the
+        # email OUTSIDE the requested scope back to its exact original
+        # value regardless of what the model returned, so a single-sided
+        # regenerate can never accidentally drift the other email.
+        if scope == "internal":
+            result["client_email_subject"] = current_client_subject
+            result["client_email_body"] = current_client_body
+        elif scope == "client":
+            result["internal_email_subject"] = current_internal_subject
+            result["internal_email_body"] = current_internal_body
+        return result
     except Exception as exc:
         return _unchanged(f"Reprompt failed: {exc}")
 
@@ -530,11 +567,13 @@ Respond with this exact JSON structure:
         # gpt-5-mini — a narrow revise-in-place task, same model tier
         # reprompt_emails() above uses for the same reason; no
         # `temperature=` since GPT-5-series rejects anything but its
-        # default (see the model-choice comment on _SEARCH_MODEL above).
+        # default (see the model-choice comment on _SEARCH_MODEL above),
+        # and `max_completion_tokens` not `max_tokens` for the same reason
+        # as reprompt_emails() just above.
         response = client.chat.completions.create(
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=2000,
+            max_completion_tokens=2000,
         )
         raw = response.choices[0].message.content or ""
         match = re.search(r"\{[\s\S]*\}", raw)
