@@ -386,6 +386,7 @@ class LineItemModel(BaseModel):
     target_override: Optional[str] = None
     target_secondary: Optional[str] = None  # secondary audience for added scale/avails
     estimated_cpm_override: Optional[float] = None  # Step 04 override of the catalog's estimated CPM (Fixed/impressions-estimate products)
+    buying_model_override: Optional[str] = None  # Step 04 override of the catalog's buying model (CPM/CPP/Fixed)
     is_added_value: bool = False  # $0 budget is deliberate — exempt from below-minimum validation, sorts to the bottom of the export
     added_value_pct: Optional[float] = None  # AV lines only: this % of the tier's real (non-AV) budget is the line's estimated gift value, shown in the export
     # Step 04's per-line objective dropdown (Awareness / Website Conversion /
@@ -559,6 +560,13 @@ class GenerateRequest(BaseModel):
 class StrategyRequest(BaseModel):
     request: dict
     reprompt: Optional[str] = None
+    # "consistent" (default): recommend only from the families already in
+    # request["products_selected"] (Step 02's parse). "new_mix": ignore
+    # that and recommend freely across the whole catalog, same as this
+    # app's original behavior — for when the planner explicitly wants a
+    # from-scratch recommendation instead of a rationale for what's
+    # already selected. See strategy_brief.generate_brief()'s own docstring.
+    mode: str = "consistent"
 
 
 class RecommendRequest(BaseModel):
@@ -714,7 +722,7 @@ async def strategy(body: StrategyRequest) -> dict:
     valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
     raw = {k: v for k, v in raw.items() if k in valid_fields}
     req = ProposalRequest(**raw)
-    brief = await strategy_brief_svc.generate_brief(req, reprompt=body.reprompt)
+    brief = await strategy_brief_svc.generate_brief(req, reprompt=body.reprompt, mode=body.mode)
 
     doc_token: Optional[str] = None
     if brief.get("strategy_summary") or brief.get("recommended_tactics"):
@@ -1007,6 +1015,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
                 target_override=li.target_override,
                 target_secondary=li.target_secondary,
                 estimated_cpm_override=li.estimated_cpm_override,
+                buying_model_override=li.buying_model_override,
                 is_added_value=li.is_added_value,
                 added_value_pct=li.added_value_pct,
                 objective_override=li.objective_override,

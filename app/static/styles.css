@@ -518,6 +518,25 @@ html, body {
   background: var(--rule);
   color: var(--ink-faint);
 }
+.matched-pill-remove {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  margin-left: 6px;
+  padding: 0;
+  vertical-align: middle;
+}
+.matched-pill-remove:hover { color: #fff; }
+.matched-products-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -12px 0 20px;
+}
+.matched-products-add-row select { max-width: 260px; }
 
 /* ----- Step 2: Form grid ----- */
 .warnings {
@@ -621,7 +640,7 @@ html, body {
   .form-grid .tier-fields-row { grid-template-columns: repeat(2, 1fr); }
 }
 
-/* Tiered budget options — Step 04 curation switcher + Step 06 avails switcher */
+/* Tiered budget options — Step 04 curation switcher + Step 05 avails switcher */
 .tier-switcher {
   display: flex;
   align-items: center;
@@ -679,6 +698,17 @@ html, body {
 }
 .tier-tab-rename:hover { opacity: 1; background: rgba(255, 255, 255, 0.25); }
 .tier-tab:not(.active) .tier-tab-rename:hover { background: var(--accent-soft); }
+.tier-tab-drag {
+  display: inline-flex;
+  align-items: center;
+  cursor: grab;
+  opacity: 0.6;
+  font-size: 12px;
+}
+.tier-tab-drag:hover { opacity: 1; }
+.tier-tab.dragging { opacity: 0.4; }
+.tier-tab.drag-over-left { box-shadow: inset 2px 0 0 0 var(--accent); }
+.tier-tab.drag-over-right { box-shadow: inset -2px 0 0 0 var(--accent); }
 .tier-switcher-hint {
   margin: -6px 0 16px;
   font-size: 12px;
@@ -987,6 +1017,23 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   letter-spacing: 0.08em;
   color: var(--ink-soft);
 }
+.model-override-select {
+  width: 100%;
+  min-width: 100px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+  border-color: var(--rule);
+  background: var(--paper-card);
+}
+/* Same "persistent green state, not a fade" language as .rate-override-badge.active. */
+.model-override-select.overridden {
+  border-color: var(--green);
+  color: var(--green);
+  background: var(--accent-soft);
+}
 .line-items td.rate, .line-items td.min {
   font-family: var(--font-mono);
   color: var(--ink-soft);
@@ -1015,11 +1062,35 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   background: var(--red-soft);
 }
 .line-items .col-budget input { width: 110px; min-width: 110px; }
+/* Net/Gross/impressions grouped into one bordered box so the two dollar
+   figures read as "one budget, two views" instead of two loose,
+   visually-equal inputs stacked with no relationship shown between them —
+   same divider-line language the Curate toolbar's own Net/Gross totals
+   already use (see .totals-divider). */
+.budget-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  background: var(--paper-warm);
+  width: 128px;
+}
+.budget-net-row { display: flex; flex-direction: column; gap: 3px; }
+.budget-field-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+}
+.budget-net-input { width: 100% !important; min-width: 0 !important; font-weight: 600; }
+.budget-divider { height: 1px; background: var(--rule); margin: 1px 0; }
 .budget-gross-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 4px;
 }
 .budget-gross-label {
   font-family: var(--font-mono);
@@ -1027,8 +1098,21 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--ink-faint);
+  flex-shrink: 0;
 }
-.budget-gross-row input { width: 110px; min-width: 110px; }
+.budget-gross-input {
+  width: 100% !important;
+  min-width: 0 !important;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.budget-imps-ref {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.budget-imps-ref.hidden { display: none; }
 .line-items .col-objective { min-width: 150px; }
 .line-items .col-objective select { width: 100%; min-width: 140px; }
 .objective-other-input { width: 100%; min-width: 140px; margin-top: 4px; }
@@ -1346,7 +1430,7 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   color: var(--ink-faint);
 }
 
-/* ----- Step 4: Avails ----- */
+/* ----- Step 5: Avails ----- */
 .avails-status-pill {
   display: inline-block;
   font-family: var(--font-mono);
@@ -1776,7 +1860,7 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   margin-bottom: 16px;
 }
 
-/* ----- Step 5: Monthly Breakdown ----- */
+/* ----- Step 6: Monthly Breakdown ----- */
 .mb-empty-state {
   padding: 20px 24px;
   background: var(--paper-warm);

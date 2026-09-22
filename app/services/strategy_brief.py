@@ -26,21 +26,45 @@ except ImportError:
 from app.services.text_utils import normalize_newlines as _normalize_newlines
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 from app.services import ad_presence as _ad_presence_svc
+from app.catalog import by_name as _catalog_by_name
 
 
-# Entravision catalog families + one-line description for the prompt
-_CATALOG_FAMILIES = """
-- Search: Paid search (SEM) & Performance Max — captures intent-driven clicks, high conversion rate
-- Display: Programmatic banner & geo-fence display — local awareness, retargeting, low CPM
-- Online Video: Pre-roll OLV & YouTube Ads — brand storytelling, high completion rates
-- CTV / OTT: Entravision Plus (Connected TV / streaming) — premium non-skippable, living-room screen
-- Audio: Digital radio, AudioEngage podcast network, Spotify — commuter and daily-routine reach
-- Social: Meta Ads (FB/IG), TikTok, LinkedIn — audience targeting, engagement, UGC-friendly
-- Email: Email marketing & display retargeting — nurturing, conversion, owned audience
-- DOOH: Digital out-of-home screens — ambient local presence, high-traffic locations
-- Services: Landing pages, creative production — support and conversion assets
-- Measurement: Brand lift, attribution, call tracking, foot traffic — ROI validation
-""".strip()
+# Entravision catalog families + one-line description for the prompt. Keyed
+# by the EXACT family string every Product in the catalog carries (see
+# catalog.py's own `family=` values) — this used to show a friendlier
+# label ("CTV / OTT") instead of the real family name ("Entravision
+# Plus"), which meant a model instructed to echo "the exact family name
+# from the catalog list above" (see the JSON schema below) would return a
+# product_family that _recommend_from_brief()'s by_family() lookup could
+# never match, silently dropping that tactic. Real names throughout now —
+# also required so generate_brief()'s allowed_families guardrail (derived
+# from the SAME real family strings via by_name(...).family) can compare
+# apples to apples.
+_CATALOG_FAMILY_DESCRIPTIONS = {
+    "Search": "Paid search (SEM) & Performance Max — captures intent-driven clicks, high conversion rate",
+    "Display": "Programmatic banner & geo-fence display — local awareness, retargeting, low CPM",
+    "Online Video": "Pre-roll OLV & YouTube Ads — brand storytelling, high completion rates",
+    "Entravision Plus": "Connected TV / streaming (CTV/OTT) — premium non-skippable, living-room screen",
+    "Audio": "Digital radio, AudioEngage podcast network, Spotify — commuter and daily-routine reach",
+    "Social": "Meta Ads (FB/IG), TikTok, LinkedIn — audience targeting, engagement, UGC-friendly",
+    "Email": "Email marketing & display retargeting — nurturing, conversion, owned audience",
+    "DOOH": "Digital out-of-home screens — ambient local presence, high-traffic locations",
+    "Services": "Landing pages, creative production — support and conversion assets",
+    "Measurement": "Brand lift, attribution, call tracking, foot traffic — ROI validation",
+}
+
+
+def _catalog_families_block(families: Optional[set] = None) -> str:
+    """Renders the family list for the prompt — every family when `families`
+    is None, or just that subset (in the dict's own canonical order) when
+    given. Falls back to the full list if `families` filters out everything
+    recognizable (e.g. every selected product is in a family this prompt
+    doesn't offer, like Branded Content/Sponsorships) rather than showing
+    the model an empty, meaningless section."""
+    keys = [k for k in _CATALOG_FAMILY_DESCRIPTIONS if families is None or k in families]
+    if not keys:
+        keys = list(_CATALOG_FAMILY_DESCRIPTIONS.keys())
+    return "\n".join(f"- {k}: {_CATALOG_FAMILY_DESCRIPTIONS[k]}" for k in keys)
 
 _ENTRAVISION_KB = """
 CTV/OTT (Entravision Plus): Entravision's advanced programmatic and CTV/OTT advertising capabilities with premium publisher partnerships.
@@ -66,9 +90,23 @@ _SEARCH_MODEL = "gpt-5.1"
 _FALLBACK_MODEL = "gpt-5.1"
 
 
-async def generate_brief(request, reprompt: Optional[str] = None) -> dict:
+async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "consistent") -> dict:
     """
     Generate (or regenerate with reprompt) a strategic brief for this proposal.
+
+    mode: "consistent" (default) constrains recommended_tactics to the
+    product FAMILIES already present in request.products_selected (Step
+    02's parse) — both by only showing the model those families in the
+    prompt, and by hard-filtering the response afterward in case it
+    ignores that instruction. This keeps the brief from steering a
+    planner toward a family they never selected upstream. "new_mix" skips
+    the constraint entirely — today's original unconstrained behavior,
+    for when the planner explicitly wants a from-scratch recommendation
+    instead of a rationale for what's already selected. Any other value
+    falls back to "consistent". Falls back to unconstrained even in
+    "consistent" mode when products_selected is empty or maps to no
+    recognizable family — "stay consistent with nothing selected" has no
+    meaningful constraint to apply.
 
     Grounded in live web search (OpenAI Responses API + web_search_preview,
     same mechanism as the Roadblocks step) so the client summary, market
@@ -102,8 +140,21 @@ async def generate_brief(request, reprompt: Optional[str] = None) -> dict:
 
     ad_intel = await _check_ad_presence_safely(request)
 
+    allowed_families = None
+    if mode != "new_mix":
+        selected = getattr(request, "products_selected", None) or []
+        families = {
+            p.family for p in (_catalog_by_name(name) for name in selected)
+            if p and p.family in _CATALOG_FAMILY_DESCRIPTIONS
+        }
+        if families:
+            allowed_families = families
+        # else: nothing parsed/recognizable to be consistent WITH — falls
+        # through to the unconstrained prompt/no guardrail, same as
+        # mode="new_mix", rather than constraining to an empty set.
+
     client = _OpenAI(api_key=api_key)
-    prompt = _build_prompt(request, reprompt, ad_intel=ad_intel)
+    prompt = _build_prompt(request, reprompt, ad_intel=ad_intel, allowed_families=allowed_families)
 
     try:
         response = client.responses.create(
@@ -135,6 +186,18 @@ async def generate_brief(request, reprompt: Optional[str] = None) -> dict:
                 )
         except Exception as fallback_exc:
             result = _error_brief(f"Request failed: {fallback_exc}")
+
+    if allowed_families and result.get("recommended_tactics"):
+        # Hard guardrail, not just a prompt ask — the model can still
+        # ignore the constraint above (or, per the module comment on
+        # _CATALOG_FAMILY_DESCRIPTIONS, echo a family name that's close
+        # but not exact). Whatever slips through gets dropped here rather
+        # than reaching Step 04's "Suggest Mix" and seeding a product
+        # family the planner never selected.
+        result["recommended_tactics"] = [
+            t for t in result["recommended_tactics"]
+            if t.get("product_family") in allowed_families
+        ]
 
     result["ad_presence"] = ad_intel
     return result
@@ -181,7 +244,8 @@ def _extract_response_text(response) -> str:
 # Prompt
 # ---------------------------------------------------------------------------
 
-def _build_prompt(request, reprompt: Optional[str], ad_intel: Optional[dict] = None) -> str:
+def _build_prompt(request, reprompt: Optional[str], ad_intel: Optional[dict] = None,
+                   allowed_families: Optional[set] = None) -> str:
     monthly = request.monthly_budget or 0
     months = request.total_months or 3
     total = monthly * months
@@ -253,8 +317,8 @@ findings are the more reliable signal.
 ## response, never a generic substitute like "the target audience"):
 {target_block}
 
-## AVAILABLE MEDIA PRODUCTS (Entravision catalog families)
-{_CATALOG_FAMILIES}
+{"## AVAILABLE MEDIA PRODUCTS — the planner already selected products in these families during request intake. Build every recommended tactic from ONLY the families below; do not introduce a different family, even if you think it would fit better." if allowed_families else "## AVAILABLE MEDIA PRODUCTS (Entravision catalog families)"}
+{_catalog_families_block(allowed_families)}
 
 ## ENTRAVISION STRENGTHS
 {_ENTRAVISION_KB}
@@ -311,7 +375,7 @@ insight sentence should still read like a person wrote it, not a template.
 1. Briefly summarize who this client is and what they do (use your knowledge to infer from name/website/category).
 2. Identify the key market context: local competitive landscape, relevant seasonality or trends — tied to the actual geo/demo above, not a generic market. Any specific number here (a market size, a growth rate, a competitor count) needs the same real citation as a tactic's data_point below — see the RULE right after this list.
 3. Analyze the campaign objectives — what does success look like for THIS audience, and why the recommended tactics reach exactly the people described in the Target Audience section.
-4. Recommend 2–5 media tactics (by catalog family). For each include:
+4. Recommend 2–5 media tactics{" — one per family already listed above, never a family outside that list" if allowed_families else " (by catalog family)"}. For each include:
    - Strategic rationale (1–2 sentences) that names the specific demo/geo/behavioral/contextual value it's built around — not a generic restatement of the tactic
    - One supporting data point with citation in format (Source, Year) — audience-specific where possible, general market only as a fallback (and say so if you fall back)
    - Entravision's specific advantage for this tactic

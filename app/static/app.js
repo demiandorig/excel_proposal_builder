@@ -9,7 +9,7 @@ const state = {
   rawNotionText: null,      // the exact Step 01 paste that produced `parsed` — sent to /api/generate and saved to reopen_state so a reopen can refill the textarea (not re-derivable from `parsed` once past Step 01)
   suggestedTabs: null,
   strategyBrief: null,      // confirmed AI strategy brief (or null if skipped)
-  roadblocks: null,         // Step 05 AI roadblocks/restrictions result (or null if skipped)
+  roadblocks: null,         // Step 07 AI roadblocks/restrictions result (or null if skipped)
   lineItems: [],            // array of { id, product_name, monthly_budget, months, ... }
   // Keyed by line item `id` — NOT product_name. Two lines can share the same
   // product (e.g. same product, different targeting), so a name-keyed dict
@@ -22,7 +22,7 @@ const state = {
   // Proposal-wide: NOT part of the per-tier snapshot pattern below, since
   // the same add-ons apply regardless of which budget option is active.
   addons: {},               // product_name -> amount (presence = picked)
-  // Step 05's plan-wide default-split choice — "even" (equal $ per month)
+  // Step 06's plan-wide default-split choice — "even" (equal $ per month)
   // or "prorated" (weighted by each month's actual active days in the
   // flight). Proposal-wide, not per-tier (one control "at the top" of the
   // step, not per-option) — governs what a NEW default gets computed as
@@ -37,10 +37,10 @@ const state = {
   // Proposal-wide (not per-tier — the toggle lives once at Step 04 and
   // governs the whole proposal, same reasoning as mbDistributionMode
   // above), drives which of the _mbPeriodsBetween granularities Curate/
-  // Avails/Step 05/the export all use. Defaults to "month" — this app's
+  // Avails/Step 06/the export all use. Defaults to "month" — this app's
   // original, only-ever behavior before the toggle existed.
   timeUnit: "month",
-  // Step 05's "combine adjacent periods into one bucket" control for the
+  // Step 06's "combine adjacent periods into one bucket" control for the
   // ACTIVE tier — [["2026-09","2026-10"], ...], each inner array 2+
   // period keys. TIER-scoped (like lineItems/availsData below, swapped by
   // switchTier/addTier/removeTier) because every line item in a tier
@@ -146,10 +146,12 @@ function _objectiveIsOther(li, idx) {
 // and every Excel/PPTX export formula exactly (gross = net / (1 - fee)), so
 // what Step 04 shows is never out of step with what actually gets exported.
 function _netToGross(net, fee) {
-  return fee ? net / (1 - fee) : net;
+  const gross = fee ? net / (1 - fee) : net;
+  return Math.round(gross * 100) / 100;
 }
 function _grossToNet(gross, fee) {
-  return fee ? gross * (1 - fee) : gross;
+  const net = fee ? gross * (1 - fee) : gross;
+  return Math.round(net * 100) / 100;
 }
 
 // Agency fee is meant to be a fraction (0–0.99, e.g. 0.15 for 15%) —
@@ -589,10 +591,16 @@ async function loadCatalog() {
   // added/removed.
   const footerCount = document.getElementById("footer-product-count");
   if (footerCount) footerCount.textContent = Object.keys(state.productIndex).length;
-  // Populate the product picker dropdown — add-ons are excluded here, they're
-  // not "products" a campaign is built around and have their own module
-  // (below the line-items table) instead, with no suggested budget.
-  const picker = document.getElementById("product-picker");
+  // Populate every product picker dropdown — add-ons are excluded here,
+  // they're not "products" a campaign is built around and have their own
+  // module (below the line-items table) instead, with no suggested budget.
+  _populateProductPicker(document.getElementById("product-picker"));
+  _populateProductPicker(document.getElementById("step2-product-picker"));
+  renderAddonsModule();
+}
+
+function _populateProductPicker(selectEl) {
+  if (!selectEl) return;
   for (const fam of state.catalog.families) {
     const productsInFamily = state.catalog.products_by_family[fam].filter(p => !p.is_addon);
     if (!productsInFamily.length) continue;  // e.g. Services/Measurement are all-addon families
@@ -604,9 +612,8 @@ async function loadCatalog() {
       opt.textContent = p.name;
       group.appendChild(opt);
     }
-    picker.appendChild(group);
+    selectEl.appendChild(group);
   }
-  renderAddonsModule();
 }
 
 function wireEvents() {
@@ -682,7 +689,7 @@ function wireEvents() {
       if (target === state.step || target > state.furthestStep) return;
       if (state.step === 2) syncFormToParsed();
       if (state.step === 4) syncLineItemsFromTable();
-      if (state.step === 6) syncAvailsFromGrid();
+      if (state.step === 5) syncAvailsFromGrid();
       goToStep(target);
     });
   });
@@ -695,6 +702,10 @@ function wireEvents() {
   // no-confirmation-dialog pattern Roadblocks' own equivalent button
   // already uses.
   document.getElementById("strategy-regenerate-btn").addEventListener("click", () => onStrategyGenerate());
+  // Same no-confirmation-dialog pattern as Regenerate right above — the
+  // planner can always Regenerate back to the consistent-with-Step-02
+  // default afterward, so this isn't a destructive/hard-to-undo action.
+  document.getElementById("strategy-new-mix-btn").addEventListener("click", () => onStrategyGenerate(null, "new_mix"));
   document.getElementById("reprompt-btn").addEventListener("click", () => {
     document.getElementById("reprompt-area").classList.remove("hidden");
     document.getElementById("reprompt-btn").style.display = "none";
@@ -728,7 +739,7 @@ function wireEvents() {
   });
 
   // Roadblocks step
-  document.getElementById("monthly-breakdown-skip-btn").addEventListener("click", () => onNext(6));
+  document.getElementById("monthly-breakdown-skip-btn").addEventListener("click", () => onNext(7));
   document.getElementById("roadblocks-skip-btn").addEventListener("click", () => onNext(8));
   document.getElementById("roadblocks-regenerate-btn").addEventListener("click", () => onRoadblocksGenerate());
 
@@ -740,6 +751,7 @@ function wireEvents() {
     btn.addEventListener("click", () => onTimeUnitChange(btn.dataset.unit));
   });
   document.getElementById("add-product-btn").addEventListener("click", onAddProduct);
+  document.getElementById("step2-add-product-btn").addEventListener("click", onAddParsedProduct);
   document.getElementById("recommend-btn").addEventListener("click", onRecommend);
   document.getElementById("add-tier-btn").addEventListener("click", () => addTier());
   document.getElementById("tier-geo-input").addEventListener("input", (e) => {
@@ -1041,7 +1053,7 @@ function onNext(n) {
   // Capture form edits before advancing
   if (state.step === 2) syncFormToParsed();
   if (state.step === 4) syncLineItemsFromTable();
-  if (state.step === 6) syncAvailsFromGrid();
+  if (state.step === 5) syncAvailsFromGrid();
 
   if (n === 3) {
     goToStep(3);
@@ -1092,13 +1104,14 @@ function onNext(n) {
           target_override: null,
           target_secondary: null,
           estimated_cpm_override: null,
+          buying_model_override: null,
           is_added_value: false,
           added_value_pct: null,
           // Best-effort default from Step 02's inferred campaign goal —
           // still a fully editable per-line dropdown, this just saves the
           // planner from setting the same thing on every line by hand.
           objective_override: _mapCampaignGoalToObjective(state.parsed.campaign_goal),
-          // Step 05's optional Monthly Breakdown — {"YYYY-MM": dollars}.
+          // Step 06's optional Monthly Breakdown — {"YYYY-MM": dollars}.
           // null/empty means this line doesn't use it (see
           // app/services/monthly_allocation.py's docstring: no separate
           // enabled flag, inferred purely from data presence).
@@ -1131,8 +1144,8 @@ function onNext(n) {
       }
     }
   }
-  if (n === 5) renderMonthlyBreakdown();
-  if (n === 6) renderAvailsGrid();
+  if (n === 5) renderAvailsGrid();
+  if (n === 6) renderMonthlyBreakdown();
   if (n === 7) {
     goToStep(7);
     // Same "only auto-generate once" gate as Step 3 above — state.roadblocks
@@ -1294,8 +1307,8 @@ function renderMatchedProducts(req) {
     return;
   }
 
-  const pills = matched.map(name =>
-    `<span class="matched-pill">${escapeHtml(name)}</span>`
+  const pills = matched.map((name, idx) =>
+    `<span class="matched-pill">${escapeHtml(name)}<button type="button" class="matched-pill-remove" data-remove-product-idx="${idx}" title="Remove">×</button></span>`
   );
 
   if (rawPick && matched.length === 0) {
@@ -1304,6 +1317,32 @@ function renderMatchedProducts(req) {
 
   list.innerHTML = pills.join(" ");
   row.classList.remove("hidden");
+
+  // Editable — removes straight from req.products_selected (== state.parsed
+  // at both call sites) so Step 03's brief and Step 04's Curate pre-fill,
+  // which both read that same array directly, see the edit immediately.
+  list.querySelectorAll("[data-remove-product-idx]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      req.products_selected.splice(parseInt(btn.dataset.removeProductIdx), 1);
+      renderMatchedProducts(req);
+    });
+  });
+}
+
+// Step 02's own "+ Add product…" — mirrors Step 04's onAddProduct(), just
+// appending a plain catalog name to products_selected instead of building
+// a full line-item object (Step 02 has no budget/rate/etc. yet to attach).
+function onAddParsedProduct() {
+  const picker = document.getElementById("step2-product-picker");
+  const name = picker.value;
+  if (!name) return;
+  if (!state.parsed) return;
+  if (!state.parsed.products_selected) state.parsed.products_selected = [];
+  if (!state.parsed.products_selected.includes(name)) {
+    state.parsed.products_selected.push(name);
+  }
+  picker.value = "";
+  renderMatchedProducts(state.parsed);
 }
 
 function renderSuggestedTabs(tabs) {
@@ -1333,24 +1372,27 @@ function _resetStrategyUI() {
   document.getElementById("reprompt-area").classList.add("hidden");
   document.getElementById("reprompt-btn").style.display = "none";
   document.getElementById("strategy-regenerate-btn").style.display = "none";
+  document.getElementById("strategy-new-mix-btn").style.display = "none";
   document.getElementById("strategy-confirm-btn").style.display = "none";
   document.getElementById("strategy-download-link").classList.add("hidden");
   document.getElementById("strategy-search-note").classList.add("hidden");
   document.getElementById("reprompt-input").value = "";
 }
 
-async function onStrategyGenerate(reprompt = null) {
+async function onStrategyGenerate(reprompt = null, mode = "consistent") {
   _resetStrategyUI();
   const loadingEl = document.getElementById("strategy-loading");
   const loadingText = document.getElementById("strategy-loading-text");
   loadingEl.classList.remove("hidden");
-  loadingText.textContent = `Researching ${state.parsed.client_name || "client"}…`;
+  loadingText.textContent = mode === "new_mix"
+    ? `Researching an overall media mix for ${state.parsed.client_name || "client"}…`
+    : `Researching ${state.parsed.client_name || "client"}…`;
 
   try {
     const res = await fetch("/api/strategy", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ request: state.parsed, reprompt }),
+      body: JSON.stringify({ request: state.parsed, reprompt, mode }),
     });
     const brief = await res.json();
     loadingEl.classList.add("hidden");
@@ -1446,6 +1488,7 @@ function renderStrategyBrief(brief) {
   document.getElementById("strategy-brief").classList.remove("hidden");
   document.getElementById("reprompt-btn").style.display = "";
   document.getElementById("strategy-regenerate-btn").style.display = "";
+  document.getElementById("strategy-new-mix-btn").style.display = "";
   document.getElementById("strategy-confirm-btn").style.display = "";
 
   const dlLink = document.getElementById("strategy-download-link");
@@ -1775,8 +1818,8 @@ function switchTier(label) {
   renderLineItems();
   renderAvailsGrid();
   // Safe to call regardless of which step is actually showing right now
-  // (it only ever writes into Step 05's own DOM nodes) — needed so
-  // switching tiers FROM Step 05 itself (via the new tier-tabs-monthly
+  // (it only ever writes into Step 06's own DOM nodes) — needed so
+  // switching tiers FROM Step 06 itself (via the new tier-tabs-monthly
   // strip) actually shows the newly-active tier's own Monthly Breakdown
   // instead of leaving the PREVIOUS tier's content on screen.
   renderMonthlyBreakdown();
@@ -1850,7 +1893,7 @@ function removeTier(label) {
 }
 
 function renderAllTierTabStrips() {
-  renderTierTabStrip("tier-tabs", { removable: true });
+  renderTierTabStrip("tier-tabs", { removable: true, draggable: true });
   renderTierTabStrip("tier-tabs-avails", { removable: false });
   renderTierTabStrip("tier-tabs-monthly", { removable: false });
 
@@ -1879,7 +1922,7 @@ function renderAllTierTabStrips() {
   // swap untouched since switchTier() just swaps which array is active),
   // but until this tab strip existed there was no way to reach any
   // option but whichever was active when the planner happened to land on
-  // Step 05 — which is exactly what made it look "only tied to option 1."
+  // Step 06 — which is exactly what made it look "only tied to option 1."
   const monthlyWrap = document.getElementById("tier-switcher-monthly-wrap");
   if (monthlyWrap) monthlyWrap.classList.toggle("hidden", !multiTier);
   const monthlyHint = document.getElementById("tier-switcher-hint-monthly");
@@ -1939,6 +1982,7 @@ function renderTierTabStrip(containerId, opts) {
 
   tabsEl.innerHTML = allLabels.map(label => `
     <button type="button" class="tier-tab ${label === state.activeTierLabel ? "active" : ""}" data-tier="${label}">
+      ${opts.draggable && totalTiers > 1 ? `<span class="tier-tab-drag" title="Drag to reorder">⠿</span>` : ""}
       ${escapeHtml(_tierDisplayName(label))}
       <span class="tier-tab-rename" data-tier-rename="${label}" title="Rename this option">✎</span>
       ${opts.removable && totalTiers > 1 ? `<span class="tier-tab-remove" data-tier-remove="${label}" title="Remove this option">×</span>` : ""}
@@ -1947,7 +1991,7 @@ function renderTierTabStrip(containerId, opts) {
 
   tabsEl.querySelectorAll(".tier-tab").forEach(btn => {
     btn.addEventListener("click", (e) => {
-      if (e.target.closest("[data-tier-remove]") || e.target.closest("[data-tier-rename]")) return;
+      if (e.target.closest("[data-tier-remove]") || e.target.closest("[data-tier-rename]") || e.target.closest(".tier-tab-drag")) return;
       switchTier(btn.dataset.tier);
     });
   });
@@ -1966,6 +2010,119 @@ function renderTierTabStrip(containerId, opts) {
       });
     });
   }
+  if (opts.draggable) wireTierTabDrag(tabsEl);
+}
+
+// --------------------------------------------------------------------------
+// Drag-to-reorder OPTION TABS (Step 04 only — tier-tabs-avails/-monthly
+// stay click-only). Same plain-mouse-events pattern as wireLineItemDrag
+// (native HTML5 DnD was already rejected for that feature — see its own
+// comment). The tab strip is `flex-wrap: wrap`, not a single row (up to 10
+// options fit on 2-3 lines on a normal-width screen), so the hit-test
+// below checks BOTH x and y against each tab's own rect — an x-only check
+// (as if tabs were always one row) would let a wrapped tab on row 2 get
+// misidentified as whichever row-1 tab happens to share its column.
+// --------------------------------------------------------------------------
+
+function wireTierTabDrag(tabsEl) {
+  const allTabs = () => [...tabsEl.querySelectorAll(".tier-tab")];
+
+  const clearDropIndicators = () => {
+    allTabs().forEach(t => t.classList.remove("drag-over-left", "drag-over-right"));
+  };
+
+  tabsEl.querySelectorAll(".tier-tab-drag").forEach(handle => {
+    handle.addEventListener("mousedown", e => {
+      if (e.button !== 0) return;  // left-click only
+      e.preventDefault();  // don't let the mouse-down start a text selection
+      const startTab = handle.closest(".tier-tab");
+      if (!startTab) return;
+      const fromLabel = startTab.dataset.tier;
+      startTab.classList.add("dragging");
+      document.body.classList.add("reordering-line-item");  // same grabbing-cursor class the line-item drag already defines
+
+      let dropTarget = null;
+      let insertAfter = false;
+
+      const onMouseMove = moveEvent => {
+        const overTab = allTabs().find(t => {
+          const rect = t.getBoundingClientRect();
+          return moveEvent.clientX >= rect.left && moveEvent.clientX <= rect.right &&
+                 moveEvent.clientY >= rect.top && moveEvent.clientY <= rect.bottom;
+        });
+        clearDropIndicators();
+        if (overTab && overTab !== startTab) {
+          const rect = overTab.getBoundingClientRect();
+          insertAfter = moveEvent.clientX > rect.left + rect.width / 2;
+          overTab.classList.add(insertAfter ? "drag-over-right" : "drag-over-left");
+          dropTarget = overTab;
+        } else {
+          dropTarget = null;
+        }
+      };
+
+      const onMouseUp = () => {
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        document.body.classList.remove("reordering-line-item");
+        startTab.classList.remove("dragging");
+        clearDropIndicators();
+        if (dropTarget) moveTier(fromLabel, dropTarget.dataset.tier, insertAfter);
+      };
+
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    });
+  });
+}
+
+// Reorders the option tabs. Display order is 100% label-derived, never
+// array position (renderTierTabStrip/allTiersForSubmit/reopen-restore all
+// just alphabetize by label), so reordering state.tiers alone would have
+// zero visible effect — a drag-reorder here means "assign new A/B/C/D
+// letters matching the drop position," the same free-letter assignment
+// addTier() already does. A tier's own custom .name (set via the ✎ rename
+// icon) is untouched either way — only which LETTER it's called changes.
+function moveTier(fromLabel, toLabel, insertAfter) {
+  if (fromLabel === toLabel) return;
+  const originalActiveLabel = state.activeTierLabel;
+  const current = [originalActiveLabel, ...state.tiers.map(t => t.label)].sort();
+  const fromIdx = current.indexOf(fromLabel);
+  const dropOnIdx = current.indexOf(toLabel);
+  if (fromIdx === -1 || dropOnIdx === -1) return;
+
+  // Same off-by-one shift math as moveLineItem, applied over labels
+  // instead of array indices.
+  let target = insertAfter ? dropOnIdx + 1 : dropOnIdx;
+  if (fromIdx < target) target -= 1;
+  if (target === fromIdx) return;  // dropped back where it started
+
+  const order = current.slice();
+  const [movedLabel] = order.splice(fromIdx, 1);
+  order.splice(target, 0, movedLabel);
+
+  // `order` is now the OLD labels in their NEW desired position —
+  // relabel each slot sequentially to match. originalActiveLabel is
+  // captured above (not re-read from state.activeTierLabel mid-loop)
+  // since this loop overwrites that same field the moment it reaches the
+  // active tier's own slot — comparing against a live-mutating value
+  // here would misidentify a later slot once labels start colliding.
+  const snapshotByLabel = {};
+  state.tiers.forEach(t => { snapshotByLabel[t.label] = t; });
+  const newTiers = [];
+  order.forEach((oldLabel, i) => {
+    const newLabel = TIER_LABELS[i];
+    if (oldLabel === originalActiveLabel) {
+      state.activeTierLabel = newLabel;
+    } else {
+      const snap = snapshotByLabel[oldLabel];
+      snap.label = newLabel;
+      newTiers.push(snap);
+    }
+  });
+  state.tiers = newTiers;
+
+  renderAllTierTabStrips();
 }
 
 // --------------------------------------------------------------------------
@@ -1984,20 +2141,29 @@ function renderLineItems() {
     const tr = document.createElement("tr");
     // Catalog's minimum_spend is a MONTHLY figure; li.monthly_budget is
     // "$ per one state.timeUnit period" — scale before comparing, same
-    // rule Step 05 uses (see _mbEffectiveMinimumForPeriod).
+    // rule Step 06 uses (see _mbEffectiveMinimumForPeriod).
     const minSpend = (p.minimum_spend || 0) * _timeUnitMinimumScale();
     // Added Value: a $0 (or below-minimum) budget is deliberate here, not
     // an oversight — don't flag it.
     const belowMin = !li.is_added_value && li.monthly_budget < minSpend;
     const rateOpen = state.rateOverrideOpen.has(idx) || li.rate_override != null || li.estimated_cpm_override != null;
+    // The effective buying model — li.buying_model_override (see the
+    // Model cell below) takes precedence over the catalog default,
+    // exactly the same override-precedence pattern rate_override/
+    // estimated_cpm_override already use (_effectiveProduct). Everything
+    // downstream in this row (which RATE input shows, the impressions
+    // reference) reads THIS, never p.pricing_model directly, so overriding
+    // the model actually changes how the row behaves, not just its label.
+    const effP = _effectiveProduct(li, p);
     // Fixed-model products (Meta, YouTube, TikTok, LinkedIn, Spotify,
     // Branded Content, ...) have no real per-unit rate to override — their
     // RATE column instead edits the ESTIMATED CPM that drives the "Est. $"
-    // impressions calc in Step 06/the export. Kept visually distinct
+    // impressions calc in Step 05/the export. Kept visually distinct
     // ("Est. $X CPM", not just "$X CPM") so it's never mistaken for a real
     // billing rate the way a bare number would be.
-    const isFixedModel = (p.pricing_model || "").toUpperCase() === "FIXED";
+    const isFixedModel = (effP.pricing_model || "").toUpperCase() === "FIXED";
     const effectiveCpm = li.estimated_cpm_override != null ? li.estimated_cpm_override : p.estimated_cpm_for_imps;
+    const impsRefText = li.is_added_value ? "" : _mbUnitsRefText(li, p, li.monthly_budget);
 
     // Row identity for the mouse-based drag-reorder wiring below — no
     // `draggable` attribute needed, this isn't native HTML5 drag-and-drop.
@@ -2011,7 +2177,16 @@ function renderLineItems() {
         ${escapeHtml(li.product_name)}
         <span class="family-tag">${escapeHtml(p.family || "")}</span>
       </td>
-      <td class="model">${escapeHtml(p.pricing_model || "—")}</td>
+      <td class="model">
+        <select class="model-override-select ${li.buying_model_override != null ? "overridden" : ""}"
+                data-idx="${idx}" data-buying-model-select
+                title="${li.buying_model_override != null ? "Overridden from catalog default (" + (p.pricing_model || "—") + ") — the avails/impressions math and export below now use this instead" : "Buying model — override if this line bills differently than the catalog default"}">
+          <option value="" ${li.buying_model_override == null ? "selected" : ""}>${escapeHtml(p.pricing_model || "—")} (catalog)</option>
+          <option value="CPM" ${li.buying_model_override === "CPM" ? "selected" : ""}>CPM</option>
+          <option value="CPP" ${li.buying_model_override === "CPP" ? "selected" : ""}>CPP</option>
+          <option value="Fixed" ${li.buying_model_override === "Fixed" ? "selected" : ""}>Fixed</option>
+        </select>
+      </td>
       <td class="rate-cell">
         ${rateOpen ? (isFixedModel ? `
           <input type="number" step="1" min="0" class="rate-override-input est-cpm-input"
@@ -2022,7 +2197,7 @@ function renderLineItems() {
           <span class="rate-override-badge ${li.estimated_cpm_override != null ? "active" : ""}" data-idx="${idx}" title="${li.estimated_cpm_override != null ? "Overridden — saved" : ""}">✓</span>
         ` : `
           <input type="number" step="1" min="0" class="rate-override-input"
-                 placeholder="${formatRate(p)}"
+                 placeholder="${formatRate(effP)}"
                  value="${li.rate_override != null ? li.rate_override : ""}"
                  data-idx="${idx}" data-key="rate_override" data-rate-input />
           <button class="btn-rate-reset" data-idx="${idx}" data-field="rate_override" title="Revert to catalog rate">×</button>
@@ -2031,25 +2206,33 @@ function renderLineItems() {
           <span class="rate-display est-cpm-display">${effectiveCpm != null ? `Est. $${effectiveCpm} CPM` : "No estimate"}</span>
           <button class="btn-rate-override" data-idx="${idx}" title="Set an estimated CPM for the impressions calc (not a real billing rate)">✎</button>
         ` : `
-          <span class="rate-display">${formatRate(p)}</span>
+          <span class="rate-display">${formatRate(effP)}</span>
           <button class="btn-rate-override" data-idx="${idx}" title="Override this rate">✎</button>
         `)}
       </td>
       <td class="min">${money(minSpend)}</td>
       <td class="col-budget">
-        <input type="number" step="50" min="0" value="${li.monthly_budget}"
-               class="${belowMin ? "below-min" : ""}"
-               ${li.is_added_value ? "disabled" : ""}
-               data-idx="${idx}" data-key="monthly_budget" />
-        ${(state.parsed.agency_fee > 0 && !li.is_added_value) ? `
-          <div class="budget-gross-row">
-            <span class="budget-gross-label">Gross</span>
-            <input type="number" step="50" min="0"
-                   value="${_netToGross(li.monthly_budget || 0, state.parsed.agency_fee).toFixed(2)}"
-                   data-idx="${idx}" data-gross-budget-input
-                   title="Gross budget for this line — editing recalculates the Net figure above" />
+        <div class="budget-box">
+          <div class="budget-net-row">
+            <span class="budget-field-label">Net</span>
+            <input type="number" step="50" min="0" value="${li.monthly_budget}"
+                   class="budget-net-input ${belowMin ? "below-min" : ""}"
+                   ${li.is_added_value ? "disabled" : ""}
+                   data-idx="${idx}" data-key="monthly_budget" />
           </div>
-        ` : ""}
+          ${(state.parsed.agency_fee > 0 && !li.is_added_value) ? `
+            <div class="budget-divider"></div>
+            <div class="budget-gross-row">
+              <span class="budget-field-label budget-gross-label">Gross</span>
+              <input type="number" step="50" min="0"
+                     value="${_netToGross(li.monthly_budget || 0, state.parsed.agency_fee).toFixed(2)}"
+                     class="budget-gross-input"
+                     data-idx="${idx}" data-gross-budget-input
+                     title="Gross budget for this line — editing recalculates the Net figure above" />
+            </div>
+          ` : ""}
+          ${impsRefText ? `<div class="budget-imps-ref mono" data-imps-ref="${idx}">≈ ${impsRefText}</div>` : `<div class="budget-imps-ref mono hidden" data-imps-ref="${idx}"></div>`}
+        </div>
         <label class="av-switch" title="Added Value — locks this line's budget to $0">
           <input type="checkbox" data-idx="${idx}" ${li.is_added_value ? "checked" : ""} data-added-value-toggle />
           <span class="av-switch-track"><span class="av-switch-thumb"></span></span>
@@ -2128,6 +2311,20 @@ function renderLineItems() {
       renderLineItems();
     });
   });
+  // Buying model override: a dedicated handler (not the generic input
+  // wiring above, which doesn't match <select>) since changing it can flip
+  // whether the RATE cell shows a real rate or an estimated-CPM input
+  // (isFixedModel above), and the impressions reference below it, so a
+  // full re-render is needed either way — no cheap DOM patch here.
+  tbody.querySelectorAll("[data-buying-model-select]").forEach(sel => {
+    sel.addEventListener("change", () => {
+      const idx = parseInt(sel.dataset.idx);
+      const li = state.lineItems[idx];
+      li.buying_model_override = sel.value || null;
+      renderLineItems();
+      updateTotals();
+    });
+  });
   // Rate/CPM override: onLineItemEdit already saves it live on every
   // keystroke (via the generic wiring above) — the ✓ badge is a PERSISTENT
   // state indicator (rendered from li.rate_override/estimated_cpm_override
@@ -2177,6 +2374,7 @@ function renderLineItems() {
       const netInput = inp.closest("td").querySelector('input[data-key="monthly_budget"]');
       if (netInput) netInput.value = li.monthly_budget;
       updateTotals();
+      _curateRefreshImpsRef(idx);
     });
   });
   tbody.querySelectorAll("[data-added-value-toggle]").forEach(cb => {
@@ -2339,6 +2537,25 @@ function onLineItemEdit(e) {
     // editing this one shifts that basis for all of them.
     _refreshAvValuePreviews();
   }
+  if (key === "monthly_budget" || key === "rate_override" || key === "estimated_cpm_override") {
+    _curateRefreshImpsRef(idx);
+  }
+}
+
+// "≈ 333,462 imps" / "≈ 116 pts" under a line's Net budget — cheap DOM
+// patch (not a full renderLineItems()) so typing doesn't lose focus,
+// mirrors _avValuePreviewText's same reasoning. Reuses _mbUnitsRefText,
+// the exact same reference-text function Step 06's Monthly Breakdown
+// already shows, so the two never drift into separately-maintained copies.
+function _curateRefreshImpsRef(idx) {
+  const li = state.lineItems[idx];
+  if (!li) return;
+  const el = document.querySelector(`#line-items-body [data-imps-ref="${idx}"]`);
+  if (!el) return;
+  const p = state.productIndex[li.product_name] || {};
+  const text = li.is_added_value ? "" : _mbUnitsRefText(li, p, li.monthly_budget);
+  el.textContent = text ? `≈ ${text}` : "";
+  el.classList.toggle("hidden", !text);
 }
 
 // Added Value % preview — "≈ $150 (5% of $3,000)" — mirrors the export's
@@ -2409,9 +2626,9 @@ function _applyTimeUnitLabels() {
   setText("mb-step-name", `${adjective} Breakdown`);
   setText("mb-no-dates-text", `${adjective} Breakdown needs a campaign flight to divide into ${nounPlural.toLowerCase()}. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.`);
   setText("mb-mode-even-btn", `Even across ${nounPlural.toLowerCase()}`);
-  setText("nav-step-5-label", ` ${adjective}`);
-  const navStep5 = document.getElementById("nav-step-5");
-  if (navStep5) navStep5.title = adjective;
+  setText("nav-step-6-label", ` ${adjective}`);
+  const navStep6 = document.getElementById("nav-step-6");
+  if (navStep6) navStep6.title = adjective;
 }
 
 // Step 04's Week/Month/Quarter toggle. Deliberately does NOT auto-convert
@@ -2422,7 +2639,7 @@ function _applyTimeUnitLabels() {
 // logic ever had a subtle bug. Instead the raw numbers stay exactly as
 // curated and the planner reviews/adjusts them under the new labels,
 // same as any other curation field. What DOES get cleared: every option's
-// Step 05 Monthly Breakdown allocations and merge groups, since their
+// Step 06 Monthly Breakdown allocations and merge groups, since their
 // period KEYS (e.g. "2026-09" for month, "W1-2026-09-01" for week) are
 // tied to the OLD granularity and become meaningless under the new one.
 function onTimeUnitChange(newUnit) {
@@ -2433,7 +2650,7 @@ function onTimeUnitChange(newUnit) {
   const hasMerges = allTiers.some(t => (t.period_merge_groups || []).length);
   if (hasAllocations || hasMerges) {
     const ok = confirm(
-      `Switching to ${_MB_UNIT_ADJECTIVE[newUnit]} will clear every budget option's Step 05 breakdown and combined periods — ` +
+      `Switching to ${_MB_UNIT_ADJECTIVE[newUnit]} will clear every budget option's Step 06 breakdown and combined periods — ` +
       `the old ${_mbUnitNoun().toLowerCase()}-based numbers won't carry over. Curated budgets and product mix are untouched either way. Continue?`
     );
     if (!ok) return;
@@ -2489,6 +2706,7 @@ function onAddProduct() {
     target_override: null,
     target_secondary: null,
     estimated_cpm_override: null,
+    buying_model_override: null,
     is_added_value: false,
     added_value_pct: null,
     objective_override: _mapCampaignGoalToObjective(state.parsed?.campaign_goal),
@@ -2609,7 +2827,7 @@ async function onRecommend() {
     // order (id first, `...li` after) let li.id:null clobber the freshly
     // generated id right back to null on every single recommended line.
     // That silently broke per-row identity everywhere line items are
-    // looked up by id instead of array index — most visibly Step 05
+    // looked up by id instead of array index — most visibly Step 06
     // Monthly Breakdown's _mbFindLineItem(), where every row resolved to
     // the very first one regardless of which row was actually edited.
     // Matches the same spread order onDuplicateLineItem already uses.
@@ -2629,7 +2847,7 @@ async function onRecommend() {
 }
 
 // --------------------------------------------------------------------------
-// Step 4: Avails
+// Step 5: Avails
 // --------------------------------------------------------------------------
 
 // Bidirectional avails calc, mirroring the AdFlo Excel formulas:
@@ -2643,7 +2861,7 @@ async function onRecommend() {
 // by building a "virtual" product with the override baked in, so
 // calcMaxSpendFromImps/calcMaxImpsFromSpend/computeSovPct don't need their
 // own override-handling logic duplicated three times.
-// Step 06's own reminder of what this line is actually targeting — mirrors
+// Step 05's own reminder of what this line is actually targeting — mirrors
 // notion_parser.compose_target_fallback() (the same DEMO | BEHAVIORAL |
 // CONTEXTUAL composition the Excel TARGET column falls back to) so the
 // planner sees the SAME value here that'll actually land in the export,
@@ -2675,6 +2893,9 @@ function _effectiveProduct(li, p) {
   }
   if (li.estimated_cpm_override != null) {
     eff = { ...eff, estimated_cpm_for_imps: li.estimated_cpm_override };
+  }
+  if (li.buying_model_override != null) {
+    eff = { ...eff, pricing_model: li.buying_model_override };
   }
   return eff;
 }
@@ -2874,7 +3095,7 @@ function parseFormattedInput(s) {
 }
 
 // --------------------------------------------------------------------------
-// Step 5: Monthly Breakdown (optional) — distributes each (non-Added-Value)
+// Step 6: Monthly Breakdown (optional) — distributes each (non-Added-Value)
 // line item's Curate-step total across the calendar months its flight
 // actually touches. Mirrors app/services/monthly_allocation.py (see that
 // module's own docstring for the full design rationale — dollars are the
@@ -2925,7 +3146,7 @@ function _mbDaysBetweenInclusive(a, b) { return Math.round((b - a) / 86400000) +
 
 // 'Sep 28 – Oct 4, 2026' / 'Sep 1 – 30, 2026' / 'Dec 15, 2026 – Jan 4,
 // 2027' — mirrors monthly_allocation.py's _date_range_label() exactly.
-// Shown alongside every period's own label in Step 05 so a planner can
+// Shown alongside every period's own label in Step 06 so a planner can
 // see exactly which real dates a period covers, at any granularity.
 function _mbDateRangeLabel(start, end) {
   const fmt = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
@@ -3096,7 +3317,7 @@ function _mbCombinedPeriodLabel(first, last) {
 // same as everywhere else in this app — see the module-level note by
 // state.timeUnit) AND _mbEffectiveMinimumForPeriod below (which further
 // multiplies by a specific period's period_count, >1 only for a merged
-// Step 05 bucket).
+// Step 06 bucket).
 const _MB_GRANULARITY_MIN_SCALE = { week: 12 / 52, month: 1, quarter: 3 };
 function _timeUnitMinimumScale() { return _MB_GRANULARITY_MIN_SCALE[state.timeUnit] ?? 1; }
 
@@ -3169,6 +3390,14 @@ function _mbDefaultAllocation(totalBudget, months) {
 // definition the server uses, so a client-side "balanced ✓" can never
 // disagree with /api/generate's own gate.
 function _mbReconcile(totalBudget, allocations) {
+  // Round the target to cents too, not just the allocated sum — a
+  // sub-cent totalBudget (e.g. from a Gross->Net conversion or a
+  // percentage split upstream) previously survived into this raw
+  // subtraction, where binary float representation error could push an
+  // otherwise-exact match just past _MB_CENT (e.g. 1738.675 - 1738.68 ===
+  // -0.005000000000109139, not -0.005) — a real 100%-allocated period
+  // then displayed a nonsensical "Over-allocated by 0.0% / $0" red badge.
+  totalBudget = Math.round((totalBudget || 0) * 100) / 100;
   const allocated = Math.round(Object.values(allocations).reduce((s, v) => s + (v || 0), 0) * 100) / 100;
   const remaining = Math.round((totalBudget - allocated) * 100) / 100;
   const allocatedPct = totalBudget ? (allocated / totalBudget * 100) : 0;
@@ -3358,7 +3587,7 @@ function renderMonthlyBreakdown() {
 
 // "For reference" — impressions (or, for a CPP/rating-point product,
 // points) that this month's $ figure would buy. Reuses calcMaxImpsFromSpend()
-// exactly as Step 06's Avails grid does (through _effectiveProduct, so a
+// exactly as Step 05's Avails grid does (through _effectiveProduct, so a
 // Step 04 rate/estimated-CPM override is respected here too) — never a
 // second, separately-maintained conversion formula. Returns "" when the
 // product has no rate/estimated-CPM to convert with at all (a pure
@@ -3668,7 +3897,7 @@ function renderAvailsGrid() {
     // checks avail.get("freeform"), it has no family-based fallback of its
     // own. Deliberately NOT done for the false/numeric default — that
     // would stamp a `{freeform: false}` entry onto every line the instant
-    // Step 06 renders, even ones the planner never touches, which would
+    // Step 05 renders, even ones the planner never touches, which would
     // wrongly make renderGenerateSummary()'s "no avails entered for this
     // option" check think avails exist just because the object has a key.
     const isFreeform = existing.freeform !== undefined ? existing.freeform : (p.family === "Search");
@@ -3957,7 +4186,7 @@ function renderGenerateSummary() {
       : [];
     if (anyAvailsAnywhere && emptyTiers.length > 0) {
       availsWarningEl.classList.remove("hidden");
-      availsWarningEl.innerHTML = `<strong>⚠ No avails entered for ${emptyTiers.map(t => escapeHtml(_tierDisplayName(t.label))).join(", ")}</strong> — other options have avails, so ${emptyTiers.length === 1 ? "this one" : "these"} will export without any. Go back to Step 06, switch to that tab, and enter avails (or use "Copy avails from") if that's not intentional.`;
+      availsWarningEl.innerHTML = `<strong>⚠ No avails entered for ${emptyTiers.map(t => escapeHtml(_tierDisplayName(t.label))).join(", ")}</strong> — other options have avails, so ${emptyTiers.length === 1 ? "this one" : "these"} will export without any. Go back to Step 05, switch to that tab, and enter avails (or use "Copy avails from") if that's not intentional.`;
     } else {
       availsWarningEl.classList.add("hidden");
       availsWarningEl.innerHTML = "";
@@ -4001,7 +4230,7 @@ async function onGenerate() {
     roadblocks: state.roadblocks || null,
     raw_notion_text: state.rawNotionText || null,
     addons: Object.entries(state.addons).map(([product_name, amount]) => ({ product_name, amount })),
-    // Step 05's plan-wide default-split choice — only matters for the
+    // Step 06's plan-wide default-split choice — only matters for the
     // export's own fallback estimate on a line that was never individually
     // customized (build_monthly_breakdown_tab's per-month total, and the
     // inline total row next to "TOTAL DIGITAL MONTHLY"); a line WITH its

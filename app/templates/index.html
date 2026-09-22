@@ -106,8 +106,8 @@
         <div class="step" data-step="2" title="Review"><span>02</span><span class="step-label"> Review</span></div>
         <div class="step" data-step="3" title="Strategy"><span>03</span><span class="step-label"> Strategy</span></div>
         <div class="step" data-step="4" title="Curate"><span>04</span><span class="step-label"> Curate</span></div>
-        <div class="step" data-step="5" title="Monthly" id="nav-step-5"><span>05</span><span class="step-label" id="nav-step-5-label"> Monthly</span></div>
-        <div class="step" data-step="6" title="Avails"><span>06</span><span class="step-label"> Avails</span></div>
+        <div class="step" data-step="5" title="Avails"><span>05</span><span class="step-label"> Avails</span></div>
+        <div class="step" data-step="6" title="Monthly" id="nav-step-6"><span>06</span><span class="step-label" id="nav-step-6-label"> Monthly</span></div>
         <div class="step" data-step="7" title="Roadblocks"><span>07</span><span class="step-label"> Roadblocks</span></div>
         <div class="step" data-step="8" title="Generate"><span>08</span><span class="step-label"> Generate</span></div>
       </nav>
@@ -210,10 +210,20 @@ Client name: ...
 
       <div id="parse-warnings" class="warnings hidden"></div>
 
-      <!-- Matched products pill row -->
+      <!-- Matched products pill row — editable: the picker/Add button
+           below let the planner add a product the parser missed, and each
+           pill's × removes one it got wrong, before either ever reaches
+           Step 03's brief or Step 04's Curate pre-fill (both read
+           state.parsed.products_selected directly). -->
       <div id="matched-products-row" class="matched-products hidden">
         <span class="matched-label">Matched products:</span>
         <span id="matched-products-list"></span>
+      </div>
+      <div class="matched-products-add-row">
+        <select id="step2-product-picker">
+          <option value="">+ Add product…</option>
+        </select>
+        <button class="btn-secondary" id="step2-add-product-btn" type="button">Add</button>
       </div>
 
       <div class="form-grid">
@@ -383,6 +393,7 @@ Client name: ...
         <div class="spacer"></div>
         <a class="btn-secondary hidden" id="strategy-download-link" download>⬇ Download Brief (.docx)</a>
         <button class="btn-secondary" id="strategy-regenerate-btn" style="display:none">↺ Regenerate</button>
+        <button class="btn-secondary" id="strategy-new-mix-btn" style="display:none" title="Recommend an entirely new media mix, ignoring the products already selected in Step 02">🔀 Overall new media mix</button>
         <button class="btn-secondary" id="reprompt-btn" style="display:none">↺ Refine this plan</button>
         <button class="btn-primary" id="strategy-confirm-btn" style="display:none" data-next="4">✓ Confirm &amp; Continue →</button>
       </div>
@@ -437,7 +448,7 @@ Client name: ...
           <button type="button" class="time-unit-slider-option active" data-unit="month">Monthly</button>
           <button type="button" class="time-unit-slider-option" data-unit="quarter">Quarterly</button>
         </div>
-        <p class="time-unit-toggle-hint">Changes how totals, avails, the Step 05 breakdown, and the export all read — everywhere this proposal says "month."</p>
+        <p class="time-unit-toggle-hint">Changes how totals, avails, the Step 06 breakdown, and the export all read — everywhere this proposal says "month."</p>
       </div>
 
       <div class="curation-toolbar">
@@ -514,14 +525,14 @@ Client name: ...
     </section>
 
     <!-- ====================================================================
-         STEP 5 — Monthly Breakdown (optional) — distributes each line
+         STEP 6 — Monthly Breakdown (optional) — distributes each line
          item's Curate-step total across the calendar months its flight
          actually touches. Entirely opt-in: skipping this step (or never
          customizing a line here) changes nothing else about the proposal.
     ===================================================================== -->
-    <section class="panel hidden" id="step-5">
+    <section class="panel hidden" id="step-6">
       <div class="panel-head">
-        <div class="kicker">Step 05 · Optional</div>
+        <div class="kicker">Step 06 · Optional</div>
         <h1 class="display" id="mb-step-title">Monthly breakdown</h1>
         <p class="lede" id="mb-step-lede">Split each line item's budget across the calendar months your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat monthly figure is all you need; nothing else changes if you do.</p>
       </div>
@@ -555,21 +566,21 @@ Client name: ...
       </div>
 
       <div class="panel-actions">
-        <button class="btn-secondary" data-back="4">← Back</button>
+        <button class="btn-secondary" data-back="5">← Back</button>
         <button class="btn-secondary" id="monthly-breakdown-skip-btn">Skip →</button>
         <div class="spacer"></div>
-        <button class="btn-primary" data-next="6" id="monthly-breakdown-continue-btn">Continue →</button>
+        <button class="btn-primary" data-next="7" id="monthly-breakdown-continue-btn">Continue →</button>
       </div>
     </section>
 
     <!-- ====================================================================
-         STEP 6 — Avails (if needed) — moved ahead of Roadblocks so
-         Curate/Monthly/Avails stay adjacent (planners bounce between
-         Curate and Avails far more than either touches Roadblocks).
+         STEP 5 — Avails (if needed) — placed right after Curate so
+         Curate/Avails stay adjacent (planners bounce between the two far
+         more than either touches Monthly Breakdown or Roadblocks).
     ===================================================================== -->
-    <section class="panel hidden" id="step-6">
+    <section class="panel hidden" id="step-5">
       <div class="panel-head">
-        <div class="kicker">Step 06</div>
+        <div class="kicker">Step 05</div>
         <h1 class="display">Avails input <span id="avails-status-pill"></span></h1>
         <p class="lede" id="avails-blurb">If this proposal needs avails, paste them from the platforms below. Otherwise, skip — avails columns will be left blank for later planner input.</p>
       </div>
@@ -591,8 +602,8 @@ Client name: ...
       </div>
 
       <div class="panel-actions">
-        <button class="btn-secondary" data-back="5">← Back</button>
-        <button class="btn-primary" data-next="7">Continue →</button>
+        <button class="btn-secondary" data-back="4">← Back</button>
+        <button class="btn-primary" data-next="6">Continue →</button>
       </div>
     </section>
 

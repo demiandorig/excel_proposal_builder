@@ -299,6 +299,7 @@ def _is_live_sports_product(product: Product) -> bool:
 def compute_sov_pct(product: Product, monthly_budget: float, avail: dict,
                     cpm_override: Optional[float] = None,
                     rate_override: Optional[float] = None,
+                    buying_model_override: Optional[str] = None,
                     time_unit: str = "month") -> Optional[float]:
     """
     % of the planner-entered avails ceiling that the curated budget
@@ -324,6 +325,10 @@ def compute_sov_pct(product: Product, monthly_budget: float, avail: dict,
     already reflects an override once it's written there — but this
     static, one-time Python-side calc has no cell to read, so it needs the
     value directly.
+
+    buying_model_override: a per-line override of the product's catalog
+    buying_model (Step 04's Model column) — same precedence as the two
+    overrides above, decides which of CPM/CPP/estimated-CPM math applies.
     """
     if not monthly_budget:
         return None
@@ -339,9 +344,10 @@ def compute_sov_pct(product: Product, monthly_budget: float, avail: dict,
 
     rate = rate_override if rate_override is not None else product.base_rate
     effective_cpm = cpm_override if cpm_override is not None else product.estimated_cpm_for_imps
-    if product.buying_model == "CPM" and rate:
+    effective_model = buying_model_override or product.buying_model
+    if effective_model == "CPM" and rate:
         implied_spend = max_imps * rate / 1000
-    elif product.buying_model == "CPP" and rate:
+    elif effective_model == "CPP" and rate:
         implied_spend = max_imps * rate
     elif effective_cpm:
         implied_spend = max_imps * effective_cpm / 1000
@@ -398,36 +404,51 @@ def _apply_sov_conditional_formatting(ws: Worksheet, col: str, first_row: int, l
 
 
 def _spend_formula_from_imps(product: Product, imps_cell: str, rate_cell: str,
-                             est_cpm_cell: Optional[str], cpm_override: Optional[float] = None) -> Optional[str]:
+                             est_cpm_cell: Optional[str], cpm_override: Optional[float] = None,
+                             buying_model_override: Optional[str] = None) -> Optional[str]:
     """Live formula for Max. Recommended Monthly Spend, derived from the Max.
     Recommended Monthly Imps cell — so the spend recalculates automatically
     if the planner edits the imps number (or the rate, when the rate itself
     lives in a cell) after the file is generated.
 
     cpm_override: Step 04's per-line estimated-CPM override, taking
-    precedence over the catalog's own estimated_cpm_for_imps when given."""
-    if product.buying_model == "CPM" and product.base_rate is not None:
+    precedence over the catalog's own estimated_cpm_for_imps when given.
+
+    buying_model_override: Step 04's per-line override of the catalog's
+    buying model (CPM/CPP/Fixed) — same precedence, takes over which
+    branch below applies instead of product.buying_model."""
+    effective_model = buying_model_override or product.buying_model
+    if effective_model == "CPM" and product.base_rate is not None:
         return f'=IFERROR({imps_cell}*{rate_cell}/1000,"")'
-    if product.buying_model == "CPP" and product.base_rate is not None:
+    if effective_model == "CPP" and product.base_rate is not None:
         return f'=IFERROR({imps_cell}*{rate_cell},"")'
     effective_cpm = cpm_override if cpm_override is not None else product.estimated_cpm_for_imps
-    if (product.buying_model == "Fixed" or product.estimated_impressions) and effective_cpm:
+    # An explicit override decides Fixed-ness on its own; with none, fall
+    # back to the catalog's own buying_model/estimated_impressions flags —
+    # unchanged from before this override existed.
+    is_effective_fixed = (effective_model == "Fixed") if buying_model_override is not None \
+        else (product.buying_model == "Fixed" or product.estimated_impressions)
+    if is_effective_fixed and effective_cpm:
         cpm_ref = est_cpm_cell or effective_cpm
         return f'=IFERROR("Est. $"&TEXT({imps_cell}*{cpm_ref}/1000,"#,##0"),"")'
     return None
 
 
 def _imps_formula_from_spend(product: Product, spend_cell: str, rate_cell: str,
-                             est_cpm_cell: Optional[str], cpm_override: Optional[float] = None) -> Optional[str]:
+                             est_cpm_cell: Optional[str], cpm_override: Optional[float] = None,
+                             buying_model_override: Optional[str] = None) -> Optional[str]:
     """Live formula for Max. Recommended Monthly Imps, derived from the Max.
     Recommended Monthly Spend cell — the mirror image of
-    `_spend_formula_from_imps`."""
-    if product.buying_model == "CPM" and product.base_rate is not None:
+    `_spend_formula_from_imps`. Same buying_model_override precedence."""
+    effective_model = buying_model_override or product.buying_model
+    if effective_model == "CPM" and product.base_rate is not None:
         return f'=IFERROR({spend_cell}/{rate_cell}*1000,0)'
-    if product.buying_model == "CPP" and product.base_rate is not None:
+    if effective_model == "CPP" and product.base_rate is not None:
         return f'=IFERROR({spend_cell}/{rate_cell},0)'
     effective_cpm = cpm_override if cpm_override is not None else product.estimated_cpm_for_imps
-    if (product.buying_model == "Fixed" or product.estimated_impressions) and effective_cpm:
+    is_effective_fixed = (effective_model == "Fixed") if buying_model_override is not None \
+        else (product.buying_model == "Fixed" or product.estimated_impressions)
+    if is_effective_fixed and effective_cpm:
         cpm_ref = est_cpm_cell or effective_cpm
         return f'=IFERROR("Est. "&TEXT({spend_cell}*1000/{cpm_ref},"#,##0"),"")'
     return None
@@ -437,7 +458,8 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
                        gross: bool = False, cols: Optional[tuple] = None, sov_pct: Optional[float] = None,
                        sov_col: Optional[str] = None, budget_col: Optional[str] = None,
                        rate_col: str = "K", est_cpm_col: Optional[str] = None,
-                       cpm_override: Optional[float] = None, time_unit: str = "month") -> None:
+                       cpm_override: Optional[float] = None, buying_model_override: Optional[str] = None,
+                       time_unit: str = "month") -> None:
     """
     Write planner-entered avails (from the app's Step 06) into the
     Max. Recommended Monthly Imps / Spend / Est. Monthly Uniques columns.
@@ -447,6 +469,10 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
     cpm_override: Step 04's per-line estimated-CPM override (LineItem.
     estimated_cpm_override) — takes precedence over the product's catalog
     estimated_cpm_for_imps for this line's derived imps/spend formula.
+
+    buying_model_override: Step 04's per-line override of the product's
+    catalog buying_model — same precedence, decides which derived-formula
+    branch (CPM/CPP/estimated-CPM) this line's imps/spend uses.
 
     time_unit: scales the LIVE SOV formula's budget-cell reference to a
     monthly equivalent (see SOV_MONTHLY_EQUIVALENT_SCALE) — the static
@@ -555,9 +581,9 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
     imps_formula = spend_formula = None
     if product is not None:
         if basis == "imps" and max_imps is not None:
-            spend_formula = _spend_formula_from_imps(product, imps_cell_ref, rate_cell_ref, est_cpm_cell_ref, cpm_override)
+            spend_formula = _spend_formula_from_imps(product, imps_cell_ref, rate_cell_ref, est_cpm_cell_ref, cpm_override, buying_model_override)
         elif basis == "spend" and max_spend is not None:
-            imps_formula = _imps_formula_from_spend(product, spend_cell_ref, rate_cell_ref, est_cpm_cell_ref, cpm_override)
+            imps_formula = _imps_formula_from_spend(product, spend_cell_ref, rate_cell_ref, est_cpm_cell_ref, cpm_override, buying_model_override)
 
     spend_is_text = False  # tracked so the SOV formula below knows not to divide by it
 
@@ -1549,10 +1575,20 @@ def build_avails_only(wb: Workbook, products: list, *,
         ws[f"E{row}"].alignment = LEFT
         ws[f"E{row}"].border = THIN_BORDER
 
+        # Effective buying model — a Step 04 override (li.buying_model_override)
+        # wins over the catalog's own buying_model, same precedence as
+        # rate_override/estimated_cpm_override just below. An explicit
+        # override decides Fixed-ness on its own; with none, falls back to
+        # the catalog's own estimated_impressions flag exactly as before
+        # this override existed.
+        buying_model_override = li.buying_model_override if li else None
+        effective_buying_model = buying_model_override or p.buying_model
+        is_effective_fixed = (effective_buying_model == "Fixed") if buying_model_override is not None else p.estimated_impressions
+
         if is_av:
             ws[f"F{row}"] = "Added Value"
         else:
-            ws[f"F{row}"] = "Fixed" if p.estimated_impressions else p.buying_model
+            ws[f"F{row}"] = "Fixed" if is_effective_fixed else effective_buying_model
         ws[f"F{row}"].alignment = CENTER
         ws[f"F{row}"].border = THIN_BORDER
 
@@ -1570,7 +1606,7 @@ def build_avails_only(wb: Workbook, products: list, *,
             ws[f"G{row}"] = 0
             _format_money_cell(ws[f"G{row}"], blue_input=True)
         else:
-            ws[f"G{row}"] = effective_rate if (effective_rate is not None and not p.estimated_impressions) else "NA"
+            ws[f"G{row}"] = effective_rate if (effective_rate is not None and not is_effective_fixed) else "NA"
             if isinstance(ws[f"G{row}"].value, (int, float)):
                 _format_money_cell(ws[f"G{row}"], blue_input=True)
         ws[f"G{row}"].alignment = CENTER
@@ -1612,10 +1648,11 @@ def build_avails_only(wb: Workbook, products: list, *,
         if avail and (avail.get("max_imps") is not None or avail.get("max_spend") is not None or avail.get("freeform")):
             # Planner already computed avails in the app (Step 06) — write directly.
             sov_pct = compute_sov_pct(p, li.monthly_budget if li else 0, avail,
-                                       cpm_override=cpm_override, rate_override=rate_override, time_unit=time_unit)
+                                       cpm_override=cpm_override, rate_override=rate_override,
+                                       buying_model_override=buying_model_override, time_unit=time_unit)
             write_avails_cells(ws, row, avail, p, cols=("J", "K", "L"), sov_pct=sov_pct, sov_col="M",
                                budget_col="I", rate_col="G", est_cpm_col="H", cpm_override=cpm_override,
-                               time_unit=time_unit)
+                               buying_model_override=buying_model_override, time_unit=time_unit)
         else:
             # Fallback: leave J open for manual planner input, auto-calc K from
             # it live. J and L are greyed out (not just left blank) to flag
@@ -1626,11 +1663,11 @@ def build_avails_only(wb: Workbook, products: list, *,
             _grey_out_empty_avails_cell(ws, f"J{row}")
             ws[f"J{row}"].alignment = CENTER
 
-            if p.buying_model == "CPM" and not p.estimated_impressions:
+            if effective_buying_model == "CPM" and not is_effective_fixed:
                 ws[f"K{row}"] = f'=IFERROR(J{row}*G{row}/1000,"")'
-            elif p.buying_model == "CPP" and not p.estimated_impressions:
+            elif effective_buying_model == "CPP" and not is_effective_fixed:
                 ws[f"K{row}"] = f'=IFERROR(J{row}*G{row},"")'
-            elif p.estimated_impressions and effective_cpm:
+            elif is_effective_fixed and effective_cpm:
                 ws[f"K{row}"] = f'=IFERROR("Est. $"&TEXT(J{row}*H{row}/1000,"#,##0"),"")'
             else:
                 ws[f"K{row}"] = f'=IFERROR(J{row}*G{row}/1000,"")'

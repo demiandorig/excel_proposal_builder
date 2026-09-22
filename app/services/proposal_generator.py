@@ -56,6 +56,12 @@ class LineItem:
     # spend calculation, never an actual charge. None = use the catalog's
     # own estimated_cpm_for_imps.
     estimated_cpm_override: Optional[float] = None
+    # Step 04 Curate override of the catalog's buying model (CPM/CPP/
+    # Fixed) — same precedence pattern as rate_override/
+    # estimated_cpm_override: None falls back to the catalog Product's own
+    # buying_model everywhere (avails math, SOV, the export's Model/Rate-
+    # Type columns); set, it takes over all of those instead.
+    buying_model_override: Optional[str] = None
     # Added Value: a $0 (or below-minimum) budget is valid and expected for
     # this line, not a planner oversight — exempts it from the below-
     # minimum validation highlight in the app, and sorts it to the bottom
@@ -74,7 +80,7 @@ class LineItem:
     # None falls back to the catalog's own short_label in the export,
     # exactly what column C showed before this field existed.
     objective_override: Optional[str] = None
-    # Optional Step 04.5 "Monthly Breakdown" — {period_key: dollars, ...}.
+    # Optional Step 06 "Monthly Breakdown" — {period_key: dollars, ...}.
     # See app/services/monthly_allocation.py's module docstring: dollars
     # are the source of truth, percentage is always derived from these,
     # and an empty/None dict means this line simply doesn't use the
@@ -83,7 +89,7 @@ class LineItem:
     # GenerateRequest.time_unit in main.py) — "YYYY-MM" for month,
     # "W{n}-YYYY-MM-DD" for week, "YYYY-MM+YYYY-MM+YYYY-MM" for quarter.
     monthly_allocations: Optional[dict[str, float]] = None
-    # Step 05's "combine adjacent periods into one bucket" control — see
+    # Step 06's "combine adjacent periods into one bucket" control — see
     # monthly_allocation.apply_period_merges. Each inner list is 2+
     # period keys (in this SAME line's own granularity) to merge into one
     # combined period before allocation/reconciliation/minimum-checking.
@@ -152,7 +158,7 @@ def generate_proposal(
     avails_data: Optional[dict] = None,   # product_name -> {max_imps, max_spend, est_uniques}
     tiers: Optional[list[dict]] = None,   # [{"label": "A", "line_items": [...], "avails_data": {...}, "period_merge_groups": [...]}, ...]
     addons: Optional[list[AddonItem]] = None,   # Step 04's Add-Ons module picks — proposal-wide, not per-tier
-    monthly_distribution_mode: str = "even",   # Step 05's plan-wide default-split choice — "even" or "prorated"
+    monthly_distribution_mode: str = "even",   # Step 06's plan-wide default-split choice — "even" or "prorated"
     time_unit: str = "month",   # Step 04's toggle — "week" | "month" | "quarter", proposal-wide
 ) -> dict:
     """
@@ -182,7 +188,7 @@ def generate_proposal(
                 sheet, matching how the old hardcoded add-ons list already
                 behaved before it became planner-driven. None falls back to
                 that legacy hardcoded list; [] means "planner picked none."
-        monthly_distribution_mode: Step 05's plan-wide "even" (default) or
+        monthly_distribution_mode: Step 06's plan-wide "even" (default) or
                 "prorated" (by days) choice — only affects the fallback
                 estimate shown for a line item that never got its own
                 monthly_allocations; a customized line's real numbers are
@@ -668,6 +674,18 @@ def _populate_line_items(
 
         av_value = (tier_real_total * (li.added_value_pct / 100.0)) if (li.is_added_value and li.added_value_pct) else None
 
+        # Effective buying model (CPM/CPP/Fixed) — a Step 04 override
+        # (li.buying_model_override) wins over the catalog's own
+        # buying_model, same precedence as rate_override/
+        # estimated_cpm_override. An explicit override decides Fixed-ness
+        # on its own; with none, fall back to the catalog's own
+        # buying_model/estimated_impressions flags exactly as before this
+        # override existed, so a non-overridden line is byte-for-byte
+        # unchanged.
+        effective_buying_model = li.buying_model_override or product.buying_model
+        is_effective_fixed = (effective_buying_model == "Fixed") if li.buying_model_override is not None \
+            else (product.buying_model == "Fixed" or product.estimated_impressions)
+
         # RATE TYPE (J) / NET RATE (K) — an Added Value line is never priced
         # like a normal CPM/CPP/Fixed line (that's the whole point), so it
         # overrides both regardless of what the catalog or a stray
@@ -680,9 +698,24 @@ def _populate_line_items(
             ws[f"J{row}"].alignment = et.CENTER
             ws[f"K{row}"] = 0
             et._format_money_cell(ws[f"K{row}"], blue_input=True)
-        elif li.rate_override is not None:
-            ws[f"K{row}"] = li.rate_override
-            et._format_money_cell(ws[f"K{row}"], blue_input=True)
+        else:
+            # _write_product_row (excel_template.py) already wrote J{row}
+            # from the raw catalog buying_model at sheet-creation time —
+            # overwrite it here whenever a Step 04 override changed it, the
+            # same "catalog default, then overwrite if the planner set
+            # one" pattern K{row}/I{row} already use.
+            if li.buying_model_override is not None:
+                ws[f"J{row}"] = effective_buying_model
+                ws[f"J{row}"].alignment = et.CENTER
+            if li.rate_override is not None:
+                ws[f"K{row}"] = li.rate_override
+                et._format_money_cell(ws[f"K{row}"], blue_input=True)
+            elif li.buying_model_override == "Fixed":
+                # Overridden TO Fixed with no real per-unit rate of its own
+                # — matches _write_product_row's own "Fixed => NA" rule.
+                ws[f"K{row}"] = "NA"
+                ws[f"K{row}"].alignment = et.CENTER
+                ws[f"K{row}"].font = et.BODY_FONT
 
         # IMPRESSIONS (I) — Fixed/estimated-CPM products only (Meta,
         # YouTube, TikTok, LinkedIn, Spotify, Branded Content, ...).
@@ -695,10 +728,11 @@ def _populate_line_items(
         # LineItem.estimated_cpm_override's own docstring) but nothing
         # actually fed it back into the export's own IMPRESSIONS column —
         # the Avails step's own "Max Recommended Monthly Imps/Spend"
-        # ceiling figures were never affected, only this column.
-        if not li.is_added_value and li.estimated_cpm_override is not None and (
-            product.buying_model == "Fixed" or product.estimated_impressions
-        ):
+        # ceiling figures were never affected, only this column. Now reads
+        # is_effective_fixed (above) instead of the catalog flags directly,
+        # so a buying_model_override that flips a line INTO or OUT OF
+        # Fixed is respected here too.
+        if not li.is_added_value and li.estimated_cpm_override is not None and is_effective_fixed:
             ws[f"I{row}"] = f'=IFERROR("Est. "&TEXT(L{row}*1000/{li.estimated_cpm_override},"#,##0"),"NA")'
             ws[f"I{row}"].alignment = et.CENTER
 
@@ -771,7 +805,7 @@ def _populate_line_items(
         if combined:
             ws[f"{_notes_col}{row}"] = combined
 
-        # Avails (planner-entered from Step 06 of the app) — N/O/P net, P/Q/R gross,
+        # Avails (planner-entered from Step 05 of the app) — N/O/P net, P/Q/R gross,
         # plus the SOV% column right after (Q net, S gross). Always written,
         # even with an empty avails dict, so a line with nothing entered gets
         # write_avails_cells's grey "not entered" flag instead of the row
@@ -785,9 +819,10 @@ def _populate_line_items(
             avail = avails_by.get(product.name)
         sov_pct = et.compute_sov_pct(product, li.monthly_budget, avail or {},
                                       cpm_override=li.estimated_cpm_override, rate_override=li.rate_override,
-                                      time_unit=time_unit)
+                                      buying_model_override=li.buying_model_override, time_unit=time_unit)
         et.write_avails_cells(ws, row, avail or {}, product, gross=gross, sov_pct=sov_pct, sov_col=sov_col,
-                              budget_col="L", cpm_override=li.estimated_cpm_override, time_unit=time_unit)
+                              budget_col="L", cpm_override=li.estimated_cpm_override,
+                              buying_model_override=li.buying_model_override, time_unit=time_unit)
 
         row += 1
 
