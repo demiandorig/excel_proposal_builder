@@ -1627,6 +1627,52 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 @media (max-width: 700px) {
   .panel-head-row { flex-direction: column; }
 }
+.panel-head-actions {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+/* Step 01's "From Notion" reference panel — filled after picking a
+   result from the Search Notion modal (see notion-reference-panel's own
+   HTML comment for why this shows raw fields rather than auto-filling
+   the paste box outright). */
+.notion-reference-panel {
+  margin-bottom: 20px;
+  padding: 16px 20px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+}
+.notion-reference-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.notion-reference-head strong { color: var(--ink); }
+.notion-reference-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px 20px;
+  margin: 0;
+}
+.notion-reference-fields dt {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+}
+.notion-reference-fields dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+  word-break: break-word;
+}
 
 .modal-overlay {
   position: fixed;

@@ -98,6 +98,27 @@ class ProposalRequest:
     # Parser warnings (e.g. "couldn't match product 'Foo' to catalog")
     warnings: list = field(default_factory=list)
 
+    def __post_init__(self):
+        # A planner-provided agency_fee can arrive already-broken from the
+        # CLIENT (a raw whole-number percent like 15 instead of the
+        # fraction 0.15 this field is documented as expecting — the
+        # app.js-side fix covers where that actually gets typed) — this
+        # is the single, construction-time choke point EVERY
+        # ProposalRequest(**raw) call site in main.py passes through
+        # (there are 6 of them), so a bad value can't reach the Excel
+        # export (which divides by (1 - agency_fee) — a value >= 1 there
+        # produces a NEGATIVE "Gross" figure, not an error) no matter
+        # which endpoint — or a future new one — constructs this object.
+        # parse_notion()'s own fresh-paste path is unaffected: it always
+        # REASSIGNS agency_fee via _parse_agency_fee() (already correctly
+        # normalized) on the freshly-constructed, argument-less
+        # ProposalRequest() AFTER this runs — see that function's own code.
+        if self.agency_fee is not None:
+            fee = self.agency_fee
+            if fee >= 1.0:
+                fee = fee / 100.0
+            self.agency_fee = fee if 0.0 <= fee < 1.0 else None
+
     def to_dict(self) -> dict:
         d = asdict(self)
         return d

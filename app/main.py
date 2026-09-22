@@ -74,6 +74,7 @@ from app.services import pptx_builder
 from app.services import strategy_brief as strategy_brief_svc
 from app.services import roadblocks as roadblocks_svc
 from app.services import monthly_allocation
+from app.services import notion_client
 
 
 # ---------------------------------------------------------------------------
@@ -1818,6 +1819,71 @@ async def my_proposals(request: Request, page: int = 1, page_size: int = 10, sea
 
 
 # ---------------------------------------------------------------------------
+# Notion Requests database search — Step 01
+# ---------------------------------------------------------------------------
+# Planner-facing (any logged-in user, not admin-only — every planner needs
+# this at Step 01, same reasoning as /api/my-proposals above being outside
+# the /api/admin/* namespace).
+
+# The exact 3 statuses the planner picks from — matches the Requests
+# database's own "Status" property values shown in its board view. Kept
+# as a fixed, reviewed list (not fetched live from Notion on every page
+# load) since which statuses make sense for a planner to search is a
+# product decision, not something that should silently change if someone
+# relabels a status option in Notion.
+_NOTION_SEARCH_STATUSES = ["New", "Paused", "Progress"]
+
+
+@app.get("/api/notion/search")
+async def notion_search(status: str) -> dict:
+    """
+    Requests currently at `status` (one of _NOTION_SEARCH_STATUSES) — a
+    lightweight result per page (whatever properties
+    notion_client.page_to_flat_dict finds, generically extracted) for
+    Step 01's picker UI. Returns {"configured": false} rather than a 4xx
+    when the integration has no token/database set, so the frontend can
+    just hide the search UI instead of showing an error for something
+    that's an intentional not-set-up-yet state, not a fault.
+    """
+    if not notion_client.is_configured():
+        return {"configured": False, "results": []}
+    if status not in _NOTION_SEARCH_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {_NOTION_SEARCH_STATUSES}")
+    try:
+        pages = notion_client.query_by_status(status)
+    except notion_client.NotionAPIError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    return {
+        "configured": True,
+        "results": [
+            {"page_id": p["id"], **notion_client.page_to_flat_dict(p)}
+            for p in pages
+        ],
+    }
+
+
+@app.get("/api/notion/page/{page_id}")
+async def notion_get_page(page_id: str) -> dict:
+    """
+    What Step 01 reads once a planner picks a specific search result:
+    both the page's PROPERTIES (for the reference panel) and its BODY
+    TEXT (confirmed by the planner to be literally the same "Label:
+    value" content a paste already contains) — see
+    notion_client.get_page_body_text for why that means zero further
+    parsing is needed; the frontend can feed body_text straight into the
+    same textarea a manual paste fills.
+    """
+    if not notion_client.is_configured():
+        raise HTTPException(status_code=503, detail="Notion integration isn't configured.")
+    try:
+        page = notion_client.get_page(page_id)
+        body_text = notion_client.get_page_body_text(page_id)
+    except notion_client.NotionAPIError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    return {"page_id": page_id, "properties": notion_client.page_to_flat_dict(page), "body_text": body_text}
+
+
+# ---------------------------------------------------------------------------
 # Admin analytics dashboard
 # ---------------------------------------------------------------------------
 # Aggregates come from summary/reopen_state (JSONB columns) rather than
@@ -2001,6 +2067,23 @@ async def admin_analytics(window: str = "all") -> dict:
     if window not in _ANALYTICS_WINDOWS:
         window = "all"
     return compute_admin_analytics(window)
+
+
+@app.get("/api/admin/notion/schema")
+async def admin_notion_schema() -> dict:
+    """
+    One-time setup helper, admin-only (gated by the blanket /api/admin/*
+    rule) — NOT used by Step 01's own search at runtime. Dumps the
+    Requests database's real property names/types/option-lists so the
+    hardcoded property names in app/services/notion_client.py (and any
+    future paste-text field mapping) can be confirmed against reality
+    instead of guessed from a screenshot. Run this once after setting
+    NOTION_API_TOKEN/NOTION_REQUESTS_DATABASE_ID, never on a hot path.
+    """
+    try:
+        return {"properties": notion_client.get_database_schema()}
+    except notion_client.NotionAPIError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
 def _resolve_admin_product_key(product_name: str) -> tuple[str, bool]:

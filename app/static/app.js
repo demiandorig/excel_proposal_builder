@@ -152,9 +152,28 @@ function _grossToNet(gross, fee) {
   return fee ? gross * (1 - fee) : gross;
 }
 
+// Agency fee is meant to be a fraction (0–0.99, e.g. 0.15 for 15%) —
+// _netToGross/_grossToNet above both assume that range. But a planner
+// naturally types "15" for "15%" (the field is just labeled "Agency
+// Fee", no visible "%"), and nothing stopped that raw "15" from being
+// stored and used directly — 1 - 15 = -14, so every "Gross" figure came
+// out negative (the exact bug this fixes). Mirrors notion_parser.py's
+// own _parse_agency_fee(), which already does this same normalization
+// server-side for a fresh Notion paste — this is the shared client-side
+// equivalent for the two places a planner can ALSO set/override the fee
+// directly (this function, and Step 02's own field via syncFormToParsed).
+// Returns null (not 0) for anything blank/unparseable/out-of-range, same
+// "couldn't make sense of it, treat as no fee" convention as the Python side.
+function _normalizeAgencyFee(raw) {
+  if (raw === "" || raw == null) return null;
+  const n = parseFloat(raw);
+  if (isNaN(n)) return null;
+  const frac = n >= 1 ? n / 100 : n;
+  return (frac >= 0 && frac < 1) ? frac : null;
+}
+
 function onCurateAgencyFeeInput(e) {
-  const v = e.target.value;
-  state.parsed.agency_fee = v === "" ? null : parseFloat(v);
+  state.parsed.agency_fee = _normalizeAgencyFee(e.target.value);
   // Keep Step 02's own field in sync so going back there shows the same value.
   const step2Field = document.querySelector('[data-field="agency_fee"]');
   if (step2Field) step2Field.value = e.target.value;
@@ -273,6 +292,139 @@ function renderMyProposalsTable(list) {
       <td><a class="reopen-link" href="/?reopen=${encodeURIComponent(p.proposal_id)}" target="_blank" rel="noopener">Reopen ↗</a></td>
     </tr>
   `).join("");
+}
+
+// --------------------------------------------------------------------------
+// "Search Notion Requests" modal (Step 01) — an alternative to copy-pasting
+// from Notion by hand. Degrades gracefully (a friendly inline note, not an
+// error) when the integration has no token/database configured server-side
+// — see GET /api/notion/search's own "configured: false" response.
+//
+// Selecting a result does NOT auto-fill the paste textarea (see
+// notion_client.py's own module docstring on why field-mapping is a
+// follow-up phase) — it fills the Notion ID field (when the result's own
+// "ID" property parses as digits) and shows every fetched property in a
+// reference panel above the paste box, so a planner can still confirm
+// they picked the right request and copy specific values while pasting
+// the rest from Notion as before.
+// --------------------------------------------------------------------------
+
+const state_notionSearch = { status: "New" };  // module-level, not on the big `state` object — purely transient modal UI state, never sent anywhere or persisted
+
+function openNotionSearchModal() {
+  document.getElementById("notion-search-modal").classList.remove("hidden");
+  loadNotionSearchResults();
+}
+
+function closeNotionSearchModal() {
+  document.getElementById("notion-search-modal").classList.add("hidden");
+}
+
+async function loadNotionSearchResults() {
+  const body = document.getElementById("notion-search-body");
+  body.innerHTML = `<tr><td colspan="5" class="admin-empty"><span class="btn-inline-spinner"></span>Loading…</td></tr>`;
+  document.getElementById("notion-search-count").textContent = "";
+  try {
+    const res = await fetch(`/api/notion/search?status=${encodeURIComponent(state_notionSearch.status)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    if (!data.configured) {
+      body.innerHTML = `<tr><td colspan="5" class="admin-empty">Notion search isn't set up yet — ask an admin to configure it.</td></tr>`;
+      return;
+    }
+    renderNotionSearchTable(data.results || []);
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="5" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+// Every Notion database's own property names vary — read generically
+// rather than assuming exact keys, so this doesn't break if a column
+// gets renamed on the Notion side. Falls back to "—" for anything absent.
+function _notionField(result, ...candidateNames) {
+  for (const name of candidateNames) {
+    if (result[name] != null && result[name] !== "") return result[name];
+  }
+  return null;
+}
+
+function renderNotionSearchTable(list) {
+  const body = document.getElementById("notion-search-body");
+  document.getElementById("notion-search-count").textContent = `${list.length} request${list.length === 1 ? "" : "s"}`;
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="5" class="admin-empty">No requests at this status.</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map(r => {
+    const name = _notionField(r, "Project Name", "Name") || "(untitled)";
+    const id = _notionField(r, "ID");
+    const owner = _notionField(r, "Owner");
+    const due = _notionField(r, "Due Date");
+    return `
+    <tr>
+      <td>${escapeHtml(name)}</td>
+      <td class="mono">${escapeHtml(id != null ? String(id) : "—")}</td>
+      <td>${escapeHtml(Array.isArray(owner) ? owner.join(", ") : (owner || "—"))}</td>
+      <td class="mono">${escapeHtml(due ? formatDate(due) : "—")}</td>
+      <td><button type="button" class="btn-secondary notion-select-btn" data-page-id="${escapeAttr(r.page_id)}">Select</button></td>
+    </tr>`;
+  }).join("");
+  body.querySelectorAll(".notion-select-btn").forEach(btn => {
+    btn.addEventListener("click", () => onSelectNotionResult(btn.dataset.pageId));
+  });
+}
+
+async function onSelectNotionResult(pageId) {
+  const textarea = document.getElementById("notion-input");
+  // Selecting a result REPLACES the paste box — confirm first if the
+  // planner already has real manual work sitting there, same "don't
+  // silently overwrite in-progress input" rule as any other destructive
+  // action in this app.
+  if (textarea.value.trim() && !confirm("This will replace the text currently in the paste box below. Continue?")) {
+    return;
+  }
+  const btn = document.querySelector(`.notion-select-btn[data-page-id="${CSS.escape(pageId)}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = "Loading…"; }
+  try {
+    const res = await fetch(`/api/notion/page/${encodeURIComponent(pageId)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    applyNotionReference(data.properties || {}, data.body_text || "");
+    closeNotionSearchModal();
+  } catch (e) {
+    alert("Could not load that request: " + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = "Select"; }
+  }
+}
+
+// Extracts just the digits from an "ID" value shaped like "EVC-3003" (or
+// a bare number) — matches the notion-id-input's own digits-only format.
+function _digitsFromNotionId(raw) {
+  if (raw == null) return "";
+  return String(raw).replace(/\D/g, "").slice(0, 5);
+}
+
+// bodyText: the Notion page's own body content, already in the SAME
+// "Label: value" plain-text shape a manual paste has (confirmed by the
+// planner — see notion_client.get_page_body_text's own docstring) — fed
+// directly into the SAME textarea/Parse flow a copy-paste already uses,
+// so parse_notion() needs zero changes to handle either source.
+function applyNotionReference(properties, bodyText) {
+  const idDigits = _digitsFromNotionId(_notionField(properties, "ID"));
+  if (idDigits) document.getElementById("notion-id-input").value = idDigits;
+
+  if (bodyText) document.getElementById("notion-input").value = bodyText;
+
+  const title = _notionField(properties, "Project Name", "Name") || "(untitled)";
+  document.getElementById("notion-reference-title").textContent = title;
+
+  const fieldsEl = document.getElementById("notion-reference-fields");
+  const entries = Object.entries(properties).filter(([k, v]) => v != null && v !== "" && k !== "Project Name" && k !== "Name");
+  fieldsEl.innerHTML = entries.map(([k, v]) => `
+    <div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(Array.isArray(v) ? v.join(", ") : String(v))}</dd></div>
+  `).join("");
+
+  document.getElementById("notion-reference-panel").classList.remove("hidden");
 }
 
 // --------------------------------------------------------------------------
@@ -482,6 +634,24 @@ function wireEvents() {
     loadMyProposals();
   });
 
+  // "Search Notion Requests" modal (Step 01)
+  document.getElementById("notion-search-btn").addEventListener("click", openNotionSearchModal);
+  document.getElementById("notion-search-close-btn").addEventListener("click", closeNotionSearchModal);
+  document.getElementById("notion-search-modal").addEventListener("click", (e) => {
+    if (e.target.id === "notion-search-modal") closeNotionSearchModal();  // backdrop click
+  });
+  document.querySelectorAll("#notion-search-status-tabs .tier-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (state_notionSearch.status === btn.dataset.status) return;
+      state_notionSearch.status = btn.dataset.status;
+      document.querySelectorAll("#notion-search-status-tabs .tier-tab").forEach(b => b.classList.toggle("active", b === btn));
+      loadNotionSearchResults();
+    });
+  });
+  document.getElementById("notion-reference-close-btn").addEventListener("click", () => {
+    document.getElementById("notion-reference-panel").classList.add("hidden");
+  });
+
   // Notion ID — digits only, max 5
   document.getElementById("notion-id-input").addEventListener("input", (e) => {
     e.target.value = e.target.value.replace(/\D/g, "").slice(0, 5);
@@ -582,6 +752,14 @@ function wireEvents() {
     state.activeTierEndDate = e.target.value.trim() || null;
   });
   document.getElementById("curate-agency-fee-input").addEventListener("input", onCurateAgencyFeeInput);
+  // On blur (not on every keystroke, which would fight an in-progress
+  // "0.15" being typed digit-by-digit): re-display whatever the
+  // NORMALIZED value actually is, so a planner who typed "15" sees it
+  // become "0.15" once they're done — visible confirmation of the
+  // interpretation, not a silent invisible conversion.
+  document.getElementById("curate-agency-fee-input").addEventListener("blur", (e) => {
+    e.target.value = state.parsed.agency_fee != null ? state.parsed.agency_fee : "";
+  });
 
   // Avails — copy from another budget option
   document.getElementById("copy-avails-btn").addEventListener("click", onCopyAvails);
@@ -1077,6 +1255,15 @@ function syncFormToParsed() {
     const f = el.dataset.field;
     if (el.type === "checkbox") {
       state.parsed[f] = el.checked;
+      return;
+    }
+    // agency_fee needs the same "15" -> 0.15 normalization
+    // onCurateAgencyFeeInput applies — this is the OTHER place a planner
+    // can set/override it directly (Step 02's own field), and without
+    // this it fed a raw whole-number percent straight into
+    // _netToGross/_grossToNet the moment Step 04 rendered, same bug.
+    if (f === "agency_fee") {
+      state.parsed[f] = _normalizeAgencyFee(el.value);
       return;
     }
     let v = el.value;

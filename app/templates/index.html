@@ -59,6 +59,39 @@
     </div>
   </div>
 
+  <!-- "Search Notion Requests" — Step 01's alternative to copy-pasting
+       from Notion by hand. Degrades gracefully to a friendly inline note
+       when NOTION_API_TOKEN/NOTION_REQUESTS_DATABASE_ID aren't set (see
+       GET /api/notion/search's own "configured: false" response) rather
+       than hiding the button outright — a planner clicking it either way
+       is a normal, harmless action, never a dead end. -->
+  <div id="notion-search-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2>Search Notion Requests</h2>
+        <button type="button" class="modal-close-btn" id="notion-search-close-btn" title="Close">✕</button>
+      </div>
+      <div class="admin-toolbar">
+        <div class="tier-tabs" id="notion-search-status-tabs">
+          <button type="button" class="tier-tab active" data-status="New">New</button>
+          <button type="button" class="tier-tab" data-status="Paused">Paused</button>
+          <button type="button" class="tier-tab" data-status="Progress">Progress</button>
+        </div>
+        <span class="admin-count" id="notion-search-count"></span>
+      </div>
+      <div class="table-scroll">
+        <table class="admin-table" id="notion-search-table">
+          <thead>
+            <tr><th>Project Name</th><th>ID</th><th>Owner</th><th>Due Date</th><th></th></tr>
+          </thead>
+          <tbody id="notion-search-body">
+            <tr><td colspan="5" class="admin-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
   <header class="masthead">
     <div class="masthead-inner">
       <a class="brand" href="#" id="logo-reset" title="Start new proposal">
@@ -115,7 +148,10 @@
           <h1 class="display">Paste the Notion request</h1>
           <p class="lede">Start with the Notion request ID, then copy the full request text below. The parser handles markdown formatting, blank fields, and both Avails-Only and Renewal branches.</p>
         </div>
-        <button type="button" class="btn-secondary" id="my-proposals-btn">📜 My Proposal History</button>
+        <div class="panel-head-actions">
+          <button type="button" class="btn-secondary" id="notion-search-btn">🔍 Search Notion Requests</button>
+          <button type="button" class="btn-secondary" id="my-proposals-btn">📜 My Proposal History</button>
+        </div>
       </div>
 
       <div class="notion-id-row">
@@ -127,6 +163,21 @@
                    placeholder="48213" pattern="[0-9]{4,5}" />
           </div>
         </label>
+      </div>
+
+      <!-- Filled after picking a result from the Search Notion modal —
+           the page's own database PROPERTIES (Owner/Status/Due Date/etc.,
+           shown generically since this database's exact column names
+           aren't hardcoded), for context the paste text itself doesn't
+           carry. The paste box below gets the page's BODY content
+           directly (same "Label: value" text a manual copy-paste already
+           has) — review it like any other paste before hitting Parse. -->
+      <div class="notion-reference-panel hidden" id="notion-reference-panel">
+        <div class="notion-reference-head">
+          <span>From Notion — <strong id="notion-reference-title"></strong> <small>(pasted into the box below — review before parsing)</small></span>
+          <button type="button" class="modal-close-btn" id="notion-reference-close-btn" title="Dismiss">✕</button>
+        </div>
+        <dl class="notion-reference-fields" id="notion-reference-fields"></dl>
       </div>
 
       <div class="paste-area">

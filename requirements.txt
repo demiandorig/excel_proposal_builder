@@ -9,6 +9,7 @@ openai>=1.50   # needs the Responses API (client.responses) for Step 05's web_se
 python-docx>=1.1
 python-pptx>=1.0   # the Net/Gross signature-ready PowerPoint export (Step 07)
 python-dotenv>=1.0   # loads .env at startup (OPENAI_API_KEY, DRIVE_* creds, etc.)
+requests>=2.31   # app/services/notion_client.py — the Step 01 "search Notion requests" integration
 
 # Optional — only needed if you want the /api/drive/upload endpoint to
 # actually upload to Google Drive. Without these installed (or without the
