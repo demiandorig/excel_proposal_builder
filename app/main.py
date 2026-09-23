@@ -13,6 +13,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -72,6 +73,7 @@ from app.services import ai_enricher
 from app.services import docx_builder
 from app.services import pptx_builder
 from app.services import strategy_brief as strategy_brief_svc
+from app.services import ad_presence as ad_presence_svc
 from app.services import roadblocks as roadblocks_svc
 from app.services import monthly_allocation
 from app.services import notion_client
@@ -567,6 +569,13 @@ class StrategyRequest(BaseModel):
     # from-scratch recommendation instead of a rationale for what's
     # already selected. See strategy_brief.generate_brief()'s own docstring.
     mode: str = "consistent"
+    # A prior /api/ad-presence result to fold into the brief on regenerate.
+    ad_presence: Optional[dict] = None
+
+
+class AdPresenceRequest(BaseModel):
+    client_name: str = ""
+    client_website: str = ""
 
 
 class RecommendRequest(BaseModel):
@@ -726,7 +735,8 @@ async def strategy(body: StrategyRequest) -> dict:
     valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
     raw = {k: v for k, v in raw.items() if k in valid_fields}
     req = ProposalRequest(**raw)
-    brief = await strategy_brief_svc.generate_brief(req, reprompt=body.reprompt, mode=body.mode)
+    brief = await strategy_brief_svc.generate_brief(req, reprompt=body.reprompt, mode=body.mode,
+                                                    ad_presence=body.ad_presence)
 
     doc_token: Optional[str] = None
     if brief.get("strategy_summary") or brief.get("recommended_tactics"):
@@ -769,6 +779,23 @@ async def strategy(body: StrategyRequest) -> dict:
 
     brief["doc_token"] = doc_token
     return brief
+
+
+@app.post("/api/ad-presence")
+async def ad_presence_check(body: AdPresenceRequest) -> dict:
+    """Optional, on-demand Meta/Google/TikTok ad-library check, run from Step 03 after the brief."""
+    name, website = body.client_name.strip(), body.client_website.strip()
+    if not (name or website):
+        raise HTTPException(status_code=400, detail="Client name or website required.")
+    # Backstop only: the check applies its own 60s per-platform budget and returns partial results.
+    try:
+        result = await asyncio.wait_for(ad_presence_svc.check_ad_presence(name, website), timeout=90)
+    except Exception as exc:
+        message = "timed out after 90s" if isinstance(exc, asyncio.TimeoutError) else (str(exc) or type(exc).__name__)
+        result = {"error": message, "summary": "", "meta": {}, "google": {}, "tiktok": {}}
+    result["checked_at"] = datetime.now(timezone.utc).isoformat()
+    result["inputs"] = {"client_name": name, "client_website": website}
+    return result
 
 
 @app.get("/api/download-strategy/{doc_token}")
@@ -867,7 +894,8 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
         for li in body.line_items
     ]
 
-    result = roadblocks_svc.generate_roadblocks(req, line_items, strategy_brief=body.strategy_brief)
+    result = await asyncio.to_thread(
+        roadblocks_svc.generate_roadblocks, req, line_items, strategy_brief=body.strategy_brief)
 
     doc_token: Optional[str] = None
     if result.get("product_roadblocks"):
@@ -1091,7 +1119,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     tier_context = [
         {"label": t["label"], "name": t.get("name"), "line_items": t["line_items"]} for t in tiers
     ] if multi_tier else None
-    enrichment = ai_enricher.enrich_proposal(
+    enrichment = await asyncio.to_thread(
+        ai_enricher.enrich_proposal,
         req, union_line_items, short_id, strategy_brief=body.strategy_brief, tiers=tier_context,
     )
     # A planner-set name override wins over whatever the AI itself guessed
@@ -1390,7 +1419,8 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
         for li in body.line_items
     ]
 
-    result = ai_enricher.reprompt_emails(
+    result = await asyncio.to_thread(
+        ai_enricher.reprompt_emails,
         req, line_items, body.campaign_name,
         body.current_internal_subject, body.current_internal_body,
         body.current_client_subject, body.current_client_body,
@@ -1430,7 +1460,7 @@ async def refine_gamma_outline_endpoint(body: GammaOutlineRefineRequest) -> dict
     app.js's buildGammaOutline, no fetch at all) and stays that way; this
     endpoint only runs when the planner explicitly clicks "Refine".
     """
-    return ai_enricher.refine_gamma_outline(body.outline, body.reprompt)
+    return await asyncio.to_thread(ai_enricher.refine_gamma_outline, body.outline, body.reprompt)
 
 
 @app.get("/api/download/{proposal_id}")

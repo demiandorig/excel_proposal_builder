@@ -199,6 +199,11 @@ _AD_PRESENCE_LABELS = {"meta": "Meta (Facebook/Instagram)", "google": "Google Ad
 
 def _ad_presence_line(platform_result: dict) -> str:
     r = platform_result or {}
+    status = r.get("status")
+    if status == "unsupported":
+        return f"not verifiable automatically. {r.get('note', '')}".strip()
+    if status == "error":
+        return f"check failed. {r.get('note', '')}".strip()
     if not r.get("checked"):
         return f"not checked ({r.get('note') or 'skipped'})"
     if not r.get("active"):
@@ -209,8 +214,17 @@ def _ad_presence_line(platform_result: dict) -> str:
         parts = [f"{round(p * 100)}% {_AD_PRESENCE_LANG_LABELS.get(c, c)}"
                   for c, p in sorted(langs.items(), key=lambda kv: -kv[1])]
         lang_str = f" — ad copy sampled as {', '.join(parts)}"
-    count = r.get("high_confidence_count") or r.get("ad_count_estimate") or r.get("ad_count_estimate_display") or "some"
-    return f"ACTIVE, ~{count} ad(s) found{lang_str}"
+    # Same wording as ad_presence.active_count_phrase: Meta/TikTok counts are a
+    # first-page floor; Google's is the Transparency Center's own estimate.
+    confirmed = r.get("high_confidence_count") or 0
+    estimate = str(r.get("ad_count_estimate_display") or r.get("ad_count_estimate") or "").strip("~ ")
+    if confirmed:
+        count = f"at least {confirmed} ad{'' if confirmed == 1 else 's'} running"
+    elif estimate and estimate != "0":
+        count = f"~{estimate} ads running"
+    else:
+        count = "ads running"
+    return f"ACTIVE, {count}{lang_str}"
 
 
 def _ad_presence_section(doc, ad_presence: dict) -> None:
@@ -225,8 +239,8 @@ def _ad_presence_section(doc, ad_presence: dict) -> None:
     p.add_run("Digital Ad Presence").bold = True
     note_p = doc.add_paragraph()
     note_run = note_p.add_run(
-        "Live-checked against Meta, Google & TikTok's public ad libraries — "
-        "Meta/Google are reliable signals, TikTok's commercial-ad coverage is thin."
+        "Checked against Meta's Ad Library and Google's Ads Transparency Center. "
+        "TikTok's public library only covers ads shown in the EU/UK, so US activity can't be verified."
     )
     note_run.italic = True
 
@@ -237,6 +251,16 @@ def _ad_presence_section(doc, ad_presence: dict) -> None:
         line_p = doc.add_paragraph(style="List Bullet")
         line_p.add_run(f"{_AD_PRESENCE_LABELS[key]}: ").bold = True
         line_p.add_run(_ad_presence_line(r))
+        if key == "meta" and r.get("active"):
+            for ad in [a for a in (r.get("sample_ads") or []) if a.get("confidence") == "high"][:3]:
+                body = (ad.get("body") or ad.get("raw_text") or "").strip()
+                if len(body) > 150:
+                    body = body[:150].rstrip() + "…"
+                started = f" (started {ad['started_running_on']})" if ad.get("started_running_on") else ""
+                ad_p = doc.add_paragraph()
+                ad_p.paragraph_format.left_indent = Pt(24)
+                ad_p.add_run(f"{ad.get('page_name') or ad.get('page_name_guess') or 'Ad'}{started}: ").italic = True
+                ad_p.add_run(body)
 
 
 def build_strategy_brief_docx(

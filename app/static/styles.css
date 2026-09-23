@@ -316,12 +316,14 @@ html, body {
 
 .panel-actions {
   display: flex;
+  flex-wrap: wrap;  /* Step 03 has six buttons; wrap on narrow windows instead of pushing the page sideways */
   justify-content: space-between;
   gap: 16px;
   margin-top: 32px;
   padding-top: 24px;
   border-top: 1px solid var(--rule-soft);
 }
+.panel-actions > .btn-primary:last-child { margin-left: auto; }  /* stays right-aligned when wrapped */
 
 /* ----- Notion ID pill (Step 2 header) ----- */
 .notion-id-pill {
@@ -1047,6 +1049,25 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   border-radius: var(--radius);
   background: var(--paper-card);
   box-sizing: border-box;
+}
+.line-items .col-share-header { white-space: nowrap; }
+.line-items .col-share { white-space: nowrap; }
+.share-wrap { display: inline-flex; align-items: center; gap: 3px; }
+.line-items input.share-input {
+  width: 58px;
+  min-width: 58px;
+  text-align: right;
+  font-size: 12.5px;
+}
+.line-items input.share-input:disabled {
+  background: var(--paper-warm);
+  color: var(--ink-faint);
+  border-style: dashed;
+}
+.share-suffix, .share-na {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
 }
 .line-items textarea {
   font-family: var(--font-body);
@@ -2121,8 +2142,75 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   white-space: nowrap;
 }
 .adpresence-status.active { color: var(--green); background: var(--green-soft); }
-.adpresence-status.inconclusive { color: var(--amber); background: var(--amber-soft); }
-.adpresence-status.none { color: var(--ink-faint); background: var(--paper-warm); }
+.adpresence-status.error { color: var(--amber); background: var(--amber-soft); }
+.adpresence-status.not_found,
+.adpresence-status.unsupported,
+.adpresence-status.not_checked { color: var(--ink-faint); background: var(--paper-warm); }
+.adpresence-run-btn { margin-left: auto; }
+.adpresence-status-line {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  margin: -2px 0 2px;
+}
+.adpresence-callout {
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+}
+.adpresence-more summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.adpresence-more-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.adpresence-ad {
+  border-top: 1px solid var(--rule-soft);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.adpresence-ad-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+.adpresence-ad-headline { font-weight: 600; }
+.adpresence-ad-body { color: var(--ink-soft); white-space: pre-wrap; }
+.adpresence-ad-meta,
+.adpresence-queries {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+}
+.adpresence-conf {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+  color: var(--ink-faint);
+}
+.adpresence-conf.conf-high { color: var(--green); }
+.adpresence-weak summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.adpresence-open-link {
+  font-size: 12px;
+  color: var(--accent);
+}
 .adpresence-detail {
   font-size: 12.5px;
   line-height: 1.5;

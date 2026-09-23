@@ -706,6 +706,7 @@ function wireEvents() {
   // planner can always Regenerate back to the consistent-with-Step-02
   // default afterward, so this isn't a destructive/hard-to-undo action.
   document.getElementById("strategy-new-mix-btn").addEventListener("click", () => onStrategyGenerate(null, "new_mix"));
+  document.getElementById("adpresence-run-btn").addEventListener("click", onAdPresenceCheck);
   document.getElementById("reprompt-btn").addEventListener("click", () => {
     document.getElementById("reprompt-area").classList.remove("hidden");
     document.getElementById("reprompt-btn").style.display = "none";
@@ -753,6 +754,17 @@ function wireEvents() {
   document.getElementById("add-product-btn").addEventListener("click", onAddProduct);
   document.getElementById("step2-add-product-btn").addEventListener("click", onAddParsedProduct);
   document.getElementById("recommend-btn").addEventListener("click", onRecommend);
+  document.getElementById("scale-to-total-btn").addEventListener("click", onScaleToTotal);
+  const budgetTarget = document.getElementById("total-budget-target");
+  budgetTarget.addEventListener("focus", () => {
+    const raw = parseFormattedInput(budgetTarget.value);
+    budgetTarget.value = raw === null ? "" : String(raw);
+  });
+  budgetTarget.addEventListener("blur", () => {
+    const raw = parseFormattedInput(budgetTarget.value);
+    budgetTarget.value = raw === null ? "" : formatBudgetInputValue(raw);
+  });
+  budgetTarget.addEventListener("keydown", e => { if (e.key === "Enter") budgetTarget.blur(); });
   document.getElementById("add-tier-btn").addEventListener("click", () => addTier());
   document.getElementById("tier-geo-input").addEventListener("input", (e) => {
     state.activeTierGeo = e.target.value.trim() || null;
@@ -1075,7 +1087,7 @@ function onNext(n) {
     // Pre-populate budget + line items for Curate step
     const budget = state.parsed.monthly_budget || parseBudgetFromRenewal(state.parsed);
     if (budget) {
-      document.getElementById("total-budget-target").value = budget;
+      document.getElementById("total-budget-target").value = formatBudgetInputValue(Number(budget));
     }
     // Reference/override box — pre-filled from Step 02's parsed value so
     // the planner sees what was inferred without flipping back a step;
@@ -1393,26 +1405,53 @@ async function onStrategyGenerate(reprompt = null, mode = "consistent") {
     const res = await fetch("/api/strategy", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ request: state.parsed, reprompt, mode }),
+      body: JSON.stringify({ request: state.parsed, reprompt, mode, ad_presence: _adPresenceToCarry() }),
     });
-    const brief = await res.json();
+    const brief = await _readJsonResponse(res);
     loadingEl.classList.add("hidden");
 
     if (brief.error && !brief.strategy_summary) {
-      const errEl = document.getElementById("strategy-error");
-      errEl.classList.remove("hidden");
-      errEl.innerHTML = `<strong>Strategy brief unavailable:</strong> ${escapeHtml(brief.error)}<br>
-        <small>Set <code>OPENAI_API_KEY</code> to enable this step. You can skip and curate manually.</small>`;
+      _showStrategyError(brief.error);
       return;
     }
 
     renderStrategyBrief(brief);
   } catch (e) {
-    document.getElementById("strategy-loading").classList.add("hidden");
-    const errEl = document.getElementById("strategy-error");
-    errEl.classList.remove("hidden");
-    errEl.textContent = "Request failed: " + e.message;
+    loadingEl.classList.add("hidden");
+    _showStrategyError("Request failed: " + e.message);
   }
+}
+
+// A proxy timeout or crash returns HTML, not JSON — surface the HTTP status instead of "Unexpected token <".
+async function _readJsonResponse(res) {
+  let data;
+  try {
+    data = await res.json();
+  } catch (_) {
+    throw new Error(res.ok ? "the server sent an unreadable response" : `server returned ${res.status} ${res.statusText}`);
+  }
+  if (!res.ok) throw new Error(data.detail || `server returned ${res.status} ${res.statusText}`);
+  return data;
+}
+
+function _showStrategyError(message) {
+  const errEl = document.getElementById("strategy-error");
+  errEl.classList.remove("hidden");
+  const keyMissing = /OPENAI_API_KEY|openai package/i.test(message);
+  errEl.innerHTML = `<strong>Strategy brief unavailable:</strong> ${escapeHtml(message)}<br>
+    <small>${keyMissing ? "Set <code>OPENAI_API_KEY</code> to enable this step. You can" : "Click Regenerate to try again, or"} skip and curate manually.</small>`;
+  if (!keyMissing) document.getElementById("strategy-regenerate-btn").style.display = "";
+}
+
+// A prior on-demand check is only reused if it was run for the same client name/website.
+function _adPresenceToCarry() {
+  const ap = state.strategyBrief && state.strategyBrief.ad_presence;
+  if (!ap || !_adPresenceHasResults(ap)) return null;
+  if (!ap.inputs) return ap;
+  const p = state.parsed || {};
+  const same = (ap.inputs.client_name || "") === (p.client_name || "").trim()
+    && (ap.inputs.client_website || "") === (p.client_website || "").trim();
+  return same ? ap : null;
 }
 
 async function onStrategyReprompt() {
@@ -1422,6 +1461,15 @@ async function onStrategyReprompt() {
 }
 
 function renderStrategyBrief(brief) {
+  // A check that finished after this brief was requested still belongs to it.
+  let adPresenceFresh = false;
+  if (state.strategyBrief && state.strategyBrief !== brief && !_adPresenceHasResults(brief.ad_presence)) {
+    const carried = _adPresenceToCarry();
+    if (carried) {
+      brief.ad_presence = carried;
+      adPresenceFresh = true;
+    }
+  }
   state.strategyBrief = brief;
 
   const noteEl = document.getElementById("strategy-search-note");
@@ -1436,7 +1484,8 @@ function renderStrategyBrief(brief) {
   setText("brief-market-context", brief.market_context || "");
   setText("brief-objectives", brief.objectives_analysis || "");
   setText("brief-strategy-summary", brief.strategy_summary || "");
-  renderAdPresence(brief.ad_presence || {});
+  renderAdPresence(brief.ad_presence || null, { fresh: adPresenceFresh });
+  if (adPresenceFresh) _debouncedRebuildStrategyDoc();
 
   // Budget note
   const budget = state.parsed.monthly_budget || parseBudgetFromRenewal(state.parsed) || 0;
@@ -1569,58 +1618,195 @@ const _debouncedRebuildStrategyDoc = _debounce(async () => {
 
 const AD_PRESENCE_LANG_LABELS = { en: "English", es: "Spanish" };
 
-function renderAdPresence(adPresence) {
+const AD_PRESENCE_STATUS_LABELS = {
+  active: "ACTIVE", not_found: "NOT FOUND", unsupported: "NOT VERIFIABLE",
+  error: "CHECK FAILED", not_checked: "NOT CHECKED",
+};
+
+function _adPresenceHasResults(ap) {
+  return !!(ap && (ap.meta || ap.google || ap.tiktok) && ["meta", "google", "tiktok"].some(k => ap[k] && Object.keys(ap[k]).length));
+}
+
+// Older saved briefs predate the `status` field (and TikTok's old "inconclusive" wording).
+function _adPresenceStatus(r) {
+  if (r.status) return r.status;
+  if (!r.checked) return r.note ? "error" : "not_checked";
+  if (r.active) return "active";
+  return (r.note || "").toLowerCase().includes("inconclusive") ? "unsupported" : "not_found";
+}
+
+function _safeHttpUrl(url) {
+  return typeof url === "string" && /^https?:\/\//i.test(url) ? url : "";
+}
+
+function _adLangChips(langs) {
+  return Object.entries(langs || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([code, pct]) => `<span class="adpresence-lang-chip">${Math.round(pct * 100)}% ${escapeHtml(AD_PRESENCE_LANG_LABELS[code] || code)}</span>`)
+    .join("");
+}
+
+function _adPresenceHeadline(key, r, status) {
+  if (status !== "active") return r.note || "Not checked.";
+  if (key === "google") {
+    const count = r.ad_count_estimate_display ? `~${r.ad_count_estimate_display} ads` : "Ads found";
+    const advertisers = (r.advertisers || []).slice(0, 3).join(", ");
+    return advertisers ? `${count} · ${advertisers}` : count;
+  }
+  // Only the first page of library results is read, so this is a floor, not the client's total.
+  const n = r.high_confidence_count || (r.sample_ads || []).filter(a => a.confidence === "high").length;
+  const source = key === "meta" ? "a matching Page" : "a matching advertiser";
+  const total = r.result_count_estimate ? ` · ${r.result_count_estimate} for this search` : "";
+  return n ? `At least ${n} ad${n === 1 ? "" : "s"} from ${source}${total}` : `Ads from ${source}${total}`;
+}
+
+function _adSampleHtml(ad) {
+  const body = ad.body || ad.raw_text || "";
+  const shortBody = body.length > 280 ? body.slice(0, 280).trimEnd() + "…" : body;
+  const link = _safeHttpUrl(ad.library_url);
+  const meta = [
+    ad.started_running_on ? `Started ${escapeHtml(ad.started_running_on)}` : "",
+    ad.language ? escapeHtml(AD_PRESENCE_LANG_LABELS[ad.language] || ad.language) : "",
+    ad.destination_domain ? escapeHtml(ad.destination_domain) : "",
+    ad.cta ? `CTA: ${escapeHtml(ad.cta)}` : "",
+    ad.has_versions ? "multiple versions" : "",
+  ].filter(Boolean).join(" · ");
+  return `
+    <div class="adpresence-ad">
+      <div class="adpresence-ad-head">
+        <strong>${escapeHtml(ad.page_name || ad.page_name_guess || "Unknown Page")}</strong>
+        <span class="adpresence-conf conf-${escapeAttr(ad.confidence || "low")}">${escapeHtml(ad.confidence || "low")} match</span>
+      </div>
+      ${ad.headline ? `<div class="adpresence-ad-headline">${escapeHtml(ad.headline)}</div>` : ""}
+      ${shortBody ? `<div class="adpresence-ad-body">${escapeHtml(shortBody)}</div>` : ""}
+      <div class="adpresence-ad-meta">${meta}${link ? `${meta ? " · " : ""}<a href="${escapeHtml(link)}" target="_blank" rel="noopener">Open in Ad Library ↗</a>` : ""}</div>
+    </div>`;
+}
+
+function _adPresenceDetailsHtml(key, r, status) {
+  const parts = [];
+  if (key === "meta") {
+    const ads = r.sample_ads || [];
+    const strong = ads.filter(a => a.confidence === "high");
+    const weak = ads.filter(a => a.confidence !== "high");
+    if (strong.length) parts.push(strong.map(_adSampleHtml).join(""));
+    if (weak.length) {
+      parts.push(`<details class="adpresence-weak"><summary>Other advertisers mentioning the client (${weak.length})</summary>${weak.map(_adSampleHtml).join("")}</details>`);
+    }
+    if ((r.queries_tried || []).length) {
+      parts.push(`<div class="adpresence-queries">Searched: ${r.queries_tried.map(q => escapeHtml(q)).join(" · ")}</div>`);
+    }
+  }
+  if (key === "google" && (r.advertisers || []).length) {
+    parts.push(`<div class="adpresence-queries">Verified advertisers: ${r.advertisers.map(a => escapeHtml(a)).join(", ")}</div>`);
+    parts.push(`<div class="adpresence-queries">Google doesn't expose ad copy on this page — open the Transparency Center to see creatives.</div>`);
+  }
+  const link = _safeHttpUrl(r.search_url || r.library_url || (r.search_urls || [])[0]);
+  if (link) {
+    const label = key === "meta" ? "Meta Ad Library" : key === "google" ? "Ads Transparency Center" : "TikTok Ad Library";
+    parts.push(`<a class="adpresence-open-link" href="${escapeHtml(link)}" target="_blank" rel="noopener">Open ${label} ↗</a>`);
+  }
+  return parts.join("");
+}
+
+function renderAdPresence(adPresence, { fresh = false } = {}) {
   const el = document.getElementById("brief-ad-presence");
+  const statusEl = document.getElementById("brief-ad-presence-status");
+  const btn = document.getElementById("adpresence-run-btn");
   if (!el) return;
 
-  const platforms = [
-    ["meta", "Meta (FB/IG)", adPresence.meta],
-    ["google", "Google Ads", adPresence.google],
-    ["tiktok", "TikTok", adPresence.tiktok],
-  ];
-
-  el.innerHTML = platforms.map(([key, label, r]) => {
-    r = r || {};
-    let statusClass = "none";
-    let statusLabel = "NOT CHECKED";
-    let detail = r.note || "Not checked for this proposal.";
-
-    if (r.checked) {
-      if (r.active) {
-        statusClass = "active";
-        statusLabel = "ACTIVE";
-        const count = r.high_confidence_count || r.ad_count_estimate || r.ad_count_estimate_display || "some";
-        if (key === "google") {
-          detail = `~${count} ads` + (r.advertisers && r.advertisers.length ? ` · ${r.advertisers.slice(0, 3).join(", ")}` : "");
-        } else {
-          detail = `~${count} ad(s) found`;
-        }
-      } else if ((r.note || "").toLowerCase().includes("inconclusive")) {
-        statusClass = "inconclusive";
-        statusLabel = "INCONCLUSIVE";
-      } else {
-        statusClass = "none";
-        statusLabel = "NOT FOUND";
-      }
+  if (!_adPresenceHasResults(adPresence)) {
+    el.innerHTML = "";
+    if (btn) btn.textContent = "Check digital ad presence";
+    if (statusEl) {
+      statusEl.classList.remove("hidden");
+      statusEl.textContent = adPresence && adPresence.error
+        ? `The check couldn't run: ${adPresence.error}`
+        : "Not checked yet — takes about 10–20 seconds and shows the client's current Meta and Google ads, including sample ad copy.";
     }
+    return;
+  }
 
-    const langs = r.languages || {};
-    const langChips = Object.entries(langs)
-      .sort((a, b) => b[1] - a[1])
-      .map(([code, pct]) => `<span class="adpresence-lang-chip">${Math.round(pct * 100)}% ${escapeHtml(AD_PRESENCE_LANG_LABELS[code] || code)}</span>`)
-      .join("");
+  if (btn) btn.textContent = "↻ Re-check";
+  if (statusEl) {
+    const when = adPresence.checked_at ? new Date(adPresence.checked_at).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+    const took = adPresence.elapsed_seconds ? ` · ${Math.round(adPresence.elapsed_seconds)}s` : "";
+    const hint = fresh ? " · Regenerate the brief to fold these findings into the strategy." : "";
+    statusEl.classList.toggle("hidden", !(when || hint));
+    statusEl.textContent = `${when ? `Checked ${when}` : ""}${took}${hint}`.replace(/^ · /, "");
+  }
 
+  const platforms = [["meta", "Meta (FB/IG)"], ["google", "Google Ads"], ["tiktok", "TikTok"]];
+  el.innerHTML = platforms.map(([key, label]) => {
+    const r = adPresence[key] || {};
+    const status = _adPresenceStatus(r);
+    const langChips = _adLangChips(r.languages);
+    const details = _adPresenceDetailsHtml(key, r, status);
+    const statusLabel = key === "tiktok" && status === "unsupported" ? "NOT VERIFIABLE (US)" : AD_PRESENCE_STATUS_LABELS[status] || status.toUpperCase();
     return `
       <div class="adpresence-card">
         <div class="adpresence-card-head">
           <span class="adpresence-platform">${escapeHtml(label)}</span>
-          <span class="adpresence-status ${statusClass}">${statusLabel}</span>
+          <span class="adpresence-status ${escapeAttr(status)}">${escapeHtml(statusLabel)}</span>
         </div>
-        <div class="adpresence-detail">${escapeHtml(detail)}</div>
+        <div class="adpresence-detail">${escapeHtml(_adPresenceHeadline(key, r, status))}</div>
         ${langChips ? `<div class="adpresence-langs">${langChips}</div>` : ""}
+        ${_spanishGapCallout(key, r, status)}
+        ${details ? `<details class="adpresence-more"><summary>View details</summary><div class="adpresence-more-body">${details}</div></details>` : ""}
       </div>
     `;
   }).join("");
+}
+
+// Only a hint from the sampled ads, not proof the client runs no Spanish creative anywhere.
+function _spanishGapCallout(key, r, status) {
+  if (key !== "meta" || status !== "active") return "";
+  const p = state.parsed || {};
+  const targetsSpanish = /spanish|hispanic|latin/i.test(`${p.language || ""} ${p.demo || ""} ${p.behavioral || ""}`);
+  const langs = r.languages || {};
+  if (!targetsSpanish || !Object.keys(langs).length || langs.es) return "";
+  return `<div class="adpresence-callout">No Spanish-language copy in the sampled ads — a possible Entravision opening.</div>`;
+}
+
+async function onAdPresenceCheck() {
+  const brief = state.strategyBrief;
+  if (!brief) return;
+  const p = state.parsed || {};
+  const btn = document.getElementById("adpresence-run-btn");
+  const statusEl = document.getElementById("brief-ad-presence-status");
+  if (!(p.client_name || "").trim() && !(p.client_website || "").trim()) {
+    statusEl.classList.remove("hidden");
+    statusEl.textContent = "Add the client name or website in Step 02 first.";
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  statusEl.classList.remove("hidden");
+  statusEl.textContent = "Checking Meta's Ad Library and Google's Ads Transparency Center…";
+  try {
+    const res = await fetch("/api/ad-presence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_name: (p.client_name || "").trim(), client_website: (p.client_website || "").trim() }),
+    });
+    const result = await _readJsonResponse(res);
+    if (!_adPresenceHasResults(result)) throw new Error(result.error || "no results came back");
+    // Attach to whichever brief is current: a Regenerate may have finished mid-check.
+    const current = state.strategyBrief;
+    if (!current) return;
+    current.ad_presence = result;
+    renderAdPresence(result, { fresh: true });
+    _debouncedRebuildStrategyDoc();
+  } catch (e) {
+    const current = state.strategyBrief;
+    renderAdPresence(current ? current.ad_presence || null : null);  // keep earlier results on screen
+    statusEl.classList.remove("hidden");
+    statusEl.textContent = `The check couldn't run: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+    const current = state.strategyBrief;
+    btn.textContent = current && _adPresenceHasResults(current.ad_presence) ? "↻ Re-check" : "Check digital ad presence";
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -1661,14 +1847,15 @@ async function onRoadblocksGenerate() {
         strategy_brief: _briefWithSelectedTactics(),
       }),
     });
-    const data = await res.json();
+    const data = await _readJsonResponse(res);
     loadingEl.classList.add("hidden");
 
     if (data.error && !data.product_roadblocks?.length) {
       const errEl = document.getElementById("roadblocks-error");
       errEl.classList.remove("hidden");
       errEl.innerHTML = `<strong>Roadblocks check unavailable:</strong> ${escapeHtml(data.error)}<br>
-        <small>You can skip this step and continue.</small>`;
+        <small>You can regenerate, or skip this step and continue.</small>`;
+      document.getElementById("roadblocks-regenerate-btn").style.display = "";
       return;
     }
 
@@ -1678,6 +1865,7 @@ async function onRoadblocksGenerate() {
     const errEl = document.getElementById("roadblocks-error");
     errEl.classList.remove("hidden");
     errEl.textContent = "Request failed: " + e.message;
+    document.getElementById("roadblocks-regenerate-btn").style.display = "";
   }
 }
 
@@ -1847,7 +2035,8 @@ function addTier(targetBudget) {
   const clonedItems = state.lineItems.map(li => {
     const newId = newLineItemId();
     idMap[li.id] = newId;
-    return { ...li, id: newId };
+    // Own copy of the allocations: a shared object would make Step 06 edits leak between options.
+    return { ...li, id: newId, monthly_allocations: li.monthly_allocations ? { ...li.monthly_allocations } : li.monthly_allocations };
   });
   const clonedAvails = {};
   Object.keys(state.availsData).forEach(oldId => {
@@ -2137,6 +2326,8 @@ function renderLineItems() {
   // Added Value % basis: the tier's real (non-AV) budget — same "% of what's
   // actually being billed" rule the export uses (see proposal_generator.py).
   const tierRealTotal = state.lineItems.reduce((s, li) => s + (li.is_added_value ? 0 : (li.monthly_budget || 0)), 0);
+  const shares = _curateSharePercents();
+  const paidCount = _paidLineIndices().length;
   state.lineItems.forEach((li, idx) => {
     const p = state.productIndex[li.product_name] || {};
     const tr = document.createElement("tr");
@@ -2249,6 +2440,7 @@ function renderLineItems() {
           </div>
         ` : ""}
       </td>
+      <td class="col-share">${_shareCellHtml(li, idx, shares[idx], paidCount)}</td>
       <td class="col-months">
         <input type="number" step="1" min="1" value="${li.months}"
                data-idx="${idx}" data-key="months" />
@@ -2289,8 +2481,13 @@ function renderLineItems() {
     tbody.appendChild(tr);
   });
   // Wire row events
-  tbody.querySelectorAll("input:not([data-secondary-toggle]):not([data-added-value-toggle]):not([data-av-pct]):not([data-gross-budget-input]), textarea").forEach(inp => {
+  tbody.querySelectorAll("input:not([data-secondary-toggle]):not([data-added-value-toggle]):not([data-av-pct]):not([data-gross-budget-input]):not([data-share-input]), textarea").forEach(inp => {
     inp.addEventListener("input", onLineItemEdit);
+  });
+  // Step 06's split follows a typed budget/months once it's committed (blur/Enter), not per
+  // keystroke, so passing through "5" on the way to "5000" can't compound cent rounding.
+  tbody.querySelectorAll('input[data-key="monthly_budget"], input[data-key="months"], [data-gross-budget-input]').forEach(inp => {
+    inp.addEventListener("change", () => _mbRescaleLine(state.lineItems[parseInt(inp.dataset.idx)]));
   });
   tbody.querySelectorAll("[data-secondary-toggle]").forEach(cb => {
     cb.addEventListener("change", () => onToggleSecondaryTarget(parseInt(cb.dataset.idx)));
@@ -2371,12 +2568,31 @@ function renderLineItems() {
       const li = state.lineItems[idx];
       const fee = state.parsed.agency_fee || 0;
       const gross = parseFormattedInput(inp.value) ?? 0;
+      _mbStampBaseline(li);
       li.monthly_budget = _grossToNet(gross, fee);
       const netInput = inp.closest("td").querySelector('input[data-key="monthly_budget"]');
       if (netInput) netInput.value = formatBudgetInputValue(li.monthly_budget);
       updateTotals();
       _curateRefreshImpsRef(idx);
+      _refreshAvValuePreviews();
+      _curateRefreshShares();
     });
+  });
+  // % of total: applied on change (blur/Enter) against the budgets as they were on focus,
+  // so re-editing never compounds rounding drift.
+  tbody.querySelectorAll("[data-share-input]").forEach(inp => {
+    inp.addEventListener("focus", () => {
+      state._shareSnapshot = state.lineItems.map(li => li.monthly_budget || 0);
+      inp.select();
+    });
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
+    inp.addEventListener("change", () => {
+      const pct = parseFloat(String(inp.value).replace(/[^0-9.\-]/g, ""));
+      if (Number.isFinite(pct)) _applySharePct(parseInt(inp.dataset.idx), pct, state._shareSnapshot);
+      state._shareSnapshot = null;
+      _renderLineItemsKeepingFocus();
+    });
+    inp.addEventListener("blur", () => { state._shareSnapshot = null; });
   });
   // Comma-formatted display layer for the Net/Gross budget inputs above —
   // each one's own "input" listener already parses/stores/syncs on every
@@ -2544,8 +2760,10 @@ function onLineItemEdit(e) {
     const isOptionalOverride = key === "rate_override" || key === "estimated_cpm_override";
     v = v === "" ? (isOptionalOverride ? null : 0) : parseFloat(v);
   }
+  if (key === "monthly_budget" || key === "months") _mbStampBaseline(state.lineItems[idx]);
   state.lineItems[idx][key] = v;
   updateTotals();
+  if (key === "monthly_budget") _curateRefreshShares();
   if (key === "monthly_budget") {
     const li = state.lineItems[idx];
     const p = state.productIndex[li.product_name] || {};
@@ -2582,6 +2800,128 @@ function _curateRefreshImpsRef(idx) {
   const text = li.is_added_value ? "" : _mbUnitsRefText(li, p, li.monthly_budget);
   el.textContent = text ? `≈ ${text}` : "";
   el.classList.toggle("hidden", !text);
+}
+
+// --------------------------------------------------------------------------
+// Step 04: % of total + scale-to-total. Added Value lines are always excluded
+// (locked at $0, never scaled); the math lives in curate-math.js.
+// --------------------------------------------------------------------------
+
+function _paidLineIndices() {
+  return state.lineItems.map((li, i) => (li.is_added_value ? -1 : i)).filter(i => i >= 0);
+}
+
+// Aligned to state.lineItems: a one-decimal share for paid lines (summing to 100.0), null otherwise.
+function _curateSharePercents() {
+  const paid = _paidLineIndices();
+  const shares = CurateMath.sharePercents(paid.map(i => state.lineItems[i].monthly_budget || 0));
+  const out = state.lineItems.map(() => null);
+  paid.forEach((lineIdx, j) => { out[lineIdx] = shares[j]; });
+  return out;
+}
+
+// Editable once there's a total to divide and at least one other paid line to rebalance against.
+function _shareInputState(share, paidCount) {
+  if (share === null || share === undefined) return { editable: false, title: "Enter budgets first — the % needs a plan total to divide." };
+  if (paidCount < 2) return { editable: false, title: "The only paid line is always 100% of the plan." };
+  return { editable: true, title: "Edit to rebalance: the other lines adjust proportionally so the plan stays at 100%." };
+}
+
+function _shareCellHtml(li, idx, share, paidCount) {
+  if (li.is_added_value) return `<span class="share-na" title="Added Value lines aren't part of the paid total">AV</span>`;
+  const { editable, title } = _shareInputState(share, paidCount);
+  return `<span class="share-wrap"><input type="text" inputmode="decimal" class="share-input" data-idx="${idx}" data-share-input
+    value="${share === null ? "" : share.toFixed(1)}" placeholder="—" ${editable ? "" : "disabled"} title="${escapeHtml(title)}" /><span class="share-suffix">%</span></span>`;
+}
+
+// Cheap patch while a Net/Gross value is being typed (a full re-render would steal focus).
+function _curateRefreshShares() {
+  const shares = _curateSharePercents();
+  const paidCount = _paidLineIndices().length;
+  document.querySelectorAll("#line-items-body [data-share-input]").forEach(inp => {
+    if (inp === document.activeElement) return;
+    const share = shares[parseInt(inp.dataset.idx)];
+    const { editable, title } = _shareInputState(share, paidCount);
+    inp.value = share === null || share === undefined ? "" : share.toFixed(1);
+    inp.disabled = !editable;
+    inp.title = title;
+  });
+}
+
+// A change handler fires while focus is already moving (Tab or a click on the next cell), so an
+// immediate re-render would destroy the cell being moved to. Wait for focus to land, re-render,
+// then focus the same cell in the rebuilt table.
+function _renderLineItemsKeepingFocus() {
+  setTimeout(() => {
+    const el = document.activeElement;
+    const inTable = el && el.closest && el.closest("#line-items-body") && el.dataset && el.dataset.idx !== undefined;
+    const marker = !inTable ? null : el.dataset.key !== undefined
+      ? `[data-key="${el.dataset.key}"]`
+      : Array.from(el.attributes).map(a => a.name).filter(n => n.startsWith("data-") && n !== "data-idx").map(n => `[${n}]`)[0];
+    renderLineItems();
+    const next = marker && document.querySelector(`#line-items-body [data-idx="${el.dataset.idx}"]${marker}`);
+    if (next && !next.disabled) {
+      next.focus();
+      if (next.tagName === "INPUT" && next.type === "text") next.select();
+    }
+  }, 0);
+}
+
+// Step 06's rescale needs the total an allocation was built against; a reopened proposal never restores it.
+function _mbStampBaseline(li) {
+  if (li && li.monthly_allocations && Object.keys(li.monthly_allocations).length && li._mbBaseline === undefined) {
+    li._mbBaseline = (li.monthly_budget || 0) * (li.months || 1);
+  }
+}
+
+// Writes new budgets and immediately rescales any Monthly Breakdown so each period keeps its %,
+// even if the planner never reopens Step 06 before generating.
+function _commitBudgets(lineIndices, budgets) {
+  lineIndices.forEach((lineIdx, j) => {
+    const li = state.lineItems[lineIdx];
+    _mbStampBaseline(li);
+    li.monthly_budget = budgets[j];
+    _mbRescaleLine(li);
+  });
+}
+
+// Same rescale Step 06 applies on render, applied now: a reopened proposal can jump from here
+// straight to Generate without Step 06 ever re-rendering.
+function _mbRescaleLine(li) {
+  if (li && li.monthly_allocations && Object.keys(li.monthly_allocations).length) {
+    li.monthly_allocations = _mbRescaleForBudgetChange(li);
+  }
+}
+
+function _applySharePct(lineIdx, pct, snapshot) {
+  const paid = _paidLineIndices();
+  const k = paid.indexOf(lineIdx);
+  if (k < 0 || paid.length < 2) return;
+  const budgets = paid.map(i => (snapshot && snapshot[i] !== undefined ? snapshot[i] : state.lineItems[i].monthly_budget) || 0);
+  _commitBudgets(paid, CurateMath.setSharePct(budgets, k, pct));
+}
+
+function onScaleToTotal() {
+  const input = document.getElementById("total-budget-target");
+  const target = parseFormattedInput(input.value);
+  const unit = _mbUnitAdjective().toLowerCase();
+  if (!target || target <= 0) {
+    alert(`Enter a total ${unit} budget first.`);
+    input.focus();
+    return;
+  }
+  const paid = _paidLineIndices();
+  if (!paid.length) {
+    alert("Add at least one paid (non-Added-Value) line first.");
+    return;
+  }
+  const budgets = paid.map(i => state.lineItems[i].monthly_budget || 0);
+  if (!(budgets.reduce((a, b) => a + b, 0) > 0)
+      && !confirm(`None of the lines has a budget yet, so there's no mix to scale from. Split ${money(target)} evenly across the ${paid.length} paid line(s)?`)) {
+    return;
+  }
+  _commitBudgets(paid, CurateMath.scaleToTotal(budgets, target));
+  renderLineItems();
 }
 
 // Added Value % preview — "≈ $150 (5% of $3,000)" — mirrors the export's
@@ -2810,7 +3150,11 @@ function onToggleAddon(name, isPicked) {
 function onDuplicateLineItem(idx) {
   const original = state.lineItems[idx];
   if (!original) return;
-  const copy = { ...original, id: newLineItemId() };
+  const copy = {
+    ...original,
+    id: newLineItemId(),
+    monthly_allocations: original.monthly_allocations ? { ...original.monthly_allocations } : original.monthly_allocations,
+  };
   // Carry over any avails already entered for the original line, so
   // duplicating a filled-in row for a targeting variant doesn't lose them.
   if (state.availsData[original.id]) {
@@ -2823,7 +3167,7 @@ function onDuplicateLineItem(idx) {
 }
 
 async function onRecommend() {
-  const budget = parseFloat(document.getElementById("total-budget-target").value);
+  const budget = parseFormattedInput(document.getElementById("total-budget-target").value);
   if (!budget || budget <= 0) {
     alert(`Enter a target ${_mbUnitAdjective().toLowerCase()} budget first.`);
     return;
@@ -3491,9 +3835,15 @@ function _mbRescaleForBudgetChange(li) {
   if (!li.monthly_allocations || li._mbBaseline === undefined || Math.abs(li._mbBaseline - total) <= _MB_CENT) {
     return li.monthly_allocations;
   }
-  const priorBaseline = li._mbBaseline || 1;  // guard divide-by-zero; a $0 baseline has nothing meaningful to rescale FROM anyway
-  const rescaled = {};
   const keys = Object.keys(li.monthly_allocations);
+  if (!(li._mbBaseline > _MB_CENT)) {
+    // Built against $0, so there's no split to keep. Rescaling from zero would put the whole
+    // new budget in the last period; spread it evenly over the same periods instead.
+    li._mbBaseline = total;
+    return _mbEvenDefaultAllocation(total, keys.map(key => ({ key })));
+  }
+  const priorBaseline = li._mbBaseline;
+  const rescaled = {};
   let running = 0;
   keys.slice(0, -1).forEach(k => {
     const share = Math.round(total * (li.monthly_allocations[k] / priorBaseline) * 100) / 100;

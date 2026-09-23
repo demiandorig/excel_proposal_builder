@@ -14,7 +14,6 @@ All features degrade gracefully when OPENAI_API_KEY is not set.
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -22,6 +21,7 @@ from datetime import datetime, date
 from typing import Optional
 
 from app.catalog import by_name as _catalog_by_name
+from app.services import llm_utils
 from app.services.text_utils import normalize_newlines as _normalize_newlines
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 
@@ -272,6 +272,10 @@ def safe_filename(title: str) -> str:
 # (quietly falls through to the fallback) and then break the fallback too.
 _SEARCH_MODEL = "gpt-5.1"
 _FALLBACK_MODEL = "gpt-5.1"
+# Caps count reasoning + visible tokens (gpt-5-mini reasons by default); llm_utils retries/flags truncation.
+_ENRICH_MAX_OUTPUT_TOKENS = 20000
+_REVISE_MODEL = "gpt-5-mini"
+_REVISE_MAX_COMPLETION_TOKENS = 16000
 
 
 def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional[dict] = None,
@@ -281,7 +285,7 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     name, per-product blurbs (with data citations), and both emails.
     Returns a ProposalEnrichment — empty fields (not an exception) on failure.
 
-    Grounded in live web search (Responses API + web_search_preview, same
+    Grounded in live web search (Responses API + web_search, same
     mechanism as the Roadblocks and Strategy Brief steps) so a blurb's
     "specific recent stat" is something actually found via search, not the
     model's static training-data guess — falls back to a plain (non-
@@ -315,64 +319,36 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
 
     client = _OpenAI(api_key=api_key)
     prompt = _build_prompt(request, line_items, strategy_brief=strategy_brief, tiers=tiers)
+    truncated = ProposalEnrichment(
+        campaign_name=_fallback_campaign_name(request),
+        error="Content generation was cut off before it finished, even after an automatic retry.",
+    )
 
     try:
-        response = client.responses.create(
-            model=_SEARCH_MODEL,
-            tools=[{"type": "web_search"}],
-            input=prompt,
-            max_output_tokens=6000,
-        )
-        raw = _extract_response_text(response)
-        return _parse_response(raw, request, line_items, used_web_search=True)
+        raw = llm_utils.responses_text(client, model=_SEARCH_MODEL, prompt=prompt,
+                                       tools=[{"type": "web_search"}],
+                                       max_output_tokens=_ENRICH_MAX_OUTPUT_TOKENS)
+    except llm_utils.ResponseTruncated:
+        return truncated
     except Exception as search_exc:
-        # Responses API / web_search_preview unavailable on this account or
-        # SDK version — fall back to a plain completion, but say so clearly
-        # rather than silently presenting static-knowledge guesses as
-        # web-verified stats.
         try:
-            response = client.chat.completions.create(
-                model=_FALLBACK_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                # GPT-5-series rejects the legacy `max_tokens` param outright
-                # — see strategy_brief.py's identical fix for the full
-                # explanation (same migration gap, same fallback shape).
-                max_completion_tokens=5000,
-            )
-            raw = response.choices[0].message.content
-            result = _parse_response(raw, request, line_items, used_web_search=False)
-            if not result.error:
-                result.error = (
-                    "Web search wasn't available on this account "
-                    f"({search_exc}); this used the model's general knowledge "
-                    "instead — verify stats before relying on them."
-                )
-            return result
+            raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
+                                      max_completion_tokens=_ENRICH_MAX_OUTPUT_TOKENS)
+        except llm_utils.ResponseTruncated:
+            return truncated
         except Exception as fallback_exc:
             return ProposalEnrichment(
                 campaign_name=_fallback_campaign_name(request),
                 error=f"Content generation failed: {fallback_exc}",
             )
-
-
-def _extract_response_text(response) -> str:
-    """
-    Pull the text out of a Responses API result. `.output_text` is the
-    SDK's convenience accessor; fall back to walking `.output` manually for
-    older SDK versions that don't expose it.
-    """
-    text = getattr(response, "output_text", None)
-    if text:
-        return text
-    chunks = []
-    for item in getattr(response, "output", None) or []:
-        for content in getattr(item, "content", None) or []:
-            t = getattr(content, "text", None)
-            if t:
-                chunks.append(t)
-    if chunks:
-        return "\n".join(chunks)
-    raise ValueError("Responses API returned no extractable text")
+        result = _parse_response(raw, request, line_items, used_web_search=False, client=client)
+        if not result.error:
+            result.error = (
+                f"Live web search failed ({search_exc}); this used the model's general "
+                "knowledge instead — verify stats before relying on them."
+            )
+        return result
+    return _parse_response(raw, request, line_items, used_web_search=True, client=client)
 
 
 def _fallback_campaign_name(request) -> str:
@@ -480,22 +456,11 @@ Respond with this exact JSON structure:
 }}"""
 
     try:
-        # gpt-5-mini, not gpt-4o-mini — same GPT-5-series bump/reasoning as
-        # _SEARCH_MODEL above (a small model is fine here, this is a
-        # narrower revise-in-place task); no `temperature=` for the same
-        # reason (GPT-5-series rejects anything but its default of 1), and
-        # `max_completion_tokens` not `max_tokens` — GPT-5-series rejects
-        # that legacy param outright, same migration gap as the other two.
-        response = client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=3000,
-        )
-        raw = response.choices[0].message.content or ""
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
-            return _unchanged("No structured response received — emails left unchanged.")
-        data = json.loads(match.group(0))
+        # No `temperature=` (GPT-5-series rejects it) and `max_completion_tokens`, not `max_tokens`.
+        raw = llm_utils.chat_text(client, model=_REVISE_MODEL, prompt=prompt,
+                                  max_completion_tokens=_REVISE_MAX_COMPLETION_TOKENS)
+        data = llm_utils.parse_json_object(
+            raw, expect_any=("internal_email_body", "client_email_body"), client=client)
         result = {
             "internal_email_subject": data.get("internal_email_subject") or current_internal_subject,
             "internal_email_body": _normalize_newlines(data.get("internal_email_body") or current_internal_body),
@@ -514,6 +479,8 @@ Respond with this exact JSON structure:
             result["internal_email_subject"] = current_internal_subject
             result["internal_email_body"] = current_internal_body
         return result
+    except llm_utils.ResponseTruncated:
+        return _unchanged("The revision was cut off before it finished — emails left unchanged. Try again.")
     except Exception as exc:
         return _unchanged(f"Reprompt failed: {exc}")
 
@@ -564,26 +531,15 @@ Respond with this exact JSON structure:
 {{"outline": "the full revised outline text"}}"""
 
     try:
-        # gpt-5-mini — a narrow revise-in-place task, same model tier
-        # reprompt_emails() above uses for the same reason; no
-        # `temperature=` since GPT-5-series rejects anything but its
-        # default (see the model-choice comment on _SEARCH_MODEL above),
-        # and `max_completion_tokens` not `max_tokens` for the same reason
-        # as reprompt_emails() just above.
-        response = client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=2000,
-        )
-        raw = response.choices[0].message.content or ""
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if not match:
-            return _unchanged("No structured response received — outline left unchanged.")
-        data = json.loads(match.group(0))
+        raw = llm_utils.chat_text(client, model=_REVISE_MODEL, prompt=prompt,
+                                  max_completion_tokens=_REVISE_MAX_COMPLETION_TOKENS)
+        data = llm_utils.parse_json_object(raw, expect_any=("outline",), client=client)
         revised = data.get("outline")
-        if not revised:
+        if not revised or not isinstance(revised, str):
             return _unchanged("No structured response received — outline left unchanged.")
         return {"outline": _normalize_newlines(revised), "error": None}
+    except llm_utils.ResponseTruncated:
+        return _unchanged("The revision was cut off before it finished — outline left unchanged. Try again.")
     except Exception as exc:
         return _unchanged(f"Reprompt failed: {exc}")
 
@@ -916,27 +872,23 @@ RULES:
 # ---------------------------------------------------------------------------
 
 
-def _parse_response(raw: str, request, line_items, used_web_search: bool = False) -> ProposalEnrichment:
-    # Extract JSON object (defensive — model sometimes adds preamble despite instructions)
-    match = re.search(r"\{[\s\S]*\}", raw)
-    if not match:
-        return ProposalEnrichment(
-            campaign_name=_fallback_campaign_name(request),
-            used_web_search=used_web_search,
-            error="No structured response received.",
-        )
-
+def _parse_response(raw: str, request, line_items, used_web_search: bool = False,
+                    client=None) -> ProposalEnrichment:
     try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
+        data = llm_utils.parse_json_object(
+            raw, expect_any=("campaign_name", "product_blurbs", "internal_email_body", "client_email_body"),
+            client=client)
+    except ValueError as exc:
         return ProposalEnrichment(
             campaign_name=_fallback_campaign_name(request),
             used_web_search=used_web_search,
-            error=f"JSON parse error: {exc}",
+            error=str(exc),
         )
 
     blurbs = []
     for pb in data.get("product_blurbs") or []:
+        if not isinstance(pb, dict):
+            continue
         blurbs.append(ProductBlurb(
             product_name=pb.get("product_name", ""),
             blurb=_normalize_newlines(pb.get("blurb", "")),

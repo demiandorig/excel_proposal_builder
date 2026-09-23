@@ -12,9 +12,8 @@ are AI-informed rather than purely rule-based.
 """
 from __future__ import annotations
 
-import json
+import asyncio
 import os
-import re
 from typing import Optional
 
 try:
@@ -23,9 +22,9 @@ try:
 except ImportError:
     _HAS_OPENAI = False
 
+from app.services import llm_utils
 from app.services.text_utils import normalize_newlines as _normalize_newlines
 from app.services.writing_style import HOUSE_VOICE_GUIDE
-from app.services import ad_presence as _ad_presence_svc
 from app.catalog import by_name as _catalog_by_name
 
 
@@ -88,11 +87,21 @@ General: Entravision's deep expertise in creating culturally relevant, bilingual
 # through to the fallback) and then break the fallback too.
 _SEARCH_MODEL = "gpt-5.1"
 _FALLBACK_MODEL = "gpt-5.1"
+# Reasoning + visible tokens share this cap; a full brief has run ~12k chars (~3k tokens) and
+# an old 3,000 cap truncated it mid-object. llm_utils retries once at double this if still cut off.
+_MAX_OUTPUT_TOKENS = 16000
+_BRIEF_KEYS = ("client_summary", "strategy_summary", "recommended_tactics", "key_insights")
+_TRUNCATED_MSG = "The brief was cut off before it finished, even after an automatic retry."
 
 
-async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "consistent") -> dict:
+async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "consistent",
+                         ad_presence: Optional[dict] = None) -> dict:
     """
     Generate (or regenerate with reprompt) a strategic brief for this proposal.
+
+    ad_presence: the result of an optional, separately-run /api/ad-presence check. When
+    given, it's folded into the prompt and echoed back on the result; the brief itself
+    no longer runs that check.
 
     mode: "consistent" (default) constrains recommended_tactics to the
     product FAMILIES already present in request.products_selected (Step
@@ -108,28 +117,13 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
     recognizable family — "stay consistent with nothing selected" has no
     meaningful constraint to apply.
 
-    Grounded in live web search (OpenAI Responses API + web_search_preview,
-    same mechanism as the Roadblocks step) so the client summary, market
-    context, and tactic-supporting stats are pulled from actual current
-    sources instead of the model's static training-data guesses — the
-    previous chat-completions-only version had no way to look anything up,
-    which is exactly what made its "specific recent stat" asks come out
-    generic. Falls back to a plain (non-searching) completion — with a
-    clear disclaimer — if the Responses API or the search tool isn't
-    available on this account/SDK version.
+    Grounded in live web search (Responses API + the web_search tool); falls back
+    to a plain completion, with a disclaimer in `error`, if search fails.
 
     Returns a dict with keys:
       client_summary, market_context, objectives_analysis, strategy_summary,
       recommended_tactics (list), key_insights (list), used_web_search (bool),
-      error (str|None), ad_presence (dict)
-
-    `ad_presence` is a deterministic (non-LLM) live check of whether the
-    client is currently running ads on Meta/Google/TikTok, and in what
-    language — see app/services/ad_presence.py. It's attached to every
-    result (even an error brief) so the UI/export can render it as its own
-    section regardless of whether the LLM call itself succeeded, and it's
-    also folded into the prompt below so the model's own market_context/
-    key_insights can reference it directly instead of guessing.
+      error (str|None), and ad_presence (dict) when one was passed in.
     """
     api_key = os.getenv("OPENAI_API_KEY")
 
@@ -138,7 +132,7 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
     if not api_key:
         return _error_brief("OPENAI_API_KEY not set.")
 
-    ad_intel = await _check_ad_presence_safely(request)
+    ad_intel = ad_presence if (ad_presence and ad_presence.get("summary")) else None
 
     allowed_families = None
     if mode != "new_mix":
@@ -155,42 +149,8 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
 
     client = _OpenAI(api_key=api_key)
     prompt = _build_prompt(request, reprompt, ad_intel=ad_intel, allowed_families=allowed_families)
-
-    try:
-        response = client.responses.create(
-            model=_SEARCH_MODEL,
-            tools=[{"type": "web_search"}],
-            input=prompt,
-            max_output_tokens=3000,
-        )
-        raw = _extract_response_text(response)
-        result = _parse(raw, used_web_search=True)
-    except Exception as search_exc:
-        # Responses API / web_search_preview unavailable on this account or
-        # SDK version — fall back to a plain completion, but say so clearly
-        # rather than silently presenting static-knowledge guesses as
-        # web-verified research.
-        try:
-            response = client.chat.completions.create(
-                model=_FALLBACK_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                # GPT-5-series rejects the legacy `max_tokens` param outright
-                # ("Unsupported parameter... Use 'max_completion_tokens'
-                # instead") — same class of migration gap as the
-                # `temperature=`/`web_search` rename noted on _SEARCH_MODEL
-                # above, just missed for this param at the time.
-                max_completion_tokens=2500,
-            )
-            raw = response.choices[0].message.content or ""
-            result = _parse(raw, used_web_search=False)
-            if not result.get("error"):
-                result["error"] = (
-                    "Web search wasn't available on this account "
-                    f"({search_exc}); this used the model's general knowledge "
-                    "instead — verify stats before relying on them."
-                )
-        except Exception as fallback_exc:
-            result = _error_brief(f"Request failed: {fallback_exc}")
+    # The OpenAI client is synchronous; off the event loop so one brief can't stall every other request.
+    result = await asyncio.to_thread(_run_brief_call, client, prompt)
 
     if allowed_families and result.get("recommended_tactics"):
         # Hard guardrail, not just a prompt ask — the model can still
@@ -216,45 +176,34 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
         # section with no explanation.
         result["recommended_tactics"] = filtered or result["recommended_tactics"]
 
-    result["ad_presence"] = ad_intel
+    if ad_presence:
+        result["ad_presence"] = ad_presence
     return result
 
 
-async def _check_ad_presence_safely(request) -> dict:
-    """
-    Live-checks Meta/Google/TikTok ad presence for this client (see
-    ad_presence.py: public-website checks, not an API — a handful of
-    browser page loads, ~15-25s total). Wrapped in its own try/except so a
-    slow or broken ad-library page never breaks brief generation itself —
-    this is a bonus signal, not a hard dependency of the brief.
-    """
+def _run_brief_call(client, prompt: str) -> dict:
     try:
-        return await _ad_presence_svc.check_ad_presence(
-            getattr(request, "client_name", "") or "",
-            getattr(request, "client_website", "") or "",
-        )
-    except Exception as exc:
-        return {"summary": "", "error": str(exc), "meta": {}, "google": {}, "tiktok": {}}
-
-
-def _extract_response_text(response) -> str:
-    """
-    Pull the text out of a Responses API result. `.output_text` is the
-    SDK's convenience accessor; fall back to walking `.output` manually for
-    older SDK versions that don't expose it.
-    """
-    text = getattr(response, "output_text", None)
-    if text:
-        return text
-    chunks = []
-    for item in getattr(response, "output", None) or []:
-        for content in getattr(item, "content", None) or []:
-            t = getattr(content, "text", None)
-            if t:
-                chunks.append(t)
-    if chunks:
-        return "\n".join(chunks)
-    raise ValueError("Responses API returned no extractable text")
+        raw = llm_utils.responses_text(client, model=_SEARCH_MODEL, prompt=prompt,
+                                       tools=[{"type": "web_search"}],
+                                       max_output_tokens=_MAX_OUTPUT_TOKENS)
+    except llm_utils.ResponseTruncated:
+        return _error_brief(_TRUNCATED_MSG)
+    except Exception as search_exc:
+        try:
+            raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
+                                      max_completion_tokens=_MAX_OUTPUT_TOKENS)
+        except llm_utils.ResponseTruncated:
+            return _error_brief(_TRUNCATED_MSG)
+        except Exception as fallback_exc:
+            return _error_brief(f"Request failed: {fallback_exc}")
+        result = _parse(raw, used_web_search=False, client=client)
+        if not result.get("error"):
+            result["error"] = (
+                f"Live web search failed ({search_exc}); this used the model's general "
+                "knowledge instead — verify stats before relying on them."
+            )
+        return result
+    return _parse(raw, used_web_search=True, client=client)
 
 
 # ---------------------------------------------------------------------------
@@ -306,16 +255,16 @@ Please revise your strategy taking this into account.
     ad_intel_block = ""
     if ad_intel and ad_intel.get("summary"):
         ad_intel_block = f"""
-## CURRENT AD PRESENCE (live-checked just now against the public Meta,
-## Google, and TikTok ad libraries — use this, don't guess or contradict it)
+## CURRENT AD PRESENCE (live-checked against the public Meta and Google
+## ad libraries — use this, don't guess or contradict it)
 {ad_intel['summary']}
 
 Where this is specific, use it directly rather than restating it blandly —
 e.g. active Meta ads with no Spanish-language variant is a real, callable
 opportunity; a client already dominant on a channel changes what the
-"opening" is. TikTok's public library has thin commercial coverage, so
-treat a TikTok negative as inconclusive, not as proof — Meta and Google
-findings are the more reliable signal.
+"opening" is. TikTok's public library only covers ads shown in the EU/UK,
+so a US client's TikTok activity is unknown — never treat it as a positive
+or a negative.
 """
 
     return f"""You are a senior digital media sales strategist at Entravision. Research this campaign request and produce a data-backed strategic brief.
@@ -444,17 +393,14 @@ Respond ONLY with valid JSON — no markdown fences, no preamble:
 # ---------------------------------------------------------------------------
 
 
-def _parse(raw: str, used_web_search: bool = False) -> dict:
-    match = re.search(r"\{[\s\S]*\}", raw)
-    if not match:
-        return _error_brief("No structured response received.")
+def _parse(raw: str, used_web_search: bool = False, client=None) -> dict:
     try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        return _error_brief(f"JSON parse error: {exc}")
+        data = llm_utils.parse_json_object(raw, expect_any=_BRIEF_KEYS, client=client)
+    except ValueError as exc:
+        return _error_brief(str(exc))
 
     # Normalise: ensure all expected keys exist
-    tactics = data.get("recommended_tactics") or []
+    tactics = [t for t in (data.get("recommended_tactics") or []) if isinstance(t, dict)]
     for t in tactics:
         t.setdefault("product_family", "")
         t.setdefault("rationale", "")
@@ -463,7 +409,7 @@ def _parse(raw: str, used_web_search: bool = False) -> dict:
         t.setdefault("entravision_advantage", "")
         t.setdefault("suggested_budget_pct", 0)
         for key in ("rationale", "data_point", "entravision_advantage"):
-            t[key] = _normalize_newlines(t.get(key, ""))
+            t[key] = _normalize_newlines(str(t.get(key) or ""))
 
     return {
         "client_summary": _normalize_newlines(data.get("client_summary", "")),
@@ -471,7 +417,8 @@ def _parse(raw: str, used_web_search: bool = False) -> dict:
         "objectives_analysis": _normalize_newlines(data.get("objectives_analysis", "")),
         "strategy_summary": _normalize_newlines(data.get("strategy_summary", "")),
         "recommended_tactics": tactics,
-        "key_insights": [_normalize_newlines(i) for i in (data.get("key_insights") or [])],
+        "key_insights": [_normalize_newlines(i if isinstance(i, str) else str(i))
+                         for i in (data.get("key_insights") or [])],
         "used_web_search": used_web_search,
         "error": None,
     }
@@ -487,5 +434,4 @@ def _error_brief(msg: str) -> dict:
         "key_insights": [],
         "used_web_search": False,
         "error": msg,
-        "ad_presence": {},  # overwritten by generate_brief() when it gets that far
     }

@@ -10,18 +10,16 @@ boilerplate. Falls back to the catalog's already-known policy flags
 (cannabis_policy/political_policy/hispanic_targeting_forced) as a supplement
 when the model can't find something more specific.
 
-Uses OpenAI's Responses API with the `web_search_preview` tool so the risks
-are grounded in live policy pages rather than the model's static knowledge
+Uses OpenAI's Responses API with the `web_search` tool so the risks are
+grounded in live policy pages rather than the model's static knowledge
 (the older gpt-4o-mini-search-preview chat model this used previously has
 been deprecated by OpenAI). Falls back to a plain (non-searching) chat
 completion — with a clear disclaimer — if the Responses API or the
-web_search_preview tool isn't available on this account/SDK version.
+web_search tool isn't available on this account/SDK version.
 """
 from __future__ import annotations
 
-import json
 import os
-import re
 from typing import Optional
 
 try:
@@ -31,6 +29,7 @@ except ImportError:
     _HAS_OPENAI = False
 
 from app.catalog import by_name
+from app.services import llm_utils
 from app.services.text_utils import normalize_newlines as _normalize_newlines
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 
@@ -46,6 +45,10 @@ from app.services.writing_style import HOUSE_VOICE_GUIDE
 # since GPT-5-series models reject any value but the default (1).
 _SEARCH_MODEL = "gpt-5.1"
 _FALLBACK_MODEL = "gpt-5.1"
+# Shared by reasoning + visible tokens; output grows with the product count (>=5 cited sources).
+_MAX_OUTPUT_TOKENS = 16000
+_ROADBLOCKS_KEYS = ("overall_summary", "product_roadblocks")
+_TRUNCATED_MSG = "The roadblocks check was cut off before it finished, even after an automatic retry."
 
 
 def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = None) -> dict:
@@ -71,59 +74,27 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
     prompt = _build_prompt(request, line_items, strategy_brief)
 
     try:
-        response = client.responses.create(
-            model=_SEARCH_MODEL,
-            tools=[{"type": "web_search"}],
-            input=prompt,
-            max_output_tokens=3500,
-        )
-        raw = _extract_response_text(response)
-        return _parse(raw, used_web_search=True)
+        raw = llm_utils.responses_text(client, model=_SEARCH_MODEL, prompt=prompt,
+                                       tools=[{"type": "web_search"}],
+                                       max_output_tokens=_MAX_OUTPUT_TOKENS)
+    except llm_utils.ResponseTruncated:
+        return _error_result(_TRUNCATED_MSG)
     except Exception as search_exc:
-        # Responses API / web_search_preview tool unavailable on this
-        # account or SDK version — fall back to a plain completion, but say
-        # so clearly rather than silently presenting static-knowledge
-        # guesses as web-verified.
         try:
-            response = client.chat.completions.create(
-                model=_FALLBACK_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                # GPT-5-series rejects the legacy `max_tokens` param outright
-                # — see strategy_brief.py's identical fix for the full
-                # explanation (same migration gap, same fallback shape).
-                max_completion_tokens=3500,
-            )
-            raw = response.choices[0].message.content or ""
-            result = _parse(raw, used_web_search=False)
-            if not result.get("error"):
-                result["error"] = (
-                    "Web search wasn't available on this account "
-                    f"({search_exc}); this used the model's general knowledge "
-                    "instead — verify against current platform policies before relying on it."
-                )
-            return result
+            raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
+                                      max_completion_tokens=_MAX_OUTPUT_TOKENS)
+        except llm_utils.ResponseTruncated:
+            return _error_result(_TRUNCATED_MSG)
         except Exception as fallback_exc:
             return _error_result(f"Roadblocks check failed: {fallback_exc}")
-
-
-def _extract_response_text(response) -> str:
-    """
-    Pull the text out of a Responses API result. `.output_text` is the SDK's
-    convenience accessor; fall back to walking `.output` manually for older
-    SDK versions that don't expose it.
-    """
-    text = getattr(response, "output_text", None)
-    if text:
-        return text
-    chunks = []
-    for item in getattr(response, "output", None) or []:
-        for content in getattr(item, "content", None) or []:
-            t = getattr(content, "text", None)
-            if t:
-                chunks.append(t)
-    if chunks:
-        return "\n".join(chunks)
-    raise ValueError("Responses API returned no extractable text")
+        result = _parse(raw, used_web_search=False, client=client)
+        if not result.get("error"):
+            result["error"] = (
+                f"Live web search failed ({search_exc}); this used the model's general knowledge "
+                "instead — verify against current platform policies before relying on it."
+            )
+        return result
+    return _parse(raw, used_web_search=True, client=client)
 
 
 def _error_result(msg: str) -> dict:
@@ -252,24 +223,21 @@ RULES:
 - Respond ONLY with the JSON object, starting with {{ and ending with }}"""
 
 
-def _parse(raw: str, used_web_search: bool) -> dict:
-    match = re.search(r"\{[\s\S]*\}", raw)
-    if not match:
-        return _error_result("No structured response received.")
+def _parse(raw: str, used_web_search: bool, client=None) -> dict:
     try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        return _error_result(f"JSON parse error: {exc}")
+        data = llm_utils.parse_json_object(raw, expect_any=_ROADBLOCKS_KEYS, client=client)
+    except ValueError as exc:
+        return _error_result(str(exc))
 
-    roadblocks = data.get("product_roadblocks") or []
+    roadblocks = [r for r in (data.get("product_roadblocks") or []) if isinstance(r, dict)]
     for r in roadblocks:
         r.setdefault("product_name", "")
         r.setdefault("risk_level", "low")
-        r["recommended_mitigation"] = _normalize_newlines(r.get("recommended_mitigation", ""))
-        risks = r.get("risks") or []
+        r["recommended_mitigation"] = _normalize_newlines(str(r.get("recommended_mitigation") or ""))
+        risks = [risk for risk in (r.get("risks") or []) if isinstance(risk, dict)]
         for risk in risks:
             risk.setdefault("issue", "")
-            risk["detail"] = _normalize_newlines(risk.get("detail", ""))
+            risk["detail"] = _normalize_newlines(str(risk.get("detail") or ""))
             risk.setdefault("source", "")
         r["risks"] = risks
 

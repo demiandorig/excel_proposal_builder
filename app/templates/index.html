@@ -353,8 +353,10 @@ Client name: ...
 
         <div class="brief-adpresence-head">
           <h3>Digital Ad Presence</h3>
-          <div class="brief-adpresence-caveat">live-checked against Meta, Google &amp; TikTok's public ad libraries — Meta/Google are reliable, TikTok's commercial coverage is thin</div>
+          <div class="brief-adpresence-caveat">optional · checks the client's live ads in Meta's Ad Library &amp; Google's Ads Transparency Center</div>
+          <button type="button" class="btn-secondary adpresence-run-btn" id="adpresence-run-btn">Check digital ad presence</button>
         </div>
+        <div id="brief-ad-presence-status" class="adpresence-status-line hidden"></div>
         <div id="brief-ad-presence" class="brief-adpresence"></div>
 
         <div class="brief-tactics-head">
@@ -454,9 +456,10 @@ Client name: ...
       <div class="curation-toolbar">
         <label class="inline-input">
           <span id="budget-target-label">Total monthly budget</span>
-          <input type="number" id="total-budget-target" step="50" placeholder="0.00" />
+          <input type="text" inputmode="decimal" id="total-budget-target" placeholder="0" />
         </label>
         <button class="btn-secondary" id="recommend-btn">⚡ Suggest mix</button>
+        <button class="btn-secondary" id="scale-to-total-btn" title="Scale every line to this total, keeping the current mix (same % per line)">⇅ Scale plan to total</button>
         <div class="spacer"></div>
         <div class="totals-display">
           <div class="totals-row">
@@ -484,6 +487,7 @@ Client name: ...
               <th>Rate</th>
               <th>Min</th>
               <th id="col-budget-header">Monthly $</th>
+              <th class="col-share-header" title="Share of the plan's total. Edit one line's % and the others rebalance proportionally so the plan stays at 100%.">% of total</th>
               <th id="col-months-header">Months</th>
               <th>Target override</th>
               <th>Objective</th>
@@ -802,6 +806,7 @@ Client name: ...
   </footer>
 
   <script src="/static/session-guard.js"></script>
+  <script src="/static/curate-math.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
