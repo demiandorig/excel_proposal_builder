@@ -399,6 +399,43 @@ html, body {
   .proposal-name-text { white-space: normal; word-break: break-word; }
 }
 
+.proposal-name-save-draft { flex-shrink: 0; padding: 3px 10px; font-size: 10px; }
+.proposal-name-draft-status {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.proposal-name-draft-status.save-draft-error { color: var(--red); }
+
+/* Small "Draft" pill for My Proposal History / the admin console's own
+   proposals table — same off/ok/warn convention as .mb-status-badge, but
+   only ever rendered for a draft row; a completed/generated row shows
+   nothing here rather than a redundant "Complete" badge. */
+.proposal-status-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 3px 8px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+.proposal-status-badge.draft { color: var(--amber); background: var(--amber-soft); }
+
+.my-proposals-actions { display: flex; align-items: center; gap: 8px; }
+.btn-inline-delete {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  opacity: 0.6;
+}
+.btn-inline-delete:hover { opacity: 1; }
+
 /* ----- Step 1: Notion ID ----- */
 .notion-id-row {
   margin-bottom: 24px;

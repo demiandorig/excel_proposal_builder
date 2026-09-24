@@ -131,11 +131,19 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
             "strategy_brief": {"recommended_tactics": ["persistence-test"]},
             "force_tabs": {"net": True},
             "addons": [],
+            "monthly_distribution_mode": "prorated",
+            "campaign_name_override": "Persistence Override",
+            "wizard_step": 8,
         }
         _save_proposal_metadata(
             proposal_id=proposal_id,
             client_name="Persistence Test Client",
             seller_email="seller@example.test",
+            # Was missing entirely (a required kwarg with no default) —
+            # this call would have raised TypeError if this test had ever
+            # actually run against a real DATABASE_URL; caught while
+            # adding the status param below, fixed alongside it.
+            created_by_email="planner@example.test",
             requested_by="Pytest",
             notion_id=f"notion-{suffix}",
             proposal_title="Persistence Test Proposal",
@@ -148,6 +156,7 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
             requester_user_agent="pytest",
             summary={"total_net": 1234.5, "tabs_built": ["Net"]},
             reopen_state=reopen_state,
+            status="generated",
         )
 
         worker = textwrap.dedent(
@@ -184,9 +193,11 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
             metadata = _get_proposal_metadata({proposal_id!r})
             assert metadata["summary"] == {{"total_net": 1234.5, "tabs_built": ["Net"]}}
             assert metadata["notion_id"] == {"notion-" + suffix!r}
+            assert metadata["status"] == "generated"
 
             reopened = asyncio.run(reopen_proposal({proposal_id!r}))
             assert reopened["proposal_title"] == "Persistence Test Proposal"
+            assert reopened["status"] == "generated"
             assert reopened["request"] == {{
                 "client_name": "Persistence Test Client",
                 "salesperson_email": "seller@example.test",
@@ -194,6 +205,9 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
             assert reopened["line_items"][0]["rate_override"] == 39.0
             assert reopened["avails_data"][{custom_name!r}]["frequency"] == 5.5
             assert reopened["strategy_brief"] == {{"recommended_tactics": ["persistence-test"]}}
+            assert reopened["monthly_distribution_mode"] == "prorated"
+            assert reopened["campaign_name_override"] == "Persistence Override"
+            assert reopened["wizard_step"] == 8
 
             response = asyncio.run(download({proposal_id!r}))
             assert response.filename == {proposal_filename!r}

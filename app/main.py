@@ -58,6 +58,7 @@ from app.catalog import (
 )
 from app.services.notion_parser import (
     ProposalRequest,
+    ProductSpecifics,
     parse_notion,
     classify_output_tabs,
 )
@@ -267,11 +268,110 @@ def _get_next_short_id() -> str:
         return str(random.randint(1000, 9999))
 
 
+def _reconstruct_proposal_request(raw: dict) -> ProposalRequest:
+    """Turn a `request` dict (as every endpoint receives `body.request`
+    from the frontend) back into a real ProposalRequest — the exact same
+    dict -> dataclass reconstruction every endpoint touching `request`
+    needs (specifics sub-dict -> ProductSpecifics, unknown/extra keys
+    dropped). Was copy-pasted at 6 separate call sites (one per endpoint);
+    consolidated into one function so a future ProposalRequest field
+    doesn't need updating in 6+ places to actually be reachable — same
+    "one shared place, not N near-identical copies" fix already applied
+    to normalize_newlines (see text_utils.py) and the JSON-parsing layer
+    (see llm_utils.py)."""
+    raw = dict(raw)
+    if "specifics" in raw and isinstance(raw["specifics"], dict):
+        raw["specifics"] = ProductSpecifics(**raw["specifics"])
+    valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
+    raw = {k: v for k, v in raw.items() if k in valid_fields}
+    return ProposalRequest(**raw)
+
+
+def _build_reopen_state(
+    *,
+    request_dict: dict,
+    line_items: list[LineItemModel],
+    tiers: Optional[list[TierModel]],
+    avails_data: Optional[dict[str, AvailsEntry]],
+    strategy_brief: Optional[dict],
+    roadblocks: Optional[dict],
+    force_tabs: Optional[dict],
+    addons: list[AddonItemModel],
+    raw_notion_text: Optional[str],
+    enrichment: Optional[dict],
+    time_unit: str,
+    monthly_distribution_mode: str,
+    campaign_name_override: Optional[str],
+    wizard_step: int,
+) -> dict:
+    """Everything a reopen needs to fully restore the wizard — shared by
+    /api/generate (a completed proposal) and /api/proposal/draft (an
+    in-progress one), so the two can't quietly drift apart on what
+    "resuming" actually restores. Was previously built inline only inside
+    /api/generate and was missing monthly_distribution_mode/
+    campaign_name_override entirely — a real pre-existing gap (reopening
+    ANY proposal silently reset Step 05's even/prorated choice back to
+    "even") fixed here for both call sites at once."""
+    return {
+        "request": request_dict,
+        "line_items": [li.model_dump() for li in (line_items or (tiers[0].line_items if tiers else []))],
+        "avails_data": {
+            k: v.model_dump() for k, v in
+            (avails_data or (tiers[0].avails_data if tiers else {}) or {}).items()
+        },
+        "tiers": [t.model_dump() for t in tiers] if tiers else None,
+        "strategy_brief": strategy_brief,
+        "roadblocks": roadblocks,
+        "force_tabs": force_tabs,
+        "addons": [a.model_dump() for a in (addons or [])],
+        "raw_notion_text": raw_notion_text,
+        "enrichment": enrichment,
+        # time_unit/monthly_distribution_mode are PROPOSAL-wide (no tier
+        # home) — each tier's own period_merge_groups already rides along
+        # inside "tiers" above (TierModel.model_dump() includes it).
+        # Without time_unit specifically, reopening a non-month proposal
+        # would default state.timeUnit back to "month" client-side while
+        # monthly_allocations keys stay in the OLD format (e.g.
+        # "W1-2026-09-01"), which _mbReconcileMonthsForDateChange would
+        # then treat as entirely unrecognized — silently wiping the
+        # reopened breakdown's apparent numbers.
+        "time_unit": time_unit,
+        "monthly_distribution_mode": monthly_distribution_mode,
+        "campaign_name_override": campaign_name_override,
+        # Which step this was saved/generated at — a draft resumes here;
+        # a completed generate stamps 8, though the reopen flow for an
+        # already-generated proposal ignores this and always lands on
+        # Curate (Step 04) as it always has.
+        "wizard_step": max(1, min(8, wizard_step or 1)),
+    }
+
+
+def _resolve_draftable_proposal_id(requested_proposal_id: Optional[str]) -> str:
+    """Shared by /api/generate AND /api/proposal/draft (save_draft) —
+    reuses `requested_proposal_id` (state.proposalId, from an earlier
+    draft save or a reopened proposal) IN PLACE only when it still
+    belongs to a draft or doesn't exist yet. A real, already-GENERATED
+    proposal's row is NEVER reused, by either caller: /api/generate
+    mints a fresh id for it (unchanged from before drafts existed, so
+    its prior download history/files stay intact under their own row),
+    and — critically — so does save_draft(), which otherwise would
+    silently flip a real, already-sent proposal's status back to
+    'draft' and null out its filename/generated_at/summary columns the
+    moment autosave (or a stray manual Save Draft click) fires while the
+    planner is just looking at a reopened, completed proposal. Extracted
+    so this resolution logic is directly testable without invoking the
+    whole generate()/save_draft() handlers."""
+    existing = _get_proposal_metadata(requested_proposal_id) if requested_proposal_id else None
+    if existing and existing.get("status") == "draft":
+        return requested_proposal_id
+    return secrets.token_urlsafe(16)
+
+
 _PROPOSAL_COLUMNS = (
     "proposal_id, client_name, seller_email, created_by_email, requested_by, notion_id, "
     "proposal_title, filename, email_doc_filename, pptx_net_filename, "
     "pptx_gross_filename, generated_at, requester_ip, requester_user_agent, "
-    "summary, reopen_state"
+    "summary, reopen_state, status, updated_at"
 )
 
 
@@ -283,6 +383,10 @@ def _proposal_metadata_from_row(row: dict | None) -> dict | None:
     generated_at = meta.get("generated_at")
     if hasattr(generated_at, "isoformat"):
         meta["generated_at"] = generated_at.isoformat()
+    updated_at = meta.get("updated_at")
+    if hasattr(updated_at, "isoformat"):
+        meta["updated_at"] = updated_at.isoformat()
+    meta["status"] = meta.get("status") or "generated"
     meta["summary"] = meta.get("summary") or {}
     meta["reopen_state"] = meta.get("reopen_state") or {}
     if meta.get("filename"):
@@ -309,15 +413,23 @@ def _save_proposal_metadata(
     requested_by: str,
     notion_id: str | None,
     proposal_title: str,
-    filename: str,
-    email_doc_filename: str | None,
-    pptx_net_filename: str | None,
-    pptx_gross_filename: str | None,
-    generated_at: datetime,
-    requester_ip: str,
-    requester_user_agent: str,
-    summary: dict,
     reopen_state: dict,
+    # Only known once a real Excel/email/deck has actually been built —
+    # None for a draft save (see status="draft" below), always given by
+    # the real /api/generate call site.
+    filename: str | None = None,
+    email_doc_filename: str | None = None,
+    pptx_net_filename: str | None = None,
+    pptx_gross_filename: str | None = None,
+    generated_at: datetime | None = None,
+    requester_ip: str | None = None,
+    requester_user_agent: str | None = None,
+    summary: dict | None = None,
+    # 'generated' (the default, matching every row before this column
+    # existed) or 'draft' — see schema.sql's migration comment. Callers
+    # that pass neither `filename` nor a non-default `status` reproduce
+    # this function's exact pre-draft-feature behavior.
+    status: str = "generated",
 ) -> None:
     with get_connection() as conn:
         conn.execute(
@@ -326,9 +438,9 @@ def _save_proposal_metadata(
                 proposal_id, client_name, seller_email, created_by_email, requested_by, notion_id,
                 proposal_title, filename, email_doc_filename, pptx_net_filename,
                 pptx_gross_filename, generated_at, requester_ip,
-                requester_user_agent, summary, reopen_state
+                requester_user_agent, summary, reopen_state, status, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (proposal_id) DO UPDATE SET
                 client_name = EXCLUDED.client_name,
                 seller_email = EXCLUDED.seller_email,
@@ -344,7 +456,9 @@ def _save_proposal_metadata(
                 requester_ip = EXCLUDED.requester_ip,
                 requester_user_agent = EXCLUDED.requester_user_agent,
                 summary = EXCLUDED.summary,
-                reopen_state = EXCLUDED.reopen_state
+                reopen_state = EXCLUDED.reopen_state,
+                status = EXCLUDED.status,
+                updated_at = now()
             """,
             (
                 proposal_id,
@@ -361,8 +475,9 @@ def _save_proposal_metadata(
                 generated_at,
                 requester_ip,
                 requester_user_agent,
-                Jsonb(summary),
+                Jsonb(summary or {}),
                 Jsonb(reopen_state),
+                status,
             ),
         )
 
@@ -557,6 +672,47 @@ class GenerateRequest(BaseModel):
     # so the real generated title/filename matches what the planner
     # explicitly chose rather than the AI's own invention.
     campaign_name_override: Optional[str] = None
+    # Echoes back state.proposalId — set when this generate follows an
+    # earlier draft save (or a reopened proposal) of the SAME work.
+    # Reused as the row's real proposal_id ONLY when it still belongs to a
+    # draft (nothing real generated under it yet — see the resolution
+    # logic in generate()); an already-GENERATED proposal being reopened
+    # and re-generated still gets a fresh id as before, so its prior
+    # download history/files stay intact under their own row.
+    proposal_id: Optional[str] = None
+
+
+class DraftSaveRequest(BaseModel):
+    """POST /api/proposal/draft's body — the same wizard-state shape
+    GenerateRequest carries, but every field is optional/defaulted since a
+    draft can be saved from as early as Step 02 with nothing curated yet,
+    and deliberately carries NO validation beyond basic type-checking (an
+    unbalanced/incomplete plan is exactly what a draft is allowed to be)."""
+    proposal_id: Optional[str] = None  # None -> mint a new row; else upsert the existing one
+    wizard_step: int = 2  # which step the planner was on — resumed to on reopen
+    request: dict = {}
+    line_items: list[LineItemModel] = []
+    tiers: Optional[list[TierModel]] = None
+
+    @field_validator("tiers")
+    @classmethod
+    def _tiers_within_cap_and_unique(cls, v: Optional[list[TierModel]]) -> Optional[list[TierModel]]:
+        return GenerateRequest._tiers_within_cap_and_unique(v)
+
+    avails_data: Optional[dict[str, AvailsEntry]] = None
+    strategy_brief: Optional[dict] = None
+    roadblocks: Optional[dict] = None
+    raw_notion_text: Optional[str] = None
+    force_tabs: Optional[dict] = None
+    addons: list[AddonItemModel] = []
+    monthly_distribution_mode: str = "even"
+    time_unit: str = "month"
+    campaign_name_override: Optional[str] = None
+    enrichment: Optional[dict] = None  # Step 07 AI email content, if the planner got that far before saving
+    # Client-computed preview title (buildProposalNamePreview()) or the
+    # real one once known — shown in My Proposals so a draft row isn't
+    # blank; falls back to client_name server-side if empty.
+    proposal_title: str = ""
 
 
 class StrategyRequest(BaseModel):
@@ -728,13 +884,7 @@ async def strategy(body: StrategyRequest) -> dict:
     """Generate (or regenerate) an AI strategy brief for the proposal. Also
     writes a downloadable .docx of the brief and returns a token to fetch it
     via /api/download-strategy/{token}, same pattern as the roadblocks step."""
-    from app.services.notion_parser import ProductSpecifics
-    raw = dict(body.request)
-    if "specifics" in raw and isinstance(raw["specifics"], dict):
-        raw["specifics"] = ProductSpecifics(**raw["specifics"])
-    valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
-    raw = {k: v for k, v in raw.items() if k in valid_fields}
-    req = ProposalRequest(**raw)
+    req = _reconstruct_proposal_request(body.request)
     brief = await strategy_brief_svc.generate_brief(req, reprompt=body.reprompt, mode=body.mode,
                                                     ad_presence=body.ad_presence)
 
@@ -847,13 +997,7 @@ async def rebuild_strategy_doc(doc_token: str, body: StrategyDocRebuildRequest) 
     meta = json.loads(meta_file.read_text(encoding="utf-8"))
     doc_path = Path(meta["path"])
 
-    from app.services.notion_parser import ProductSpecifics
-    raw = dict(body.request)
-    if "specifics" in raw and isinstance(raw["specifics"], dict):
-        raw["specifics"] = ProductSpecifics(**raw["specifics"])
-    valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
-    raw = {k: v for k, v in raw.items() if k in valid_fields}
-    req = ProposalRequest(**raw)
+    req = _reconstruct_proposal_request(body.request)
 
     built = docx_builder.build_strategy_brief_docx(
         output_path=doc_path,
@@ -881,13 +1025,7 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
     context via live web search. Also writes a downloadable .docx report
     and returns a token to fetch it via /api/download-roadblocks/{token}.
     """
-    from app.services.notion_parser import ProductSpecifics
-    raw = dict(body.request)
-    if "specifics" in raw and isinstance(raw["specifics"], dict):
-        raw["specifics"] = ProductSpecifics(**raw["specifics"])
-    valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
-    raw = {k: v for k, v in raw.items() if k in valid_fields}
-    req = ProposalRequest(**raw)
+    req = _reconstruct_proposal_request(body.request)
 
     line_items = [
         LineItem(id=li.id, product_name=li.product_name, monthly_budget=li.monthly_budget, months=li.months)
@@ -949,13 +1087,7 @@ async def download_roadblocks(doc_token: str) -> FileResponse:
 @app.post("/api/recommend")
 async def recommend(body: RecommendRequest) -> dict:
     """Given a parsed request + a monthly budget, suggest line items."""
-    from app.services.notion_parser import ProductSpecifics
-    raw = dict(body.request)
-    if "specifics" in raw and isinstance(raw["specifics"], dict):
-        raw["specifics"] = ProductSpecifics(**raw["specifics"])
-    valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
-    raw = {k: v for k, v in raw.items() if k in valid_fields}
-    req = ProposalRequest(**raw)
+    req = _reconstruct_proposal_request(body.request)
 
     items = recommend_line_items(req, body.monthly_budget, strategy_brief=body.strategy_brief, time_unit=body.time_unit)
     return {"line_items": [asdict(li) for li in items]}
@@ -1027,13 +1159,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     Generate an Excel proposal with AI enrichment.
     Returns proposal_id, filename, proposal_title, summary, and enrichment content.
     """
-    from app.services.notion_parser import ProductSpecifics
-    raw = dict(body.request)
-    if "specifics" in raw and isinstance(raw["specifics"], dict):
-        raw["specifics"] = ProductSpecifics(**raw["specifics"])
-    valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
-    raw = {k: v for k, v in raw.items() if k in valid_fields}
-    req = ProposalRequest(**raw)
+    req = _reconstruct_proposal_request(body.request)
 
     def _to_line_items(models: list[LineItemModel]) -> list[LineItem]:
         return [
@@ -1139,8 +1265,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         client_name=req.client_name or "",
     )
 
-    # 4. Derive filenames from the title
-    proposal_id = secrets.token_urlsafe(16)
+    # 4. Derive filenames from the title.
+    proposal_id = _resolve_draftable_proposal_id(body.proposal_id)
     safe_base = ai_enricher.safe_filename(proposal_title)
     filename = f"{safe_base}.xlsx"
     output_path = PROPOSALS_DIR / filename
@@ -1308,31 +1434,22 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     # 11. Store metadata in PostgreSQL. The generated files remain on disk;
     # their filenames are persisted so the existing download routes can derive
     # their paths after a restart or redeploy.
-    reopen_state = {
-        "request": body.request,
-        "line_items": [li.model_dump() for li in (body.line_items or (body.tiers[0].line_items if body.tiers else []))],
-        "avails_data": {
-            k: v.model_dump() for k, v in
-            (body.avails_data or (body.tiers[0].avails_data if body.tiers else {}) or {}).items()
-        },
-        "tiers": [t.model_dump() for t in body.tiers] if body.tiers else None,
-        "strategy_brief": body.strategy_brief,
-        "roadblocks": body.roadblocks,
-        "force_tabs": body.force_tabs,
-        "addons": [a.model_dump() for a in body.addons],
-        "raw_notion_text": body.raw_notion_text,
-        "enrichment": enrichment_out,
-        # Each tier's own period_merge_groups already rides along inside
-        # "tiers" above (TierModel.model_dump() includes it) — time_unit
-        # is the one PROPOSAL-wide granularity field with no tier home, so
-        # it needs its own explicit key here. Without it, reopening a
-        # non-month proposal would default state.timeUnit back to "month"
-        # client-side while monthly_allocations keys stay in the OLD
-        # format (e.g. "W1-2026-09-01"), which _mbReconcileMonthsForDateChange
-        # would then treat as entirely unrecognized — silently wiping the
-        # reopened breakdown's apparent numbers.
-        "time_unit": body.time_unit,
-    }
+    reopen_state = _build_reopen_state(
+        request_dict=body.request,
+        line_items=body.line_items,
+        tiers=body.tiers,
+        avails_data=body.avails_data,
+        strategy_brief=body.strategy_brief,
+        roadblocks=body.roadblocks,
+        force_tabs=body.force_tabs,
+        addons=body.addons,
+        raw_notion_text=body.raw_notion_text,
+        enrichment=enrichment_out,
+        time_unit=body.time_unit,
+        monthly_distribution_mode=body.monthly_distribution_mode,
+        campaign_name_override=body.campaign_name_override,
+        wizard_step=8,
+    )
     _save_proposal_metadata(
         proposal_id=proposal_id,
         client_name=req.client_name,
@@ -1354,6 +1471,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         pptx_net_filename=pptx_net_filename,
         pptx_gross_filename=pptx_gross_filename,
         generated_at=datetime.now(timezone.utc),
+        status="generated",
         requester_ip=client_ip,
         requester_user_agent=user_agent,
         summary=summary,
@@ -1381,8 +1499,11 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
 async def reopen_proposal(proposal_id: str) -> dict:
     """
     Return the full saved state (request, line items, avails, strategy brief)
-    for a previously generated proposal, so the app can pre-fill the wizard
-    for edits instead of starting from a blank paste.
+    for a previously generated proposal OR a saved draft, so the app can
+    pre-fill the wizard for edits instead of starting from a blank paste.
+    `status` tells the frontend which of the two this is — a draft resumes
+    at `wizard_step`; a completed proposal always lands on Curate, as it
+    always has (see app.js's maybeReopenProposal()).
     """
     meta = _get_proposal_metadata(proposal_id)
     if meta is None:
@@ -1392,8 +1513,96 @@ async def reopen_proposal(proposal_id: str) -> dict:
         raise HTTPException(status_code=410, detail="This proposal was generated before reopening was supported.")
     return {
         "proposal_title": meta.get("proposal_title", ""),
+        "status": meta.get("status") or "generated",
         **reopen_state,
     }
+
+
+@app.post("/api/proposal/draft")
+async def save_draft(body: DraftSaveRequest, request: Request) -> dict:
+    """
+    Save the wizard's CURRENT state as a resumable, incomplete "draft" —
+    callable from any step once Step 01/02 parsing has produced a
+    `request` (the frontend gates its Save Draft button the same way it
+    gates the proposal-name bar: from Step 02 onward). Deliberately runs
+    NO validation beyond Pydantic's own type-checking — a draft is
+    explicitly allowed to be unbalanced/incomplete, unlike /api/generate's
+    hard Monthly Breakdown gate — and never touches the AI services or the
+    filesystem (no Excel/email/deck is built), so saving progress never
+    burns an OpenAI call and is safe to click as often as the planner likes.
+
+    Upserts the SAME `proposals` row on every call once one exists (via
+    `body.proposal_id`, echoed back from the first save and then carried
+    by the frontend on every later save) rather than piling up duplicate
+    rows per session — reuses reopen_state's exact shape, so a saved
+    draft resumes through the very same GET .../reopen code path a
+    completed proposal already does.
+    """
+    req = _reconstruct_proposal_request(body.request)
+    notion_id = ai_enricher.normalize_notion_id(req.notion_id)
+    # Reuses body.proposal_id only when it doesn't exist yet or is still a
+    # draft — NEVER when it already belongs to a real GENERATED proposal,
+    # which matters a lot once autosave is in the picture: a planner
+    # reopening a past, completed proposal just to look at it must never
+    # have autosave silently flip it back to "draft" and blank its
+    # filename/generated_at columns. See _resolve_draftable_proposal_id's
+    # own docstring for the full reasoning (shared with /api/generate).
+    proposal_id = _resolve_draftable_proposal_id((body.proposal_id or "").strip() or None)
+
+    reopen_state = _build_reopen_state(
+        request_dict=body.request,
+        line_items=body.line_items,
+        tiers=body.tiers,
+        avails_data=body.avails_data,
+        strategy_brief=body.strategy_brief,
+        roadblocks=body.roadblocks,
+        force_tabs=body.force_tabs,
+        addons=body.addons,
+        raw_notion_text=body.raw_notion_text,
+        enrichment=body.enrichment,
+        time_unit=body.time_unit,
+        monthly_distribution_mode=body.monthly_distribution_mode,
+        campaign_name_override=body.campaign_name_override,
+        wizard_step=body.wizard_step,
+    )
+    client_ip = request.client.host if request.client else ""
+    user_agent = request.headers.get("user-agent", "")
+    _save_proposal_metadata(
+        proposal_id=proposal_id,
+        client_name=req.client_name,
+        seller_email=req.salesperson_email,
+        created_by_email=request.state.user["email"],
+        requested_by=req.requested_by,
+        notion_id=notion_id,
+        proposal_title=body.proposal_title.strip() or req.client_name or "Untitled draft",
+        requester_ip=client_ip,
+        requester_user_agent=user_agent,
+        summary={},
+        reopen_state=reopen_state,
+        status="draft",
+    )
+    return {"proposal_id": proposal_id, "saved_at": datetime.now(timezone.utc).isoformat()}
+
+
+@app.delete("/api/proposal/{proposal_id}")
+async def delete_draft(proposal_id: str, request: Request) -> dict:
+    """
+    Deletes a DRAFT only — there is no delete path for a real generated
+    proposal (that row is a permanent record of what was actually sent,
+    same reasoning "My Proposal History" itself is never destructive).
+    Scoped to the caller's own drafts, so one planner can't delete
+    another's in-progress work.
+    """
+    meta = _get_proposal_metadata(proposal_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    if meta.get("status") != "draft":
+        raise HTTPException(status_code=400, detail="Only drafts can be deleted.")
+    if (meta.get("created_by_email") or "").lower() != (request.state.user["email"] or "").lower():
+        raise HTTPException(status_code=403, detail="You can only delete your own drafts.")
+    with get_connection() as conn:
+        conn.execute("DELETE FROM proposals WHERE proposal_id = %s", (proposal_id,))
+    return {"ok": True}
 
 
 @app.post("/api/proposal/{proposal_id}/reprompt-emails")
@@ -1406,13 +1615,7 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
     the same path/filename, so the existing download link keeps working and
     now serves the revised content.
     """
-    from app.services.notion_parser import ProductSpecifics
-    raw = dict(body.request)
-    if "specifics" in raw and isinstance(raw["specifics"], dict):
-        raw["specifics"] = ProductSpecifics(**raw["specifics"])
-    valid_fields = set(ProposalRequest.__dataclass_fields__.keys())
-    raw = {k: v for k, v in raw.items() if k in valid_fields}
-    req = ProposalRequest(**raw)
+    req = _reconstruct_proposal_request(body.request)
 
     line_items = [
         LineItem(id=li.id, product_name=li.product_name, monthly_budget=li.monthly_budget, months=li.months)
@@ -1727,7 +1930,7 @@ async def admin_delete_user(user_id: str, request: Request) -> dict:
 _PROPOSAL_LIST_COLUMNS = (
     "proposal_id, client_name, seller_email, requested_by, notion_id, "
     "proposal_title, filename, generated_at, requester_ip, "
-    "requester_user_agent, summary"
+    "requester_user_agent, summary, status, updated_at"
 )
 
 
@@ -1780,7 +1983,7 @@ def _query_proposals(*, mine_email: Optional[str], search: str, page: int, page_
         SELECT {_PROPOSAL_LIST_COLUMNS}, COUNT(*) OVER() AS total_count
         FROM proposals
         {where_sql}
-        ORDER BY generated_at DESC NULLS LAST, created_at DESC
+        ORDER BY updated_at DESC
         LIMIT %s OFFSET %s
         """,
         (*params, page_size, offset),
@@ -1804,6 +2007,8 @@ def _query_proposals(*, mine_email: Optional[str], search: str, page: int, page_
             "total_net": (meta.get("summary") or {}).get("total_net"),
             "total_gross": (meta.get("summary") or {}).get("total_gross"),
             "tabs_built": (meta.get("summary") or {}).get("tabs_built", []),
+            "status": meta.get("status") or "generated",
+            "updated_at": meta.get("updated_at", ""),
         })
     return {
         "proposals": proposals,
@@ -1991,8 +2196,18 @@ def compute_admin_analytics(window: str = "all") -> dict:
     genuine duplicate.
     """
     since = _analytics_since(window)
-    where_sql = "WHERE generated_at >= %s" if since else ""
-    params = (since,) if since else ()
+    # Drafts (status='draft') never had a real Excel/summary built and
+    # must never count toward "who creates plans"/revenue analytics — a
+    # NULL generated_at already excludes them whenever a time window is
+    # active, but "all" has no window clause at all, so this needs to be
+    # explicit rather than relying on that side effect.
+    where_clauses = ["status = 'generated'"]
+    params: list = []
+    if since:
+        where_clauses.append("generated_at >= %s")
+        params.append(since)
+    where_sql = f"WHERE {' AND '.join(where_clauses)}"
+    params = tuple(params)
     rows = fetch_all(
         f"""
         SELECT

@@ -270,6 +270,47 @@ CREATE INDEX idx_proposals_generated_at ON proposals (generated_at DESC);
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS created_by_email TEXT;
 
 -- ---------------------------------------------------------------------------
+-- Migration: resumable drafts. A "draft" is a proposals row saved from the
+-- in-progress wizard (any step from Review onward) via the new
+-- POST /api/proposal/draft, BEFORE a real Excel/email/deck has ever been
+-- built for it — status stays 'generated' (the default, matching every
+-- existing row) until a real POST /api/generate call finishes, at which
+-- point a draft's OWN row is promoted in place (same proposal_id) rather
+-- than leaving an orphaned draft row behind — see main.py's proposal_id
+-- resolution in /api/generate. updated_at is "last touched, by either a
+-- draft-save OR a real generate" — independent of generated_at, which
+-- stays NULL for a draft — so My Proposals can sort drafts by recency
+-- instead of always shoving them to the bottom of a generated_at sort.
+-- ---------------------------------------------------------------------------
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'generated';
+-- 'generated' is already the semantically correct value for every
+-- pre-existing row (every one of them really is a completed, generated
+-- proposal), so no backfill is needed for this column beyond the DEFAULT.
+
+-- updated_at needs a real one-time backfill, not just its DEFAULT: a plain
+-- `ADD COLUMN ... DEFAULT now()` would stamp EVERY existing row with the
+-- single instant this migration happens to run, flattening their real
+-- chronological order (every past proposal ties on the same timestamp
+-- until fresh activity reorders things) — My Proposals sorts by
+-- updated_at, so that would visibly scramble existing history on deploy
+-- day. Wrapped in a DO block that checks column existence FIRST so the
+-- backfill runs exactly once, only during the actual migration that
+-- introduces the column — schema.sql re-runs on every deploy, and a
+-- later run must never overwrite a real updated_at the app has since set
+-- (e.g. a draft saved minutes ago) back to its generated_at/created_at.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'proposals' AND column_name = 'updated_at'
+    ) THEN
+        ALTER TABLE proposals ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+        UPDATE proposals SET updated_at = COALESCE(generated_at, created_at);
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_proposals_updated_at ON proposals (updated_at DESC);
+
+-- ---------------------------------------------------------------------------
 -- drive_tokens — the single stored Google OAuth2 token for Drive uploads
 -- (app/services/drive_uploader.py), replacing the local file
 -- ~/.entravision_drive_token.json. One row, fixed id — there's only ever

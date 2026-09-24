@@ -221,6 +221,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   // session, which calls this again itself once state.timeUnit is restored.
   _applyTimeUnitLabels();
   await maybeReopenProposal();
+  // Runs for the rest of the session regardless of step — _autosaveTick()
+  // itself no-ops whenever there's nothing parsed yet to save.
+  startAutosave();
 });
 
 // --------------------------------------------------------------------------
@@ -253,7 +256,7 @@ function closeMyProposalsModal() {
 
 async function loadMyProposals() {
   const body = document.getElementById("my-proposals-body");
-  body.innerHTML = `<tr><td colspan="6" class="admin-empty"><span class="btn-inline-spinner"></span>Loading…</td></tr>`;
+  body.innerHTML = `<tr><td colspan="7" class="admin-empty"><span class="btn-inline-spinner"></span>Loading…</td></tr>`;
   document.getElementById("my-proposals-prev-btn").disabled = true;
   document.getElementById("my-proposals-next-btn").disabled = true;
 
@@ -268,7 +271,7 @@ async function loadMyProposals() {
     state.myProposals.page = data.page || page;
     renderMyProposalsTable(data.proposals || []);
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="6" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
   } finally {
     document.getElementById("my-proposals-page-info").textContent = `Page ${state.myProposals.page} of ${state.myProposals.totalPages}`;
     document.getElementById("my-proposals-prev-btn").disabled = state.myProposals.page <= 1;
@@ -281,19 +284,37 @@ async function loadMyProposals() {
 function renderMyProposalsTable(list) {
   const body = document.getElementById("my-proposals-body");
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="6" class="admin-empty">No proposals yet.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="admin-empty">No proposals yet.</td></tr>`;
     return;
   }
-  body.innerHTML = list.map(p => `
+  body.innerHTML = list.map(p => {
+    const isDraft = p.status === "draft";
+    return `
     <tr>
-      <td class="mono">${escapeHtml(formatDate(p.generated_at))}</td>
+      <td class="mono">${escapeHtml(formatDate(p.generated_at || p.updated_at))}</td>
       <td class="mono">${escapeHtml(p.notion_id || "—")}</td>
       <td>${escapeHtml(p.client_name || "—")}</td>
       <td class="wrap">${escapeHtml(p.proposal_title || p.filename || "—")}</td>
-      <td class="mono">${money(p.total_net)}</td>
-      <td><a class="reopen-link" href="/?reopen=${encodeURIComponent(p.proposal_id)}" target="_blank" rel="noopener">Reopen ↗</a></td>
+      <td>${isDraft ? '<span class="proposal-status-badge draft">Draft</span>' : ""}</td>
+      <td class="mono">${isDraft ? "—" : money(p.total_net)}</td>
+      <td class="my-proposals-actions">
+        <a class="reopen-link" href="/?reopen=${encodeURIComponent(p.proposal_id)}" target="_blank" rel="noopener">${isDraft ? "Continue ↗" : "Reopen ↗"}</a>
+        ${isDraft ? `<button type="button" class="btn-inline-delete" data-delete-draft="${escapeAttr(p.proposal_id)}" title="Delete this draft">🗑</button>` : ""}
+      </td>
     </tr>
-  `).join("");
+  `;
+  }).join("");
+}
+
+async function onDeleteDraft(proposalId) {
+  if (!confirm("Delete this draft? This can't be undone.")) return;
+  try {
+    const res = await fetch(`/api/proposal/${encodeURIComponent(proposalId)}`, { method: "DELETE" });
+    await _readJsonResponse(res);
+    loadMyProposals();
+  } catch (e) {
+    alert("Couldn't delete: " + e.message);
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -473,14 +494,20 @@ async function maybeReopenProposal() {
     // generated — show it verbatim rather than a fresh live-guess.
     state.finalProposalTitle = data.proposal_title || null;
     // MUST be restored before renderLineItems()/renderMonthlyBreakdown()
-    // run below — unlike mbDistributionMode (a preview-only default that
-    // always resets to "even"), time_unit determines the FORMAT of the
+    // run below — time_unit determines the FORMAT of the
     // monthly_allocations keys this same payload is about to restore
     // (see reopen_state's own comment in main.py). Absent entirely on a
     // proposal generated before this feature existed — defaults to
     // "month", correct for every such proposal since that was the only
     // granularity that existed then.
     state.timeUnit = data.time_unit || "month";
+    // Same "absent on an older proposal -> default" treatment as
+    // time_unit above — both were only added to reopen_state once this
+    // round's consistency pass closed the gap (see _build_reopen_state
+    // in main.py); an older save simply resets to each field's normal
+    // default, same as it always silently did before this fix existed.
+    state.mbDistributionMode = data.monthly_distribution_mode || "even";
+    state.manualCampaignNameOverride = data.campaign_name_override || null;
 
     // Restore Add-Ons picks (absent entirely on a proposal generated before
     // this feature existed — defaults to none picked, not an error).
@@ -532,16 +559,52 @@ async function maybeReopenProposal() {
     document.getElementById("tier-start-date-input").value = _toIsoDateString(state.activeTierStartDate);
     document.getElementById("tier-end-date-input").value = _toIsoDateString(state.activeTierEndDate);
     _syncTierOverridePanelOpen();
-    // A reopened proposal already has every step's data (it was fully
-    // generated once) — let the nav pills jump anywhere immediately
-    // instead of only unlocking as the planner re-visits each step.
-    state.furthestStep = 8;
-    goToStep(4);  // straight to Curate — the paste/review content is already known
+    // Seeds the autosave dirty-check to "nothing's changed yet" — without
+    // this, the very first tick after a reopen would autosave immediately
+    // even though the planner hasn't touched anything, just because the
+    // restored state naturally differs from the initial null.
+    _lastSavedDraftSnapshot = JSON.stringify({ ..._buildWizardStatePayload(), enrichment: state.enrichment });
+    if ((data.status || "generated") === "draft") {
+      // A draft only ever has data up through wherever it was saved —
+      // resume exactly there, with the nav pills unlocked only that far,
+      // rather than pretending the whole flow was already completed.
+      _resumeAtStep(data.wizard_step);
+    } else {
+      // A reopened, fully GENERATED proposal already has every step's
+      // data — let the nav pills jump anywhere immediately instead of
+      // only unlocking as the planner re-visits each step. Unchanged
+      // from before drafts existed.
+      state.furthestStep = 8;
+      goToStep(4);  // straight to Curate — the paste/review content is already known
+    }
   } catch (e) {
     alert("Reopen failed: " + e.message);
   } finally {
     overlay.classList.add("hidden");
   }
+}
+
+// Restores whichever step a saved DRAFT was left at, rendering each
+// already-reached step's content from the just-restored state.
+// Deliberately calls goToStep() directly rather than onNext() — onNext()
+// has "first visit" side effects (auto-run the Strategy/Roadblocks AI
+// calls when their result is still null, auto-populate default line
+// items) that must NEVER re-fire just from resuming a draft: its saved
+// data is already real, not a blank first pass, and re-triggering an AI
+// call here is exactly the wasted-quota case Save Draft exists to avoid.
+// Every render* call below is state-only (no fetch) and already safe to
+// call unconditionally — renderLineItems()/renderAllTierTabStrips() ran
+// just before this in maybeReopenProposal(), same as the generated-
+// proposal path always has.
+function _resumeAtStep(step) {
+  const s = Math.max(2, Math.min(8, step || 2));
+  if (state.strategyBrief) renderStrategyBrief(state.strategyBrief);
+  if (state.roadblocks) renderRoadblocks(state.roadblocks);
+  if (s >= 5) renderAvailsGrid();
+  if (s >= 6) renderMonthlyBreakdown();
+  if (s >= 8) renderGenerateSummary();
+  state.furthestStep = s;
+  goToStep(s);
 }
 
 // Converts one tier from the /api/generate WIRE shape (snake_case,
@@ -624,6 +687,12 @@ function wireEvents() {
   document.getElementById("my-proposals-close-btn").addEventListener("click", closeMyProposalsModal);
   document.getElementById("my-proposals-modal").addEventListener("click", (e) => {
     if (e.target.id === "my-proposals-modal") closeMyProposalsModal();  // backdrop click
+  });
+  // Delegated — the table body is fully re-rendered on every load/page
+  // change, so a per-row listener would need rewiring every time.
+  document.getElementById("my-proposals-body").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-delete-draft]");
+    if (btn) onDeleteDraft(btn.dataset.deleteDraft);
   });
   document.getElementById("my-proposals-search").addEventListener("input", _debounce((e) => {
     state.myProposals.search = e.target.value;
@@ -718,6 +787,7 @@ function wireEvents() {
   document.getElementById("reprompt-submit-btn").addEventListener("click", onStrategyReprompt);
 
   // Proposal name bar — editable campaign-name segment.
+  document.getElementById("save-draft-btn").addEventListener("click", onSaveDraft);
   document.getElementById("proposal-name-edit-btn").addEventListener("click", onEditProposalNameClick);
   document.getElementById("proposal-name-save-btn").addEventListener("click", onSaveProposalNameEdit);
   document.getElementById("proposal-name-cancel-btn").addEventListener("click", onCancelProposalNameEdit);
@@ -896,6 +966,12 @@ function resetAll() {
   _resetStrategyUI();
   _resetRoadblocksUI();
   renderAddonsModule();  // re-render so the checkboxes visually clear too, not just state.addons
+  document.getElementById("save-draft-status").textContent = "";  // clear a stale "Saved at…" from the prior proposal
+  // Without this, autosave's dirty-check would compare the NEW (blank)
+  // proposal's state against the PREVIOUS proposal's last-saved snapshot
+  // — harmless in practice (worst case one redundant early autosave) but
+  // not actually meaningful, so reset it cleanly on every New Proposal.
+  _lastSavedDraftSnapshot = null;
 
   goToStep(1);
 }
@@ -1001,6 +1077,119 @@ function updateProposalNameBar() {
   }
   document.getElementById("proposal-name-text").textContent = title;
   bar.classList.remove("hidden");
+}
+
+// --------------------------------------------------------------------------
+// Save Draft — persists the wizard's current state as a resumable,
+// incomplete proposal (shows up in My Proposal History as "Draft"), from
+// any step once there's a parsed request to save: the 💾 Save Draft
+// button for an explicit save, plus a periodic autosave (see below) so
+// progress survives a closed tab / crashed browser without the planner
+// having to remember to click anything. Neither ever calls an AI service
+// or validates the plan (an unbalanced/incomplete plan is exactly what a
+// draft is allowed to be) — see POST /api/proposal/draft.
+// --------------------------------------------------------------------------
+
+// Flushes whatever step is currently being edited into state — same sync
+// calls the step-pill handler / onNext() run before navigating away —
+// then returns a JSON snapshot of exactly what a save would send, so the
+// autosave timer can tell "did anything actually change" without a
+// separate dirty-flag threaded through every single edit handler.
+function _flushAndSnapshotDraftState() {
+  if (state.step === 2) syncFormToParsed();
+  if (state.step === 4) syncLineItemsFromTable();
+  if (state.step === 5) syncAvailsFromGrid();
+  return JSON.stringify({ ..._buildWizardStatePayload(), enrichment: state.enrichment });
+}
+
+// The actual POST — shared by the manual button and autosave so the two
+// can't drift apart on what gets sent. `silent` only changes the status
+// line's wording/whether a failure surfaces as a visible error; the
+// network call itself is identical either way.
+async function _saveDraftNow(snapshot, { silent }) {
+  const statusEl = document.getElementById("save-draft-status");
+  const payload = {
+    ...JSON.parse(snapshot),
+    proposal_id: state.proposalId,
+    wizard_step: state.step,
+    proposal_title: state.finalProposalTitle || buildProposalNamePreview(state.parsed),
+  };
+  try {
+    const res = await fetch("/api/proposal/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await _readJsonResponse(res);
+    state.proposalId = data.proposal_id;
+    _lastSavedDraftSnapshot = snapshot;
+    const when = new Date(data.saved_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    statusEl.classList.remove("save-draft-error");
+    statusEl.textContent = `${silent ? "Auto-saved" : "Saved as draft"} · ${when}`;
+  } catch (e) {
+    // A silent autosave failure doesn't interrupt the planner — the
+    // status line just keeps showing whatever it last said (still
+    // accurate: nothing since then has actually been saved), and the
+    // manual button is always right there to retry explicitly. Only a
+    // deliberate click surfaces the error.
+    if (!silent) {
+      statusEl.textContent = `Couldn't save: ${e.message}`;
+      statusEl.classList.add("save-draft-error");
+    }
+    throw e;
+  }
+}
+
+async function onSaveDraft() {
+  if (!state.parsed) return;  // button is hidden until then anyway (see updateProposalNameBar)
+  const btn = document.getElementById("save-draft-btn");
+  const prevLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    await _saveDraftNow(_flushAndSnapshotDraftState(), { silent: false });
+  } catch (e) {
+    // already surfaced in the status line by _saveDraftNow
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Autosave — a periodic safety net on top of the manual button, so
+// closing the tab mid-edit (forgetting to click Save Draft, a crash, a
+// slow connection) never loses more than one interval's worth of work.
+// Ticks on a fixed timer rather than per-keystroke/per-edit (which would
+// mean hooking dozens of scattered edit handlers just to know "something
+// changed," and would spam the server while someone's actively typing) —
+// each tick cheaply snapshots current state and skips the network call
+// entirely when nothing's different from the last save.
+// --------------------------------------------------------------------------
+
+const _AUTOSAVE_INTERVAL_MS = 60000;
+let _autosaveTimer = null;
+let _lastSavedDraftSnapshot = null;
+let _autosaveInFlight = false;
+
+function startAutosave() {
+  if (_autosaveTimer) return;
+  _autosaveTimer = setInterval(_autosaveTick, _AUTOSAVE_INTERVAL_MS);
+}
+
+async function _autosaveTick() {
+  if (!state.parsed) return;  // nothing worth saving yet (matches the Save Draft button's own gate)
+  if (_autosaveInFlight || document.getElementById("save-draft-btn").disabled) return;  // a save is already in flight
+  const snapshot = _flushAndSnapshotDraftState();
+  if (snapshot === _lastSavedDraftSnapshot) return;  // no real edits since the last save — skip the round trip
+  _autosaveInFlight = true;
+  try {
+    await _saveDraftNow(snapshot, { silent: true });
+  } catch (e) {
+    // swallowed — see _saveDraftNow's own comment on silent failures
+  } finally {
+    _autosaveInFlight = false;
+  }
 }
 
 // The campaign-name segment is the ONE AI-guessed/client-name-derived
@@ -4600,12 +4789,17 @@ function renderGenerateSummary() {
   });
 }
 
-async function onGenerate() {
+// Fields shared by /api/generate and /api/proposal/draft — the whole
+// wizard state needed to resume or finish a proposal. Kept in ONE place
+// so the two payloads can't quietly drift apart (the same "one shared
+// spot, not near-identical copies" lesson as normalize_newlines/
+// llm_utils on the backend — see main.py's _build_reopen_state).
+function _buildWizardStatePayload() {
   const forceTabs = {};
   document.querySelectorAll(".tabs-override [data-tab]").forEach(cb => {
     forceTabs[cb.dataset.tab] = cb.checked;
   });
-  const payload = {
+  return {
     request: state.parsed,
     line_items: state.lineItems,     // legacy field — kept for back-compat; the server prefers `tiers` when present
     tiers: allTiersForSubmit(),
@@ -4629,6 +4823,17 @@ async function onGenerate() {
     // convention (see the proposal-name-bar's Edit button) — null unless
     // explicitly set, in which case it wins over the AI's own guess.
     campaign_name_override: state.manualCampaignNameOverride,
+  };
+}
+
+async function onGenerate() {
+  const payload = {
+    ..._buildWizardStatePayload(),
+    // Echoes back an id from an earlier draft save (or a reopened
+    // proposal) of this SAME work — see main.py's proposal_id
+    // resolution in generate() for exactly when that id gets reused
+    // vs. a fresh one minted.
+    proposal_id: state.proposalId,
   };
   const btn = document.getElementById("generate-btn");
   btn.disabled = true;

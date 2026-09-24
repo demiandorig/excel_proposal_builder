@@ -22,12 +22,13 @@ def _fake_request(email: str = "planner@entravision.com") -> SimpleNamespace:
     return SimpleNamespace(state=SimpleNamespace(user={"email": email, "is_admin": True}))
 
 
-def _row(proposal_id: str, seller_email: str, total_count: int) -> dict:
+def _row(proposal_id: str, seller_email: str, total_count: int, status: str = "generated") -> dict:
     return {
         "proposal_id": proposal_id, "client_name": "Acme", "seller_email": seller_email,
         "requested_by": "Jane AE", "notion_id": "EVC-1", "proposal_title": "t", "filename": "f.xlsx",
         "generated_at": None, "requester_ip": "1.2.3.4", "requester_user_agent": "UA",
         "summary": {"total_net": 100.0}, "total_count": total_count,
+        "status": status, "updated_at": None,
     }
 
 
@@ -52,6 +53,30 @@ def test_mine_filter_matches_on_created_by_email_case_insensitively(monkeypatch)
     assert result["count"] == 1
     assert result["total_count"] == 1
     assert result["proposals"][0]["proposal_id"] == "p1"
+    assert result["proposals"][0]["status"] == "generated"
+
+
+def test_draft_rows_flow_through_the_list_with_their_status(monkeypatch):
+    monkeypatch.setattr(main, "fetch_all", lambda sql, params: [_row("p2", "ae@x.com", 1, status="draft")])
+    result = asyncio.run(main.my_proposals(_fake_request()))
+    assert result["proposals"][0]["status"] == "draft"
+
+
+def test_list_orders_by_updated_at_not_generated_at(monkeypatch):
+    # A draft (generated_at NULL) must still be able to sort ahead of an
+    # older generated proposal — updated_at, not generated_at, drives the
+    # order now, so a draft sorts by when it was last saved, not always
+    # pushed to the bottom.
+    captured = {}
+
+    def fake_fetch_all(sql, params):
+        captured["sql"] = sql
+        return [_row("p1", "x", 1)]
+
+    monkeypatch.setattr(main, "fetch_all", fake_fetch_all)
+    asyncio.run(main.my_proposals(_fake_request()))
+    assert "ORDER BY updated_at DESC" in captured["sql"]
+    assert "generated_at DESC" not in captured["sql"]
 
 
 def test_all_scope_omits_the_mine_filter_entirely(monkeypatch):
@@ -170,6 +195,26 @@ def test_save_proposal_metadata_persists_created_by_email_separately_from_seller
     # the column order in the INSERT column list.
     assert params[2] == "ae@entravision.com"
     assert params[3] == "planner@entravision.com"
+    # status defaults to "generated" (matching every row before drafts
+    # existed) and is appended at the END of the param list, so it can't
+    # shift the two positional indices asserted above.
+    assert params[-1] == "generated"
+    assert "status" in sql and "updated_at" in sql
+
+
+def test_save_proposal_metadata_status_defaults_and_draft_override(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "get_connection", lambda: _CapturingConn(calls))
+
+    # A draft omits every generate-only field entirely — must not raise
+    # (they're all optional now) and must persist status="draft".
+    main._save_proposal_metadata(
+        proposal_id="d1", client_name="Acme", seller_email="", created_by_email="planner@entravision.com",
+        requested_by="", notion_id=None, proposal_title="Untitled draft",
+        reopen_state={"request": {}}, status="draft",
+    )
+    assert calls[0][1][-1] == "draft"
+    assert calls[0][1][7] is None  # filename — never known yet for a draft
 
 
 def test_users_export_csv_never_includes_password_fields(monkeypatch):
