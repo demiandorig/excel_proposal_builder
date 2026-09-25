@@ -350,7 +350,7 @@ async function loadProposals() {
   } catch (e) {
     if (adminState._proposalsRequestToken !== requestToken) return;
     document.getElementById("proposals-body").innerHTML =
-      `<tr><td colspan="10" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+      `<tr><td colspan="11" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
   } finally {
     if (adminState._proposalsRequestToken === requestToken) {
       adminState.proposalsLoading = false;
@@ -366,7 +366,7 @@ async function loadProposals() {
 // for however long that request takes.
 function renderProposalsLoading() {
   document.getElementById("proposals-body").innerHTML =
-    `<tr><td colspan="10" class="admin-empty"><span class="btn-inline-spinner"></span>Loading…</td></tr>`;
+    `<tr><td colspan="11" class="admin-empty"><span class="btn-inline-spinner"></span>Loading…</td></tr>`;
   document.getElementById("proposals-prev-btn").disabled = true;
   document.getElementById("proposals-next-btn").disabled = true;
 }
@@ -389,24 +389,28 @@ function renderProposals(list) {
   renderProposalsPagination();
 
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="10" class="admin-empty">No proposals match.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="11" class="admin-empty">No proposals match.</td></tr>`;
     return;
   }
 
-  body.innerHTML = list.map(p => `
+  body.innerHTML = list.map(p => {
+    const isDraft = p.status === "draft";
+    return `
     <tr>
-      <td class="mono">${formatDate(p.generated_at)}</td>
+      <td class="mono">${formatDate(p.generated_at || p.updated_at)}</td>
       <td class="mono">${escapeHtml(p.notion_id || "—")}</td>
       <td>${escapeHtml(p.client_name || "—")}</td>
       <td>${escapeHtml(p.requested_by || p.seller_email || "—")}</td>
       <td class="wrap">${escapeHtml(p.proposal_title || p.filename || "—")}</td>
+      <td>${isDraft ? '<span class="proposal-status-badge draft">Draft</span>' : ""}</td>
       <td class="mono">${escapeHtml((p.tabs_built || []).join(", "))}</td>
-      <td class="mono">${money(p.total_net)}</td>
+      <td class="mono">${isDraft ? "—" : money(p.total_net)}</td>
       <td class="mono muted">${escapeHtml(p.requester_ip || "—")}</td>
       <td class="wrap muted" title="${escapeAttr(p.requester_user_agent || "")}">${escapeHtml(shortenUA(p.requester_user_agent))}</td>
-      <td><a class="reopen-link" href="/?reopen=${encodeURIComponent(p.proposal_id)}" target="_blank" rel="noopener">Reopen ↗</a></td>
+      <td><a class="reopen-link" href="/?reopen=${encodeURIComponent(p.proposal_id)}" target="_blank" rel="noopener">${isDraft ? "Continue ↗" : "Reopen ↗"}</a></td>
     </tr>
-  `).join("");
+  `;
+  }).join("");
 }
 
 function shortenUA(ua) {

@@ -44,10 +44,10 @@
       <div class="table-scroll">
         <table class="admin-table" id="my-proposals-table">
           <thead>
-            <tr><th>Generated</th><th>Notion ID</th><th>Client</th><th>Proposal Title</th><th>Net</th><th></th></tr>
+            <tr><th>Generated</th><th>Notion ID</th><th>Client</th><th>Proposal Title</th><th>Status</th><th>Net</th><th></th></tr>
           </thead>
           <tbody id="my-proposals-body">
-            <tr><td colspan="6" class="admin-empty">Loading…</td></tr>
+            <tr><td colspan="7" class="admin-empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -126,6 +126,9 @@
       <button class="btn-copy proposal-name-edit" id="proposal-name-edit-btn" title="Edit the campaign name">✎ Edit</button>
       <button class="btn-copy proposal-name-copy" id="proposal-name-copy-btn"
               data-copy-target="proposal-name-text" title="Copy proposal name">⧉ Copy</button>
+      <button class="btn-copy proposal-name-save-draft" id="save-draft-btn"
+              title="Save your progress so far — shows up in My Proposal History as a resumable draft">💾 Save Draft</button>
+      <span class="proposal-name-draft-status" id="save-draft-status"></span>
     </div>
     <div class="proposal-name-bar-inner proposal-name-edit-row hidden" id="proposal-name-edit-row">
       <span class="proposal-name-label">Campaign name</span>

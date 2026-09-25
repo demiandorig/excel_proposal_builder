@@ -203,7 +203,7 @@ def test_time_unit_adoption_defaults_missing_to_month(monkeypatch):
     assert by_unit["month"] == 2
 
 
-def test_window_all_time_has_no_where_clause(monkeypatch):
+def test_window_all_time_has_no_time_filter_but_still_excludes_drafts(monkeypatch):
     captured = {}
 
     def fake_fetch_all(sql, params):
@@ -214,11 +214,17 @@ def test_window_all_time_has_no_where_clause(monkeypatch):
     monkeypatch.setattr(m, "fetch_all", fake_fetch_all)
     m.compute_admin_analytics("all")
 
-    assert "WHERE" not in captured["sql"]
+    # No time-window clause for "all" — but a draft (status='draft', no
+    # real Excel/summary ever built) must never count toward revenue/
+    # "who creates plans" analytics regardless of window, so the
+    # status filter is unconditional, not just something the old
+    # generated_at-based WHERE happened to imply.
+    assert "generated_at >=" not in captured["sql"]
+    assert "status = 'generated'" in captured["sql"]
     assert captured["params"] == ()
 
 
-def test_window_30d_adds_a_since_filter(monkeypatch):
+def test_window_30d_adds_a_since_filter_alongside_the_status_filter(monkeypatch):
     captured = {}
 
     def fake_fetch_all(sql, params):
@@ -229,7 +235,8 @@ def test_window_30d_adds_a_since_filter(monkeypatch):
     monkeypatch.setattr(m, "fetch_all", fake_fetch_all)
     m.compute_admin_analytics("30d")
 
-    assert "WHERE generated_at >= %s" in captured["sql"]
+    assert "status = 'generated'" in captured["sql"]
+    assert "generated_at >= %s" in captured["sql"]
     assert len(captured["params"]) == 1
     assert isinstance(captured["params"][0], datetime)
 
