@@ -428,7 +428,7 @@ Client name: ...
       </p>
 
       <details class="tier-override-panel" id="tier-override-panel">
-        <summary>Override geo or dates for this option</summary>
+        <summary><span class="tier-override-icon">⚙</span> Geo / Date Override for This Option</summary>
         <div class="tier-override-row">
           <label class="inline-input tier-geo-override">
             <span>Geo override</span>
@@ -461,8 +461,9 @@ Client name: ...
           <span id="budget-target-label">Total monthly budget</span>
           <input type="text" inputmode="decimal" id="total-budget-target" placeholder="0" />
         </label>
-        <button class="btn-secondary" id="recommend-btn">⚡ Suggest mix</button>
         <button class="btn-secondary" id="scale-to-total-btn" title="Scale every line to this total, keeping the current mix (same % per line)">⇅ Scale plan to total</button>
+        <button class="btn-secondary" id="suggest-ideal-totals-btn" title="Keeps the current products — only reweights each line's budget toward the confirmed strategy brief's suggested split">🎯 Suggest Ideal Totals</button>
+        <button class="btn-secondary" id="recommend-btn" title="Builds a brand-new product mix from the confirmed strategy brief — replaces the current lines">🔄 Generate New Product Mix</button>
         <div class="spacer"></div>
         <div class="totals-display">
           <div class="totals-row">

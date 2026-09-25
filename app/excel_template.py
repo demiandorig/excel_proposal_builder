@@ -23,6 +23,7 @@ from openpyxl.cell.text import InlineFont
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.worksheet.formula import ArrayFormula
 from openpyxl.worksheet.worksheet import Worksheet
+from openpyxl.comments import Comment
 
 from app.catalog import CATALOG, Product, families, by_family
 from app.services.notion_parser import compose_target_fallback
@@ -859,6 +860,28 @@ def _unit_labels(time_unit: str) -> dict:
 # into a leading-underscore "private" function across a module boundary
 # isn't a pattern to add more of.
 unit_labels = _unit_labels
+
+# The Week/Month/Quarter toggle only changes how this plan is PLANNED and
+# PACED — actual invoicing always runs on a monthly (30-day) cycle
+# regardless of it, and that's easy to misread from a Weekly/Quarterly
+# tab title alone. Shared by both places a Breakdown appears (the inline
+# block on each Net/Gross tab and the standalone Breakdown tab) so the
+# wording can't drift between them; per-granularity clause only added
+# when it's actually informative (a Monthly plan's breakdown already
+# coincides with its billing cycle, so the base sentence alone is enough).
+_BILLING_CADENCE_NOTE_BASE = (
+    "Billing is always invoiced on a monthly (30-day) cycle, regardless of this plan's breakdown granularity."
+)
+
+
+def _billing_cadence_note(time_unit: str) -> str:
+    if time_unit == "week":
+        return (_BILLING_CADENCE_NOTE_BASE + " This plan is entered and paced by week, but each month's "
+                "invoice totals whatever weeks fall in that calendar month.")
+    if time_unit == "quarter":
+        return (_BILLING_CADENCE_NOTE_BASE + " This plan's monthly invoice amounts are drawn from what's "
+                "booked for the quarter.")
+    return _BILLING_CADENCE_NOTE_BASE
 
 # SOV ("Share of Voice") compares the curated budget against the catalog's
 # avails ceiling, which is always a MONTHLY figure (see _UNIT_LABELS'
@@ -2070,6 +2093,14 @@ def write_monthly_breakdown_header(ws: Worksheet, row: int, months: list[dict], 
         banner_cell.font = SECTION_FONT
         banner_cell.fill = SECTION_FILL
         banner_cell.alignment = CENTER
+        # A comment, not an extra row — this block's row positions are
+        # tightly aligned with build_proposal_a/_gross's own line-item and
+        # TOTAL DIGITAL MONTHLY rows (see _populate_monthly_breakdown_inline's
+        # own "row math ... must stay in sync" warning); inserting a real
+        # row here would require re-deriving that alignment across multiple
+        # functions. Excel marks a commented cell with a small red corner
+        # indicator, so it stays discoverable without touching layout.
+        banner_cell.comment = Comment(_billing_cadence_note(time_unit), "Entravision Proposal Builder", width=260, height=90)
     for i, m in enumerate(months):
         col = start_col + i
         cell = ws.cell(row=row, column=col)
@@ -2125,6 +2156,8 @@ def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
     ws["B2"].font = TITLE_FONT
     ws.column_dimensions["A"].width = 2
     ws.column_dimensions["B"].width = 34
+    ws["B3"] = _billing_cadence_note(time_unit)
+    ws["B3"].font = NOTE_FONT
 
     header_row = 4
     ws.cell(row=header_row, column=2, value="LINE ITEM").font = H_HEADER

@@ -555,10 +555,7 @@ async function maybeReopenProposal() {
 
     renderLineItems();
     renderAllTierTabStrips();
-    document.getElementById("tier-geo-input").value = state.activeTierGeo || "";
-    document.getElementById("tier-start-date-input").value = _toIsoDateString(state.activeTierStartDate);
-    document.getElementById("tier-end-date-input").value = _toIsoDateString(state.activeTierEndDate);
-    _syncTierOverridePanelOpen();
+    _refreshTierOverrideInputs();
     // Seeds the autosave dirty-check to "nothing's changed yet" — without
     // this, the very first tick after a reopen would autosave immediately
     // even though the planner hasn't touched anything, just because the
@@ -825,6 +822,7 @@ function wireEvents() {
   document.getElementById("step2-add-product-btn").addEventListener("click", onAddParsedProduct);
   document.getElementById("recommend-btn").addEventListener("click", onRecommend);
   document.getElementById("scale-to-total-btn").addEventListener("click", onScaleToTotal);
+  document.getElementById("suggest-ideal-totals-btn").addEventListener("click", onSuggestIdealTotals);
   const budgetTarget = document.getElementById("total-budget-target");
   budgetTarget.addEventListener("focus", () => {
     const raw = parseFormattedInput(budgetTarget.value);
@@ -1008,6 +1006,22 @@ function _previewDocType(requestType) {
 function _previewTitleCase(text) {
   if (!text) return text;
   return text.split(" ").map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(" ");
+}
+
+// Writes state.activeTierGeo/StartDate/EndDate into the 3 override
+// inputs' visible .value — the ONE thing that was missing everywhere the
+// active tier changes. Without this, switchTier()/addTier() swapped
+// state correctly but left the 3 boxes showing whatever the PREVIOUS
+// option's fields displayed, which read as "the override leaked across
+// options" even though the actual per-option data (and what /api/generate
+// submits) was always correct underneath — a real, confusing bug, not
+// just cosmetic, since a planner would reasonably edit what they saw
+// rather than trust invisible state.
+function _refreshTierOverrideInputs() {
+  document.getElementById("tier-geo-input").value = state.activeTierGeo || "";
+  document.getElementById("tier-start-date-input").value = _toIsoDateString(state.activeTierStartDate);
+  document.getElementById("tier-end-date-input").value = _toIsoDateString(state.activeTierEndDate);
+  _syncTierOverridePanelOpen();
 }
 
 // The Geo/Start/End override fields sit inside a collapsed-by-default
@@ -1285,10 +1299,7 @@ function onNext(n) {
     document.getElementById("curate-agency-fee-input").value =
       state.parsed.agency_fee != null ? state.parsed.agency_fee : "";
     // Per-tier geo/date override boxes — reflect whichever tier is currently active.
-    document.getElementById("tier-geo-input").value = state.activeTierGeo || "";
-    document.getElementById("tier-start-date-input").value = _toIsoDateString(state.activeTierStartDate);
-    document.getElementById("tier-end-date-input").value = _toIsoDateString(state.activeTierEndDate);
-    _syncTierOverridePanelOpen();
+    _refreshTierOverrideInputs();
     if (state.lineItems.length === 0) {
       state.lineItems = (state.parsed.products_selected || []).map(name => {
         const p = state.productIndex[name];
@@ -2192,6 +2203,9 @@ function switchTier(label) {
   state.activeTierPeriodMergeGroups = target.periodMergeGroups || [];
   state.rateOverrideOpen.clear();
   state.objectiveOtherOpen.clear();
+  // The actual fix: the 3 override boxes must show THIS tier's values,
+  // not whatever the previous tier's typed text left behind.
+  _refreshTierOverrideInputs();
 
   renderLineItems();
   renderAvailsGrid();
@@ -2249,6 +2263,10 @@ function addTier(targetBudget) {
   state.activeTierPeriodMergeGroups = [];
   state.rateOverrideOpen.clear();
   state.objectiveOtherOpen.clear();
+  // Same fix as switchTier(): the new option starts with no date override
+  // and (quirk, see above) an inherited geo — either way the boxes need
+  // to reflect that, not keep showing the source option's own values.
+  _refreshTierOverrideInputs();
 
   renderLineItems();
   renderAvailsGrid();
@@ -3090,6 +3108,62 @@ function _applySharePct(lineIdx, pct, snapshot) {
   _commitBudgets(paid, CurateMath.setSharePct(budgets, k, pct));
 }
 
+// "Suggest ideal totals" — unlike "Generate new product mix" (onRecommend,
+// below, which can add/remove products), this NEVER changes which
+// products are in the plan. It only reallocates the plan's CURRENT total
+// across the lines already there, weighted toward the confirmed strategy
+// brief's suggested_budget_pct per product family — the "scale plan to
+// total" of brief-driven rebalancing, not a fresh mix. A line whose
+// product's family isn't covered by any checked brief tactic keeps its
+// current % share of the total rather than being zeroed out — the brief
+// not mentioning a product isn't a signal to defund it.
+function onSuggestIdealTotals() {
+  const paid = _paidLineIndices();
+  if (!paid.length) {
+    alert("Add at least one paid (non-Added-Value) line first.");
+    return;
+  }
+  const tactics = ((_briefWithSelectedTactics() || {}).recommended_tactics) || [];
+  if (!tactics.length) {
+    alert("Confirm a Strategy Brief in Step 03 first — this reallocates toward its suggested budget split.");
+    return;
+  }
+  const budgets = paid.map(i => state.lineItems[i].monthly_budget || 0);
+  const total = budgets.reduce((a, b) => a + b, 0);
+  if (!(total > 0)) {
+    alert("Enter some budgets first — there's no total to reallocate yet.");
+    return;
+  }
+
+  // product_family -> suggested_budget_pct (first tactic per family wins;
+  // in practice the brief names each family at most once).
+  const pctByFamily = {};
+  tactics.forEach(t => {
+    if (t.product_family && !(t.product_family in pctByFamily) && Number.isFinite(t.suggested_budget_pct)) {
+      pctByFamily[t.product_family] = t.suggested_budget_pct;
+    }
+  });
+  // How many PAID lines share each covered family, so that family's %
+  // splits evenly across duplicate/variant lines in the same family
+  // rather than handing the whole family % to just the first one.
+  const familyCounts = {};
+  paid.forEach(i => {
+    const family = (state.productIndex[state.lineItems[i].product_name] || {}).family;
+    if (family && family in pctByFamily) familyCounts[family] = (familyCounts[family] || 0) + 1;
+  });
+  // Every weight expressed as "% of the plan total" so covered and
+  // uncovered lines are directly comparable — mixing a 0-100 percent
+  // figure with a raw dollar amount would let whichever side had the
+  // larger numbers dominate the allocation regardless of intent.
+  const weights = paid.map((i, j) => {
+    const family = (state.productIndex[state.lineItems[i].product_name] || {}).family;
+    if (family && family in pctByFamily) return pctByFamily[family] / familyCounts[family];
+    return (budgets[j] / total) * 100;
+  });
+  _commitBudgets(paid, CurateMath.allocateLargestRemainder(weights, total, CurateMath.roundingUnitFor(total)));
+  renderLineItems();
+}
+
 function onScaleToTotal() {
   const input = document.getElementById("total-budget-target");
   const target = parseFormattedInput(input.value);
@@ -3355,6 +3429,13 @@ function onDuplicateLineItem(idx) {
   renderLineItems();
 }
 
+// "Generate new product mix" (the "recommend-btn" element id/handler
+// name are kept as-is — only the button's label/position changed, not
+// this function). Builds a BRAND-NEW product mix from the confirmed
+// strategy brief and REPLACES state.lineItems entirely, one product per
+// tactic family — genuinely different from "Suggest ideal totals" above,
+// which never touches which products are present. Placed last/least-
+// prominent in the toolbar since it's the more disruptive of the two.
 async function onRecommend() {
   const budget = parseFormattedInput(document.getElementById("total-budget-target").value);
   if (!budget || budget <= 0) {
@@ -3364,7 +3445,7 @@ async function onRecommend() {
   const btn = document.getElementById("recommend-btn");
   btn.disabled = true;
   const originalLabel = btn.innerHTML;
-  btn.innerHTML = '<span class="btn-inline-spinner"></span>Suggesting…';
+  btn.innerHTML = '<span class="btn-inline-spinner"></span>Generating…';
   try {
     const res = await fetch("/api/recommend", {
       method: "POST",

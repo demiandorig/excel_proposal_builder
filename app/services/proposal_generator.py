@@ -426,7 +426,13 @@ def generate_proposal(
         if tier_uses_monthly_breakdown:
             mb_tab_adjective = et.unit_labels(time_unit)["adjective"]
             mb_sheet_name = f"{mb_tab_adjective} Breakdown {label}" if multi_tier else f"{mb_tab_adjective} Breakdown"
-            mb_sheet_title = _safe_sheet_name(tier_display_name, "(Monthly)", used_sheet_titles) if multi_tier else mb_sheet_name
+            # Bug fix: this used to hardcode the literal "(Monthly)" regardless of
+            # time_unit, so a multi-tier Weekly/Quarterly proposal's standalone
+            # breakdown tab was titled e.g. "Option A (Monthly)" even though the
+            # tab's own content (and mb_sheet_name just above) were already
+            # correctly "Weekly"/"Quarterly" — mb_tab_adjective was already
+            # computed right above for exactly this, just never used here.
+            mb_sheet_title = _safe_sheet_name(tier_display_name, f"({mb_tab_adjective})", used_sheet_titles) if multi_tier else mb_sheet_name
             et.build_monthly_breakdown_tab(wb, products, tier_line_items, tier_months, sheet_name=mb_sheet_title,
                                            distribution_mode=monthly_distribution_mode, time_unit=time_unit)
             tabs_built.append(mb_sheet_name)
