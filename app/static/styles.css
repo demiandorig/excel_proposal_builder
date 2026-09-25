@@ -897,20 +897,44 @@ html, body {
 }
 .agency-fee-box input { width: 100px; }
 .tier-geo-override input { width: 240px; }
+/* Boxed like .time-unit-toggle-wrap directly below it (same background/
+   border/radius/padding) — previously this was bare, tiny, pale mono
+   text with only a small ▸ glyph as its sole interactive affordance,
+   which planners consistently missed entirely (real team feedback).
+   Still a collapsed <details> (most proposals never need this), but now
+   reads as an obvious labeled control at rest, not disclaimer text. */
 .tier-override-panel {
   margin-bottom: 14px;
+  background: var(--paper-warm);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  padding: 12px 16px;
 }
 .tier-override-panel summary {
   list-style: none;
   cursor: pointer;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--ink-faint);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-kicker);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
   user-select: none;
 }
+.tier-override-icon { font-size: 13px; }
 .tier-override-panel summary::-webkit-details-marker { display: none; }
-.tier-override-panel summary::before { content: "▸ "; }
-.tier-override-panel[open] summary::before { content: "▾ "; }
+.tier-override-panel summary::after {
+  content: "▸";
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  color: var(--ink-faint);
+  transition: transform 0.15s ease;
+}
+.tier-override-panel[open] summary::after { transform: rotate(90deg); }
 .tier-override-panel summary:hover { color: var(--accent); }
 .tier-override-row {
   display: flex;
@@ -918,7 +942,8 @@ html, body {
   gap: 20px;
   flex-wrap: wrap;
   margin-top: 12px;
-  margin-bottom: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule-soft);
 }
 .tier-override-row .inline-input { margin-bottom: 0; flex: 0 0 auto; }
 .tier-override-row .tier-geo-override input { width: 200px; }
