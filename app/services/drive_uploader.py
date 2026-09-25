@@ -15,10 +15,13 @@ Setup:
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 from app.db import get_connection
+
+_logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
@@ -136,11 +139,33 @@ def _load_credentials():
             client_secret=data["client_secret"],
             scopes=data.get("scopes"),
         )
-        if creds.expired and creds.refresh_token:
+        # Expiry is not stored in drive_tokens, so Credentials is reconstructed
+        # with expiry=None. google-auth reports that as expired=False, even when
+        # the saved access token is long expired. Refresh whenever expiry is
+        # unknown (or known to have passed) before making Drive API calls.
+        if creds.expiry is None or creds.expired:
+            if not creds.refresh_token:
+                return None
+            refresh_token = creds.refresh_token
             creds.refresh(GRequest())
+            # Google normally does not issue a replacement refresh token.
+            # Preserve the stored token if the refresh response omits one.
+            if not creds.refresh_token:
+                creds = Credentials(
+                    token=creds.token,
+                    refresh_token=refresh_token,
+                    token_uri=creds.token_uri,
+                    client_id=creds.client_id,
+                    client_secret=creds.client_secret,
+                    scopes=creds.scopes,
+                    expiry=creds.expiry,
+                )
             _save_credentials(creds)
         return creds
-    except Exception:
+    except Exception as e:
+        # Refresh/network/DB failures should lead the caller to the normal
+        # reauthorization flow, without logging token material or HTTP bodies.
+        _logger.warning("Drive credential load/refresh failed (%s)", type(e).__name__)
         return None
 
 
