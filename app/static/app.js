@@ -33,6 +33,20 @@ const state = {
   // (day-proration was this app's own earlier default; even is now what
   // the planner actually wants, with day-proration kept as an opt-in).
   mbDistributionMode: "even",
+  // Step 06's "By Product" (one panel per line item, every period at
+  // once — the original layout) vs. "By Month" (pick one period, see/
+  // edit every product's figure for just that period in one table) view
+  // toggle. Transient UI state, not part of what's saved/generated —
+  // purely which of the two already-equivalent renderings of the exact
+  // same monthly_allocations data the planner currently prefers looking
+  // at. Not per-tier: switching tiers is a natural moment to also want a
+  // fresh product-by-product look, but there's no strong reason either
+  // way, so this just stays whatever it was.
+  mbViewMode: "product",
+  // Which period is selected in the "By Month" view above — reset
+  // whenever it no longer matches a real period in the current flight
+  // (see renderMonthlyBreakdown's own guard).
+  mbActiveMonthKey: null,
   // Step 04's Week/Month/Quarter toggle — "week" | "month" | "quarter".
   // Proposal-wide (not per-tier — the toggle lives once at Step 04 and
   // governs the whole proposal, same reasoning as mbDistributionMode
@@ -802,6 +816,15 @@ function wireEvents() {
     btn.addEventListener("click", () => {
       if (state.mbDistributionMode === btn.dataset.mode) return;
       state.mbDistributionMode = btn.dataset.mode;
+      renderMonthlyBreakdown();
+    });
+  });
+  // By Product / By Month view toggle — same "wired once, static pair of
+  // buttons" pattern as the mode tabs just above.
+  document.querySelectorAll("#mb-view-tabs .tier-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (state.mbViewMode === btn.dataset.view) return;
+      state.mbViewMode = btn.dataset.view;
       renderMonthlyBreakdown();
     });
   });
@@ -4249,7 +4272,6 @@ function renderMonthlyBreakdown() {
   });
 
   const eligibleLines = state.lineItems.filter(li => !li.is_added_value);
-  const anyLineActive = eligibleLines.some(li => li.monthly_allocations && Object.keys(li.monthly_allocations).length);
 
   eligibleLines.forEach(li => {
     if (li.monthly_allocations && Object.keys(li.monthly_allocations).length) {
@@ -4267,22 +4289,44 @@ function renderMonthlyBreakdown() {
       } else {
         li.monthly_allocations = _mbRescaleForBudgetChange(li);
       }
-    } else if (anyLineActive && li._mbBaseline === undefined) {
-      // "Line item added" (genuinely never seen by this render loop before
-      // — _mbBaseline is only ever undefined the first time) while the
-      // feature is already in use elsewhere on this tier — join it
-      // automatically rather than leaving the plan-level total silently
-      // incomplete for this line. The _mbBaseline check is what stops
-      // this from also re-triggering for a line the planner explicitly
+    } else if (li._mbBaseline === undefined) {
+      // "Line item added" (genuinely never seen by this render loop
+      // before — _mbBaseline is only ever undefined the first time) —
+      // Monthly/Weekly/Quarterly Breakdown is on by default for every
+      // line in every proposal now, not opt-in, so this auto-populates
+      // the even-split default immediately rather than waiting for the
+      // planner to check a box. The _mbBaseline check is what stops this
+      // from also re-triggering for a line the planner explicitly
       // UNCHECKED (monthly_allocations is empty either way, but an
-      // unchecked line keeps its baseline — see the checkbox handler).
+      // unchecked line keeps its baseline — see the checkbox handler) —
+      // an opt-out still sticks, this only auto-joins a line that's
+      // never been through this render loop at all.
       _mbSetAllocation(li, _mbDefaultAllocation(li.monthly_budget * li.months, months));
     }
   });
 
-  document.getElementById("mb-line-items").innerHTML = eligibleLines.map(li => _mbLineItemBlockHtml(li, months)).join("")
-    || `<p class="mb-empty-hint">No line items yet — add products in Step 04 first.</p>`;
-  _mbWireLineItemBlocks(months);
+  // Both views render from the exact same eligibleLines/months — "By
+  // Month" is a pivot of the same monthly_allocations data, not a second
+  // copy of it. Only the ACTIVE view's container gets real HTML; the
+  // other is emptied outright (not just hidden) so its .mb-pct-input/
+  // .mb-dollar-input elements don't linger in the DOM to double-wire
+  // against the shared class-based selectors both views' inputs use.
+  const byMonth = state.mbViewMode === "month";
+  document.getElementById("mb-view-by-product").classList.toggle("hidden", byMonth);
+  document.getElementById("mb-view-by-month").classList.toggle("hidden", !byMonth);
+  document.querySelectorAll("#mb-view-tabs .tier-tab").forEach(btn => {
+    btn.classList.toggle("active", (btn.dataset.view === "month") === byMonth);
+  });
+  if (byMonth) {
+    document.getElementById("mb-line-items").innerHTML = "";
+    _mbRenderByMonthView(eligibleLines, months);
+  } else {
+    document.getElementById("mb-month-table-wrap").innerHTML = "";
+    document.getElementById("mb-month-tabs").innerHTML = "";
+    document.getElementById("mb-line-items").innerHTML = eligibleLines.map(li => _mbLineItemBlockHtml(li, months)).join("")
+      || `<p class="mb-empty-hint">No line items yet — add products in Step 04 first.</p>`;
+    _mbWireLineItemBlocks(months);
+  }
   _mbRenderPlanSummary(months);
   _mbUpdateContinueState(months);
 }
@@ -4469,6 +4513,115 @@ function _mbLiveUpdateAfterEdit(li, months, editedInput) {
 
   _mbRenderPlanSummary(months);
   _mbUpdateContinueState(months);
+}
+
+// --------------------------------------------------------------------------
+// Step 06 "By Month" view — a pivot of the exact same data _mbLineItemBlockHtml
+// renders, one period at a time across every product instead of one product
+// at a time across every period. Self-contained (own month-tab strip, own
+// table, own input wiring) rather than trying to force-share
+// _mbWireLineItemBlocks/_mbLiveUpdateAfterEdit, which assume the by-product
+// view's .mb-line-block DOM shape for their live per-keystroke patching —
+// simpler and lower-risk than reworking those to handle two different row
+// shapes under one roof. Both views write into the SAME li.monthly_allocations
+// object, so a line edited here shows up correctly the next time either
+// view renders it.
+// --------------------------------------------------------------------------
+
+function _mbRenderByMonthView(eligibleLines, months) {
+  if (!state.mbActiveMonthKey || !months.some(m => m.key === state.mbActiveMonthKey)) {
+    state.mbActiveMonthKey = months[0] ? months[0].key : null;
+  }
+  const monthKey = state.mbActiveMonthKey;
+  const month = months.find(m => m.key === monthKey);
+
+  // data-month-tab/data-line/data-month below are deliberately NOT run
+  // through escapeAttr — a quarter or merged-period key looks like
+  // "2026-09+2026-10", and escapeAttr replaces "+" with "_" (safe for a
+  // plain id, but here it would silently corrupt the key so it no longer
+  // matches li.monthly_allocations' real key at all). Matches
+  // _mbLineItemBlockHtml's own by-product-view convention for the exact
+  // same data — never free-text, always an internally-generated id/key.
+  const tabsEl = document.getElementById("mb-month-tabs");
+  tabsEl.innerHTML = months.map(m => `
+    <button type="button" class="tier-tab ${m.key === monthKey ? "active" : ""}" data-month-tab="${m.key}">${escapeHtml(m.label)}</button>
+  `).join("");
+  tabsEl.querySelectorAll("[data-month-tab]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.mbActiveMonthKey = btn.dataset.monthTab;
+      renderMonthlyBreakdown();
+    });
+  });
+
+  if (!month) {
+    document.getElementById("mb-month-table-wrap").innerHTML = "";
+    return;
+  }
+
+  let monthTotal = 0;
+  const rows = eligibleLines.map(li => {
+    const product = state.productIndex[li.product_name];
+    const total = li.monthly_budget * li.months;
+    const enabled = !!(li.monthly_allocations && Object.keys(li.monthly_allocations).length);
+    const dollars = enabled ? (li.monthly_allocations[monthKey] || 0) : 0;
+    if (enabled) monthTotal += dollars;
+    const pct = total ? (dollars / total * 100) : 0;
+    const minSpend = product ? (product.minimum_spend || 0) : 0;
+    const effectiveMin = _mbEffectiveMinimumForPeriod(minSpend, month);
+    const belowMin = enabled && effectiveMin > 0 && dollars + _MB_CENT < effectiveMin;
+    const unitsRef = enabled ? _mbUnitsRefText(li, product, dollars) : "";
+    return `
+      <tr data-line="${li.id}" class="${belowMin ? "mb-row-warn" : ""}">
+        <td class="mb-month-product-cell">${escapeHtml(product ? product.name : li.product_name)}<span class="mb-month-line-total">Line total: ${money(total)}</span></td>
+        <td><input type="number" step="0.01" min="0" max="100" class="mb-pct-input" data-line="${li.id}" data-month="${monthKey}" value="${enabled ? Math.round(pct * 100) / 100 : ""}" ${enabled ? "" : "disabled"} /></td>
+        <td><input type="number" step="1" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${monthKey}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
+        <td class="mb-units-ref mono">${escapeHtml(unitsRef)}</td>
+        <td class="mb-validation">${belowMin ? `⚠ Below min ($${effectiveMin.toLocaleString(undefined, { maximumFractionDigits: 0 })})` : (enabled ? "✓" : "Not using Breakdown")}</td>
+      </tr>`;
+  }).join("");
+
+  document.getElementById("mb-month-table-wrap").innerHTML = `
+    <table class="mb-table">
+      <thead><tr><th>Product</th><th>%</th><th>$ this ${escapeHtml(_mbUnitNoun())}</th><th>Reference</th><th>Status</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="5" class="mb-empty-hint">No line items yet — add products in Step 04 first.</td></tr>`}</tbody>
+      <tfoot><tr class="mb-month-total-row"><td>Total for ${escapeHtml(month.label)}</td><td></td><td class="mono">${money(monthTotal)}</td><td></td><td></td></tr></tfoot>
+    </table>`;
+
+  document.querySelectorAll("#mb-month-table-wrap .mb-pct-input").forEach(inp => {
+    inp.addEventListener("input", (e) => {
+      const li = _mbFindLineItem(e.target.dataset.line);
+      if (!li || !li.monthly_allocations) return;
+      const total = li.monthly_budget * li.months;
+      const pct = parseFloat(e.target.value);
+      li.monthly_allocations[monthKey] = isNaN(pct) ? 0 : Math.round(total * pct / 100 * 100) / 100;
+      const row = e.target.closest("tr");
+      const dollarInput = row && row.querySelector(".mb-dollar-input");
+      if (dollarInput) dollarInput.value = li.monthly_allocations[monthKey].toFixed(2);
+    });
+    inp.addEventListener("blur", () => {
+      _mbSyncBudgetToAllocation(_mbFindLineItem(inp.dataset.line));
+      renderMonthlyBreakdown();
+    });
+  });
+  document.querySelectorAll("#mb-month-table-wrap .mb-dollar-input").forEach(inp => {
+    inp.addEventListener("input", (e) => {
+      const li = _mbFindLineItem(e.target.dataset.line);
+      if (!li || !li.monthly_allocations) return;
+      const dollars = parseFloat(e.target.value);
+      li.monthly_allocations[monthKey] = isNaN(dollars) ? 0 : Math.round(dollars * 100) / 100;
+      const total = li.monthly_budget * li.months;
+      const row = e.target.closest("tr");
+      const pctInput = row && row.querySelector(".mb-pct-input");
+      if (pctInput) pctInput.value = total ? Math.round((li.monthly_allocations[monthKey] / total * 100) * 100) / 100 : 0;
+    });
+    inp.addEventListener("blur", () => {
+      // Same reverse-sync as the By Product view — a committed edit here
+      // whose new per-line sum no longer matches the Curate-step total
+      // updates monthly_budget to match, not the other way around.
+      _mbSyncBudgetToAllocation(_mbFindLineItem(inp.dataset.line));
+      renderMonthlyBreakdown();
+    });
+  });
 }
 
 function _mbRenderPlanSummary(months) {

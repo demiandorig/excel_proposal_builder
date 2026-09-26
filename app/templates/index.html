@@ -568,8 +568,22 @@ Client name: ...
         <div class="mb-plan-summary" id="mb-plan-summary">
           <!-- plan-level "total spend by month" bar — rendered by renderMonthlyBreakdown() -->
         </div>
-        <div id="mb-line-items">
-          <!-- one collapsible block per (non-Added-Value) line item -->
+        <div class="mb-mode-select">
+          <span class="mb-mode-label">View:</span>
+          <div class="tier-tabs" id="mb-view-tabs">
+            <button type="button" class="tier-tab active" data-view="product">By Product</button>
+            <button type="button" class="tier-tab" data-view="month">By Month</button>
+          </div>
+          <span class="tier-switcher-hint" id="mb-view-hint">By Product: one panel per line item, every period at once. By Month: pick one period, curate every product's figure for it in one table.</span>
+        </div>
+        <div id="mb-view-by-product">
+          <div id="mb-line-items">
+            <!-- one collapsible block per (non-Added-Value) line item -->
+          </div>
+        </div>
+        <div id="mb-view-by-month" class="hidden">
+          <div class="tier-tabs" id="mb-month-tabs"></div>
+          <div id="mb-month-table-wrap"></div>
         </div>
       </div>
 
