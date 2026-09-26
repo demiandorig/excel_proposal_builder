@@ -4418,7 +4418,7 @@ function _mbLineItemBlockHtml(li, months) {
       </summary>
       <div class="mb-line-body">
         <table class="mb-table">
-          <thead><tr><th>${escapeHtml(_mbUnitNoun())}</th><th>%</th><th>$</th><th>Reference</th><th>Status</th></tr></thead>
+          <thead><tr><th>${escapeHtml(_mbUnitNoun())}</th><th>% of total</th><th>$</th><th>Reference</th><th>Status</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
         <button type="button" class="btn-secondary mb-reset-btn" data-line="${li.id}" ${enabled ? "" : "disabled"}>↺ Reset to ${state.mbDistributionMode === "prorated" ? "day-prorated" : "even"} default</button>
@@ -4586,14 +4586,24 @@ function _mbRenderByMonthView(eligibleLines, months) {
     return;
   }
 
+  // % here means this product's share of the MONTH's total spend, not of
+  // its own flight total — that's the By Product view's meaning, and the
+  // planner switching to By Month wants to rebalance products against
+  // each other within one period instead. monthTotal is computed in its
+  // own pass, before the per-row pct below, so every row's % lands
+  // against the same, fully-summed denominator.
   let monthTotal = 0;
+  eligibleLines.forEach(li => {
+    const enabled = !!(li.monthly_allocations && Object.keys(li.monthly_allocations).length);
+    if (enabled) monthTotal += (li.monthly_allocations[monthKey] || 0);
+  });
+
   const rows = eligibleLines.map(li => {
     const product = state.productIndex[li.product_name];
     const total = li.monthly_budget * li.months;
     const enabled = !!(li.monthly_allocations && Object.keys(li.monthly_allocations).length);
     const dollars = enabled ? (li.monthly_allocations[monthKey] || 0) : 0;
-    if (enabled) monthTotal += dollars;
-    const pct = total ? (dollars / total * 100) : 0;
+    const pct = monthTotal ? (dollars / monthTotal * 100) : 0;
     const minSpend = product ? (product.minimum_spend || 0) : 0;
     const effectiveMin = _mbEffectiveMinimumForPeriod(minSpend, month);
     const belowMin = enabled && effectiveMin > 0 && dollars + _MB_CENT < effectiveMin;
@@ -4610,7 +4620,7 @@ function _mbRenderByMonthView(eligibleLines, months) {
 
   document.getElementById("mb-month-table-wrap").innerHTML = `
     <table class="mb-table">
-      <thead><tr><th>Product</th><th>%</th><th>$ this ${escapeHtml(_mbUnitNoun())}</th><th>Reference</th><th>Status</th></tr></thead>
+      <thead><tr><th>Product</th><th>% of ${escapeHtml(_mbUnitNoun().toLowerCase())}</th><th>$ this ${escapeHtml(_mbUnitNoun())}</th><th>Reference</th><th>Status</th></tr></thead>
       <tbody>${rows || `<tr><td colspan="5" class="mb-empty-hint">No line items yet — add products in Step 04 first.</td></tr>`}</tbody>
       <tfoot><tr class="mb-month-total-row"><td>Total for ${escapeHtml(month.label)}</td><td></td><td class="mono">${money(monthTotal)}</td><td></td><td></td></tr></tfoot>
     </table>`;
@@ -4619,9 +4629,12 @@ function _mbRenderByMonthView(eligibleLines, months) {
     inp.addEventListener("input", (e) => {
       const li = _mbFindLineItem(e.target.dataset.line);
       if (!li || !li.monthly_allocations) return;
-      const total = li.monthly_budget * li.months;
+      // Converts against monthTotal (this render's month-wide sum, frozen
+      // for the life of this listener — same "stable anchor until the next
+      // render" pattern the By Product view uses with its own line total),
+      // not the product's own flight total.
       const pct = parseFloat(e.target.value);
-      li.monthly_allocations[monthKey] = isNaN(pct) ? 0 : Math.round(total * pct / 100 * 100) / 100;
+      li.monthly_allocations[monthKey] = isNaN(pct) ? 0 : Math.round(monthTotal * pct / 100 * 100) / 100;
       const row = e.target.closest("tr");
       const dollarInput = row && row.querySelector(".mb-dollar-input");
       if (dollarInput) dollarInput.value = li.monthly_allocations[monthKey].toFixed(2);
@@ -4637,10 +4650,9 @@ function _mbRenderByMonthView(eligibleLines, months) {
       if (!li || !li.monthly_allocations) return;
       const dollars = parseFloat(e.target.value);
       li.monthly_allocations[monthKey] = isNaN(dollars) ? 0 : Math.round(dollars * 100) / 100;
-      const total = li.monthly_budget * li.months;
       const row = e.target.closest("tr");
       const pctInput = row && row.querySelector(".mb-pct-input");
-      if (pctInput) pctInput.value = total ? Math.round((li.monthly_allocations[monthKey] / total * 100) * 100) / 100 : 0;
+      if (pctInput) pctInput.value = monthTotal ? Math.round((li.monthly_allocations[monthKey] / monthTotal * 100) * 100) / 100 : 0;
     });
     inp.addEventListener("blur", () => {
       // Same reverse-sync as the By Product view — a committed edit here
