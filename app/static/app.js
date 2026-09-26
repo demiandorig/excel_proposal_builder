@@ -33,16 +33,17 @@ const state = {
   // (day-proration was this app's own earlier default; even is now what
   // the planner actually wants, with day-proration kept as an opt-in).
   mbDistributionMode: "even",
-  // Step 06's "By Product" (one panel per line item, every period at
-  // once — the original layout) vs. "By Month" (pick one period, see/
-  // edit every product's figure for just that period in one table) view
-  // toggle. Transient UI state, not part of what's saved/generated —
-  // purely which of the two already-equivalent renderings of the exact
-  // same monthly_allocations data the planner currently prefers looking
-  // at. Not per-tier: switching tiers is a natural moment to also want a
-  // fresh product-by-product look, but there's no strong reason either
-  // way, so this just stays whatever it was.
-  mbViewMode: "product",
+  // Step 06's "By Month" (pick one period, see/edit every product's
+  // figure for just that period in one table — the default, per explicit
+  // instruction) vs. "By Product" (one panel per line item, every period
+  // at once — the original layout, kept as the alternate view) toggle.
+  // Transient UI state, not part of what's saved/generated — purely
+  // which of the two already-equivalent renderings of the exact same
+  // monthly_allocations data the planner currently prefers looking at.
+  // Not per-tier: switching tiers is a natural moment to also want a
+  // fresh look, but there's no strong reason either way, so this just
+  // stays whatever it was.
+  mbViewMode: "month",
   // Which period is selected in the "By Month" view above — reset
   // whenever it no longer matches a real period in the current flight
   // (see renderMonthlyBreakdown's own guard).
@@ -585,6 +586,18 @@ async function maybeReopenProposal() {
       // data — let the nav pills jump anywhere immediately instead of
       // only unlocking as the planner re-visits each step. Unchanged
       // from before drafts existed.
+      //
+      // BUG FIX: state.strategyBrief/state.roadblocks were being restored
+      // above (lines ~494/500) but never actually RENDERED — so a planner
+      // who navigated to Step 03/07 via the nav pills after reopening saw
+      // a genuinely blank Strategy Brief / Roadblocks panel (including its
+      // own Regenerate button, which lives inside that same unrendered
+      // DOM), even though the real content was sitting right there in
+      // state the whole time. Same render calls _resumeAtStep already
+      // makes for the draft-resume case above — safe to call
+      // unconditionally, both are pure state-to-DOM writes, no fetch.
+      if (state.strategyBrief) renderStrategyBrief(state.strategyBrief);
+      if (state.roadblocks) renderRoadblocks(state.roadblocks);
       state.furthestStep = 8;
       goToStep(4);  // straight to Curate — the paste/review content is already known
     }
@@ -4347,6 +4360,18 @@ function _mbUnitsRefText(li, product, dollars) {
   return (eff.pricing_model || "").toUpperCase() === "CPP" ? `${formatted} pts` : `${formatted} imps`;
 }
 
+// Short targeting snippet for Step 06's line labels — two rows with the
+// SAME product name (e.g. two targeting variants of the same product,
+// which this app explicitly supports) are otherwise indistinguishable in
+// either view. Reuses _effectiveTargetText (Step 05's own "what this line
+// is actually targeting" composition, same fallback the export uses) so
+// this matches reality rather than showing only a blank override.
+function _mbTargetingSnippet(li) {
+  const text = _effectiveTargetText(li);
+  if (!text) return "";
+  return text.length > 70 ? text.slice(0, 70).trimEnd() + "…" : text;
+}
+
 function _mbLineItemBlockHtml(li, months) {
   const product = state.productIndex[li.product_name];
   const total = li.monthly_budget * li.months;
@@ -4364,8 +4389,8 @@ function _mbLineItemBlockHtml(li, months) {
     return `
       <tr data-month="${m.key}" class="${belowMin ? "mb-row-warn" : ""}">
         <td class="mono mb-period-cell"><span class="mb-period-label">${escapeHtml(m.label)}</span><span class="mb-period-range">${escapeHtml(m.date_range_label || "")}</span></td>
-        <td><input type="number" step="0.01" min="0" max="100" class="mb-pct-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? Math.round(pct * 100) / 100 : ""}" ${enabled ? "" : "disabled"} /></td>
-        <td><input type="number" step="1" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
+        <td><input type="number" step="5" min="0" max="100" class="mb-pct-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? Math.round(pct * 100) / 100 : ""}" ${enabled ? "" : "disabled"} /></td>
+        <td><input type="number" step="50" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${m.key}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
         <td class="mb-units-ref mono">${escapeHtml(unitsRef)}</td>
         <td class="mb-validation">${belowMin ? `⚠ Below min ($${effectiveMin.toLocaleString(undefined, { maximumFractionDigits: 0 })})` : (enabled ? "✓" : "")}</td>
       </tr>`;
@@ -4380,7 +4405,10 @@ function _mbLineItemBlockHtml(li, months) {
   return `
     <details class="mb-line-block" ${enabled ? "open" : ""} data-line-id="${li.id}">
       <summary>
-        <span class="mb-line-name">${escapeHtml(product ? product.name : li.product_name)}</span>
+        <span class="mb-line-name-wrap">
+          <span class="mb-line-name">${escapeHtml(product ? product.name : li.product_name)}</span>
+          ${_mbTargetingSnippet(li) ? `<span class="mb-line-targeting">${escapeHtml(_mbTargetingSnippet(li))}</span>` : ""}
+        </span>
         <span class="mb-line-total">Total: ${money(total)}</span>
         <label class="mb-enable-toggle" onclick="event.stopPropagation()">
           <input type="checkbox" class="mb-enable-checkbox" data-line="${li.id}" ${enabled ? "checked" : ""} />
@@ -4572,9 +4600,9 @@ function _mbRenderByMonthView(eligibleLines, months) {
     const unitsRef = enabled ? _mbUnitsRefText(li, product, dollars) : "";
     return `
       <tr data-line="${li.id}" class="${belowMin ? "mb-row-warn" : ""}">
-        <td class="mb-month-product-cell">${escapeHtml(product ? product.name : li.product_name)}<span class="mb-month-line-total">Line total: ${money(total)}</span></td>
-        <td><input type="number" step="0.01" min="0" max="100" class="mb-pct-input" data-line="${li.id}" data-month="${monthKey}" value="${enabled ? Math.round(pct * 100) / 100 : ""}" ${enabled ? "" : "disabled"} /></td>
-        <td><input type="number" step="1" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${monthKey}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
+        <td class="mb-month-product-cell">${escapeHtml(product ? product.name : li.product_name)}${_mbTargetingSnippet(li) ? `<span class="mb-line-targeting">${escapeHtml(_mbTargetingSnippet(li))}</span>` : ""}<span class="mb-month-line-total">Line total: ${money(total)}</span></td>
+        <td><input type="number" step="5" min="0" max="100" class="mb-pct-input" data-line="${li.id}" data-month="${monthKey}" value="${enabled ? Math.round(pct * 100) / 100 : ""}" ${enabled ? "" : "disabled"} /></td>
+        <td><input type="number" step="50" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${monthKey}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
         <td class="mb-units-ref mono">${escapeHtml(unitsRef)}</td>
         <td class="mb-validation">${belowMin ? `⚠ Below min ($${effectiveMin.toLocaleString(undefined, { maximumFractionDigits: 0 })})` : (enabled ? "✓" : "Not using Breakdown")}</td>
       </tr>`;
@@ -4635,9 +4663,12 @@ function _mbRenderPlanSummary(months) {
   const grandTotal = months.reduce((s, m) => s + totals[m.key], 0);
   const cells = months.map((m, i) => {
     const isMerged = m.key.includes("+");
-    // "Combine with next" only makes sense before the LAST cell, and
-    // ties this option's whole period list together — see _mbMergePeriodWithNext.
-    const mergeBtn = !isMerged && i < months.length - 1
+    // "Combine with next" only makes sense before the LAST cell — but IS
+    // still offered on an already-merged cell (chaining it with whatever
+    // follows builds a bigger, 3+-way group; _mbMergePeriodWithNext
+    // already supports this, this button was just hidden for no reason
+    // once a cell had anything merged into it at all).
+    const mergeBtn = i < months.length - 1
       ? `<button type="button" class="mb-merge-btn" data-merge-key="${escapeHtml(m.key)}" title="Combine this ${_mbUnitNoun().toLowerCase()} with the next one — useful when a partial ${_mbUnitNoun().toLowerCase()} is too small to clear a product's minimum on its own">⛓ Combine with next</button>`
       : "";
     const unmergeBtn = isMerged
@@ -4647,7 +4678,7 @@ function _mbRenderPlanSummary(months) {
     <div class="mb-summary-cell ${isMerged ? "mb-summary-cell-merged" : ""}">
       <div class="mb-summary-month">${escapeHtml(m.label)}</div>
       <div class="mb-summary-range">${escapeHtml(m.date_range_label || "")}</div>
-      <div class="mb-summary-amount">${money(totals[m.key])}</div>
+      <div class="mb-summary-amount">${money(totals[m.key])}<button type="button" class="mb-edit-total-btn" data-edit-total-key="${m.key}" data-current-total="${totals[m.key]}" title="Set a new total for this ${_mbUnitNoun().toLowerCase()} — every product's figure for it recalculates proportionally to hit it">✎</button></div>
       ${mergeBtn}${unmergeBtn}
     </div>`;
   }).join("");
@@ -4669,6 +4700,40 @@ function _mbWireMergeControls() {
   document.querySelectorAll(".mb-unmerge-btn").forEach(btn => {
     btn.addEventListener("click", () => _mbUnmergePeriod(btn.dataset.unmergeKey));
   });
+  document.querySelectorAll(".mb-edit-total-btn").forEach(btn => {
+    btn.addEventListener("click", () => onEditMonthTotal(btn.dataset.editTotalKey, parseFloat(btn.dataset.currentTotal) || 0));
+  });
+}
+
+// The plan summary bar's ✎ — sets a NEW total for one period across every
+// product at once (the per-period analog of Step 04's "Scale plan to
+// total"/"Suggest ideal totals": those reweight a LINE across periods,
+// this reweights a PERIOD across lines). Every line currently using
+// Monthly/Weekly/Quarterly Breakdown gets its figure for THIS period
+// recalculated proportionally to its current one (or split evenly if
+// every line is currently $0 for it — allocateLargestRemainder's own
+// built-in fallback) — a line not using Breakdown at all is left alone,
+// same as everywhere else in this step.
+function onEditMonthTotal(periodKey, currentTotal) {
+  const input = prompt(`New total for this period (currently ${money(currentTotal)}):`, currentTotal.toFixed(2));
+  if (input === null) return;  // cancelled
+  const newTotal = parseFormattedInput(input);
+  if (newTotal === null || newTotal < 0) {
+    alert("Enter a valid, non-negative dollar amount.");
+    return;
+  }
+  const eligibleLines = state.lineItems.filter(li => !li.is_added_value && li.monthly_allocations && Object.keys(li.monthly_allocations).length);
+  if (!eligibleLines.length) {
+    alert("No line items are using Breakdown yet — nothing to reallocate.");
+    return;
+  }
+  const weights = eligibleLines.map(li => li.monthly_allocations[periodKey] || 0);
+  const newValues = CurateMath.allocateLargestRemainder(weights, newTotal, CurateMath.roundingUnitFor(newTotal));
+  eligibleLines.forEach((li, i) => {
+    li.monthly_allocations[periodKey] = newValues[i];
+    _mbSyncBudgetToAllocation(li);
+  });
+  renderMonthlyBreakdown();
 }
 
 // Combines the (already-possibly-merged) period `periodKey` with whichever

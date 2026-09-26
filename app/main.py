@@ -1093,6 +1093,33 @@ async def recommend(body: RecommendRequest) -> dict:
     return {"line_items": [asdict(li) for li in items]}
 
 
+def _sync_monthly_budgets_to_allocations(tiers: list[dict]) -> None:
+    """
+    Whenever a line has a Monthly Breakdown, its REAL total is whatever
+    that breakdown actually sums to — never monthly_budget * months
+    treated as separately authoritative. Mutates each LineItem in place.
+
+    The frontend already keeps these in sync as the planner edits
+    (app.js's _mbSyncBudgetToAllocation, on every Step 06 field blur), but
+    that sync never runs for a line whose monthly_allocations came from
+    somewhere OTHER than a live edit in THIS session — reopening a past
+    proposal, most commonly, where a since-stale monthly_budget/allocation
+    pairing (from before this feature existed, or before a fix that
+    touched either) gets reloaded verbatim with no edit ever "committing"
+    a fresh sync. Normalizing here, in /api/generate, makes the SERVER —
+    not a client-side event handler — the actual source of truth for
+    what gets exported, so NET BUDGET, TOTAL DIGITAL MONTHLY, the grand
+    total, and every other consumer of monthly_budget/total_budget() can
+    never again disagree with the real, planner-entered monthly figures
+    purely because of when/whether a blur event happened to fire.
+    """
+    for t in tiers:
+        for li in t["line_items"]:
+            if li.monthly_allocations:
+                real_total = sum(li.monthly_allocations.values())
+                li.monthly_budget = round(real_total / (li.months or 1), 2)
+
+
 def _validate_monthly_breakdown(
     tiers: list[dict], req: ProposalRequest, multi_tier: bool, granularity: str = "month",
 ) -> tuple[list[str], list[dict]]:
@@ -1215,6 +1242,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             "period_merge_groups": None,
         }]
     multi_tier = len(tiers) > 1
+    _sync_monthly_budgets_to_allocations(tiers)
 
     # Monthly Breakdown validation — no longer a hard gate (per explicit
     # planner feedback: a line's real monthly figures can legitimately

@@ -30,6 +30,40 @@ def _tier(line_items, start_date=None, end_date=None, label="A"):
     return {"label": label, "start_date": start_date, "end_date": end_date, "line_items": line_items}
 
 
+# --- _sync_monthly_budgets_to_allocations (the export-total fix) ----------
+
+def test_sync_updates_monthly_budget_to_the_real_uneven_total():
+    # $65,000 over 3 months, unevenly split — exactly the reported bug's
+    # shape (a stale monthly_budget from before any Step 06 edit was ever
+    # committed, e.g. a reopened proposal, must still export correctly).
+    li = LineItem(product_name="Search - SEM", monthly_budget=20000, months=3, id="1",
+                  monthly_allocations={"2026-09": 25000, "2026-10": 10000, "2026-11": 30000})
+    m._sync_monthly_budgets_to_allocations([_tier([li])])
+    assert li.monthly_budget == 21666.67
+    # Matches the real sum to within the expected rounding artifact (a
+    # rate rounded to cents can't always reconstruct the exact real total
+    # when it isn't evenly divisible by the month count — see
+    # monthly_allocation.reconcile_allocation's own period-scaled
+    # tolerance for this same, unavoidable class of drift).
+    assert round(li.total_budget(), 2) == 65000.01
+
+
+def test_sync_leaves_a_line_with_no_breakdown_untouched():
+    li = LineItem(product_name="Search - SEM", monthly_budget=1000, months=4, id="2")  # monthly_allocations=None
+    m._sync_monthly_budgets_to_allocations([_tier([li])])
+    assert li.monthly_budget == 1000
+
+
+def test_sync_runs_across_every_tier():
+    li_a = LineItem(product_name="Search - SEM", monthly_budget=999, months=2, id="3",
+                     monthly_allocations={"2026-09": 100, "2026-10": 200})
+    li_b = LineItem(product_name="Search - SEM", monthly_budget=999, months=1, id="4",
+                     monthly_allocations={"2026-09": 500})
+    m._sync_monthly_budgets_to_allocations([_tier([li_a], label="A"), _tier([li_b], label="B")])
+    assert li_a.monthly_budget == 150.0
+    assert li_b.monthly_budget == 500.0
+
+
 def test_balanced_allocation_produces_no_errors():
     li = LineItem(product_name="Search - SEM", monthly_budget=1000, months=4, id="1",
                   monthly_allocations={"2026-09": 1000, "2026-10": 1000, "2026-11": 1000, "2026-12": 1000})

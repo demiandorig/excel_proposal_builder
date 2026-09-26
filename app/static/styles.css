@@ -2019,6 +2019,18 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 }
 .mb-merge-btn:hover, .mb-unmerge-btn:hover { background: rgba(255,255,255,0.18); }
 .mb-unmerge-btn { color: var(--amber); }
+.mb-edit-total-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--paper);
+  opacity: 0.55;
+  font-size: 12px;
+  margin-left: 4px;
+  padding: 2px;
+  vertical-align: middle;
+}
+.mb-edit-total-btn:hover { opacity: 1; }
 
 .mb-units-ref {
   font-size: 12px;
@@ -2060,7 +2072,9 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 }
 .mb-line-block summary::-webkit-details-marker { display: none; }
 .mb-line-block[open] summary { border-bottom: 1px solid var(--rule-soft); }
-.mb-line-name { font-weight: 600; color: var(--ink); flex: 1; min-width: 160px; }
+.mb-line-name-wrap { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 160px; }
+.mb-line-name { font-weight: 600; color: var(--ink); }
+.mb-line-targeting { font-size: 11px; font-weight: 400; color: var(--ink-faint); }
 .mb-line-total { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-soft); }
 .mb-enable-toggle {
   display: flex;
