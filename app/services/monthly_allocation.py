@@ -460,17 +460,28 @@ def reconcile_allocation(total_budget: float, allocations: dict[str, float]) -> 
     actually sum to its curated total — everything else (the UI's running
     total, /api/generate's own gate) calls this rather than
     re-implementing the sum/compare itself.
+
+    `total_budget` is normally `monthly_budget * months` — monthly_budget
+    is itself a rounded-to-cents rate (see app.js's _mbSyncBudgetToAllocation,
+    which derives it from a planner-typed monthly breakdown), so multiplying
+    it back out by `months` periods can legitimately land up to
+    `len(allocations) * _CENT` away from the real, exactly-entered sum
+    (e.g. $65,000 split into a 3-month rate rounds to $21,666.67/mo, and
+    21666.67 * 3 = $65,000.01 — a genuine $0.01 gap with nothing wrong).
+    The tolerance scales with the period count so that expected rounding
+    slop is never reported as an under/over-allocation error.
     """
     allocated = round(sum(allocations.values()), 2) if allocations else 0.0
     remaining = round(total_budget - allocated, 2)
     allocated_pct = (allocated / total_budget * 100) if total_budget else 0.0
+    tolerance = _CENT * max(1, len(allocations))
     return {
         "allocated": allocated,
         "remaining": remaining,
         "allocated_pct": round(allocated_pct, 4),
         "remaining_pct": round(100 - allocated_pct, 4),
-        "balanced": abs(remaining) <= _CENT,
-        "over_allocated": remaining < -_CENT,
+        "balanced": abs(remaining) <= tolerance,
+        "over_allocated": remaining < -tolerance,
     }
 
 

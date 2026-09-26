@@ -37,6 +37,18 @@ def test_balanced_allocation_produces_no_errors():
     assert errors == []
 
 
+def test_rate_derived_rounding_slop_never_reads_as_a_balance_error():
+    # $65,000 split across 3 months rounds to a $21,666.67/mo rate (see
+    # app.js's _mbSyncBudgetToAllocation, which derives monthly_budget
+    # this same way from a planner-typed breakdown) — 21666.67 * 3 =
+    # $65,000.01, a genuine 1-cent gap against the real, exactly-entered
+    # sum with nothing actually wrong. Must not report as under-allocated.
+    li = LineItem(product_name="Search - SEM", monthly_budget=21666.67, months=3, id="1b",
+                  monthly_allocations={"2026-09": 25000, "2026-10": 10000, "2026-11": 30000})
+    errors, _ = m._validate_monthly_breakdown([_tier([li])], _REQ, multi_tier=False)
+    assert errors == []
+
+
 def test_unbalanced_allocation_is_a_balance_error():
     li = LineItem(product_name="Search - SEM", monthly_budget=1000, months=4, id="2",
                   monthly_allocations={"2026-09": 500, "2026-10": 1000, "2026-11": 1000, "2026-12": 1000})

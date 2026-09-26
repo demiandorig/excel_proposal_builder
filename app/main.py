@@ -1098,15 +1098,20 @@ def _validate_monthly_breakdown(
 ) -> tuple[list[str], list[dict]]:
     """
     Extracted from /api/generate so it's independently testable. Returns
-    (balance_errors, minimum_warnings):
-      - balance_errors: non-empty means /api/generate must refuse to
-        proceed — a line item's monthly dollars don't sum to its own
-        Curate-step total (see monthly_allocation.py's module docstring
-        on why that's the one hard requirement here).
+    (balance_errors, minimum_warnings) — NEITHER blocks generation; both are
+    surfaced back to the planner as non-blocking notes (see the response's
+    monthly_breakdown_balance_notes / monthly_breakdown_warnings):
+      - balance_errors: a line item's monthly dollars don't sum to its own
+        Curate-step total. In normal use this shouldn't happen often —
+        app.js's _mbSyncBudgetToAllocation keeps the Curate-step total in
+        sync with whatever was actually typed into Monthly Breakdown as
+        soon as an edit is committed — but a line the planner left only
+        partially filled in still reports here rather than being silently
+        treated as complete.
       - minimum_warnings: below-rate-card-minimum months, for EVERY tier
-        regardless of balance errors — never blocks generation (the
-        planner may have a deliberate reason to go under), surfaced back
-        on the response instead so it's never silently swallowed either.
+        regardless of balance errors (the planner may have a deliberate
+        reason to go under), surfaced back on the response instead of
+        being silently swallowed.
 
     `granularity` is the proposal-wide Step 04 toggle ("week"/"month"/
     "quarter", from GenerateRequest.time_unit) — it decides which period
@@ -1211,17 +1216,20 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         }]
     multi_tier = len(tiers) > 1
 
-    # Monthly Breakdown validation — the authoritative gate (the frontend
-    # already blocks its own "Continue" button on the same math, see
-    # app.js's _mbUpdateContinueState; this is what makes it actually
-    # enforced rather than just a UI hint someone could route around,
-    # e.g. by clicking "Skip" past an unbalanced line).
+    # Monthly Breakdown validation — no longer a hard gate (per explicit
+    # planner feedback: a line's real monthly figures can legitimately
+    # differ month to month, e.g. $25k/$10k/$30k across a quarter, and
+    # generation must never block on that). app.js's Curate-side sync
+    # (_mbSyncBudgetToAllocation) keeps monthly_budget in step with
+    # whatever the planner actually typed into Monthly Breakdown as soon
+    # as they commit an edit, so by the time Generate is clicked a
+    # COMPLETE line is balanced by construction — an "unbalanced" result
+    # here almost always just means a line's breakdown was left partially
+    # filled in, which the planner may have every reason to do (e.g.
+    # deliberately skipping the rest and letting the export estimate it).
+    # Surfaced back as a non-blocking warning, same treatment as
+    # minimum_warnings below, instead of ever refusing to generate.
     balance_errors, minimum_warnings = _validate_monthly_breakdown(tiers, req, multi_tier, granularity=body.time_unit)
-    if balance_errors:
-        raise HTTPException(status_code=400, detail={
-            "message": "Monthly Breakdown doesn't balance yet — fix these before generating.",
-            "errors": balance_errors,
-        })
 
     # Union of every tier's line items — product blurbs and the campaign
     # name don't vary by tier, so enrichment runs once against everything
@@ -1492,6 +1500,10 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         # above for the one thing about Monthly Breakdown that IS a hard
         # failure.
         "monthly_breakdown_warnings": minimum_warnings,
+        # Never blocks (see the comment above where these are computed) —
+        # purely informational, e.g. "this line's breakdown is still only
+        # 62.5% filled in."
+        "monthly_breakdown_balance_notes": balance_errors,
     }
 
 

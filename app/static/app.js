@@ -4038,24 +4038,37 @@ function _mbDefaultAllocation(totalBudget, months) {
 // Mirrors reconcile_allocation() exactly — the SAME balanced/remaining
 // definition the server uses, so a client-side "balanced ✓" can never
 // disagree with /api/generate's own gate.
+// Mirrors monthly_allocation.reconcile_allocation() exactly — the SAME
+// balanced/remaining definition (including the period-scaled tolerance
+// below) the server uses, so a client-side "balanced" can never disagree
+// with /api/generate's own response.
 function _mbReconcile(totalBudget, allocations) {
   // Round the target to cents too, not just the allocated sum — a
   // sub-cent totalBudget (e.g. from a Gross->Net conversion or a
   // percentage split upstream) previously survived into this raw
   // subtraction, where binary float representation error could push an
-  // otherwise-exact match just past _MB_CENT (e.g. 1738.675 - 1738.68 ===
+  // otherwise-exact match just past tolerance (e.g. 1738.675 - 1738.68 ===
   // -0.005000000000109139, not -0.005) — a real 100%-allocated period
   // then displayed a nonsensical "Over-allocated by 0.0% / $0" red badge.
   totalBudget = Math.round((totalBudget || 0) * 100) / 100;
   const allocated = Math.round(Object.values(allocations).reduce((s, v) => s + (v || 0), 0) * 100) / 100;
   const remaining = Math.round((totalBudget - allocated) * 100) / 100;
   const allocatedPct = totalBudget ? (allocated / totalBudget * 100) : 0;
+  // totalBudget is normally monthly_budget * months — monthly_budget is
+  // itself a rounded-to-cents rate (see _mbSyncBudgetToAllocation), so
+  // multiplying it back out by N periods can legitimately land up to
+  // N * _MB_CENT away from the real, exactly-entered sum (e.g. $65,000
+  // split into a 3-month rate rounds to $21,666.67/mo, and 21666.67 * 3 =
+  // $65,000.01 — a genuine 1-cent gap with nothing actually wrong). Scale
+  // the tolerance by period count so expected rounding slop never reads
+  // as a real under/over-allocation.
+  const tolerance = _MB_CENT * Math.max(1, Object.keys(allocations).length);
   return {
     allocated, remaining,
     allocated_pct: allocatedPct,
     remaining_pct: 100 - allocatedPct,
-    balanced: Math.abs(remaining) <= _MB_CENT,
-    over_allocated: remaining < -_MB_CENT,
+    balanced: Math.abs(remaining) <= tolerance,
+    over_allocated: remaining < -tolerance,
   };
 }
 
@@ -4132,6 +4145,40 @@ function _mbRescaleForBudgetChange(li) {
 function _mbSetAllocation(li, allocations) {
   li.monthly_allocations = allocations;
   li._mbBaseline = li.monthly_budget * li.months;
+}
+
+// The reverse of _mbRescaleForBudgetChange above: THAT function reacts to
+// "the Curate-step total changed elsewhere" by rescaling the breakdown to
+// match; this reacts to "the planner just hand-typed a month's $ figure
+// to a new REAL total" by updating monthly_budget to match the breakdown
+// instead — the plan's real monthly totals can legitimately differ month
+// to month (e.g. $25k/$10k/$30k across a flight), and forcing every month
+// back to reconcile against one fixed Curate-step number is exactly the
+// hard block this was built to remove. Called on blur (a committed edit),
+// not per keystroke, so a still-being-typed number never prematurely
+// overwrites monthly_budget. Every downstream consumer of monthly_budget
+// (Curate's own Net/Gross column, avails/SOV, agency-fee gross-up, and
+// the export's own totals) reads monthly_budget × months for a line's
+// real dollar figure, never monthly_allocations directly — so syncing it
+// here is the ONE place this needs to happen for the export to correctly
+// reflect a plan whose months don't match each other.
+function _mbSyncBudgetToAllocation(li) {
+  if (!li || !li.monthly_allocations || !Object.keys(li.monthly_allocations).length) return;
+  const months = li.months || 1;
+  const sum = Object.values(li.monthly_allocations).reduce((s, v) => s + (v || 0), 0);
+  const newTotal = Math.round(sum * 100) / 100;
+  const currentTotal = Math.round((li.monthly_budget || 0) * months * 100) / 100;
+  if (Math.abs(newTotal - currentTotal) <= _MB_CENT) return;  // already matches (within rounding)
+  li.monthly_budget = Number((newTotal / months).toFixed(2));
+  // Derived from the ROUNDED monthly_budget (not the raw allocation sum)
+  // so it's bit-for-bit identical to what _mbRescaleForBudgetChange will
+  // independently recompute as `total` on the very next render — when a
+  // total isn't evenly divisible by `months`, rounding monthly_budget to
+  // cents means monthly_budget*months can land a cent off the real sum;
+  // baselining against the raw sum instead would read as spurious "budget
+  // drifted since this was built" and nudge the planner's own just-typed
+  // last-period figure by that same stray cent.
+  li._mbBaseline = li.monthly_budget * months;
 }
 
 // Campaign dates, the time-unit toggle, OR the active tier's period-merge
@@ -4348,7 +4395,10 @@ function _mbWireLineItemBlocks(months) {
       li.monthly_allocations[e.target.dataset.month] = isNaN(pct) ? 0 : Math.round(total * pct / 100 * 100) / 100;
       _mbLiveUpdateAfterEdit(li, months, e.target);
     });
-    inp.addEventListener("blur", () => renderMonthlyBreakdown());
+    inp.addEventListener("blur", (e) => {
+      _mbSyncBudgetToAllocation(_mbFindLineItem(e.target.dataset.line));
+      renderMonthlyBreakdown();
+    });
   });
   document.querySelectorAll(".mb-dollar-input").forEach(inp => {
     inp.addEventListener("input", (e) => {
@@ -4358,7 +4408,14 @@ function _mbWireLineItemBlocks(months) {
       li.monthly_allocations[e.target.dataset.month] = isNaN(dollars) ? 0 : Math.round(dollars * 100) / 100;
       _mbLiveUpdateAfterEdit(li, months, e.target);
     });
-    inp.addEventListener("blur", () => renderMonthlyBreakdown());
+    inp.addEventListener("blur", (e) => {
+      // The actual fix: a committed dollar edit whose new per-line sum no
+      // longer matches the Curate-step total is treated as the planner's
+      // real number, not an error — monthly_budget updates to match
+      // rather than the plan blocking or silently reverting what was typed.
+      _mbSyncBudgetToAllocation(_mbFindLineItem(e.target.dataset.line));
+      renderMonthlyBreakdown();
+    });
   });
 }
 
@@ -4497,16 +4554,20 @@ function _mbUnmergePeriod(periodKey) {
   renderMonthlyBreakdown();
 }
 
-// Blocks "Continue" (never "Skip") while ANY enabled line item is
-// unbalanced — the hard "must balance to be considered complete"
-// requirement; /api/generate re-validates this authoritatively regardless
-// as a backstop for anyone who skips past an unbalanced state anyway.
+// Previously disabled "Continue" while ANY enabled line item was
+// unbalanced. Removed per explicit planner feedback: a line's real
+// monthly figures can legitimately differ month to month (e.g.
+// $25k/$10k/$30k across a flight), and the "must reconcile to one fixed
+// total" requirement was blocking real workflows with no visible
+// explanation beyond a greyed-out button — the disabled-button title
+// tooltip was the ONLY place the reason ever showed, easy to miss
+// entirely. The per-line "Allocated X% / Remaining Y%" status badge
+// (see _mbLiveUpdateAfterEdit/renderMonthlyBreakdown) still shows the
+// same information; it's now purely informational, never a gate.
+// /api/generate no longer blocks on this either (see main.py's
+// _validate_monthly_breakdown) — both surface the same non-blocking note.
 function _mbUpdateContinueState(months) {
-  const anyUnbalanced = state.lineItems.some(li => {
-    if (li.is_added_value || !li.monthly_allocations || !Object.keys(li.monthly_allocations).length) return false;
-    return !_mbReconcile(li.monthly_budget * li.months, li.monthly_allocations).balanced;
-  });
-  _mbSetContinueEnabled(!anyUnbalanced);
+  _mbSetContinueEnabled(true);
 }
 
 function _mbSetContinueEnabled(enabled) {
