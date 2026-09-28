@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Planning requests · Entravision</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/requests.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/requests"><img src="/static/entravision-logo.svg" alt=""><span>entravision<small>DIGITAL</small></span></a>
+    <nav aria-label="Main navigation">
+      <a class="current" href="/requests">Planning requests</a>
+      <a href="/">Proposal builder</a>
+    </nav>
+    <span class="topbar-note">Internal planning</span>
+  </header>
+  <main class="workspace">
+    <section class="queue" aria-label="Planning request queue">
+      <div class="queue-heading">
+        <h1>Planning requests</h1>
+        <p>Review intake, assign work, and deliver proposals.</p>
+      </div>
+      <div class="toolbar">
+        <div class="tabs" role="group" aria-label="Request status">
+          <button data-status="Active" class="selected">Active</button>
+          <button data-status="Reviewing">Reviewing</button>
+          <button data-status="Done">Done</button>
+          <button data-status="Canceled">Canceled</button>
+          <button data-status="All">All</button>
+        </div>
+        <label class="search-label"><span class="sr-only">Search requests</span><input id="search" type="search" placeholder="Search requests, clients, or codes…"></label>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Status</th><th>Code</th><th>Client</th><th>Request type</th><th>Seller</th><th>Market</th><th>Owner</th><th>Due</th><th>Priority</th></tr></thead>
+          <tbody id="request-rows"><tr><td colspan="9" class="empty">Loading requests…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="pager"><span id="count"></span><div><button id="prev" disabled>Previous</button><span id="page"></span><button id="next" disabled>Next</button></div></div>
+    </section>
+    <aside class="inspector" id="inspector" aria-label="Request details">
+      <div class="inspector-empty">Select a request to see its details.</div>
+    </aside>
+  </main>
+  <script src="/static/requests.js" defer></script>
+</body>
+</html>
