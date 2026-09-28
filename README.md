@@ -7,6 +7,10 @@ Stage 2 deliverable of the TapClicks / AdFlo proposal pipeline. The
 catalog, pricing rules, and Excel template are shared with the Stage 1
 business-logic spec — there is exactly one source of truth (`app/catalog.py`).
 
+The optional planning request library is documented in
+[docs/request-workflow.md](docs/request-workflow.md). It is disabled until its
+staging migration and environment settings are applied.
+
 ---
 
 ## Quick start
