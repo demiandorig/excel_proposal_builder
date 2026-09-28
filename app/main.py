@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import tempfile
+import uuid
 from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from psycopg.types.json import Jsonb
+from psycopg.errors import ForeignKeyViolation
 
 from app import auth as auth_svc
 
@@ -78,6 +80,7 @@ from app.services import ad_presence as ad_presence_svc
 from app.services import roadblocks as roadblocks_svc
 from app.services import monthly_allocation
 from app.services import notion_client
+from app import request_workflow
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +121,7 @@ def _migrate_legacy_temp_proposals() -> None:
 _migrate_legacy_temp_proposals()
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+app.include_router(request_workflow.router)
 
 
 @app.middleware("http")
@@ -155,6 +159,7 @@ _PUBLIC_PATHS = {
     "/api/login",
     "/api/health",
     "/api/market-ccs",  # already a deliberately public, non-admin lookup (see its own route below)
+    "/api/intake/fillout",  # separately authenticated with the webhook secret
 }
 
 
@@ -425,13 +430,24 @@ def _save_proposal_metadata(
     requester_ip: str | None = None,
     requester_user_agent: str | None = None,
     summary: dict | None = None,
+    request_id: str | None = None,
+    request_code: str | None = None,
     # 'generated' (the default, matching every row before this column
     # existed) or 'draft' — see schema.sql's migration comment. Callers
     # that pass neither `filename` nor a non-default `status` reproduce
     # this function's exact pre-draft-feature behavior.
     status: str = "generated",
 ) -> None:
+    if request_id and not request_workflow.enabled():
+        raise HTTPException(status_code=404, detail="Request workflow is disabled")
     with get_connection() as conn:
+        if request_workflow.enabled():
+            prior_link = conn.execute(
+                "SELECT request_id FROM planning_request_proposals WHERE proposal_id = %s",
+                (proposal_id,),
+            ).fetchone()
+            if prior_link and str(prior_link["request_id"]) != (request_id or ""):
+                raise HTTPException(status_code=403, detail="This proposal belongs to a different request")
         conn.execute(
             """
             INSERT INTO proposals (
@@ -480,6 +496,32 @@ def _save_proposal_metadata(
                 status,
             ),
         )
+        if request_id:
+            try:
+                parsed_request_id = uuid.UUID(request_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid request ID")
+            linked = conn.execute(
+                "SELECT r.code, r.status, r.owner_id, u.email AS owner_email "
+                "FROM planning_requests r LEFT JOIN users u ON u.id = r.owner_id "
+                "WHERE r.id = %s",
+                (parsed_request_id,),
+            ).fetchone()
+            if not linked or linked["code"] != request_code:
+                raise HTTPException(status_code=400, detail="Request ID and code do not match")
+            if linked["status"] != "Progress":
+                raise HTTPException(status_code=409, detail="Request must be in Progress to save proposal work")
+            actor = conn.execute(
+                "SELECT id, is_admin FROM users WHERE lower(email) = lower(%s) AND disabled = FALSE",
+                (created_by_email,),
+            ).fetchone()
+            if not actor or (not actor["is_admin"] and linked["owner_id"] != actor["id"]):
+                raise HTTPException(status_code=403, detail="Only the request owner or lead can save proposal work")
+            conn.execute(
+                "INSERT INTO planning_request_proposals (request_id, proposal_id) "
+                "VALUES (%s, %s) ON CONFLICT (request_id, proposal_id) DO NOTHING",
+                (parsed_request_id, proposal_id),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -778,7 +820,20 @@ class RepromptEmailsRequest(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     """Serve the SPA."""
-    return _serve_html_with_cache_busted_static(TEMPLATES_DIR / "index.html")
+    response = _serve_html_with_cache_busted_static(TEMPLATES_DIR / "index.html")
+    if request_workflow.enabled():
+        html = response.body.decode("utf-8").replace(
+            "<!-- REQUEST_WORKFLOW_NAV -->",
+            '<a href="/requests" class="btn-secondary" style="white-space:nowrap">Planning requests</a>',
+        )
+        return HTMLResponse(content=html)
+    return response
+
+
+@app.get("/requests", response_class=HTMLResponse)
+async def requests_page() -> HTMLResponse:
+    request_workflow.require_enabled()
+    return _serve_html_with_cache_busted_static(TEMPLATES_DIR / "requests.html")
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -898,7 +953,7 @@ async def strategy(body: StrategyRequest) -> dict:
         # Generate), so this falls back to the client name the same way the
         # final proposal itself does when enrichment hasn't run.
         doc_title = ai_enricher.build_proposal_title(
-            short_id=ai_enricher.normalize_notion_id(req.notion_id) or "DRAFT",
+            short_id=req.request_code or ai_enricher.normalize_notion_id(req.notion_id) or "DRAFT",
             campaign_name=ai_enricher._fallback_campaign_name(req),
             request_type=req.request_type,
             ref_date=req.start_date or "",
@@ -1040,7 +1095,7 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
         doc_token = secrets.token_urlsafe(12)
         # Same naming-convention fix as the Strategy Brief doc above.
         doc_title = ai_enricher.build_proposal_title(
-            short_id=ai_enricher.normalize_notion_id(req.notion_id) or "DRAFT",
+            short_id=req.request_code or ai_enricher.normalize_notion_id(req.notion_id) or "DRAFT",
             campaign_name=ai_enricher._fallback_campaign_name(req),
             request_type=req.request_type,
             ref_date=req.start_date or "",
@@ -1272,7 +1327,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
 
     # 1. Resolve the proposal ID: planner's Notion ID wins over the internal counter
     notion_id = ai_enricher.normalize_notion_id(req.notion_id)
-    short_id = notion_id or _get_next_short_id()
+    short_id = req.request_code or notion_id or _get_next_short_id()
 
     # 2. AI enrichment (campaign name + blurbs + emails) — grounded in the
     #    confirmed Step 03 strategy brief when the planner didn't skip it.
@@ -1512,6 +1567,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         requester_user_agent=user_agent,
         summary=summary,
         reopen_state=reopen_state,
+        request_id=req.request_id or None,
+        request_code=req.request_code or None,
     )
 
     return {
@@ -1620,6 +1677,8 @@ async def save_draft(body: DraftSaveRequest, request: Request) -> dict:
         summary={},
         reopen_state=reopen_state,
         status="draft",
+        request_id=req.request_id or None,
+        request_code=req.request_code or None,
     )
     return {"proposal_id": proposal_id, "saved_at": datetime.now(timezone.utc).isoformat()}
 
@@ -1640,6 +1699,12 @@ async def delete_draft(proposal_id: str, request: Request) -> dict:
         raise HTTPException(status_code=400, detail="Only drafts can be deleted.")
     if (meta.get("created_by_email") or "").lower() != (request.state.user["email"] or "").lower():
         raise HTTPException(status_code=403, detail="You can only delete your own drafts.")
+    if request_workflow.enabled():
+        linked = fetch_one(
+            "SELECT 1 FROM planning_request_proposals WHERE proposal_id = %s", (proposal_id,)
+        )
+        if linked:
+            raise HTTPException(status_code=409, detail="A request-linked draft cannot be deleted; its history is retained.")
     with get_connection() as conn:
         conn.execute("DELETE FROM proposals WHERE proposal_id = %s", (proposal_id,))
     return {"ok": True}
@@ -1955,7 +2020,13 @@ async def admin_delete_user(user_id: str, request: Request) -> dict:
     acting_user = request.state.user
     if user_id == acting_user["id"]:
         raise HTTPException(status_code=400, detail="You can't delete your own account.")
-    deleted = auth_svc.delete_user(user_id)
+    try:
+        deleted = auth_svc.delete_user(user_id)
+    except ForeignKeyViolation:
+        raise HTTPException(
+            status_code=409,
+            detail="This user owns planning requests. Reassign them, then disable the account to retain history.",
+        )
     if not deleted:
         raise HTTPException(status_code=404, detail="User not found.")
     return {"deleted": True}
