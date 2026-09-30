@@ -179,6 +179,20 @@ html, body {
 }
 .account-widget .account-link:hover,
 .account-widget .account-logout:hover { border-color: var(--accent); color: var(--accent); }
+.masthead-btn {
+  color: var(--paper);
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: var(--radius);
+  padding: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.masthead-btn:hover { border-color: var(--accent); color: var(--accent); }
 .step {
   display: flex;
   align-items: center;
@@ -1606,6 +1620,107 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 .sov-helper.sov-yellow { color: var(--amber); }
 .sov-helper.sov-orange { color: #b8560c; }
 .sov-helper.sov-red { color: var(--red); }
+
+.constanza-block {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--rule);
+}
+.constanza-result {
+  margin-top: 10px;
+  padding: 12px;
+  background: var(--accent-soft);
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+.constanza-confidence { font-weight: 600; margin: 0 0 4px; }
+.constanza-geo-note { margin: 0 0 4px; color: var(--ink-soft); }
+.constanza-warning { margin: 0 0 6px; color: #b8560c; }
+.constanza-error { color: var(--red); font-weight: 600; }
+.constanza-range-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.constanza-range-table th, .constanza-range-table td {
+  text-align: right;
+  padding: 3px 6px;
+}
+.constanza-range-table th:first-child, .constanza-range-table td:first-child { text-align: left; }
+.constanza-uniques { margin: 4px 0; }
+.constanza-notes {
+  margin: 6px 0;
+  padding-left: 18px;
+  color: var(--ink-soft);
+  font-size: 11.5px;
+}
+
+.constanza-modal-form {
+  display: grid;
+  grid-template-columns: 2fr 2fr 1fr auto;
+  gap: 12px;
+  align-items: end;
+  margin: 14px 0;
+}
+.constanza-modal-form label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-soft);
+  display: block;
+}
+#constanza-modal-result {
+  margin-top: 10px;
+}
+.constanza-dma-table-scroll { max-height: 280px; }
+.constanza-dma-table th, .constanza-dma-table td { font-size: 11.5px; }
+.constanza-more-dmas { font-size: 11px; color: var(--ink-faint); margin: 4px 0; }
+.constanza-insert-row {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.constanza-audience-details {
+  margin: 14px 0;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+.constanza-audience-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+}
+.constanza-audience-form { margin-top: 12px; }
+.constanza-interest-list {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.constanza-calc-row { margin: 14px 0; }
+.constanza-badge-row {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 0 0 8px;
+}
+.constanza-audience-summary {
+  background: var(--paper-warm);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  font-size: 12.5px;
+}
+.constanza-audience-summary p { margin: 4px 0; }
+.constanza-interest-note { color: var(--green); }
+.constanza-area-dma { color: var(--ink-faint); font-weight: normal; }
+.constanza-ambiguity-block { margin-bottom: 10px; }
+
 .avails-fields {
   display: grid;
   /* 3 fields in free-form mode, 4 (with Avg. Frequency) otherwise — auto-fit

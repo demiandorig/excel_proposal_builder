@@ -78,6 +78,9 @@ from app.services import ad_presence as ad_presence_svc
 from app.services import roadblocks as roadblocks_svc
 from app.services import monthly_allocation
 from app.services import notion_client
+from app.services import constanza_geo
+from app.services.constanza_engine import estimate_avails, PLATFORM_MODELED_PRODUCTS
+from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, parse_audience_text
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +564,12 @@ class AvailsEntry(BaseModel):
     # directly instead — still written as a real %, still gets the same
     # traffic-light conditional formatting as a computed SOV.
     sov_pct_freeform: Optional[float] = None
+    # Set only when max_imps/est_uniques came from Constanza's "Apply" —
+    # which geo/method/DMAs produced this figure (app/services/
+    # constanza_engine.py), so a reopened proposal can show the planner
+    # what it was actually calculated from instead of just a bare number
+    # indistinguishable from any other "Est." value. None otherwise.
+    geo_resolution: Optional[dict] = None
 
 
 class TierModel(BaseModel):
@@ -749,6 +758,44 @@ class RoadblocksRequest(BaseModel):
     request: dict
     line_items: list[LineItemModel]
     strategy_brief: Optional[dict] = None
+
+
+class ConstanzaResolveRequest(BaseModel):
+    geo_text: str
+    # "dma" | "state" | "zip" | "county" | "congressional_district" |
+    # "city" | "country" | None. Lets the UI's geography-type selector
+    # force a specific resolver (see constanza_geo.resolve_geo's own
+    # docstring for why this matters — "Sacramento" is genuinely ambiguous
+    # between the DMA and the city without it). None keeps the default
+    # DMA/state-first behavior, for backward compatibility with every
+    # existing saved proposal's plain geo text.
+    geo_type_hint: Optional[str] = None
+
+
+class ConstanzaAudienceSpecModel(BaseModel):
+    age_min: Optional[int] = None
+    age_max: Optional[int] = None
+    gender: Optional[str] = None
+    interest_terms: list[str] = []
+
+
+class ConstanzaEstimateRequest(BaseModel):
+    product_name: str
+    geo_text: str
+    geo_type_hint: Optional[str] = None
+    months: int = 1
+    # Only used for products with no workbook-modeled platform (VIX 360,
+    # Netflix — see constanza_engine.PLATFORM_MODELED_PRODUCTS): the
+    # planner's own national monthly total, apportioned by DMA population
+    # share. Ignored for platform-modeled products.
+    national_monthly_total: Optional[float] = None
+    # When present, routes through constanza_audience.py's age/gender/
+    # interest layer instead of the plain geo/platform estimate.
+    audience: Optional[ConstanzaAudienceSpecModel] = None
+
+
+class ConstanzaParseAudienceRequest(BaseModel):
+    text: str
 
 
 class DriveUploadRequest(BaseModel):
@@ -1091,6 +1138,170 @@ async def recommend(body: RecommendRequest) -> dict:
 
     items = recommend_line_items(req, body.monthly_budget, strategy_brief=body.strategy_brief, time_unit=body.time_unit)
     return {"line_items": [asdict(li) for li in items]}
+
+
+def _serialize_geo_resolution(resolution) -> dict:
+    return {
+        "method": resolution.method,
+        "geo_confidence": resolution.geo_confidence,
+        "resolved": resolution.resolved,
+        "unmatched_tokens": resolution.unmatched_tokens,
+        "ambiguous": resolution.ambiguous,
+        "areas": [
+            {
+                "dma": a.dma, "area_population": a.area_population, "dma_share": a.dma_share,
+                "source_type": a.source_type, "apportionment": a.apportionment,
+                "state": a.state, "label": a.label,
+            }
+            for a in resolution.areas
+        ],
+        # Back-compat for any caller still reading the Phase 1 shape.
+        "dmas": resolution.dmas,
+    }
+
+
+@app.post("/api/constanza/resolve")
+async def constanza_resolve(body: ConstanzaResolveRequest) -> dict:
+    """Resolve a campaign's free-text geo (ProposalRequest.geo / TierModel.geo)
+    into a structured, area-weighted geography — DMA/state (default),
+    or ZIP/county/congressional-district/city/country when
+    `geo_type_hint` says so — for the planner to confirm/edit before any
+    avails math runs against it. See app/services/constanza_geo.py."""
+    resolution = constanza_geo.resolve_geo(body.geo_text, geo_type_hint=body.geo_type_hint)
+    return _serialize_geo_resolution(resolution)
+
+
+def _serialize_avails_estimate(estimate, resolution) -> dict:
+    return {
+        "product_name": estimate.product_name,
+        "platform": estimate.platform,
+        "confidence": estimate.confidence,
+        "geo_method": estimate.geo_method,
+        "geo_confidence": estimate.geo_confidence,
+        "months": estimate.months,
+        "imps_low": estimate.imps_low,
+        "imps_mid": estimate.imps_mid,
+        "imps_high": estimate.imps_high,
+        "est_uniques": estimate.est_uniques,
+        "notes": estimate.notes,
+        "unmatched_geo_tokens": resolution.unmatched_tokens,
+        "ambiguous": resolution.ambiguous,
+        "by_area": [
+            {
+                "area_label": a.area_label, "dma": a.dma, "weight": a.weight,
+                "imps_low": a.imps_low, "imps_mid": a.imps_mid, "imps_high": a.imps_high,
+                "unique_viewers": a.unique_viewers, "unique_hh": a.unique_hh,
+            }
+            for a in estimate.by_area
+        ],
+    }
+
+
+@app.post("/api/constanza/estimate")
+async def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
+    """DMA-weighted avails estimate for one product over a resolved geo —
+    Project Constanza's "Stanza" engine (app/services/constanza_engine.py).
+    A fast starting point pre-filled from bundled CTV-avails-by-DMA data,
+    not a live platform pull — the planner can still confirm/refine
+    against Roku Ads Manager / Amazon DSP / Madhive / The Trade Desk. When
+    `audience` is given, routes through constanza_audience.py's age/
+    gender/interest layer on top of this same geo/platform estimate."""
+    resolution = constanza_geo.resolve_geo(body.geo_text, geo_type_hint=body.geo_type_hint)
+    if resolution.ambiguous:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Geo {body.geo_text!r} is ambiguous between multiple markets — pick one and retry.",
+        )
+    if not resolution.resolved:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not resolve geo {body.geo_text!r} to any DMA — pick markets manually.",
+        )
+    estimate = estimate_avails(
+        body.product_name, resolution, months=body.months,
+        national_monthly_total=body.national_monthly_total,
+    )
+    if estimate is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{body.product_name!r} has no modeled CTV platform and no "
+                "national_monthly_total was given to apportion by population share."
+            ),
+        )
+
+    if body.audience is None:
+        return _serialize_avails_estimate(estimate, resolution)
+
+    audience_estimate = estimate_audience(estimate, AudienceSpec(
+        age_min=body.audience.age_min, age_max=body.audience.age_max,
+        gender=body.audience.gender, interest_terms=body.audience.interest_terms,
+    ))
+    return {
+        **_serialize_avails_estimate(estimate, resolution),
+        "audience": {
+            "imps_low": audience_estimate.imps_low, "imps_mid": audience_estimate.imps_mid,
+            "imps_high": audience_estimate.imps_high,
+            "underlying_population": audience_estimate.underlying_population,
+            "reliability_floor_population": audience_estimate.reliability_floor_population,
+            "below_reliability_threshold": audience_estimate.below_reliability_threshold,
+            "confidence_tier": audience_estimate.confidence_tier,
+            "cuts_applied": audience_estimate.cuts_applied,
+            "search_multiplier_applied": audience_estimate.search_multiplier_applied,
+            "interests": [
+                {
+                    "input_text": i.input_text, "category": i.category, "supported": i.supported,
+                    "source": i.source, "source_date": i.source_date,
+                }
+                for i in audience_estimate.interests
+            ],
+            "notes": audience_estimate.notes,
+            "by_area": [
+                {
+                    "area_label": a.area_label, "dma": a.dma, "weight": a.weight,
+                    "imps_low": a.imps_low, "imps_mid": a.imps_mid, "imps_high": a.imps_high,
+                    "underlying_population": a.underlying_population,
+                }
+                for a in audience_estimate.by_area
+            ],
+        },
+    }
+
+
+@app.post("/api/constanza/parse-audience")
+async def constanza_parse_audience(body: ConstanzaParseAudienceRequest) -> dict:
+    """Free text -> structured AudienceSpec (the LLM step — see
+    constanza_audience.py's module docstring for the hard rule that the
+    LLM only classifies/extracts here, never generates a number). Kept
+    separate from /estimate so the UI can show the parsed structure for
+    the planner to confirm/edit before any estimate runs."""
+    spec = parse_audience_text(body.text)
+    return {
+        "age_min": spec.age_min, "age_max": spec.age_max, "gender": spec.gender,
+        "interest_terms": spec.interest_terms, "geo_text": spec.geo_text,
+        "geo_type_hint": spec.geo_type_hint,
+    }
+
+
+@app.get("/api/constanza/interest-taxonomy")
+async def constanza_interest_taxonomy() -> dict:
+    """The known, sourced interest categories constanza_audience.py can
+    apply a real incidence rate for — drives the UI's "browse supported
+    interests" picker so free text isn't the only way in."""
+    return {
+        "categories": [
+            {"category": c["category"], "label": c["label"], "source": c["source"], "source_date": c["source_date"]}
+            for c in load_interest_taxonomy()
+        ],
+    }
+
+
+@app.get("/api/constanza/platform-products")
+async def constanza_platform_products() -> dict:
+    """Which catalog products Constanza can platform-model directly (vs.
+    falling back to a generic population-share estimate) — drives the
+    frontend's "Auto-calculate" affordance per avails card."""
+    return {"platform_modeled_products": PLATFORM_MODELED_PRODUCTS}
 
 
 def _sync_monthly_budgets_to_allocations(tiers: list[dict]) -> None:

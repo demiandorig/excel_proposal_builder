@@ -1,0 +1,107 @@
+{
+  "The Roku Channel": {
+    "imps_mid": 7899259259.25926,
+    "imps_low": 5529481481.48148,
+    "imps_high": 10269037037.037,
+    "unique_viewers": 145000000,
+    "unique_hh": 56862745.0980392
+  },
+  "Hulu (ad tier)": {
+    "imps_mid": 6178602646.60494,
+    "imps_low": 4325021852.62346,
+    "imps_high": 8032183440.58642,
+    "unique_viewers": 75520500,
+    "unique_hh": 32835000
+  },
+  "Peacock (ad tiers)": {
+    "imps_mid": 3101528571.42857,
+    "imps_low": 2171070000,
+    "imps_high": 4031987142.85714,
+    "unique_viewers": 92160000,
+    "unique_hh": 38400000
+  },
+  "Tubi": {
+    "imps_mid": 7131384615.38462,
+    "imps_low": 4991969230.76923,
+    "imps_high": 9270800000,
+    "unique_viewers": "(deduped in FAST total)",
+    "unique_hh": null
+  },
+  "Pluto TV": {
+    "imps_mid": 2976923076.92308,
+    "imps_low": 2083846153.84615,
+    "imps_high": 3870000000,
+    "unique_viewers": "(deduped in FAST total)",
+    "unique_hh": null
+  },
+  "Long-tail FAST (Samsung TV Plus, Xumo, Plex, VIZIO, LG, TCL, VIDAA, Local Now, STIRR, DistroTV, Crackle, Redbox\u2026)": {
+    "imps_mid": 5292307692.30769,
+    "imps_low": 3704615384.61538,
+    "imps_high": 6880000000,
+    "unique_viewers": "(deduped in FAST total)",
+    "unique_hh": null
+  },
+  "vMVPDs (Fubo/Hulu Live, Sling, DIRECTV, Philo, Frndly, Vidgo)": {
+    "imps_mid": 3427200000,
+    "imps_low": 2399040000,
+    "imps_high": 4455360000,
+    "unique_viewers": 32640000,
+    "unique_hh": 13600000
+  },
+  "MVPD streaming apps (Spectrum, Xfinity, Fios, Dish, DIRECTV)": {
+    "imps_mid": 728000000,
+    "imps_low": 509600000,
+    "imps_high": 946400000,
+    "unique_viewers": 31200000,
+    "unique_hh": 13000000
+  },
+  "All FAST, deduplicated reach (Roku Ch + Tubi + Pluto + long tail)": {
+    "imps_mid": null,
+    "imps_low": null,
+    "imps_high": null,
+    "unique_viewers": 145000000,
+    "unique_hh": null
+  },
+  "CUMULATIVE \u2014 Madhive list platforms": {
+    "imps_mid": 36735205861.9082,
+    "imps_low": 25714644103.3357,
+    "imps_high": 47755767620.4806,
+    "unique_viewers": 193993008.297275,
+    "unique_hh": 77597203.3189101
+  },
+  "Reference: Prime Video (not on list)": {
+    "imps_mid": 5636855172.41379,
+    "imps_low": null,
+    "imps_high": null,
+    "unique_viewers": 130000000,
+    "unique_hh": 53061224.4897959
+  },
+  "Cumulative incl. Prime Video (reference)": {
+    "imps_mid": 42372061034.322,
+    "imps_low": null,
+    "imps_high": null,
+    "unique_viewers": null,
+    "unique_hh": null
+  },
+  "Monthly impressions per reached person (cumulative)": {
+    "imps_mid": 189.363555853596,
+    "imps_low": null,
+    "imps_high": null,
+    "unique_viewers": null,
+    "unique_hh": null
+  },
+  "Cumulative implied spend as % of U.S. CTV ad spend": {
+    "imps_mid": 0.22189578873981,
+    "imps_low": null,
+    "imps_high": null,
+    "unique_viewers": null,
+    "unique_hh": null
+  },
+  "Notes: (1) Impressions are market-level avails (what the platform sells in total), not what one DSP can clear \u2014 Madhive typically wins a fraction depending on deal type, bid, and the list's distribution caps (60% English / 25% Spanish = max share of a campaign any one publisher can deliver). (2) Network-owned DAI inventory inside vMVPD streams and network apps (A&E, ABC, CBS, ESPN, Univision, Telemundo, etc.) is additional and not counted. (3) YouTube, Netflix, Disney+, Paramount+, Max are excluded unless noted.": {
+    "imps_mid": null,
+    "imps_low": null,
+    "imps_high": null,
+    "unique_viewers": null,
+    "unique_hh": null
+  }
+}
