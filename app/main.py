@@ -26,7 +26,7 @@ from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 from urllib.parse import quote
 
 # Load .env (OPENAI_API_KEY, DRIVE_CLIENT_ID/SECRET/ROOT_FOLDER_ID, etc.) into
@@ -43,9 +43,11 @@ from fastapi import FastAPI, HTTPException, Body, Request, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
+import psycopg
 from psycopg.types.json import Jsonb
 
 from app import auth as auth_svc
+from app import disclaimers as disclaimers_svc
 
 from app.db import fetch_all, fetch_one, get_connection
 from app.catalog import (
@@ -76,6 +78,7 @@ from app.services import pptx_builder
 from app.services import strategy_brief as strategy_brief_svc
 from app.services import ad_presence as ad_presence_svc
 from app.services import roadblocks as roadblocks_svc
+from app.services import restrictions as restrictions_svc
 from app.services import monthly_allocation
 from app.services import notion_client
 
@@ -504,6 +507,9 @@ class LineItemModel(BaseModel):
     target_secondary: Optional[str] = None  # secondary audience for added scale/avails
     estimated_cpm_override: Optional[float] = None  # Step 04 override of the catalog's estimated CPM (Fixed/impressions-estimate products)
     buying_model_override: Optional[str] = None  # Step 04 override of the catalog's buying model (CPM/CPP/Fixed)
+    # Step 06's master toggle was switched off for this line. Persisted (the client-side baseline that used to
+    # carry this isn't) so a reopened proposal doesn't silently re-enable the breakdown. Not used by generation.
+    mb_off: bool = False
     is_added_value: bool = False  # $0 budget is deliberate — exempt from below-minimum validation, sorts to the bottom of the export
     added_value_pct: Optional[float] = None  # AV lines only: this % of the tier's real (non-AV) budget is the line's estimated gift value, shown in the export
     # Step 04's per-line objective dropdown (Awareness / Website Conversion /
@@ -640,7 +646,7 @@ class GenerateRequest(BaseModel):
         return v
     avails_data: Optional[dict[str, AvailsEntry]] = None  # product_name -> avails; ignored when `tiers` is present
     strategy_brief: Optional[dict] = None  # confirmed Step 03 brief, if not skipped
-    roadblocks: Optional[dict] = None  # confirmed Step 05 roadblocks result, if not skipped — saved to reopen_state purely so a reopen can restore it; not otherwise used by generation itself
+    roadblocks: Optional[dict] = None  # confirmed Step 07 roadblocks result, if not skipped — saved to reopen_state purely so a reopen can restore it; not otherwise used by generation itself
     # The exact Step 01 paste that produced `request` below — has no effect
     # on generation (parsing already happened), carried through purely so
     # reopen_state can save it and a reopen can refill the textarea (see
@@ -749,6 +755,9 @@ class RoadblocksRequest(BaseModel):
     request: dict
     line_items: list[LineItemModel]
     strategy_brief: Optional[dict] = None
+    # Restricted verticals (Restricted Verticals sheet tab names) the planner
+    # confirmed apply to this client — verdicts for them come from the sheet.
+    categories: Optional[list[str]] = None
 
 
 class DriveUploadRequest(BaseModel):
@@ -1020,7 +1029,7 @@ async def rebuild_strategy_doc(doc_token: str, body: StrategyDocRebuildRequest) 
 @app.post("/api/roadblocks")
 async def roadblocks(body: RoadblocksRequest) -> dict:
     """
-    Step 05 — AI-researched platform restrictions/roadblocks for the
+    Step 07 — AI-researched platform restrictions/roadblocks for the
     confirmed product mix, grounded in the Step 03 strategy brief + Notion
     context via live web search. Also writes a downloadable .docx report
     and returns a token to fetch it via /api/download-roadblocks/{token}.
@@ -1033,7 +1042,8 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
     ]
 
     result = await asyncio.to_thread(
-        roadblocks_svc.generate_roadblocks, req, line_items, strategy_brief=body.strategy_brief)
+        roadblocks_svc.generate_roadblocks, req, line_items,
+        strategy_brief=body.strategy_brief, categories=body.categories)
 
     doc_token: Optional[str] = None
     if result.get("product_roadblocks"):
@@ -1055,6 +1065,7 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
             overall_summary=result.get("overall_summary", ""),
             product_roadblocks=result["product_roadblocks"],
             used_web_search=result.get("used_web_search", False),
+            categories=result.get("categories") or None,
         )
         if built:
             (PROPOSALS_DIR / f"roadblocks_{doc_token}.json").write_text(json.dumps({
@@ -1069,7 +1080,7 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
 
 @app.get("/api/download-roadblocks/{doc_token}")
 async def download_roadblocks(doc_token: str) -> FileResponse:
-    """Download the Step 05 roadblocks report Word doc."""
+    """Download the Step 07 roadblocks report Word doc."""
     meta_file = PROPOSALS_DIR / f"roadblocks_{doc_token}.json"
     if not meta_file.exists():
         raise HTTPException(status_code=404, detail="Roadblocks report not found")
@@ -1259,6 +1270,18 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     # minimum_warnings below, instead of ever refusing to generate.
     balance_errors, minimum_warnings = _validate_monthly_breakdown(tiers, req, multi_tier, granularity=body.time_unit)
 
+    # Admin keyword disclaimers (Admin -> Disclaimers), matched ONCE per
+    # option here and handed to both exporters so the Excel and the PPT can
+    # never disagree about which banners apply. The loader already falls back
+    # to the built-in Live Sports rule if the table is unreachable; this
+    # try/except covers a bug in matching itself — an optional callout must
+    # never take down the whole Generate call.
+    try:
+        disclaimers_by_tier = disclaimers_svc.resolve_for_tiers(req, tiers)
+    except Exception:
+        logging.getLogger(__name__).exception("disclaimer matching failed; exporting without banners")
+        disclaimers_by_tier = {}
+
     # Union of every tier's line items — product blurbs and the campaign
     # name don't vary by tier, so enrichment runs once against everything
     # that could appear in the workbook, deduplicated by product name.
@@ -1332,6 +1355,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             addons=addons,
             monthly_distribution_mode=body.monthly_distribution_mode,
             time_unit=body.time_unit,
+            disclaimers_by_tier=disclaimers_by_tier,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
@@ -1422,24 +1446,27 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
                 "name": (t.get("name") or "").strip() or f"Option {t['label']}",
                 "products": t_products, "line_items": t_line_items,
             })
+    ppt_banners = disclaimers_svc.union_for_ppt(disclaimers_by_tier)
     if pptx_tiers:
         if any(tb == f"Proposal {t['label']}" for t in tiers for tb in tabs_built_list):
             pptx_net_filename = f"{safe_base}_Net_Deck.pptx"
             try:
                 pptx_builder.build_signature_deck(
                     req, pptx_tiers, PROPOSALS_DIR / pptx_net_filename,
-                    gross=False, proposal_title=proposal_title,
+                    gross=False, proposal_title=proposal_title, banners=ppt_banners, time_unit=body.time_unit,
                 )
             except Exception:
+                logging.getLogger(__name__).exception("PPT net deck build failed")
                 pptx_net_filename = None  # never let an optional export break the main Generate call
         if any(tb == f"Proposal {t['label']} (Gross)" for t in tiers for tb in tabs_built_list):
             pptx_gross_filename = f"{safe_base}_Gross_Deck.pptx"
             try:
                 pptx_builder.build_signature_deck(
                     req, pptx_tiers, PROPOSALS_DIR / pptx_gross_filename,
-                    gross=True, proposal_title=proposal_title,
+                    gross=True, proposal_title=proposal_title, banners=ppt_banners, time_unit=body.time_unit,
                 )
             except Exception:
+                logging.getLogger(__name__).exception("PPT gross deck build failed")
                 pptx_gross_filename = None
 
     # 9. Track requester device/IP for the admin view
@@ -1532,6 +1559,12 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         # purely informational, e.g. "this line's breakdown is still only
         # 62.5% filled in."
         "monthly_breakdown_balance_notes": balance_errors,
+        # Which admin disclaimers were drawn into this proposal, per option
+        # (names only — the full text is already in the exports).
+        "matched_disclaimers": {
+            label: [{"id": b["id"], "name": b["name"], "applies_to": b["applies_to"]} for b in banners]
+            for label, banners in disclaimers_by_tier.items()
+        },
     }
 
 
@@ -1876,6 +1909,272 @@ class MarketConfigRequest(BaseModel):
 async def admin_page() -> HTMLResponse:
     """Serve the admin SPA (proposal history + rate overrides)."""
     return _serve_html_with_cache_busted_static(TEMPLATES_DIR / "admin.html")
+
+
+# --------------------------------------------------------------------------
+# Disclaimers — admin-managed, keyword-triggered banner callouts drawn into
+# the Excel + PPT exports (app/disclaimers.py). Everything under
+# /api/admin/ is admin-only via the middleware; the preview route below it
+# is login-only so the Generate step can show a planner what will be added.
+# --------------------------------------------------------------------------
+
+@app.exception_handler(psycopg.errors.UndefinedTable)
+async def _schema_not_applied(request: Request, exc: psycopg.errors.UndefinedTable) -> JSONResponse:
+    """A table added by a newer schema.sql isn't there yet (deploys that apply the SQL by hand): say so
+    instead of a bare 500, so the admin knows the fix is to run schema.sql."""
+    logging.getLogger(__name__).warning("missing table on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "A database table this feature needs doesn't exist yet — apply the latest schema.sql, then try again."},
+    )
+
+
+class DisclaimerRequest(BaseModel):
+    name: str = Field(max_length=120)
+    keywords: Annotated[str, Field(max_length=5000)] | Annotated[list[str], Field(max_length=200)] = []
+    banner_text: str = Field(max_length=5000)
+    color: str = "red"
+    applies_to: str = "both"
+    season_start: Optional[str] = None
+    season_end: Optional[str] = None
+
+
+class DisclaimerActiveRequest(BaseModel):
+    is_active: bool
+
+
+def _clean_disclaimer_fields(body: DisclaimerRequest) -> dict:
+    try:
+        return disclaimers_svc.validate_fields(
+            name=body.name, keywords=body.keywords, banner_text=body.banner_text, color=body.color,
+            applies_to=body.applies_to, season_start=body.season_start, season_end=body.season_end,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/admin/disclaimers")
+async def admin_list_disclaimers() -> dict:
+    try:
+        rules = disclaimers_svc.list_all()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Couldn't load disclaimers (has the schema been applied?): {e}")
+    return {
+        "disclaimers": [d.to_dict() for d in rules],
+        "colors": {k: v["label"] for k, v in disclaimers_svc.COLOR_PRESETS.items()},
+        "color_swatches": {k: {"fill": v["fill"], "text": v["text"]} for k, v in disclaimers_svc.COLOR_PRESETS.items()},
+    }
+
+
+@app.post("/api/admin/disclaimers")
+async def admin_create_disclaimer(body: DisclaimerRequest) -> dict:
+    created = disclaimers_svc.create(_clean_disclaimer_fields(body))
+    return {"created": True, "disclaimer": created.to_dict()}
+
+
+@app.put("/api/admin/disclaimers/{disclaimer_id}")
+async def admin_update_disclaimer(disclaimer_id: str, body: DisclaimerRequest) -> dict:
+    updated = disclaimers_svc.update(disclaimer_id, _clean_disclaimer_fields(body))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Disclaimer not found.")
+    return {"saved": True, "disclaimer": updated.to_dict()}
+
+
+@app.patch("/api/admin/disclaimers/{disclaimer_id}")
+async def admin_toggle_disclaimer(disclaimer_id: str, body: DisclaimerActiveRequest) -> dict:
+    updated = disclaimers_svc.set_active(disclaimer_id, body.is_active)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Disclaimer not found.")
+    return {"saved": True, "disclaimer": updated.to_dict()}
+
+
+@app.delete("/api/admin/disclaimers/{disclaimer_id}")
+async def admin_delete_disclaimer(disclaimer_id: str) -> dict:
+    try:
+        deleted = disclaimers_svc.delete(disclaimer_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Disclaimer not found.")
+    return {"deleted": True}
+
+
+# --------------------------------------------------------------------------
+# Restricted verticals — Entravision's "Restricted Verticals by Platforms"
+# sheet as the source of truth for Roadblocks (app/services/restrictions.py).
+# The planner-facing list is login-only; sync / upload / edit live under
+# /api/admin/ (admin-only via the middleware).
+# --------------------------------------------------------------------------
+
+class RestrictionCategoriesRequest(BaseModel):
+    request: dict
+    product_names: list[str] = []
+
+
+@app.post("/api/restrictions/categories")
+async def restriction_categories(body: RestrictionCategoriesRequest) -> dict:
+    """The restricted verticals a planner can confirm for Roadblocks, with the
+    ones the plan's own text suggests flagged `suggested`."""
+    from app import disclaimers as disclaimers_svc
+    state = restrictions_svc.load_state()
+    req = _reconstruct_proposal_request(body.request)
+    plan_text = disclaimers_svc.request_text(req, include_products=True) + "\n" + "\n".join(body.product_names)
+    suggested = set(restrictions_svc.suggest_categories(plan_text, state["categories"]))
+    sync = state["sync"] or {}
+    return {
+        "categories": [
+            {"name": c.name, "kind": c.kind, "summary": c.summary, "suggested": c.name in suggested}
+            for c in state["categories"]
+        ],
+        "using_builtin": state["using_builtin"],
+        "synced_at": sync["synced_at"].isoformat() if sync.get("synced_at") else None,
+    }
+
+
+class RestrictionSyncRequest(BaseModel):
+    sheet_url: Optional[str] = None
+
+
+class RestrictionUploadRequest(BaseModel):
+    filename: Optional[str] = Field(default=None, max_length=300)
+    data_base64: str = Field(max_length=14_000_000)       # ~10 MB of workbook
+
+
+class RestrictionUpdateRequest(BaseModel):
+    keywords: Annotated[str, Field(max_length=5000)] | Annotated[list[str], Field(max_length=200)] = []
+    product_map: dict[str, list[str]] = Field(default={}, max_length=300)
+
+
+def _restriction_admin_payload(warnings: Optional[list[str]] = None) -> dict:
+    from app.catalog import CATALOG, effective_catalog
+    state = restrictions_svc.load_state()
+    sync = state["sync"] or {}
+    # Mappings are keyed by a product's stable catalog name, but a renamed or custom product only
+    # exists under its display name — offer (and accept) both so nothing reads "not a catalog product".
+    known_names = sorted({p.name for p in CATALOG} | {p.name for p in effective_catalog(include_deleted=True)})
+    return {
+        "warnings": warnings or [],
+        "categories": [c.to_dict() for c in state["categories"]],
+        "using_builtin": state["using_builtin"],
+        "sheet_url": sync.get("sheet_url") or restrictions_svc.DEFAULT_SHEET_URL,
+        "source_title": sync.get("source_title"),
+        "synced_at": sync["synced_at"].isoformat() if sync.get("synced_at") else None,
+        "synced_by": sync.get("synced_by"),
+        "catalog_names": known_names,
+    }
+
+
+def _restrictions_read_failed(state: dict) -> HTTPException:
+    if state.get("missing_table"):
+        return HTTPException(status_code=503, detail="A database table this feature needs doesn't exist yet — apply the latest schema.sql, then try again.")
+    return HTTPException(status_code=503, detail="Couldn't read the restrictions table — try again in a moment.")
+
+
+def _ingest_restrictions(data: bytes, sheet_url: str, source_title: str, synced_by: str) -> list[str]:
+    """Parse a workbook and replace the stored categories with it, keeping the keyword and product-mapping
+    edits an admin already made to tabs that are still there. Returns the parser's warnings."""
+    categories, warnings = restrictions_svc.parse_workbook_ex(data)
+    previous = restrictions_svc.load_state()
+    if previous.get("error"):
+        # The read FAILED: replacing now would throw away the keyword / mapping edits an admin made.
+        raise _restrictions_read_failed(previous)
+    if not previous["using_builtin"]:
+        restrictions_svc.carry_over_admin_edits(categories, previous["categories"])
+    restrictions_svc.replace_all(categories, sheet_url=sheet_url, source_title=source_title, synced_by=synced_by)
+    return warnings
+
+
+@app.get("/api/admin/restrictions")
+async def admin_get_restrictions() -> dict:
+    return _restriction_admin_payload()
+
+
+@app.post("/api/admin/restrictions/sync")
+async def admin_sync_restrictions(body: RestrictionSyncRequest, request: Request) -> dict:
+    sheet_url = (body.sheet_url or restrictions_svc.DEFAULT_SHEET_URL).strip()
+    try:
+        file_id = restrictions_svc.extract_file_id(sheet_url)
+        data, title = await asyncio.to_thread(restrictions_svc.fetch_sheet_xlsx, file_id)
+        warnings = await asyncio.to_thread(
+            _ingest_restrictions, data, sheet_url, title or "Restricted Verticals", request.state.user["email"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"synced": True, **_restriction_admin_payload(warnings)}
+
+
+@app.post("/api/admin/restrictions/upload")
+async def admin_upload_restrictions(body: RestrictionUploadRequest, request: Request) -> dict:
+    try:
+        data = restrictions_svc.decode_upload(body.data_base64)
+        warnings = await asyncio.to_thread(
+            _ingest_restrictions, data, restrictions_svc.DEFAULT_SHEET_URL,
+            f"Uploaded: {body.filename or 'workbook.xlsx'}", request.state.user["email"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"synced": True, **_restriction_admin_payload(warnings)}
+
+
+@app.put("/api/admin/restrictions/{name}")
+async def admin_update_restriction(name: str, body: RestrictionUpdateRequest, request: Request) -> dict:
+    try:
+        state = restrictions_svc.load_state()
+        if state.get("error"):
+            # The read FAILED (not "no rows yet"): seeding now would wipe whatever is really stored.
+            raise _restrictions_read_failed(state)
+        if state["using_builtin"]:
+            # Editing the built-in snapshot: persist it first so there are rows to edit.
+            restrictions_svc.seed_builtin_into_db(request.state.user["email"])
+        updated = restrictions_svc.update_category(name, keywords=body.keywords, product_map=body.product_map)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Category not found.")
+    return {"saved": True, **_restriction_admin_payload()}
+
+
+class SuggestTabsRequest(BaseModel):
+    request: dict
+    product_names: list[str] = []
+
+
+@app.post("/api/suggest-tabs")
+async def suggest_tabs(body: SuggestTabsRequest) -> dict:
+    """Which export tabs the CURRENT plan calls for — the same classification
+    /api/generate applies, so the Generate step's checkboxes can show what
+    will really be built. The suggestion returned at parse time goes stale as
+    soon as the planner changes the mix, request type or agency fee."""
+    req = _reconstruct_proposal_request(body.request)
+    return {"tabs": classify_output_tabs(
+        req.request_type, body.product_names,
+        has_agency_fee=req.agency_fee is not None and req.agency_fee > 0,
+    )}
+
+
+class DisclaimerPreviewRequest(BaseModel):
+    request: dict
+    tiers: list[TierModel] = []
+    line_items: list[LineItemModel] = []
+
+
+@app.post("/api/disclaimers/preview")
+async def preview_disclaimers(body: DisclaimerPreviewRequest) -> dict:
+    """Which disclaimers WOULD be drawn into each option's export, from the
+    wizard's current state — same resolver /api/generate uses, so what the
+    planner sees on the Generate step is what they'll get."""
+    req = _reconstruct_proposal_request(body.request)
+    if body.tiers:
+        tier_dicts = [
+            {"label": t.label, "name": t.name, "geo": t.geo, "start_date": t.start_date,
+             "end_date": t.end_date, "line_items": t.line_items}
+            for t in body.tiers
+        ]
+    else:
+        tier_dicts = [{"label": "A", "line_items": body.line_items}]
+    resolved = disclaimers_svc.resolve_for_tiers(req, tier_dicts)
+    return {"tiers": {
+        label: [{"id": b["id"], "name": b["name"], "color": b["color"], "applies_to": b["applies_to"]} for b in banners]
+        for label, banners in resolved.items()
+    }}
 
 
 # --------------------------------------------------------------------------

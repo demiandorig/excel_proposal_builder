@@ -240,7 +240,7 @@ def _add_header(slide, *, proposal_title: str, client_name: str, requested_by: s
 # pagination, so the two can never drift out of sync with each other.
 # ---------------------------------------------------------------------------
 
-def _estimate_wrapped_lines(text: str, *, chars_per_line: int = 38, max_lines: int = 3) -> int:
+def _estimate_wrapped_lines(text: str, *, chars_per_line: int = 38, max_lines: int = 40) -> int:
     """How many lines `text` will wrap to in a ~3.6"-wide column at 10-11pt
     Open Sans. chars_per_line is a deliberately conservative estimate
     (rounded down from a rough 0.085"/char average) — better to slightly
@@ -248,7 +248,9 @@ def _estimate_wrapped_lines(text: str, *, chars_per_line: int = 38, max_lines: i
     auto-fit silently grow a row taller than this file calculated."""
     if not text:
         return 1
-    return max(1, min(-(-len(text) // chars_per_line), max_lines))
+    # Per paragraph: a hard line break (Step 04's target box is a textarea) always starts a new visual line.
+    lines = sum(max(1, -(-len(par) // chars_per_line)) for par in text.split("\n"))
+    return max(1, min(lines, max_lines))
 
 
 def _line_item_impressions(product, li) -> Optional[int]:
@@ -273,11 +275,11 @@ def _line_item_impressions(product, li) -> Optional[int]:
     return None
 
 
-def _product_cell_text(product, li) -> str:
+def _product_cell_text(product, li, unit_suffix: str = "/mo") -> str:
     imps = _line_item_impressions(product, li)
     if imps is None:
         return product.name
-    return f"{product.name}\nEst. {imps:,} impressions/mo"
+    return f"{product.name}\nEst. {imps:,} impressions{unit_suffix}"
 
 
 def _row_height_in(product_name: str, target_text: str, *, header: bool = False,
@@ -363,12 +365,21 @@ def _greedy_chunk(items: list, *, start_idx: int, avail_height_in: float):
     return chunk, idx, used
 
 
-def _add_table(slide, *, top_in: float, chunk: list, gross: bool) -> float:
+# Step 04's Week/Month/Quarter toggle, as the table's column headers and per-row budget suffix.
+_UNIT_COPY = {
+    "week": ("Weeks", "Weekly Budget", "/wk"),
+    "month": ("Months", "Monthly Budget", "/mo"),
+    "quarter": ("Quarters", "Quarterly Budget", "/qtr"),
+}
+
+
+def _add_table(slide, *, top_in: float, chunk: list, gross: bool, time_unit: str = "month") -> float:
     """Draws one continuous table for this slide's chunk of items (always
     starts with a column-header row). Returns the Y position (inches)
     after the table — the exact sum of the row heights this function
     itself just set, not a separate estimate that could drift."""
-    columns = ["Product", "Target", "Months", "Monthly Budget", "Total"]
+    unit_plural, unit_budget, unit_suffix = _UNIT_COPY.get(time_unit, _UNIT_COPY["month"])
+    columns = ["Product", "Target", unit_plural, unit_budget, "Total"]
     header_h = _row_height_in("", "", header=True)
     row_heights_in = [header_h] + [item["height"] for item in chunk]
     n_rows = len(row_heights_in)
@@ -401,7 +412,7 @@ def _add_table(slide, *, top_in: float, chunk: list, gross: bool) -> float:
         p = tf.paragraphs[0]
         p.alignment = align
         run = p.add_run()
-        run.text = lines[0]
+        run.text = lines[0] or "\u00a0"
         run.font.name = font
         run.font.size = Pt(size)
         run.font.bold = bold
@@ -439,38 +450,164 @@ def _add_table(slide, *, top_in: float, chunk: list, gross: bool) -> float:
             product, li = item["product"], item["line_item"]
             fill = ROW_ALT_FILL if data_row_i % 2 == 1 else WHITE
             data_row_i += 1
-            _cell(r, 0, _product_cell_text(product, li), fill=fill)
+            _cell(r, 0, _product_cell_text(product, li, unit_suffix), fill=fill)
             _cell(r, 1, item["target"], color=INK_SOFT, size=10, fill=fill)
             _cell(r, 2, str(li.months), align=PP_ALIGN.CENTER, fill=fill)
-            _cell(r, 3, "Added Value" if li.is_added_value else f"${item['monthly']:,.0f}/mo", align=PP_ALIGN.RIGHT, fill=fill)
+            _cell(r, 3, "Added Value" if li.is_added_value else f"${item['monthly']:,.0f}{unit_suffix}", align=PP_ALIGN.RIGHT, fill=fill)
             _cell(r, 4, f"${item['line_total']:,.0f}", align=PP_ALIGN.RIGHT, bold=True, fill=fill)
 
     return top_in + sum(row_heights_in) + _TABLE_TO_SIGNATURE_GAP_IN
 
 
-def _add_signature_block(slide, *, client_name: str, top_in: float, tier_totals: list[tuple[str, float]]):
-    """Compact 2-row signature block (dates+investment, then client/
-    signature/date side by side) — closer to how the team's own manual
-    decks lay this out than this file's original 3-stacked-line version,
-    and it saves real vertical room besides. For more than one option,
-    lists each option's own total instead of a single (meaningless, since
-    they're alternatives not a sum) combined number."""
-    if len(tier_totals) == 1:
-        investment_line = f"Total Investment: {'$' + format(tier_totals[0][1], ',.0f')} per month"
-    else:
-        investment_line = "  ·  ".join(f"{name}: ${total:,.0f}/mo" for name, total in tier_totals)
+# Legal footer copy -- the same wording the Excel proposal's footer carries
+# (excel_template._write_addons_grand_total_footer), so the two deliverables
+# can't disagree about what the client is agreeing to.
+_VALIDITY_TEXT = (
+    "This proposal will be valid for a period of 1 month after being presented. Please notify "
+    "your Account Executive if you require the presented media to remain booked after that time."
+)
+_TERMS_PRE = "Client accepts Entravision's Terms of Sales ("
+_TERMS_URL = "https://entravision.com/termsofsales/"
+_TERMS_POST = ")"
 
-    terms = (
-        "Valid for 1 month after presentation — not a guarantee of delivery. All rates are NET "
-        f"unless marked otherwise. By signing below, {client_name or 'the client'} authorizes "
-        "Entravision Communications Corporation to proceed with the selected media plan."
+# Geometry for the closing block, in inches. Banners and legal copy are 9pt
+# Open Sans across the 12.33" content width; ~170 characters per line is a
+# deliberately conservative estimate (same "rather over-book than clip"
+# stance _estimate_wrapped_lines takes for table cells).
+_NOTE_CHARS_PER_LINE = 170
+_NOTE_LINE_IN = 0.16
+_BANNER_PAD_IN = 0.14
+_BANNER_GAP_IN = 0.08
+_LEGAL_PARA_GAP_IN = 0.04
+_INVESTMENT_ROW_IN = 0.42
+_SIGNATURE_LABEL_ROW_IN = 0.38
+
+
+def _note_lines(text: str) -> int:
+    return sum(max(1, -(-len(par) // _NOTE_CHARS_PER_LINE)) for par in (text or "").split("\n"))
+
+
+def _banner_height_in(banner: dict) -> float:
+    return _BANNER_PAD_IN + _NOTE_LINE_IN * _note_lines(banner["text"])
+
+
+def _signature_authorization_text(client_name: str, gross: bool) -> str:
+    return (
+        f"All rates are {'GROSS' if gross else 'NET'} unless marked otherwise. This proposal is not a guarantee of delivery. By signing below, "
+        f"{client_name or 'the client'} authorizes Entravision Communications Corporation to "
+        "proceed with the selected media plan."
     )
-    _add_textbox(slide, MARGIN, Inches(top_in), CONTENT_W, Inches(0.4), terms,
-                 font=FONT_BODY, size=9.5, color=INK)
-    _add_textbox(slide, MARGIN, Inches(top_in + 0.42), CONTENT_W, Inches(0.3),
+
+
+def _signature_layout(banners: list[dict], client_name: str, gross: bool) -> dict:
+    """Vertical offsets (inches, relative to the block's top) for the closing
+    block: matched disclaimer banners, legal copy, investment line, then the
+    signature rules -- plus `total`, the height the whole thing needs, which
+    pagination reads so a long banner list pushes the block onto its own
+    slide instead of overflowing the footer. One function feeds both the
+    drawing and the fit check, so they can't drift apart."""
+    y = 0.0
+    banner_tops = []
+    for b in banners:
+        banner_tops.append(y)
+        y += _banner_height_in(b) + _BANNER_GAP_IN
+    legal_top = y
+    legal_lines = (
+        _note_lines(_VALIDITY_TEXT)
+        + _note_lines(_TERMS_PRE + _TERMS_URL + _TERMS_POST)
+        + _note_lines(_signature_authorization_text(client_name, gross))
+    )
+    legal_h = legal_lines * _NOTE_LINE_IN + 2 * _LEGAL_PARA_GAP_IN
+    investment_top = legal_top + legal_h + 0.08
+    sig_top = investment_top + _INVESTMENT_ROW_IN
+    return {
+        "banner_tops": banner_tops, "legal_top": legal_top, "legal_h": legal_h,
+        "investment_top": investment_top, "sig_top": sig_top,
+        "total": sig_top + _SIGNATURE_LABEL_ROW_IN,
+    }
+
+
+def _add_banner(slide, top_in: float, banner: dict):
+    """A colored, full-width callout (same pale-fill/dark-text pairing as the
+    Excel banners). A real autoshape rather than a text box so the fill
+    spans the whole width and the text stays inside it."""
+    shape = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE, MARGIN, Inches(top_in), CONTENT_W, Inches(_banner_height_in(banner)))
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = RGBColor.from_string(banner["fill"].upper())
+    shape.line.fill.background()
+    shape.shadow.inherit = False
+    tf = shape.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    tf.margin_left = tf.margin_right = Inches(0.12)
+    tf.margin_top = tf.margin_bottom = Inches(0.04)
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.LEFT
+    run = p.add_run()
+    run.text = banner["text"]
+    run.font.name = FONT_BODY
+    run.font.size = Pt(9)
+    run.font.color.rgb = RGBColor.from_string(banner["font_color"].upper())
+
+
+def _add_legal_block(slide, top_in: float, height_in: float, client_name: str, gross: bool):
+    """Validity + Terms of Sales (with a real clickable link) + authorization
+    line, as three paragraphs in one text box."""
+    box = slide.shapes.add_textbox(MARGIN, Inches(top_in), CONTENT_W, Inches(height_in))
+    tf = box.text_frame
+    tf.word_wrap = True
+    tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+
+    def _run(paragraph, text, *, link=None):
+        run = paragraph.add_run()
+        run.text = text
+        run.font.name = FONT_BODY
+        run.font.size = Pt(9)
+        run.font.color.rgb = INK
+        if link:
+            run.hyperlink.address = link
+        return run
+
+    p1 = tf.paragraphs[0]
+    p1.alignment = PP_ALIGN.LEFT
+    p1.space_after = Inches(_LEGAL_PARA_GAP_IN)
+    _run(p1, _VALIDITY_TEXT)
+
+    p2 = tf.add_paragraph()
+    p2.alignment = PP_ALIGN.LEFT
+    p2.space_after = Inches(_LEGAL_PARA_GAP_IN)
+    _run(p2, _TERMS_PRE)
+    _run(p2, _TERMS_URL, link=_TERMS_URL)
+    _run(p2, _TERMS_POST)
+
+    p3 = tf.add_paragraph()
+    p3.alignment = PP_ALIGN.LEFT
+    _run(p3, _signature_authorization_text(client_name, gross))
+
+
+def _add_signature_block(slide, *, client_name: str, top_in: float, tier_totals: list[tuple[str, float]],
+                         banners: Optional[list[dict]] = None, gross: bool = False):
+    """Closing block, top to bottom: matched disclaimer banners (directly
+    below the table's totals), the legal copy, a compact investment line,
+    then the client/signature/date rules. For more than one option, lists
+    each option's own total instead of a single (meaningless, since they're
+    alternatives not a sum) combined number."""
+    banners = banners or []
+    layout = _signature_layout(banners, client_name, gross)
+    # tier_totals are whole-flight totals (budget x periods), so they carry no per-month suffix.
+    if len(tier_totals) == 1:
+        investment_line = f"Total Investment: ${tier_totals[0][1]:,.0f}"
+    else:
+        investment_line = "  \u00b7  ".join(f"{name}: ${total:,.0f}" for name, total in tier_totals)
+
+    for banner, rel_top in zip(banners, layout["banner_tops"]):
+        _add_banner(slide, top_in + rel_top, banner)
+    _add_legal_block(slide, top_in + layout["legal_top"], layout["legal_h"], client_name, gross)
+    _add_textbox(slide, MARGIN, Inches(top_in + layout["investment_top"]), CONTENT_W, Inches(0.3),
                  investment_line, font=FONT_MAIN, size=11, bold=True, color=PRIMARY)
 
-    sig_top = top_in + 0.85
+    sig_top = top_in + layout["sig_top"]
     col_w = Inches(3.9)
     gap = Inches(0.2)
     labels = ["Client", "Signature", "Date"]
@@ -481,14 +618,6 @@ def _add_signature_block(slide, *, client_name: str, top_in: float, tier_totals:
                      label, font=FONT_BODY, size=9, color=INK_SOFT)
 
 
-if _HAS_PPTX:
-    # Must match _add_signature_block's own internal geometry exactly (two
-    # fixed hops down from its top_in, plus the final row's own height) —
-    # kept as one named constant instead of copy-pasted math so the two
-    # can't silently drift apart.
-    _SIGNATURE_HEIGHT_IN = 0.85 + 0.38
-
-
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -496,6 +625,8 @@ if _HAS_PPTX:
 def build_signature_deck(
     request, tiers: list[dict], output_path: Path, *,
     gross: bool, proposal_title: str = "",
+    banners: Optional[list[dict]] = None,
+    time_unit: str = "month",
 ) -> bool:
     """
     Build the simple, signature-ready Net or Gross deck — one slide when the
@@ -510,6 +641,16 @@ def build_signature_deck(
     plain "TOTAL" row); more than one gets each option labeled with its own
     colored bar and its own subtotal — never a combined grand total across
     options, since they're alternatives, not additive.
+
+    banners: matched admin disclaimers (app/disclaimers.py), each {"text",
+    "fill", "font_color"} -- drawn as colored callouts at the top of the
+    closing block, directly below the table's totals and above the legal
+    copy; they flow onto a following slide rather than overflow. Already
+    de-duplicated across options by the caller (the closing block is shared
+    by every option).
+
+    time_unit: Step 04's "week"/"month"/"quarter" toggle, for the table's
+    column headers and per-row budget suffix.
     """
     if not _HAS_PPTX:
         return False
@@ -535,6 +676,11 @@ def build_signature_deck(
     fee_for_gross = agency_fee if gross else None
 
     items = _build_items(tiers, gross=gross, agency_fee=fee_for_gross)
+    banners = banners or []
+    # The closing block (legal copy + investment line + signature rules) has a fixed height; banners are
+    # placed one by one in whatever room is left, flowing onto a new slide when the next one doesn't fit
+    # (their number and length are admin-controlled, so they can't be assumed to fit anywhere).
+    signature_height_in = _signature_layout([], client_name, gross)["total"]
 
     # Phase 1 — decide what goes on each slide, measured against the REAL
     # height each candidate chunk needs, not a row-count guess. Every slide
@@ -555,18 +701,31 @@ def build_signature_deck(
         avail = FOOTER_Y_IN - content_top
 
         chunk, next_idx, used = _greedy_chunk(items, start_idx=idx, avail_height_in=avail)
-        reaches_end = next_idx == len(items)
-        sig_fits = reaches_end and (
-            avail - used - _TABLE_TO_SIGNATURE_GAP_IN >= _SIGNATURE_HEIGHT_IN
-        )
-        slide_plans.append({"chunk": chunk, "is_first": is_first, "is_last": sig_fits, "content_top": content_top})
+        slide_plans.append({
+            "chunk": chunk, "is_first": is_first, "is_last": False, "content_top": content_top, "banners": [],
+            "room": avail - used - _TABLE_TO_SIGNATURE_GAP_IN,    # what's left under the table on this slide
+        })
         idx = next_idx
 
-    if not slide_plans[-1]["is_last"]:
-        # The last data slide packed right up to the footer with no room
-        # left for the signature block — give it a dedicated final slide
-        # instead (empty chunk signals "no table on this one" below).
-        slide_plans.append({"chunk": [], "is_first": False, "is_last": True, "content_top": NO_HEADER_CONTENT_TOP_IN})
+    # Closing block: banners first (directly under the totals), then the legal copy / investment line /
+    # signature rules as one unit. Anything that doesn't fit the room left moves to a fresh slide with no
+    # table (an empty chunk signals "no table on this one" below).
+    def _fresh_slide() -> dict:
+        plan = {"chunk": [], "is_first": False, "is_last": False, "content_top": NO_HEADER_CONTENT_TOP_IN,
+                "banners": [], "room": FOOTER_Y_IN - NO_HEADER_CONTENT_TOP_IN}
+        slide_plans.append(plan)
+        return plan
+
+    current = slide_plans[-1]
+    for banner in banners:
+        need = _banner_height_in(banner) + _BANNER_GAP_IN
+        if need > current["room"] and (current["chunk"] or current["banners"]):
+            current = _fresh_slide()
+        current["banners"].append(banner)
+        current["room"] -= need
+    if signature_height_in > current["room"] and (current["chunk"] or current["banners"]):
+        current = _fresh_slide()
+    current["is_last"] = True
 
     total_slides = len(slide_plans)
     # Recomputed directly per tier (not read back off the `items` subtotal
@@ -602,12 +761,17 @@ def build_signature_deck(
         # rows in it (just an orphaned column-header bar) and start the
         # signature block near the top instead.
         if plan["chunk"]:
-            y_after = _add_table(slide, top_in=plan["content_top"], chunk=plan["chunk"], gross=gross)
+            y_after = _add_table(slide, top_in=plan["content_top"], chunk=plan["chunk"], gross=gross, time_unit=time_unit)
         else:
             y_after = plan["content_top"]
 
+        for banner in plan["banners"]:
+            _add_banner(slide, y_after, banner)
+            y_after += _banner_height_in(banner) + _BANNER_GAP_IN
+
         if plan["is_last"]:
-            _add_signature_block(slide, client_name=client_name, top_in=y_after, tier_totals=tier_totals)
+            _add_signature_block(slide, client_name=client_name, top_in=y_after, tier_totals=tier_totals,
+                                 banners=None, gross=gross)
 
         page_label = f"Media Plan {i + 1}/{total_slides}" if total_slides > 1 else "Media Plan"
         _footer(slide, page_label)

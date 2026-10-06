@@ -23,6 +23,12 @@ const adminState = {
   marketsLoaded: false,
   users: [],
   usersLoaded: false,
+  disclaimers: [],
+  disclaimerColors: {},
+  disclaimerSwatches: {},
+  disclaimersLoaded: false,
+  disclaimerEditingId: null,
+  restrictions: null,
   currentUserEmail: null,  // set by loadUsers()'s /api/me call — lets the Users tab hide "disable/delete self" actions
 };
 
@@ -36,6 +42,8 @@ document.addEventListener("DOMContentLoaded", () => {
   wireBulkUpload();
   wireMarketConfig();
   wireAddUser();
+  wireDisclaimers();
+  wireRestrictions();
   wireCsvExports();
   loadProposals();
 });
@@ -54,10 +62,14 @@ function wireTabs() {
       document.getElementById("tab-rates").classList.toggle("hidden", tab !== "rates");
       document.getElementById("tab-markets").classList.toggle("hidden", tab !== "markets");
       document.getElementById("tab-users").classList.toggle("hidden", tab !== "users");
+      document.getElementById("tab-disclaimers").classList.toggle("hidden", tab !== "disclaimers");
+      document.getElementById("tab-restrictions").classList.toggle("hidden", tab !== "restrictions");
       if (tab === "analytics" && !adminState.analyticsLoaded) loadAnalytics();
       if (tab === "rates" && !adminState.ratesLoaded) loadRates();
       if (tab === "markets" && !adminState.marketsLoaded) loadMarketConfig();
       if (tab === "users" && !adminState.usersLoaded) loadUsers();
+      if (tab === "disclaimers" && !adminState.disclaimersLoaded) loadDisclaimers();
+      if (tab === "restrictions" && !adminState.restrictions) loadRestrictions();
     });
   });
 }
@@ -337,7 +349,7 @@ async function loadProposals() {
     const res = await fetch(`/api/admin/proposals?${params}`);
     if (adminState._proposalsRequestToken !== requestToken) return;  // superseded
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || res.statusText);
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
     adminState.proposals = data.proposals || [];
     adminState.proposalsTotalCount = data.total_count || 0;
     adminState.proposalsTotalPages = data.total_pages || 1;
@@ -1115,5 +1127,381 @@ function wireAddUser() {
       submitBtn.disabled = false;
       submitBtn.textContent = "Add User";
     }
+  });
+}
+
+
+// --------------------------------------------------------------------------
+// Disclaimers — keyword-triggered banner callouts for the Excel + PPT
+// exports (see app/disclaimers.py). One form serves both "add" and "edit";
+// adminState.disclaimerEditingId says which.
+// --------------------------------------------------------------------------
+
+async function loadDisclaimers() {
+  const list = document.getElementById("dz-list");
+  try {
+    const res = await fetch("/api/admin/disclaimers");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    adminState.disclaimers = data.disclaimers || [];
+    adminState.disclaimerColors = data.colors || {};
+    adminState.disclaimerSwatches = data.color_swatches || {};
+    adminState.disclaimersLoaded = true;
+    fillDisclaimerColorSelect();
+    renderDisclaimers();
+    updateDisclaimerPreview();
+  } catch (e) {
+    list.innerHTML = `<p class="admin-empty">Failed to load: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function fillDisclaimerColorSelect() {
+  const sel = document.getElementById("dz-color");
+  if (sel.options.length) return;
+  sel.innerHTML = Object.entries(adminState.disclaimerColors)
+    .map(([key, label]) => `<option value="${escapeAttr(key)}">${escapeHtml(label)}</option>`).join("");
+}
+
+function swatchStyle(color) {
+  const sw = adminState.disclaimerSwatches[color] || { fill: "F8D7DA", text: "58151C" };
+  return `background:#${sw.fill};color:#${sw.text};`;
+}
+
+function updateDisclaimerPreview() {
+  const box = document.getElementById("dz-preview");
+  const text = document.getElementById("dz-text").value.trim();
+  box.setAttribute("style", swatchStyle(document.getElementById("dz-color").value || "red"));
+  box.textContent = text || "Your banner text will appear here, exactly as it will in the export.";
+}
+
+function renderDisclaimers() {
+  const list = document.getElementById("dz-list");
+  if (!adminState.disclaimers.length) {
+    list.innerHTML = `<p class="admin-empty">No disclaimers yet.</p>`;
+    return;
+  }
+  list.innerHTML = adminState.disclaimers.map(d => {
+    const when = [];
+    if (d.keywords.length) when.push(d.keywords.map(k => `<span class="dz-chip">${escapeHtml(k)}</span>`).join(""));
+    if (d.season_start && d.season_end) when.push(`<span class="dz-chip dz-chip-season">Season ${escapeHtml(d.season_start)} → ${escapeHtml(d.season_end)}</span>`);
+    const applies = { both: "Excel + PowerPoint", excel: "Excel only", ppt: "PowerPoint only" }[d.applies_to] || d.applies_to;
+    const isSeed = d.id === "seed-live-sports";
+    return `
+    <article class="dz-card ${d.is_active ? "" : "dz-inactive"}" data-id="${escapeAttr(d.id)}">
+      <header class="dz-card-head">
+        <h3>${escapeHtml(d.name)}${d.is_active ? "" : ' <span class="deleted-badge">Off</span>'}${isSeed ? ' <span class="custom-badge">Built-in</span>' : ""}</h3>
+        <span class="dz-meta">${escapeHtml(applies)}</span>
+      </header>
+      <div class="dz-banner" style="${swatchStyle(d.color)}">${escapeHtml(d.banner_text)}</div>
+      <div class="dz-triggers"><span class="dz-triggers-label">Triggers on</span>${when.join("") || "—"}</div>
+      <div class="dz-actions">
+        <label class="checkbox-label"><input type="checkbox" data-action="dz-toggle" ${d.is_active ? "checked" : ""} /> Active</label>
+        <button class="btn-secondary" data-action="dz-edit">Edit</button>
+        ${isSeed ? "" : '<button class="btn-delete-row" data-action="dz-delete">Delete</button>'}
+      </div>
+    </article>`;
+  }).join("");
+
+  list.querySelectorAll('[data-action="dz-toggle"]').forEach(el => {
+    el.addEventListener("change", (e) => toggleDisclaimer(e.target.closest(".dz-card").dataset.id, e.target.checked));
+  });
+  list.querySelectorAll('[data-action="dz-edit"]').forEach(btn => {
+    btn.addEventListener("click", (e) => startEditDisclaimer(e.target.closest(".dz-card").dataset.id));
+  });
+  list.querySelectorAll('[data-action="dz-delete"]').forEach(btn => {
+    btn.addEventListener("click", (e) => deleteDisclaimer(e.target.closest(".dz-card").dataset.id));
+  });
+}
+
+function disclaimerFormPayload() {
+  return {
+    name: document.getElementById("dz-name").value.trim(),
+    keywords: document.getElementById("dz-keywords").value,
+    banner_text: document.getElementById("dz-text").value.trim(),
+    color: document.getElementById("dz-color").value,
+    applies_to: document.getElementById("dz-applies").value,
+    season_start: document.getElementById("dz-season-start").value.trim() || null,
+    season_end: document.getElementById("dz-season-end").value.trim() || null,
+  };
+}
+
+function resetDisclaimerForm() {
+  adminState.disclaimerEditingId = null;
+  document.getElementById("dz-form").reset();
+  document.getElementById("dz-form-summary").textContent = "+ Add disclaimer";
+  document.getElementById("dz-submit").textContent = "Add Disclaimer";
+  document.getElementById("dz-cancel-edit").classList.add("hidden");
+  document.getElementById("dz-error").classList.add("hidden");
+  updateDisclaimerPreview();
+}
+
+function startEditDisclaimer(id) {
+  const d = adminState.disclaimers.find(x => x.id === id);
+  if (!d) return;
+  adminState.disclaimerEditingId = id;
+  document.getElementById("dz-name").value = d.name;
+  document.getElementById("dz-keywords").value = d.keywords.join(", ");
+  document.getElementById("dz-text").value = d.banner_text;
+  document.getElementById("dz-color").value = d.color;
+  document.getElementById("dz-applies").value = d.applies_to;
+  document.getElementById("dz-season-start").value = d.season_start || "";
+  document.getElementById("dz-season-end").value = d.season_end || "";
+  document.getElementById("dz-form-summary").textContent = `Editing: ${d.name}`;
+  document.getElementById("dz-submit").textContent = "Save Changes";
+  document.getElementById("dz-cancel-edit").classList.remove("hidden");
+  document.getElementById("dz-error").classList.add("hidden");
+  const panel = document.getElementById("dz-form-panel");
+  panel.open = true;
+  updateDisclaimerPreview();
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function toggleDisclaimer(id, isActive) {
+  try {
+    const res = await fetch(`/api/admin/disclaimers/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ is_active: isActive }),
+    });
+    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+  } catch (e) {
+    alert("Update failed: " + e.message);
+  }
+  await loadDisclaimers();
+}
+
+async function deleteDisclaimer(id) {
+  const d = adminState.disclaimers.find(x => x.id === id);
+  if (!confirm(`Delete the "${d ? d.name : id}" disclaimer? Exports will stop including it. This can't be undone.`)) return;
+  try {
+    const res = await fetch(`/api/admin/disclaimers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+    if (adminState.disclaimerEditingId === id) resetDisclaimerForm();
+  } catch (e) {
+    alert("Delete failed: " + e.message);
+  }
+  await loadDisclaimers();
+}
+
+function wireDisclaimers() {
+  const form = document.getElementById("dz-form");
+  if (!form) return;
+  ["dz-text", "dz-color"].forEach(id => {
+    document.getElementById(id).addEventListener("input", updateDisclaimerPreview);
+    document.getElementById(id).addEventListener("change", updateDisclaimerPreview);
+  });
+  document.getElementById("dz-cancel-edit").addEventListener("click", () => {
+    resetDisclaimerForm();
+    document.getElementById("dz-form-panel").open = false;
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById("dz-error");
+    errEl.classList.add("hidden");
+    const submitBtn = document.getElementById("dz-submit");
+    const editingId = adminState.disclaimerEditingId;
+    const idleLabel = submitBtn.textContent;
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Saving…";
+    try {
+      const res = await fetch(
+        editingId ? `/api/admin/disclaimers/${encodeURIComponent(editingId)}` : "/api/admin/disclaimers",
+        {
+          method: editingId ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(disclaimerFormPayload()),
+        });
+      if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+      resetDisclaimerForm();
+      document.getElementById("dz-form-panel").open = false;
+      await loadDisclaimers();
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("hidden");
+      submitBtn.textContent = idleLabel;
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
+}
+
+
+// --------------------------------------------------------------------------
+// Restrictions — Entravision's "Restricted Verticals by Platforms" sheet,
+// ingested as the Roadblocks step's source of truth (app/services/
+// restrictions.py). Sync/upload replaces everything; the per-vertical forms
+// edit the two things a sync can only guess at: trigger keywords and which
+// catalog products each sheet entry stands for.
+// --------------------------------------------------------------------------
+
+async function loadRestrictions() {
+  try {
+    const res = await fetch("/api/admin/restrictions");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    applyRestrictionsPayload(data);
+  } catch (e) {
+    document.getElementById("rs-list").innerHTML = `<p class="admin-empty">Failed to load: ${escapeHtml(e.message)}</p>`;
+  }
+}
+
+function applyRestrictionsPayload(data) {
+  adminState.restrictions = data;
+  // Parser warnings only come back from a sync/upload; later saves keep showing the last ones.
+  if (data.synced) adminState.restrictionWarnings = data.warnings || [];
+  const warnEl = document.getElementById("rs-warnings");
+  const warnings = adminState.restrictionWarnings || [];
+  warnEl.innerHTML = warnings.length
+    ? `<strong>Worth a look after this sync</strong><ul>${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>`
+    : "";
+  warnEl.classList.toggle("hidden", !warnings.length);
+  document.getElementById("rs-url").value = data.sheet_url || "";
+  document.getElementById("rs-status").textContent = data.using_builtin
+    ? "Built-in snapshot (Political, Cannabis) — sheet not synced yet"
+    : `${data.source_title || "Synced"} · ${data.synced_at ? formatDate(data.synced_at) : ""}${data.synced_by ? " · " + data.synced_by : ""}`;
+  renderRestrictions();
+}
+
+const RS_KIND_LABEL = { allowlist: "Approved-products list", blanket_hold: "Not accepted anywhere", guidance: "Platform guidance" };
+
+function renderRestrictions() {
+  const data = adminState.restrictions;
+  const list = document.getElementById("rs-list");
+  const known = new Set(data.catalog_names);
+  list.innerHTML = data.categories.map(c => {
+    const mapping = c.kind === "allowlist" ? `
+      <div class="rs-map">
+        <div class="dz-triggers-label">Which catalog products each sheet entry covers</div>
+        ${c.items.map(item => `
+          <label class="rs-field">
+            <span class="rs-item">${escapeHtml(item)}</span>
+            <textarea rows="2" data-rs-item="${escapeHtml(item)}" placeholder="No catalog product matched — type product names, comma separated">${escapeHtml((c.product_map[item] || []).join(", "))}</textarea>
+          </label>`).join("")}
+      </div>` : "";
+    const body = `<details class="rs-body"><summary>Sheet text (what the AI reads)</summary><pre>${escapeHtml(c.body)}</pre></details>`;
+    return `
+    <article class="dz-card" data-rs-category="${escapeHtml(c.name)}">
+      <header class="dz-card-head">
+        <h3>${escapeHtml(c.name)}</h3>
+        <span class="dz-meta">${escapeHtml(RS_KIND_LABEL[c.kind] || c.kind)}</span>
+      </header>
+      <p class="rs-summary">${escapeHtml(c.summary)}</p>
+      <label class="rs-field">Suggested when the plan mentions <small>(comma separated — whole words, case-insensitive)</small>
+        <input type="text" data-rs-keywords value="${escapeHtml(c.keywords.join(", "))}" />
+      </label>
+      ${mapping}
+      ${body}
+      <div class="dz-actions">
+        <span class="add-product-error hidden" data-rs-card-error></span>
+        <span class="rs-unknown hidden" data-rs-unknown></span>
+        <button type="button" class="btn-secondary" data-rs-save>Save changes</button>
+      </div>
+    </article>`;
+  }).join("") || `<p class="admin-empty">No verticals yet.</p>`;
+
+  list.querySelectorAll("[data-rs-save]").forEach(btn => {
+    btn.addEventListener("click", () => saveRestriction(btn.closest("[data-rs-category]"), known));
+  });
+}
+
+// FastAPI reports a validation failure as an ARRAY of {msg, loc, ...}; show its messages, not "[object Object]".
+function detailText(detail, fallback) {
+  const one = d => {
+    if (d == null) return "";
+    if (typeof d === "string") return d;
+    if (typeof d === "object") return d.msg || d.message || d.detail || JSON.stringify(d);
+    return String(d);
+  };
+  const text = Array.isArray(detail) ? detail.map(one).filter(Boolean).join("; ") : one(detail);
+  return text || fallback || "Request failed.";
+}
+
+function splitNames(text) {
+  return String(text || "").split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+}
+
+async function saveRestriction(card, known) {
+  const name = card.dataset.rsCategory;
+  const errEl = card.querySelector("[data-rs-card-error]");
+  const unknownEl = card.querySelector("[data-rs-unknown]");
+  errEl.classList.add("hidden");
+  const productMap = {};
+  const unknown = [];
+  card.querySelectorAll("[data-rs-item]").forEach(ta => {
+    const names = splitNames(ta.value);
+    productMap[ta.dataset.rsItem] = names;
+    names.forEach(n => { if (!known.has(n)) unknown.push(n); });
+  });
+  unknownEl.classList.toggle("hidden", !unknown.length);
+  unknownEl.textContent = unknown.length ? `Not catalog products: ${unknown.join(", ")}` : "";
+  try {
+    const res = await fetch(`/api/admin/restrictions/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keywords: card.querySelector("[data-rs-keywords]").value, product_map: productMap }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    applyRestrictionsPayload(data);
+    // The re-render above rebuilt this card; put the not-in-the-catalog warning back so it survives the save.
+    if (unknown.length) {
+      const fresh = document.querySelector(`[data-rs-category="${CSS.escape(name)}"] [data-rs-unknown]`);
+      if (fresh) {
+        fresh.textContent = `Saved, but not catalog products: ${unknown.join(", ")}`;
+        fresh.classList.remove("hidden");
+      }
+    }
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove("hidden");
+  }
+}
+
+function wireRestrictions() {
+  const syncBtn = document.getElementById("rs-sync-btn");
+  if (!syncBtn) return;
+  const errEl = document.getElementById("rs-error");
+  const run = async (btn, label, request) => {
+    errEl.classList.add("hidden");
+    const idle = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = label;
+    try {
+      const res = await request();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+      applyRestrictionsPayload(data);
+    } catch (e) {
+      errEl.textContent = e.message;
+      errEl.classList.remove("hidden");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = idle;
+    }
+  };
+  syncBtn.addEventListener("click", () => run(syncBtn, "Syncing…", () => fetch("/api/admin/restrictions/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sheet_url: document.getElementById("rs-url").value.trim() || null }),
+  })));
+  const uploadBtn = document.getElementById("rs-upload-btn");
+  uploadBtn.addEventListener("click", () => {
+    const file = document.getElementById("rs-file").files[0];
+    if (!file) { errEl.textContent = "Choose an .xlsx file first."; errEl.classList.remove("hidden"); return; }
+    run(uploadBtn, "Uploading…", () => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Couldn't read that file."));
+      reader.onload = () => {
+        const bytes = new Uint8Array(reader.result);
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        resolve(fetch("/api/admin/restrictions/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: file.name, data_base64: btoa(bin) }),
+        }));
+      };
+      reader.readAsArrayBuffer(file);
+    }));
   });
 }

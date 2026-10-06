@@ -252,7 +252,13 @@ Client name: ...
           <legend>Flight</legend>
           <label>Start date <input data-field="start_date" type="date" /></label>
           <label>End date <input data-field="end_date" type="date" /></label>
-          <label>Months <input data-field="total_months" type="number" min="1" /></label>
+          <label>Months
+            <input data-field="total_months" type="number" min="1" readonly title="Computed from the Start/End dates above" />
+          </label>
+          <div class="months-mismatch-flag hidden" id="total-months-mismatch-flag">
+            <span class="months-mismatch-text"></span>
+            <button type="button" class="months-fix-btn" id="total-months-fix-btn">Fix</button>
+          </div>
           <label>Monthly budget
             <input data-field="monthly_budget" type="number" step="0.01" min="0" />
           </label>
@@ -462,6 +468,7 @@ Client name: ...
           <input type="text" inputmode="decimal" id="total-budget-target" placeholder="0" />
         </label>
         <button class="btn-secondary" id="scale-to-total-btn" title="Scale every line to this total, keeping the current mix (same % per line)">⇅ Scale plan to total</button>
+        <button class="btn-secondary" id="mix-edit-btn" title="Set each product's share of the plan, then save to apply it">✎ Edit mix %</button>
         <button class="btn-secondary" id="suggest-ideal-totals-btn" title="Keeps the current products — only reweights each line's budget toward the confirmed strategy brief's suggested split">🎯 Suggest Ideal Totals</button>
         <button class="btn-secondary" id="recommend-btn" title="Builds a brand-new product mix from the confirmed strategy brief — replaces the current lines">🔄 Generate New Product Mix</button>
         <div class="spacer"></div>
@@ -480,6 +487,28 @@ Client name: ...
         </div>
       </div>
 
+      <!-- Shown only while "Edit mix %" is active. Percentages are staged here and
+           nothing in the plan changes until Save — see onMixEditSave() in app.js. -->
+      <div class="mix-edit-bar hidden" id="mix-edit-bar">
+        <div class="mix-edit-top">
+          <strong>Editing the mix</strong>
+          <span class="mix-edit-base" id="mix-edit-base"></span>
+          <div class="tier-tabs" id="mix-mode-tabs" title="Think in whichever unit is easiest — the other two update beside each line">
+            <button type="button" class="tier-tab active" data-mix-mode="pct">By %</button>
+            <button type="button" class="tier-tab" data-mix-mode="usd">By $</button>
+            <button type="button" class="tier-tab" data-mix-mode="imps">By impressions</button>
+          </div>
+        </div>
+        <div class="mix-edit-bottom">
+          <span class="mix-readout" id="mix-readout"></span>
+          <button type="button" class="btn-secondary" id="mix-even-btn" title="Reset every paid line to an equal share">Even split</button>
+          <div class="spacer"></div>
+          <button type="button" class="btn-secondary" id="mix-cancel-btn">Cancel</button>
+          <button type="button" class="btn-primary" id="mix-save-btn">Save mix</button>
+        </div>
+        <p class="mix-edit-hint">Set each product's share so they total 100%, then Save — the plan re-divides its current total, and nothing changes until you do. Values snap to the nearest 0.1%. Everything else on this step is paused while you edit.</p>
+      </div>
+
       <div class="line-items-scroll">
         <table class="line-items">
           <thead>
@@ -491,7 +520,7 @@ Client name: ...
               <th>Rate</th>
               <th>Min</th>
               <th id="col-budget-header">Monthly $</th>
-              <th class="col-share-header" title="Share of the plan's total. Edit one line's % and the others rebalance proportionally so the plan stays at 100%.">% of total</th>
+              <th class="col-share-header" title="Each paid line's share of the plan's total (read-only). Use ✎ Edit mix % to set the shares for the whole plan at once.">% of total</th>
               <th id="col-months-header">Months</th>
               <th>Target override</th>
               <th>Objective</th>
@@ -544,6 +573,11 @@ Client name: ...
         <h1 class="display" id="mb-step-title">Monthly breakdown</h1>
         <p class="lede" id="mb-step-lede">Split each line item's budget across the calendar months your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat monthly figure is all you need; nothing else changes if you do.</p>
       </div>
+
+      <label class="mb-master-toggle">
+        <input type="checkbox" id="mb-master-enable" checked />
+        Use <span id="mb-master-unit-label">Monthly</span> Breakdown for every line in <span id="mb-master-scope-label">this proposal</span>
+      </label>
 
       <div class="tier-switcher" id="tier-switcher-monthly-wrap">
         <div class="tier-tabs" id="tier-tabs-monthly"></div>
@@ -639,6 +673,18 @@ Client name: ...
         <p class="lede">Entravision Intelligence searches the web for current platform ad policies — targeting restrictions, common rejection reasons, category requirements — for each product in this mix, grounded in the client context from Steps 02–03. Download the report to keep on hand for launch.</p>
       </div>
 
+      <!-- Which of Entravision's restricted verticals apply to this client. The
+           "Restricted Verticals by Platforms" sheet decides what's allowed on
+           each product; the planner (not the AI) confirms which verticals apply. -->
+      <div class="restricted-verticals hidden" id="restricted-verticals">
+        <div class="rv-head">
+          <strong>Restricted verticals for this client</strong>
+          <small>Entravision's "Restricted Verticals by Platforms" sheet decides what's allowed on each product — tick any that apply.</small>
+        </div>
+        <div class="rv-chips" id="rv-chips"></div>
+        <p class="rv-note hidden" id="rv-note"></p>
+      </div>
+
       <div id="roadblocks-loading" class="strategy-loading hidden">
         <div class="strategy-spinner"></div>
         <span id="roadblocks-loading-text">Searching platform policies…</span>
@@ -680,6 +726,7 @@ Client name: ...
       <div id="tiers-avails-warning" class="warnings hidden"></div>
 
       <div class="generate-summary" id="generate-summary"></div>
+      <div class="disclaimers-preview hidden" id="disclaimers-preview"></div>
 
       <fieldset class="tabs-override">
         <legend>Tabs to generate <small>(auto-suggested above; override here)</small></legend>

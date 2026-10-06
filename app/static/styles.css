@@ -965,6 +965,12 @@ html, body {
   background: var(--paper-warm);
   border: 1px solid var(--rule-soft);
   border-radius: var(--radius);
+  /* .curation-toolbar's own flex-end rules only govern content WITHIN
+     this box — nothing pinned it to the row's right edge, so once the
+     toolbar wrapped to a second line (budget input + 3 buttons already
+     fill the first), this fell back to flex-start (left). margin-left:
+     auto claims all remaining space on whichever line it lands on. */
+  margin-left: auto;
 }
 .totals-row {
   display: flex;
@@ -1199,7 +1205,41 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 .line-items .col-objective { min-width: 150px; }
 .line-items .col-objective select { width: 100%; min-width: 140px; }
 .objective-other-input { width: 100%; min-width: 140px; margin-top: 4px; }
-.line-items .col-months input { width: 60px; min-width: 60px; }
+/* A computed field the planner can't type into directly (Step 02's
+   "Months") — same visual language as a disabled input, but still a real,
+   readable value (readonly, not disabled, so it still submits normally). */
+input[readonly] {
+  background: var(--paper-warm);
+  color: var(--ink-soft);
+  cursor: default;
+}
+
+.line-items .col-months { min-width: 70px; }
+.months-derived {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.months-mismatch-flag {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--amber);
+  white-space: nowrap;
+}
+.months-fix-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border: 1px solid var(--amber);
+  border-radius: 20px;
+  background: var(--amber-soft);
+  color: var(--amber);
+  cursor: pointer;
+}
 .line-items .col-target { min-width: 170px; }
 .line-items .col-target textarea { min-width: 170px; min-height: 52px; }
 .line-items .secondary-toggle {
@@ -1559,6 +1599,127 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   color: var(--ink-soft);
   background: var(--paper-warm);
   border-radius: var(--radius);
+}
+.avails-ref-item { white-space: normal; }
+
+/* ----- Step 07: restricted verticals + the sheet's per-product verdict ----- */
+.restricted-verticals {
+  margin: 0 0 18px;
+  padding: 14px 18px;
+  background: var(--paper-warm);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-lg);
+}
+.rv-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
+.rv-head small { color: var(--ink-soft); font-size: 12px; }
+.rv-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.rv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 20px;
+  background: var(--paper-card);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.rv-chip.on { border-color: var(--accent); background: var(--paper-card); color: var(--accent); font-weight: 600; }
+.rv-suggested { font-family: var(--font-mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); }
+.rv-note { margin: 10px 0 0; font-size: 12px; color: var(--ink-soft); }
+.roadblock-matrix { margin: 8px 0 4px; display: flex; flex-direction: column; gap: 3px; }
+.matrix-line { margin: 0; font-size: 12.5px; }
+.matrix-note { color: var(--ink-soft); font-weight: 400; }
+.matrix-allowed strong { color: var(--green); }
+.matrix-not_allowed strong { color: var(--red); }
+.matrix-guidance strong { color: var(--amber); }
+
+/* ----- Step 04 "Edit mix %" ----- */
+.mix-edit-bar {
+  margin: 0 0 16px;
+  padding: 14px 18px;
+  background: var(--paper-warm);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mix-edit-top, .mix-edit-bottom { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.mix-edit-base { font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft); }
+.mix-edit-top .tier-tabs { margin-left: auto; }
+.mix-readout { font-family: var(--font-mono); font-size: 12.5px; font-weight: 700; padding: 5px 12px; border-radius: 20px; }
+.mix-readout.mix-ok { color: var(--green); background: var(--green-soft); }
+.mix-readout.mix-under { color: var(--amber); background: var(--amber-soft); }
+.mix-readout.mix-over { color: var(--red); background: var(--red-soft); }
+.mix-edit-hint { margin: 0; font-size: 12px; color: var(--ink-soft); }
+/* A disabled button used to look exactly like an enabled one. */
+.btn-primary:disabled, .btn-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.mix-sub { margin-top: 4px; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.4; color: var(--ink-faint); max-width: 150px; }
+.mix-fill-btn {
+  margin-left: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 20px;
+  background: var(--paper-card);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.mix-fill-btn:hover { border-color: var(--accent); color: var(--accent); }
+.mix-input { border-color: var(--accent); background: var(--paper-card); }
+.mix-input:disabled { border-color: var(--rule); background: var(--paper-warm); }
+/* While a mix is half-staged, everything that would rebuild or re-divide the
+   plan is paused (the handlers also refuse, for keyboard users). */
+#step-4.mix-editing #scale-to-total-btn,
+#step-4.mix-editing #suggest-ideal-totals-btn,
+#step-4.mix-editing #recommend-btn,
+#step-4.mix-editing #add-tier-btn,
+#step-4.mix-editing #tier-tabs,
+#step-4.mix-editing #total-budget-target,
+#step-4.mix-editing #time-unit-toggle,
+#step-4.mix-editing .add-row-controls,
+#step-4.mix-editing .budget-box,
+#step-4.mix-editing .av-switch,
+#step-4.mix-editing .col-row-actions,
+#step-4.mix-editing .drag-handle {
+  pointer-events: none;
+  opacity: 0.4;
+}
+.disclaimers-preview {
+  margin: 14px 0;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  background: var(--paper-warm);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+}
+.disclaimers-preview ul { margin: 6px 0 0 18px; padding: 0; }
+/* Same ✎ glyph/affordance as the rate-override pencil in Step 04 — here it
+   only navigates back to where Target/Geo are actually edited. */
+.avails-edit-pencil {
+  margin-left: 4px;
+  padding: 0 5px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.avails-edit-pencil:hover { background: var(--paper-card); }
+/* Brief ring on whichever Step 04 field a Step 05 pencil lands on, so the
+   planner can see where they've been dropped after the page scrolls. */
+.jump-highlight {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  transition: outline-color 0.4s ease;
 }
 .freeform-toggle {
   display: flex;
@@ -2054,6 +2215,28 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 }
 .mb-mode-select .tier-switcher-hint { margin: 0; flex-basis: 100%; }
 
+/* One step-level control replacing the old per-line "Use Breakdown"
+   checkboxes (previously buried in every product's <details> summary,
+   several scroll-lengths in) — every line now turns on/off together,
+   in plain view before the tier switcher or any product panel. */
+.mb-master-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  background: var(--paper-warm);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius);
+  font-family: var(--font-kicker);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  width: fit-content;
+}
+.mb-master-toggle input { width: 16px; height: 16px; cursor: pointer; }
+
 .mb-line-block {
   border: 1px solid var(--rule);
   border-radius: var(--radius-lg);
@@ -2076,17 +2259,6 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
 .mb-line-name { font-weight: 600; color: var(--ink); }
 .mb-line-targeting { font-size: 11px; font-weight: 400; color: var(--ink-faint); }
 .mb-line-total { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-soft); }
-.mb-enable-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--ink-soft);
-  cursor: pointer;
-}
 .mb-status-badge {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -2568,6 +2740,17 @@ body.reordering-line-item, body.reordering-line-item * { cursor: grabbing !impor
   line-height: 1.5;
   color: var(--ink);
 }
+.roadblock-removed {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line, #d9d4de);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--ink-soft, var(--ink));
+}
+.roadblock-removed summary { cursor: pointer; }
+.roadblock-removed ul { margin: 8px 0 0 18px; padding: 0; }
+.roadblock-removed li { margin: 3px 0; }
 .roadblocks-empty {
   color: var(--ink-faint);
   font-family: var(--font-mono);

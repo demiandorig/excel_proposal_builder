@@ -26,6 +26,8 @@
         <button class="admin-tab" data-tab="analytics">Analytics</button>
         <button class="admin-tab" data-tab="rates">Rate Overrides</button>
         <button class="admin-tab" data-tab="markets">Markets</button>
+        <button class="admin-tab" data-tab="disclaimers">Disclaimers</button>
+        <button class="admin-tab" data-tab="restrictions">Restrictions</button>
         <button class="admin-tab" data-tab="users">Users</button>
       </nav>
       <div id="account-widget" class="account-widget"></div>
@@ -332,6 +334,89 @@
           </tbody>
         </table>
       </div>
+    </section>
+
+    <!-- ================= DISCLAIMERS TAB ================= -->
+    <section class="panel hidden" id="tab-disclaimers">
+      <div class="panel-head">
+        <div class="kicker">Admin</div>
+        <h1 class="display">Disclaimers</h1>
+        <p class="lede">Banner callouts added automatically to the Excel and PowerPoint exports when a plan mentions certain keywords or runs in a certain season. They sit below the totals and above the legal footer. Keywords match whole words or phrases (case-insensitive) against the client, geo, goal, targeting, products, and per-line notes of each option — so "live sports" matches "NBC Live Sports Stream", but "sport" won't match "sports".</p>
+      </div>
+
+      <details class="add-product-panel" id="dz-form-panel">
+        <summary id="dz-form-summary">+ Add disclaimer</summary>
+        <form id="dz-form">
+          <div class="add-product-grid">
+            <label>Name <span class="req">*</span> <small>(for your reference — not shown in the export)</small>
+              <input type="text" id="dz-name" maxlength="120" required />
+            </label>
+            <label class="span-2">Keywords <small>(comma or line separated — any one triggers it)</small>
+              <textarea id="dz-keywords" rows="2" placeholder="live sports, tentpole, nbc sports"></textarea>
+            </label>
+            <label class="span-2">Banner text <span class="req">*</span> <small>(shown exactly as typed — add an emoji or a bold-style lead-in like "Live Sports Inventory:" yourself)</small>
+              <textarea id="dz-text" rows="4" maxlength="600" required></textarea>
+            </label>
+            <label>Color
+              <select id="dz-color"></select>
+            </label>
+            <label>Applies to
+              <select id="dz-applies">
+                <option value="both">Excel and PowerPoint</option>
+                <option value="excel">Excel only</option>
+                <option value="ppt">PowerPoint only</option>
+              </select>
+            </label>
+            <label>Season starts <small>(optional, MM-DD, repeats every year)</small>
+              <input type="text" id="dz-season-start" placeholder="11-01" maxlength="5" />
+            </label>
+            <label>Season ends <small>(the flight must overlap this window)</small>
+              <input type="text" id="dz-season-end" placeholder="12-31" maxlength="5" />
+            </label>
+          </div>
+          <div class="dz-preview-wrap">
+            <span class="dz-preview-label">Preview</span>
+            <div class="dz-banner" id="dz-preview"></div>
+          </div>
+          <div class="add-product-actions">
+            <span id="dz-error" class="add-product-error hidden"></span>
+            <button type="button" class="btn-secondary hidden" id="dz-cancel-edit">Cancel</button>
+            <button type="submit" class="btn-primary" id="dz-submit">Add Disclaimer</button>
+          </div>
+        </form>
+      </details>
+
+      <div id="dz-list" class="dz-list"><p class="admin-empty">Loading…</p></div>
+    </section>
+
+    <!-- ================= RESTRICTIONS TAB ================= -->
+    <section class="panel hidden" id="tab-restrictions">
+      <div class="panel-head">
+        <div class="kicker">Admin</div>
+        <h1 class="display">Restrictions</h1>
+        <p class="lede">Entravision's "Restricted Verticals by Platforms" Google Sheet is the source of truth for whether a client vertical (Political, Cannabis, Casino/Gambling…) is allowed on each product. The Roadblocks step reads it, computes a verdict per product, and the AI isn't allowed to contradict it. Sync it here whenever the sheet changes.</p>
+      </div>
+
+      <div class="dz-card" id="rs-source">
+        <div class="dz-card-head">
+          <h3>Source</h3>
+          <span class="dz-meta" id="rs-status">Loading…</span>
+        </div>
+        <label class="rs-field">Google Sheet link
+          <input type="text" id="rs-url" placeholder="https://docs.google.com/spreadsheets/d/…" />
+        </label>
+        <div class="dz-actions">
+          <button type="button" class="btn-primary" id="rs-sync-btn">Sync from Google Sheet</button>
+          <span class="rs-or">or</span>
+          <input type="file" id="rs-file" accept=".xlsx" />
+          <button type="button" class="btn-secondary" id="rs-upload-btn">Upload .xlsx</button>
+        </div>
+        <p class="rs-hint">Sync uses the app's connected Google Drive account, so that account needs access to the sheet. If it doesn't, download the sheet from Google (File → Download → Microsoft Excel) and upload it here instead. Syncing replaces what's below with what's in the sheet; keyword and product-mapping edits you made are kept for every tab and sheet entry that is still there.</p>
+        <span id="rs-error" class="add-product-error hidden"></span>
+        <div class="rs-warnings hidden" id="rs-warnings"></div>
+      </div>
+
+      <div id="rs-list" class="dz-list"><p class="admin-empty">Loading…</p></div>
     </section>
 
     <!-- ================= USERS TAB ================= -->

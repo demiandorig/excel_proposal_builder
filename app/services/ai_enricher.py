@@ -4,9 +4,9 @@ AI enrichment for the Entravision Proposal Builder.
 Uses OpenAI gpt-5.1 (see _SEARCH_MODEL/_FALLBACK_MODEL below) to generate in
 a single API call:
   - Campaign name (short, memorable, title-cased)
-  - Per-product strategic blurbs, grounded in the campaign's own numbers
-    (~70 words each; a real citation is a bonus, never mandatory — see
-    writing_style.HOUSE_VOICE_GUIDE)
+  - Per-product blurbs: one short plain paragraph on what the product is and
+    does (25-55 words; at most one short channel fact, never audience/geo/
+    language/variant talk — see PRODUCT BLURB RULES in _build_prompt)
   - Internal AE email (professional, friendly)
   - Client-facing email body (for the Word doc)
 
@@ -22,7 +22,7 @@ from typing import Optional
 
 from app.catalog import by_name as _catalog_by_name
 from app.services import llm_utils
-from app.services.text_utils import normalize_newlines as _normalize_newlines
+from app.services.text_utils import normalize_newlines as _normalize_newlines, split_sentences, strip_variant_pricing
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 
 try:
@@ -83,7 +83,7 @@ def _knowledge_base_block(curated_families: set) -> str:
 @dataclass
 class ProductBlurb:
     product_name: str
-    blurb: str  # ~70-80 words; Strategy + Data citation + Entravision advantage
+    blurb: str  # one short plain paragraph (<= _BLURB_MAX_WORDS) — what the product is/does
 
 
 @dataclass
@@ -282,7 +282,7 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
                     tiers: Optional[list] = None) -> ProposalEnrichment:
     """
     Call OpenAI to generate all AI enrichment for a proposal — campaign
-    name, per-product blurbs (with data citations), and both emails.
+    name, per-product blurbs (short plain descriptions), and both emails.
     Returns a ProposalEnrichment — empty fields (not an exception) on failure.
 
     Grounded in live web search (Responses API + web_search, same
@@ -293,10 +293,9 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     or the search tool isn't available on this account/SDK version.
 
     strategy_brief: the confirmed brief from the app's Step 03 (if the planner
-    didn't skip it) — when present, the product blurbs are grounded in the
-    same audience-specific rationale/data the planner already reviewed and
-    confirmed, instead of being regenerated from scratch and potentially
-    drifting from it.
+    didn't skip it) — when present, the EMAILS stay consistent with the
+    rationale/data the planner already reviewed and confirmed. Product blurbs
+    deliberately don't reuse it: they stay a short plain description.
 
     tiers: when the proposal has more than one budget option, a list of
     {"label": "A", "line_items": [...]} — one per option. `line_items`
@@ -598,10 +597,19 @@ def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
     # drifting toward whatever else was sitting in the prompt.
     def _product_line(li) -> str:
         p = _catalog_by_name(li.product_name)
-        desc = (p.proposal_description if p else "") or ""
+        desc = strip_variant_pricing(p.proposal_description if p else "")
         if len(desc) > 280:
-            desc = desc[:280].rsplit(" ", 1)[0] + "…"
-        desc_line = f"\n    What this actually is (from Entravision's own rate card — open the blurb grounded in this, don't guess): {desc}" if desc else ""
+            cut = desc[:280]
+            # end on a sentence boundary when there is one, so the prompt doesn't dangle on a half-sentence that
+            # cues exactly the format menus (skippable, tiers) the blurb rules forbid
+            cut_at = max(cut.rfind(". "), cut.rfind(".\n"))
+            desc = cut[:cut_at + 1] if cut_at >= 80 else cut.rsplit(" ", 1)[0] + "…"
+        desc_line = (
+            f"\n    What this actually is (from Entravision's own rate card — ground the blurb in this, don't guess): {desc}"
+            if desc else
+            "\n    What this actually is: (no rate-card description on file — describe it in one plain, generic sentence from its "
+            "name and its Knowledge Base row only; invent no specifics)"
+        )
         return (
             f"  - {li.product_name}: ${li.monthly_budget:,.0f}/month × {li.months} months "
             f"= ${li.monthly_budget * li.months:,.0f} total{desc_line}"
@@ -671,9 +679,9 @@ reference impressions; never compute or guess your own.
         else "Search the web for general market statistics from 2023–2026 — actually look them up, don't recall from memory."
     )
 
-    # If the planner confirmed a Step 03 strategy brief, ground the blurbs in it
-    # so the final proposal stays consistent with what was already reviewed —
-    # reuse its per-tactic rationale/data instead of re-deriving from scratch.
+    # If the planner confirmed a Step 03 strategy brief, keep the EMAILS consistent
+    # with what was already reviewed — reuse its per-tactic rationale/data instead of
+    # re-deriving from scratch. (Product blurbs don't use it; see PRODUCT BLURB RULES.)
     #
     # ONLY reuse tactics whose product_family is still actually in the
     # curated mix below. Step 03 runs before Step 04's curation — if the
@@ -697,13 +705,11 @@ reference impressions; never compute or guess your own.
         ]
         if tactic_lines:
             strategy_block = f"""
-## CONFIRMED STRATEGY BRIEF (planner already reviewed and approved this — your
-## product blurbs below MUST stay consistent with this rationale and reuse
-## its data points where the product family matches; do not contradict it.
-## Only tactics for families still in the current product mix are included
-## below — if a product isn't listed here, write its blurb from the
-## Target Audience / Knowledge Base sections instead, not from a tactic for
-## a different product family)
+## CONFIRMED STRATEGY BRIEF (planner already reviewed and approved this — the
+## EMAILS below MUST stay consistent with this rationale and may reuse its data
+## points where the product family matches; do not contradict it. Product
+## blurbs do NOT reuse it: they stay a plain description of the product. Only
+## tactics for families still in the current product mix are included below)
 {chr(10).join(tactic_lines)}
 Overall direction: {strategy_brief.get('strategy_summary', '')}
 """
@@ -753,9 +759,9 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
     # what's needed to make Python emit a literal backslash-quote pair.
     client_email_instruction = (
         "Full client-facing email (no internal references). Follow the VOICE section above throughout — specific and grounded in this client's real numbers and targeting, never generic. Sections: (1) Opening paragraph on why digital matters now for this specific audience, (2) "
-        + ('For EACH budget option: its own heading (\\"Option A\\", \\"Option B\\", ...), its total investment, and for each product in that option — product name, net budget, then the strategic blurb'
+        + ('For EACH budget option: its own heading (\\"Option A\\", \\"Option B\\", ...), its total investment, and for each product in that option — product name, net budget, then a short plain description of that product'
            if tiers_block else
-           'Total investment line, then for EACH product: product name as heading, net budget, then the strategic blurb')
+           'Total investment line, then for EACH product: product name as heading, net budget, then a short plain description of that product')
         + ", (3) 'What This Campaign Delivers' with 3 specific bullet points, (4) Call-to-action sentence inviting the client to pick an option"
         + (" and confirm" if tiers_block else "")
         + ", (5) Sign-off from AE name and email."
@@ -775,8 +781,10 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
 - Question Details: {getattr(request, "question_details", "") or "None"}
 - Market: {request.salesperson_market or "TBD"}
 
-## TARGET AUDIENCE (use these SPECIFIC values by name in every blurb — never
-## a generic substitute like "the target audience" or "local consumers"):
+## TARGET AUDIENCE (background for the EMAILS and the campaign name — use these
+## specific values by name there, never a generic substitute like "the target
+## audience". Do NOT repeat any of it in a product blurb: audience, geography
+## and language each already have their own column in the proposal):
 {target_block}
 {strategy_block}{tiers_block}
 ## PRODUCTS IN THIS PROPOSAL (union across every option, if more than one)
@@ -785,54 +793,63 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
 ## ENTRAVISION KNOWLEDGE BASE (only the families actually in this proposal)
 {_knowledge_base_block(curated_families)}
 
-## STATISTICS GUIDANCE
+## STATISTICS GUIDANCE (for the EMAILS — product blurbs follow their own, tighter rule below)
 {stat_guidance}
 Prefer a statistic tied to the SPECIFIC audience/geo above over a generic
 industry-wide number. Only use a generic market-wide stat when nothing more
 specific is plausible, and say so if you do ("no audience-specific data
 available, using general market benchmark").
 
+## PRODUCT BLURBS — WHAT THEY ARE FOR
+Each blurb becomes the short DESCRIPTION cell for that product in the proposal
+spreadsheet, sitting beside separate columns that already show the target
+audience, geography, flight dates, sizes and rates. So a blurb must add what
+those columns don't: plainly what this product is and does, in terms a client
+who has never bought it would understand (the rate-card sentence is printed directly above your blurb in the same cell, so do not restate it — say what the buyer actually gets and how it reaches people) — and, ONLY when one genuinely helps,
+a single short, real fact about the channel itself (how people use the medium,
+why the format works). Never a fact about this client's audience or market.
+
 ## YOU HAVE LIVE WEB SEARCH — USE IT WHEN A STAT GENUINELY HELPS, DON'T FORCE IT
-This is a real capability, not a hypothetical, and it's there for when a
-real external stat would genuinely strengthen a blurb — search for it
-rather than writing a number that merely sounds plausible for the
-category. It is NOT a requirement for every blurb: a blurb reasoning
-entirely from this campaign's own numbers and this product's own fit
-(no external citation at all) is a fully acceptable, often stronger,
-outcome — see VOICE below. If the client's website is given above, search
-it too so the blurbs reflect what the client actually does, not an
-assumption from the name. A citation you can't actually verify via search
-should not be presented as sourced data.
+This is a real capability, not a hypothetical. For the emails, search for a
+real external stat when it would strengthen a point rather than writing a
+number that merely sounds plausible. For a product blurb a plain description
+with no stat at all is the NORMAL, good outcome. If the client's website is
+given above, search it too so the emails reflect what the client actually
+does, not an assumption from the name. A citation you can't actually verify
+via search should not be presented as sourced data.
 
 {HOUSE_VOICE_GUIDE}
 
-BAD blurb (generic, reject this style): "Reach your target audience
-through premium video content that drives engagement and results."
-BAD blurb (fluent but WRONG PRODUCT — reject this style just as hard, even
-though nothing about it individually reads as an error): a confident,
-well-cited paragraph about podcast listenership written under a Meta/
-Facebook product's name. Every product's own "What this actually is" line
-above is the one and only source for what that product does — a stat or
-Entravision advantage clearly written for a DIFFERENT family (podcasts,
-CTV, DOOH, whatever isn't in that product's own description) never belongs
-in this blurb, no matter how well it reads.
-GOOD blurb (specific, required style): "[This product], per its own
-description above, does [the specific thing it does — paraphrase, don't
-just repeat the description verbatim]. For {request.demo or 'this demo'}
-in {request.geo or 'this market'}, [a concrete, specific detail — a
-targeting capability, format, budget/reach trade-off, or placement this
-particular product offers — that makes it fit this audience, stated
-plainly]. Only add a real, search-verified stat (Source, Year) if it
-genuinely adds something beyond that — never as a mandatory add-on."
+The voice guide above governs the EMAILS. Product blurbs are the one deliberate
+exception: they are a short, plain product description (see PRODUCT BLURB RULES
+below), not a reasoned argument — don't apply the budget-split / trade-off
+reasoning to them.
+
+BAD blurb (too long, and repeats what the targeting columns already say): "For
+Hispanic adults 25-54 in Los Angeles, premium CTV matters because ... (Source,
+2025). Entravision's expertise makes this the right execution."
+BAD blurb (talks about a variant or a menu of formats the client didn't buy):
+"This is the Hispanic-focused version of our CTV product." / "Skippable and
+non-skippable formats are available, though skippable is recommended."
+BAD blurb (language claim about the inventory): "Runs on Spanish-language sites
+and apps."
+BAD blurb (fluent but WRONG PRODUCT — reject this just as hard): a confident
+paragraph about podcast listenership written under a Meta/Facebook product's
+name. Every product's own "What this actually is" line above is the one and
+only source for what that product does.
+GOOD blurb (plain, no stat — an equally good outcome): "Banner ads shown across
+a network of websites and apps, retargeting local shoppers as they browse so
+your offer stays in front of them after they leave your site."
+GOOD blurb (plain, a different family): "Text ads that appear on Google when
+people search for what you offer, so your business shows up at the moment
+they're ready to call or visit."
+GOOD blurb (one relevant channel fact, only when it genuinely helps): "[One or
+two plain sentences on what the product is and does.] [One short, real, searched
+fact about the channel itself.] (Source, Year)"
 
 Do NOT close a blurb with a generic "Entravision's [X] advantage/expertise
-makes this the right execution/choice for this client" sentence — that
-line reads as filler no matter how it's worded, and stacked across every
-product in a proposal it's the same sentence repeated with the noun
-swapped. If there's a genuine, specific Entravision capability worth
-naming (e.g. a named local partnership, a real first-party data asset),
-state the concrete fact itself and stop there — don't wrap it in
-boilerplate praise.
+makes this the right execution/choice for this client" sentence — cut it
+outright rather than reword it.
 
 ---
 
@@ -843,7 +860,7 @@ Return this exact JSON structure (no deviation):
   "product_blurbs": [
     {{
       "product_name": "exact product name as listed above",
-      "blurb": "[What this product concretely is/does — grounded in its own 'What this actually is' line above, paraphrased not copied]. For [name the specific demo/geo/behavioral/contextual value from above], this matters because [specific recent stat tied to THAT audience and THIS product's real category, with year] (Source, Year). [One concrete, specific detail this product itself offers that fits this audience — NOT a generic 'Entravision's expertise makes this the right execution' closing line]."
+      "blurb": "[One or two plain sentences: what this product is and does, grounded in its own 'What this actually is' line above but adding what the buyer gets and how it reaches people — not a restatement of that line. Optionally end with ONE short, real fact about the channel itself — only if it genuinely helps the client — as (Source, Year). No audience, geo, language, variant or format talk.]"
     }}
   ],
   "internal_email_subject": "Digital Strategy Pack: [Client] ([Month Year] Campaign)",
@@ -853,13 +870,20 @@ Return this exact JSON structure (no deviation):
 }}
 
 RULES:
-- Each product blurb: 50–80 words, insightful (not a basic restatement of the category), grounded first in this campaign's own real numbers/product fit (see VOICE above), and must name at least one specific targeting value from the Target Audience section above. A real statistic with citation (Source Name, Year) is a welcome addition when it genuinely strengthens the point — never a mandatory ingredient; a blurb with no external citation at all, reasoning entirely from this client's own specifics, is a perfectly good and often stronger outcome
-- Never close a blurb with a generic "Entravision's [X] expertise/advantage makes this the right execution/choice for this client" sentence — cut it outright rather than reword it. Every real, useful sentence in a blurb is specific to that product+audience; a sentence that would read the same with the product name swapped out doesn't belong
-- Before writing each blurb, re-read that product's own "What this actually is" line above and its own row in the Entravision Knowledge Base. That is the ONLY source of truth for what the product does and which Entravision advantage applies to it — not the product's name alone, not another product's blurb, not a family that merely sounds adjacent
-- Every citation must name a real, specific, searchable source (publisher + year) you actually found via search — never a vague placeholder like "Industry Report, 2025." If you can't find a specific real source, don't present a number as sourced data — fold it into the blurb as directional context instead
-- A blurb must accurately describe the NAMED product's own format/category, grounded in ITS OWN description above — e.g. never describe audio/podcast/streaming content for an email, display, or search product, or vice versa, even if that content is sitting elsewhere in this prompt for a different product. If the confirmed strategy brief above doesn't cover a product, base its blurb on the Target Audience section plus that product's own description and knowledge-base row — never borrow a rationale, stat, or example written for a different product family
+PRODUCT BLURB RULES (for the product_blurbs field only — these override anything above that sounds longer or more elaborate when you write a blurb; the emails follow the voice and statistics guidance above):
+- Each product blurb is ONE short paragraph, 25–55 words, plain and concrete, no filler: what the product is and what it does. Add a single short channel fact only if it genuinely helps the client; otherwise stop after the description. A blurb with no stat and no citation is the normal outcome
+- A blurb must tell the reader something the product name and the other columns don't already say — what the buyer actually gets and how it reaches people, in plain words. Don't just restate the name ("Search - SEM is search engine marketing") or copy the rate-card description line word for word
+- Do NOT repeat the audience, geography, language, demographic, behavioral or contextual targeting, flight dates, budget, sizes or placement in a blurb — those already have their own columns in the proposal
+- In a blurb, describe ONLY the product as named. Never mention variants, tiers, versions or format options (e.g. "Hispanic version", "standard vs. custom", "skippable vs. non-skippable"), and never recommend one over another. If the description above lists several, describe the product generally and don't enumerate them
+- Never make claims about the language of the content, sites, apps, stations or publishers a product runs on (e.g. "Spanish-language sites", "English-only inventory") unless the product's own name states it. Targeting a language audience is not the same as the inventory being in that language
+- In a blurb, any fact must be about the channel/format itself (never the client's audience or market), found via search, with a real named source and year — if you can't find one, leave it out
+- Never close a blurb with a generic "Entravision's [X] expertise/advantage makes this the right execution/choice for this client" sentence — cut it outright rather than reword it. A sentence that would read the same with the product name swapped out doesn't belong
+- Before writing each blurb, re-read that product's own "What this actually is" line above and its own row in the Entravision Knowledge Base. They are the ONLY source of truth for what the product does — not the product's name alone, not another product's blurb, not a family that merely sounds adjacent. Use the Knowledge Base row only to decide WHICH capability applies; never copy its numbers, audience, language or geography wording into a blurb (the rows describe Entravision's network, and those details have their own columns or belong in the emails)
+- Every citation must name a real, specific, searchable source (publisher + year) you actually found via search — never a vague placeholder like "Industry Report, 2025." If you can't find a specific real source, leave the number out
+- A blurb must accurately describe the NAMED product's own format/category, grounded in ITS OWN description above — e.g. never describe audio/podcast/streaming content for an email, display, or search product, or vice versa, even if that content is sitting elsewhere in this prompt for a different product. Base every blurb on that product's own description and knowledge-base row only — never on the Target Audience section, and never borrow a rationale, stat, or example written for a different product family
 - A product's blurb stays the SAME regardless of which option(s) it appears in — write it once per product, not once per option
-- For Hispanic/Spanish targets: use U.S. Hispanic-specific stats
+
+EMAIL AND OUTPUT RULES:
 - Internal email: warm and collegial; do NOT include the client email body inline — just reference it
 - Client email: professional but readable; absolutely no internal document references
 - Do not mention a presentation, deck, or any deliverable that isn't actually part of this request (see Request Type above) — only reference what's really being delivered
@@ -870,6 +894,105 @@ RULES:
 # ---------------------------------------------------------------------------
 # Response parser
 # ---------------------------------------------------------------------------
+
+
+# Hard cap on a blurb's length. The prompt asks for 25-55 words; this is the
+# ceiling past which trailing sentences are dropped (never cut mid-sentence).
+_BLURB_MAX_WORDS = 70
+
+# Things the prompt forbids in a blurb (variants/"versions", skippable-format
+# menus). A model occasionally writes them anyway, so any sentence containing
+# one is dropped rather than trusting compliance — a wrong claim in a
+# client-facing cell is worse than a missing sentence. "skippable" is allowed
+# when the product's own name says it.
+_BLURB_FORBIDDEN = re.compile(
+    r"\bvariants?\b"
+    r"|\b(?:hispanic|spanish|english|custom|standard|premium|basic|lite|pro|enhanced)(?:[- ]\w+)? versions?\b|\bversions of (?:this|our|the)\b"
+    r"|\b(?:non-?skippable|skippable)\b",
+    re.IGNORECASE,
+)
+# Claims about the LANGUAGE OF THE INVENTORY ("Spanish-language radio stations", "Spanish-only sites").
+# Targeting a language audience isn't the same as the content being in that language, so these are never
+# made — unless the product's own name states the language.
+_LANGUAGE_CLAIM = re.compile(
+    r"\b(?:spanish|english)[- ]language\s+(?:[\w-]+\s+){0,2}?(?:sites?|websites?|publishers?|content|properties|apps?|stations?|"
+    r"inventory|radio|podcasts?|programming|media|channels?|networks?|streams?|outlets?|platforms?)\b"
+    r"|\b(?:spanish|english)[- ]only\b",
+    re.IGNORECASE,
+)
+# Only a product name that STATES a language exempts it — "Hispanics CTV" or "...Espacio Latino Hub" names an
+# audience, not the language of the inventory.
+_LANGUAGE_IN_NAME = re.compile(r"\b(?:spanish|english)\b", re.IGNORECASE)
+def _split_sentences(text: str) -> list[str]:
+    """Sentences of a blurb — abbreviation-aware, with a citation kept together with the sentence it supports
+    (so dropping, keeping and word-counting treat the pair as one unit)."""
+    return [seg.strip() for seg in split_sentences(text) if seg.strip()]
+
+
+# One-word values that are ordinary descriptive words, not places or audiences, never count as a repeat.
+_GENERIC_TARGET_WORDS = {
+    "local", "national", "nationwide", "regional", "statewide", "mobile", "adults", "adult", "women", "men", "families",
+    "general", "market", "markets", "hispanic", "latino", "latina", "spanish", "english", "bilingual", "all", "usa",
+}
+
+
+def _targeting_phrases(request) -> list[str]:
+    """The request's own geo / demo values, as phrases a blurb must not repeat — those already have their own
+    columns in the proposal. Short values and one-word generic descriptors ("Local", "Hispanic") are skipped."""
+    out: list[str] = []
+    for field in ("geo", "demo"):
+        raw = str(getattr(request, field, "") or "")
+        for part in re.split(r"[;,|/\n]+|\band\b", raw, flags=re.IGNORECASE):
+            part = part.strip(" .-()")
+            variants = {part, re.sub(r"\b(?:dma|msa)\b", "", part, flags=re.IGNORECASE).strip(" .-()")}
+            for v in variants:
+                v = re.sub(r"\s+", " ", v).lower()
+                if len(v) < 5 or v in out or (" " not in v and v in _GENERIC_TARGET_WORDS):
+                    continue
+                out.append(v)
+    return out[:200]
+
+
+def _compile_avoid(phrases) -> Optional["re.Pattern"]:
+    """One alternation compiled once (a per-phrase pattern would blow Python's regex cache on a long ZIP list)."""
+    phrases = [p for p in phrases if p]
+    if not phrases:
+        return None
+    return re.compile(r"(?<![a-z0-9])(?:" + "|".join(re.escape(p) for p in phrases) + r")(?![a-z0-9])")
+
+
+def _blurb_sentence_ok(sentence: str, product_name: str, avoid: Optional["re.Pattern"] = None) -> bool:
+    name = (product_name or "").lower()
+    if avoid is not None and avoid.search(sentence.lower()):
+        return False
+    for m in _BLURB_FORBIDDEN.finditer(sentence):
+        if "skippable" in m.group(0).lower() and "skippable" in name:
+            continue
+        return False
+    if _LANGUAGE_CLAIM.search(sentence) and not _LANGUAGE_IN_NAME.search(name):
+        return False
+    return True
+
+
+def _tighten_blurb(text: str, product_name: str = "", avoid: Optional["re.Pattern"] = None) -> str:
+    """Enforces the blurb rules the prompt asks for: drops sentences that
+    mention variants / language-of-inventory claims / skippable-format menus
+    or repeat the request's own geo / demo (together with the citation that
+    supported them), then keeps leading
+    sentences up to _BLURB_MAX_WORDS. Returns "" if every sentence was
+    disallowed (the export then shows just the catalog text)."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    kept = [s for s in _split_sentences(text) if _blurb_sentence_ok(s, product_name, avoid)]
+    out, words = [], 0
+    for sentence in kept:
+        count = len(sentence.split())
+        if out and words + count > _BLURB_MAX_WORDS:
+            break
+        out.append(sentence)
+        words += count
+    return " ".join(out)
 
 
 def _parse_response(raw: str, request, line_items, used_web_search: bool = False,
@@ -886,13 +1009,14 @@ def _parse_response(raw: str, request, line_items, used_web_search: bool = False
         )
 
     blurbs = []
+    avoid = _compile_avoid(_targeting_phrases(request))
     for pb in data.get("product_blurbs") or []:
         if not isinstance(pb, dict):
             continue
-        blurbs.append(ProductBlurb(
-            product_name=pb.get("product_name", ""),
-            blurb=_normalize_newlines(pb.get("blurb", "")),
-        ))
+        name, blurb = pb.get("product_name", ""), pb.get("blurb", "")
+        if not isinstance(name, str) or not isinstance(blurb, str):
+            continue   # a malformed entry costs that one blurb, not the whole enrichment (emails, campaign name)
+        blurbs.append(ProductBlurb(product_name=name, blurb=_tighten_blurb(_normalize_newlines(blurb), name, avoid)))
 
     return ProposalEnrichment(
         campaign_name=data.get("campaign_name") or _fallback_campaign_name(request),

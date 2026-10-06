@@ -8,6 +8,20 @@ const state = {
   parsed: null,             // parsed ProposalRequest dict
   rawNotionText: null,      // the exact Step 01 paste that produced `parsed` — sent to /api/generate and saved to reopen_state so a reopen can refill the textarea (not re-derivable from `parsed` once past Step 01)
   suggestedTabs: null,
+  // Export-tab checkboxes the planner explicitly toggled ({tabKey: bool}).
+  // ONLY these are sent as force_tabs overrides; every other tab is decided
+  // fresh by the server from the final plan. Sending all six checkboxes used
+  // to let a stale or never-synced set silently drop tabs (see
+  // _buildWizardStatePayload).
+  tabsTouched: {},
+  // Restricted verticals (sheet tab names) the planner confirmed for Roadblocks;
+  // null until the list has been loaded and the suggested ones pre-ticked.
+  rvSelected: null,
+  rvCategories: [],
+  rvUnconfirmed: false,           // true while the pre-ticked suggestions haven't been looked at by the planner
+  generatedProposalId: null,      // the proposal row Generate produced (a later autosave adopts a draft id into proposalId)
+  // Step 04's staged "Edit mix %" session, or null. See onMixEditStart().
+  mixEdit: null,
   strategyBrief: null,      // confirmed AI strategy brief (or null if skipped)
   roadblocks: null,         // Step 07 AI roadblocks/restrictions result (or null if skipped)
   lineItems: [],            // array of { id, product_name, monthly_budget, months, ... }
@@ -501,6 +515,7 @@ async function maybeReopenProposal() {
     state.roadblocks = data.roadblocks || null;
     state.enrichment = data.enrichment || null;
     state.proposalId = reopenId;
+    state.generatedProposalId = (data.status || "generated") === "draft" ? null : reopenId;
     // The exact Step 01 paste, when this proposal was generated after that
     // started being saved — refills the textarea below. Older proposals
     // have nothing here; the box is just left blank, same as today.
@@ -556,10 +571,17 @@ async function maybeReopenProposal() {
     state.tiers = rest;
     _applyTimeUnitLabels();
 
-    // Forced export-tab selections, if the planner had overridden any
-    // before generating — reuses suggestedTabs' own existing checkbox-sync
-    // loop in renderGenerateSummary() rather than adding a second one.
-    state.suggestedTabs = data.force_tabs || null;
+    // Forced export-tab selections the planner made before generating. A save
+    // from before overrides were tracked carries all six checkboxes (many of
+    // them just never-synced defaults, e.g. all-false from a draft saved
+    // before Step 08) — those are NOT real choices, so they only seed the
+    // display and get replaced by the server's fresh suggestion; newer saves
+    // carry just the boxes the planner actually toggled, which stay overrides.
+    const { _v: tabsFormat, ...savedTabs } = data.force_tabs || {};
+    const sixTabKeys = ["net", "wsections", "gross", "avails_only", "dooh_summary", "dooh_screenlist"];
+    const isLegacyFullSet = !tabsFormat && sixTabKeys.every(k => k in savedTabs);
+    state.suggestedTabs = isLegacyFullSet ? savedTabs : null;
+    state.tabsTouched = isLegacyFullSet ? {} : { ...savedTabs };
 
     fillForm(state.parsed);
     const digits = (state.parsed.notion_id || "").replace(/^EVC-/, "");
@@ -622,10 +644,12 @@ async function maybeReopenProposal() {
 // proposal path always has.
 function _resumeAtStep(step) {
   const s = Math.max(2, Math.min(8, step || 2));
+  _resyncAllTierMonths();
   if (state.strategyBrief) renderStrategyBrief(state.strategyBrief);
   if (state.roadblocks) renderRoadblocks(state.roadblocks);
   if (s >= 5) renderAvailsGrid();
   if (s >= 6) renderMonthlyBreakdown();
+  if (s === 7) _enterRoadblocksStep(false);     // the picker (and the saved selection) must be visible on resume
   if (s >= 8) renderGenerateSummary();
   state.furthestStep = s;
   goToStep(s);
@@ -757,12 +781,10 @@ function wireEvents() {
     e.target.value = e.target.value.replace(/\D/g, "").slice(0, 5);
   });
 
-  // Logo = reset to step 1 with confirmation
+  // Logo = start a new proposal (work is saved first, no "will be lost" prompt — see startNewProposal)
   document.getElementById("logo-reset").addEventListener("click", (e) => {
     e.preventDefault();
-    if (state.step === 1 || confirm("Start a new proposal? Your current work will be lost.")) {
-      resetAll();
-    }
+    startNewProposal();
   });
 
   // Step nav buttons
@@ -783,6 +805,16 @@ function wireEvents() {
       if (state.step === 2) syncFormToParsed();
       if (state.step === 4) syncLineItemsFromTable();
       if (state.step === 5) syncAvailsFromGrid();
+      // onNext() re-renders these steps from current state on the way in;
+      // a pill jump used to skip that, so Step 05 showed stale Target/Geo
+      // after an edit in Step 04 and Step 08's tab checkboxes (which are
+      // only ever synced by renderGenerateSummary) stayed unchecked.
+      _resyncAllTierMonths();
+      if (target === 4 && state.lineItems.length) renderLineItems();
+      if (target === 5) renderAvailsGrid();
+      if (target === 6) renderMonthlyBreakdown();
+      if (target === 7) _enterRoadblocksStep(false);
+      if (target === 8) renderGenerateSummary();
       goToStep(target);
     });
   });
@@ -809,6 +841,38 @@ function wireEvents() {
     document.getElementById("reprompt-btn").style.display = "";
   });
   document.getElementById("reprompt-submit-btn").addEventListener("click", onStrategyReprompt);
+
+  // Remember which export-tab boxes the planner actually toggles — see tabsTouched.
+  document.querySelectorAll(".tabs-override [data-tab]").forEach(cb => {
+    cb.addEventListener("change", () => { state.tabsTouched[cb.dataset.tab] = cb.checked; });
+  });
+
+  // Step 05's Target/Geo pencils — pure navigation back to where those are
+  // actually edited (Step 04), not a second editor. One delegated listener
+  // on the static container since renderAvailsGrid() rebuilds every card.
+  document.getElementById("avails-grid").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-jump-field]");
+    if (!btn) return;
+    _jumpToCurateField(btn.dataset.jumpField, btn.dataset.lid || null);
+  });
+
+  // Step 02 — "Months" is derived from these two dates now (see
+  // _step02DerivedTotalMonths), never free-typed; refresh it live so the
+  // planner sees the real flight length update as they edit the dates,
+  // not just after they leave the field. syncFormToParsed() only runs at
+  // specific commit points (step nav, autosave) — too late for a live
+  // recompute — so these two fields write straight into state.parsed
+  // themselves, the same "don't wait for the generic batched sync"
+  // pattern the tier-date-override inputs already use.
+  document.querySelector('[data-field="start_date"]').addEventListener("input", (e) => {
+    state.parsed.start_date = e.target.value.trim() || null;
+    _refreshStep02MonthsField();
+  });
+  document.querySelector('[data-field="end_date"]').addEventListener("input", (e) => {
+    state.parsed.end_date = e.target.value.trim() || null;
+    _refreshStep02MonthsField();
+  });
+  document.getElementById("total-months-fix-btn").addEventListener("click", onFixStep02Months);
 
   // Proposal name bar — editable campaign-name segment.
   document.getElementById("save-draft-btn").addEventListener("click", onSaveDraft);
@@ -841,6 +905,31 @@ function wireEvents() {
       renderMonthlyBreakdown();
     });
   });
+  // Single step-level "Use Breakdown" toggle — replaces the old per-line
+  // checkboxes (one master switch for every eligible line at once, per
+  // planner preference: simpler than per-line opt-out). Wired once, same
+  // static-element pattern as the two toggles above; renderMonthlyBreakdown()
+  // syncs its checked/indeterminate state every render.
+  document.getElementById("mb-master-enable").addEventListener("change", (e) => {
+    const months = _mbEffectiveMonths();
+    if (!months) return;
+    const eligibleLines = state.lineItems.filter(li => !li.is_added_value);
+    eligibleLines.forEach(li => {
+      li.mb_off = !e.target.checked;     // persisted with the line, so the choice survives a reopen
+      if (e.target.checked) {
+        if (!li.monthly_allocations || !Object.keys(li.monthly_allocations).length) {
+          _mbSetAllocation(li, _mbDefaultAllocation(li.monthly_budget * li.months, months));
+        }
+      } else {
+        // Same "keep _mbBaseline, null the allocation" convention the old
+        // per-line checkbox used — _mbBaseline is what tells the next
+        // render "explicitly turned off" apart from "never touched",
+        // stopping the auto-join logic from silently re-enabling it.
+        li.monthly_allocations = null;
+      }
+    });
+    renderMonthlyBreakdown();
+  });
 
   // Roadblocks step
   document.getElementById("monthly-breakdown-skip-btn").addEventListener("click", () => onNext(7));
@@ -859,6 +948,13 @@ function wireEvents() {
   document.getElementById("recommend-btn").addEventListener("click", onRecommend);
   document.getElementById("scale-to-total-btn").addEventListener("click", onScaleToTotal);
   document.getElementById("suggest-ideal-totals-btn").addEventListener("click", onSuggestIdealTotals);
+  document.getElementById("mix-edit-btn").addEventListener("click", onMixEditStart);
+  document.getElementById("mix-save-btn").addEventListener("click", onMixEditSave);
+  document.getElementById("mix-cancel-btn").addEventListener("click", onMixEditCancel);
+  document.getElementById("mix-even-btn").addEventListener("click", onMixEditEvenSplit);
+  document.querySelectorAll("#mix-mode-tabs [data-mix-mode]").forEach(b => {
+    b.addEventListener("click", () => onMixEditSetMode(b.dataset.mixMode));
+  });
   const budgetTarget = document.getElementById("total-budget-target");
   budgetTarget.addEventListener("focus", () => {
     const raw = parseFormattedInput(budgetTarget.value);
@@ -875,9 +971,14 @@ function wireEvents() {
   });
   document.getElementById("tier-start-date-input").addEventListener("input", (e) => {
     state.activeTierStartDate = e.target.value.trim() || null;
+    // Months is derived from these dates now (see col-months) — a
+    // tier-date override changing them has to refresh that column
+    // immediately, not just whenever the planner next navigates back in.
+    renderLineItems();
   });
   document.getElementById("tier-end-date-input").addEventListener("input", (e) => {
     state.activeTierEndDate = e.target.value.trim() || null;
+    renderLineItems();
   });
   document.getElementById("curate-agency-fee-input").addEventListener("input", onCurateAgencyFeeInput);
   // On blur (not on every keystroke, which would fight an in-progress
@@ -947,21 +1048,102 @@ function wireEvents() {
   });
 
   // New proposal restart
-  document.getElementById("new-proposal-btn").addEventListener("click", () => {
-    if (confirm("Start a new proposal? This will clear all current work.")) {
-      resetAll();
+  document.getElementById("new-proposal-btn").addEventListener("click", startNewProposal);
+}
+
+// Every proposal is saved continuously now (autosave + Save Draft), so
+// leaving it is no longer destructive and shouldn't nag. Autosave only
+// ticks once a minute though, so flush one last save here first — only
+// if something actually changed since the last one — rather than trusting
+// the timer to have just run. The ONLY remaining prompt is when that
+// final save genuinely fails, since that's the one case work could be lost.
+let _startingNew = false;
+
+async function startNewProposal() {
+  if (_startingNew) return;          // a double click must not send two first-time saves (duplicate drafts)
+  _startingNew = true;
+  try {
+    if (state.parsed) {
+      // Let any autosave/manual save already in flight land first, so two
+      // first-time saves can't race and create duplicate drafts.
+      const waitUntil = Date.now() + 15000;
+      while ((_autosaveInFlight || document.getElementById("save-draft-btn").disabled) && Date.now() < waitUntil) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      if (_autosaveInFlight || document.getElementById("save-draft-btn").disabled) {
+        if (!confirm("Saving your latest changes is taking longer than expected. Start a new proposal anyway? Whatever was last saved is still in My Proposal History.")) return;
+        resetAll();
+        return;
+      }
+      const snapshot = _flushAndSnapshotDraftState();
+      if (snapshot !== _lastSavedDraftSnapshot) {
+        _autosaveInFlight = true;    // keeps the autosave timer from posting a second copy meanwhile
+        try {
+          await _saveDraftNow(snapshot, { silent: true });
+        } catch (e) {
+          if (!confirm(`Couldn't save your latest changes (${e.message}). Start a new proposal anyway? Whatever was last saved is still in My Proposal History.`)) return;
+        } finally {
+          _autosaveInFlight = false;
+        }
+      }
     }
-  });
+    resetAll();
+  } finally {
+    _startingNew = false;
+  }
 }
 
 // --------------------------------------------------------------------------
 // Reset / new proposal
 // --------------------------------------------------------------------------
 
+// Everything that belongs to the proposal being left (its Step 03/07 results, ids and the Generate result panel) —
+// shared by New proposal and by pasting a different request over the current one.
+function _clearPerProposalState() {
+  _resetEpoch++;
+  state.strategyBrief = null;
+  state.roadblocks = null;
+  state.rvSelected = null;
+  state.rvCategories = [];
+  state.rvUnconfirmed = false;
+  state.proposalId = null;
+  state.generatedProposalId = null;
+  state.proposalSummary = null;
+  state.enrichment = null;
+  state.finalProposalTitle = null;
+  _lastSavedDraftSnapshot = null;
+  const result = document.getElementById("result");
+  if (result) result.classList.add("hidden");
+  const drive = document.getElementById("drive-status");
+  if (drive) drive.classList.add("hidden");
+  const chips = document.getElementById("rv-chips");
+  if (chips) chips.innerHTML = "";
+  const picker = document.getElementById("restricted-verticals");
+  if (picker) picker.classList.add("hidden");
+  _resetStrategyUI();
+  _resetRoadblocksUI();
+}
+
+let _resetEpoch = 0;   // bumped by every resetAll() and re-parse, so a response that was in flight across it can tell
+
 function resetAll() {
+  _clearPerProposalState();
   state.parsed = null;
+  // Settings that belong to the proposal being left must not colour the next one.
+  state.timeUnit = "month";
+  state.activeTierPeriodMergeGroups = [];
+  state.mbDistributionMode = "even";
+  state.mbViewMode = "month";
+  state.mbActiveMonthKey = null;
+  state.rvUnconfirmed = false;
+  state.generatedProposalId = null;
+  _applyTimeUnitLabels();
   state.rawNotionText = null;
   state.suggestedTabs = null;
+  state.tabsTouched = {};
+  state.mixEdit = null;
+  state.rvSelected = null;
+  state.rvCategories = [];
   state.strategyBrief = null;
   state.roadblocks = null;
   state.lineItems = [];
@@ -1158,6 +1340,7 @@ function _flushAndSnapshotDraftState() {
 // network call itself is identical either way.
 async function _saveDraftNow(snapshot, { silent }) {
   const statusEl = document.getElementById("save-draft-status");
+  const epoch = _resetEpoch;
   const payload = {
     ...JSON.parse(snapshot),
     proposal_id: state.proposalId,
@@ -1171,6 +1354,7 @@ async function _saveDraftNow(snapshot, { silent }) {
       body: JSON.stringify(payload),
     });
     const data = await _readJsonResponse(res);
+    if (epoch !== _resetEpoch) return;   // a New Proposal happened while this was in flight — don't graft its id onto the blank one
     state.proposalId = data.proposal_id;
     _lastSavedDraftSnapshot = snapshot;
     const when = new Date(data.saved_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
@@ -1192,6 +1376,7 @@ async function _saveDraftNow(snapshot, { silent }) {
 
 async function onSaveDraft() {
   if (!state.parsed) return;  // button is hidden until then anyway (see updateProposalNameBar)
+  if (_autosaveInFlight || _startingNew) return;   // a save (or New proposal's final save) is already running
   const btn = document.getElementById("save-draft-btn");
   const prevLabel = btn.textContent;
   btn.disabled = true;
@@ -1275,6 +1460,15 @@ function onCancelProposalNameEdit() {
 // --------------------------------------------------------------------------
 
 function goToStep(n) {
+  // Leaving Step 04 mid-"Edit mix": nothing staged is ever saved implicitly, so
+  // only ask when there's something to lose.
+  if (state.mixEdit && n !== 4) {
+    if (_mixEditDirty() && !confirm("Discard your unsaved mix percentages?")) return;
+    state.mixEdit = null;
+    if (state.lineItems.length) renderLineItems();
+  }
+  // Step 06 / 08 can change budgets and months underneath Step 04; show them as they are now.
+  if (n === 4 && state.step !== 4 && state.lineItems.length) renderLineItems();
   state.step = n;
   state.furthestStep = Math.max(state.furthestStep, n);
   // Editing client name/request type/start date is only possible back on
@@ -1306,6 +1500,7 @@ function onNext(n) {
   if (state.step === 2) syncFormToParsed();
   if (state.step === 4) syncLineItemsFromTable();
   if (state.step === 5) syncAvailsFromGrid();
+  _resyncAllTierMonths();    // dates may have changed since the lines were last rendered (Step 02 pill, option overrides)
 
   if (n === 3) {
     goToStep(3);
@@ -1347,7 +1542,11 @@ function onNext(n) {
           // changed it yet — so no scaling needed here specifically, but
           // _timeUnitMinimumScale() is a no-op (×1) for "month" anyway.
           monthly_budget: p ? (p.minimum_spend || 0) * _timeUnitMinimumScale() : 0,
-          months: state.parsed.total_months || 3,
+          // Derived from the flight dates (falls back to the legacy
+          // planner-typed total_months only if dates aren't parseable
+          // yet) — never free-typed from here, see _curateDerivedMonths.
+          months: _curateDerivedMonths() || state.parsed.total_months || 3,
+          _monthsReconciled: true,
           rate_override: null,
           notes_override: null,
           target_override: null,
@@ -1391,22 +1590,45 @@ function onNext(n) {
         });
         if (state.activeTierLabel !== baseLabel) switchTier(baseLabel);  // land back on the base option, not the last one created
       }
+    } else {
+      renderLineItems();   // lines already exist: show their months as the CURRENT dates derive them, not as last rendered
     }
   }
   if (n === 5) renderAvailsGrid();
   if (n === 6) renderMonthlyBreakdown();
   if (n === 7) {
     goToStep(7);
-    // Same "only auto-generate once" gate as Step 3 above — state.roadblocks
-    // is only ever set on a successful renderRoadblocks() call, so a prior
-    // failure still correctly auto-retries; an existing result does not.
-    // The always-visible "↺ Regenerate" button is how a planner gets a
-    // fresh one on purpose (e.g. after changing the curated mix).
-    if (!state.roadblocks) onRoadblocksGenerate();
+    _enterRoadblocksStep();
     return;
   }
   if (n === 8) renderGenerateSummary();
   goToStep(n);
+}
+
+// Landing on Step 07 (Continue, a nav pill, or resuming a saved proposal): the vertical picker is always
+// loaded; the check itself runs by itself only when that can't produce a wrong verdict.
+function _enterRoadblocksStep(autoRun = true) {
+  const needsRun = !state.roadblocks;      // an existing result (even a degraded one) stays until Regenerate
+  _loadRestrictedVerticals().then(awaitingConfirmation => {
+    if (!needsRun) return;
+    if (autoRun && state.step !== 7) return;      // the planner already left; don't spend an API call behind their back
+    if (awaitingConfirmation || !autoRun) {
+      // A suggested vertical (say Political) that the planner hasn't confirmed would put hard "not accepted"
+      // verdicts on products it may not even apply to — so wait for them to confirm and press Run. Coming
+      // back by nav pill or by resuming a saved proposal never spends an API call on its own either.
+      _resetRoadblocksUI();
+      if (awaitingConfirmation) {
+        const note = document.getElementById("rv-note");
+        note.textContent = "Tick the verticals that apply to this client, then click ▶ Run check.";
+        note.classList.remove("hidden");
+      }
+      const runBtn = document.getElementById("roadblocks-regenerate-btn");
+      runBtn.textContent = "▶ Run check";
+      runBtn.style.display = "";
+    } else {
+      onRoadblocksGenerate();
+    }
+  });
 }
 
 // Parse a budget number out of renewal_budget field (e.g. "7500 | $5k for LA...")
@@ -1474,12 +1696,20 @@ async function onParse() {
     // reopen — see reopen_state's raw_notion_text and maybeReopenProposal().
     state.rawNotionText = text;
     state.suggestedTabs = data.suggested_tabs;
+    state.tabsTouched = {};
     state.lineItems = [];  // reset so step 3 re-populates from fresh parse
     state.availsData = {};
     state.tiers = [];
+    // A re-parse (back to Step 01, paste another request) is a different proposal: nothing of the last
+    // client's Step 03 / 07 results, confirmed verticals, ids or Generate result may carry over.
+    _clearPerProposalState();
     state.activeTierLabel = "A";
     state.activeTierName = null;
     fillForm(state.parsed);
+    // A fresh parse has no legacy figure to protect: Months simply follows the flight dates from here on
+    // (including dates typed in later, when the parse itself had none).
+    state._totalMonthsReconciled = true;
+    _refreshStep02MonthsField();
     renderWarnings(state.parsed.warnings || []);
     renderMatchedProducts(state.parsed);
     renderSuggestedTabs(data.suggested_tabs);
@@ -1510,6 +1740,56 @@ function fillForm(req) {
       el.value = req[f];
     }
   });
+  // A fresh parse already derives total_months server-side (see
+  // notion_parser.py) — this only matters for a REOPENED proposal, whose
+  // stored figure predates this fix and may disagree with the real
+  // calendar count; state._totalMonthsReconciled resets on every fresh
+  // fillForm() call (new proposal or reopen) so each one gets its own
+  // fair comparison instead of carrying over the previous proposal's.
+  state._totalMonthsReconciled = undefined;
+  _refreshStep02MonthsField();
+}
+
+// Campaign-level "Months" (Step 02) — same derived/flagged-legacy pattern
+// as Step 04's per-line months (_curateDerivedMonths), tracked at session
+// level since there's only the one field, not one per line item.
+function _step02DerivedTotalMonths() {
+  const start = _mbParseDate(state.parsed.start_date);
+  const end = _mbParseDate(state.parsed.end_date);
+  return (start && end) ? _mbMonthsBetween(start, end).length : null;
+}
+
+function _refreshStep02MonthsField() {
+  const input = document.querySelector('[data-field="total_months"]');
+  const flag = document.getElementById("total-months-mismatch-flag");
+  if (!input || !flag) return;
+  const derived = _step02DerivedTotalMonths();
+  // Nothing saved to protect (no figure at all): the field simply follows the dates from the start.
+  if (state._totalMonthsReconciled === undefined && !state.parsed.total_months) state._totalMonthsReconciled = true;
+  if (derived == null) { flag.classList.add("hidden"); return; }
+  if (state._totalMonthsReconciled === undefined) {
+    state._totalMonthsReconciled = (state.parsed.total_months === derived);
+  }
+  if (state._totalMonthsReconciled) {
+    state.parsed.total_months = derived;
+    input.value = derived;
+    flag.classList.add("hidden");
+  } else {
+    const mismatch = state.parsed.total_months !== derived;
+    flag.classList.toggle("hidden", !mismatch);
+    if (mismatch) {
+      flag.querySelector(".months-mismatch-text").textContent = `⚠ ${state.parsed.total_months} saved`;
+      flag.title = `Saved as ${state.parsed.total_months} — the flight's real month count is ${derived}. Left as-is; click Fix to match the real flight.`;
+    }
+  }
+}
+
+function onFixStep02Months() {
+  const derived = _step02DerivedTotalMonths();
+  if (derived == null) return;
+  state.parsed.total_months = derived;
+  state._totalMonthsReconciled = true;
+  _refreshStep02MonthsField();
 }
 
 function syncFormToParsed() {
@@ -1629,6 +1909,7 @@ function _resetStrategyUI() {
 }
 
 async function onStrategyGenerate(reprompt = null, mode = "consistent") {
+  const epoch = _resetEpoch;
   _resetStrategyUI();
   const loadingEl = document.getElementById("strategy-loading");
   const loadingText = document.getElementById("strategy-loading-text");
@@ -1644,6 +1925,7 @@ async function onStrategyGenerate(reprompt = null, mode = "consistent") {
       body: JSON.stringify({ request: state.parsed, reprompt, mode, ad_presence: _adPresenceToCarry() }),
     });
     const brief = await _readJsonResponse(res);
+    if (epoch !== _resetEpoch) return;     // a different proposal is on screen now
     loadingEl.classList.add("hidden");
 
     if (brief.error && !brief.strategy_summary) {
@@ -1653,6 +1935,7 @@ async function onStrategyGenerate(reprompt = null, mode = "consistent") {
 
     renderStrategyBrief(brief);
   } catch (e) {
+    if (epoch !== _resetEpoch) return;
     loadingEl.classList.add("hidden");
     _showStrategyError("Request failed: " + e.message);
   }
@@ -2007,6 +2290,7 @@ function _spanishGapCallout(key, r, status) {
 async function onAdPresenceCheck() {
   const brief = state.strategyBrief;
   if (!brief) return;
+  const epoch = _resetEpoch;
   const p = state.parsed || {};
   const btn = document.getElementById("adpresence-run-btn");
   const statusEl = document.getElementById("brief-ad-presence-status");
@@ -2026,6 +2310,7 @@ async function onAdPresenceCheck() {
       body: JSON.stringify({ client_name: (p.client_name || "").trim(), client_website: (p.client_website || "").trim() }),
     });
     const result = await _readJsonResponse(res);
+    if (epoch !== _resetEpoch) return;
     if (!_adPresenceHasResults(result)) throw new Error(result.error || "no results came back");
     // Attach to whichever brief is current: a Regenerate may have finished mid-check.
     const current = state.strategyBrief;
@@ -2056,9 +2341,23 @@ function _resetRoadblocksUI() {
   document.getElementById("roadblocks-regenerate-btn").style.display = "none";
   document.getElementById("roadblocks-download-link").classList.add("hidden");
   document.getElementById("roadblocks-search-note").classList.add("hidden");
+  document.getElementById("rv-note").classList.add("hidden");
 }
 
+let _roadblocksInFlight = false;
+
 async function onRoadblocksGenerate() {
+  if (_roadblocksInFlight) return;      // overlapping entries to Step 07 must not each start a paid check
+  _roadblocksInFlight = true;
+  const epoch = _resetEpoch;
+  try {
+    await _runRoadblocks(epoch);
+  } finally {
+    _roadblocksInFlight = false;
+  }
+}
+
+async function _runRoadblocks(epoch) {
   _resetRoadblocksUI();
   const loadingEl = document.getElementById("roadblocks-loading");
   loadingEl.classList.remove("hidden");
@@ -2081,9 +2380,11 @@ async function onRoadblocksGenerate() {
         request: state.parsed,
         line_items: [...unionByProduct.values()],
         strategy_brief: _briefWithSelectedTactics(),
+        categories: [...(state.rvSelected || [])],
       }),
     });
     const data = await _readJsonResponse(res);
+    if (epoch !== _resetEpoch) return;      // a different proposal is on screen now
     loadingEl.classList.add("hidden");
 
     if (data.error && !data.product_roadblocks?.length) {
@@ -2097,6 +2398,7 @@ async function onRoadblocksGenerate() {
 
     renderRoadblocks(data);
   } catch (e) {
+    if (epoch !== _resetEpoch) return;
     loadingEl.classList.add("hidden");
     const errEl = document.getElementById("roadblocks-error");
     errEl.classList.remove("hidden");
@@ -2105,8 +2407,104 @@ async function onRoadblocksGenerate() {
   }
 }
 
+// A product's verdict from Entravision's Restricted Verticals sheet, one line per confirmed vertical.
+function _roadblockMatrixHtml(matrix) {
+  if (!matrix || !(matrix.checks || []).length) return "";
+  const icon = { allowed: "✓ Allowed", not_allowed: "✕ Not accepted", guidance: "ℹ See guidance", "n/a": "– n/a" };
+  return `<div class="roadblock-matrix">${matrix.checks.map(c => `
+    <p class="matrix-line matrix-${escapeAttr(c.status)}"><strong>${escapeHtml(c.category)}:</strong> ${escapeHtml(icon[c.status] || c.status)}${c.note ? ` <span class="matrix-note">— ${escapeHtml(c.note)}</span>` : ""}</p>`).join("")}</div>`;
+}
+
+// Step 07's vertical picker. Loads the sheet's verticals, pre-ticks the ones the
+// plan's own text suggests (client, goal, targeting, products), then leaves the
+// choice to the planner — a saved selection (reopened proposal) is kept as-is.
+// Resolves to true when the picker is showing suggestions the planner has not confirmed yet.
+async function _loadRestrictedVerticals() {
+  const wrap = document.getElementById("restricted-verticals");
+  if (!wrap || !state.parsed) return false;
+  const epoch = _resetEpoch;
+  try {
+    const names = [...new Set(allTiersForSubmit().flatMap(t => (t.line_items || []).map(li => li.product_name)))];
+    const res = await fetch("/api/restrictions/categories", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: state.parsed, product_names: names }),
+    });
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    if (epoch !== _resetEpoch) return false;
+    state.rvCategories = data.categories || [];
+    if (state.rvSelected === null) {
+      state.rvSelected = new Set(state.rvCategories.filter(c => c.suggested).map(c => c.name));
+      state.rvUnconfirmed = state.rvSelected.size > 0;     // pre-ticked by us, not yet confirmed by the planner
+    } else {
+      // A vertical the sheet no longer lists has no chip to untick; drop it so it isn't re-sent forever.
+      const known = new Set(state.rvCategories.map(c => c.name));
+      state.rvSelected = new Set([...state.rvSelected].filter(n => known.has(n)));
+    }
+    _renderRestrictedVerticals(data);
+    return !!state.rvUnconfirmed;
+  } catch (e) {
+    wrap.classList.add("hidden");   // optional layer — Roadblocks still runs without it
+    return false;
+  }
+}
+
+function _renderRestrictedVerticals(data) {
+  const wrap = document.getElementById("restricted-verticals");
+  const chips = document.getElementById("rv-chips");
+  if (!state.rvCategories.length) { wrap.classList.add("hidden"); return; }
+  wrap.classList.remove("hidden");
+  chips.innerHTML = state.rvCategories.map(c => `
+    <label class="rv-chip ${state.rvSelected.has(c.name) ? "on" : ""}" title="${escapeHtml(c.summary || "")}">
+      <input type="checkbox" data-rv-category="${escapeHtml(c.name)}" ${state.rvSelected.has(c.name) ? "checked" : ""} />
+      ${escapeHtml(c.name)}${c.suggested ? ' <span class="rv-suggested">suggested</span>' : ""}
+    </label>`).join("");
+  chips.querySelectorAll("[data-rv-category]").forEach(cb => {
+    cb.addEventListener("change", () => {
+      if (!state.rvSelected) state.rvSelected = new Set();
+      if (cb.checked) state.rvSelected.add(cb.dataset.rvCategory); else state.rvSelected.delete(cb.dataset.rvCategory);
+      state.rvUnconfirmed = false;     // the planner has now looked at the selection
+      cb.closest(".rv-chip").classList.toggle("on", cb.checked);
+      const note = document.getElementById("rv-note");
+      note.textContent = "Selection changed — click ↺ Regenerate to re-run the check with it.";
+      note.classList.remove("hidden");
+    });
+  });
+  const note = document.getElementById("rv-note");
+  const unresolved = (state.roadblocks && state.roadblocks.unresolved_categories) || [];
+  if (unresolved.length) {
+    note.textContent = `Couldn't find ${unresolved.join(", ")} in the restricted-verticals sheet any more — an admin may have renamed it. Re-tick the verticals and regenerate.`;
+    note.classList.remove("hidden");
+  } else if (data && data.using_builtin) {
+    note.textContent = "Showing Entravision's built-in snapshot (Political, Cannabis) — an admin can sync the full sheet under Admin → Restrictions.";
+    note.classList.remove("hidden");
+  } else {
+    note.classList.add("hidden");
+  }
+}
+
 function renderRoadblocks(data) {
   state.roadblocks = data;
+  if (Array.isArray(data.categories) && state.rvSelected === null) state.rvSelected = new Set(data.categories);
+  const covered = new Set(data.categories || []);
+  const stale = [...(state.rvSelected || [])].some(n => !covered.has(n)) || [...covered].some(n => !(state.rvSelected || new Set()).has(n));
+  const noteEl0 = document.getElementById("rv-note");
+  if (stale && Array.isArray(data.categories) && state.rvSelected !== null) {
+    // The planner changed the ticks while this check was running: it doesn't answer them.
+    noteEl0.textContent = "Selection changed — click ↺ Regenerate to re-run the check with it.";
+    noteEl0.classList.remove("hidden");
+  } else {
+    state.rvUnconfirmed = false;                                         // a completed run means the selection was confirmed
+    noteEl0.classList.add("hidden");                                     // "Selection changed…" is answered by this result
+  }
+  document.getElementById("roadblocks-regenerate-btn").textContent = "↺ Regenerate";
+  const unresolved = data.unresolved_categories || [];
+  if (unresolved.length) {
+    const note = document.getElementById("rv-note");
+    note.textContent = `Couldn't find ${unresolved.join(", ")} in the restricted-verticals sheet any more — an admin may have renamed it. Re-tick the verticals and regenerate.`;
+    note.classList.remove("hidden");
+  }
 
   setText("roadblocks-summary", data.overall_summary || "");
 
@@ -2121,12 +2519,19 @@ function renderRoadblocks(data) {
   const items = [...(data.product_roadblocks || [])].sort(
     (a, b) => (RISK_ORDER[a.risk_level] ?? 3) - (RISK_ORDER[b.risk_level] ?? 3)
   );
-  cards.innerHTML = items.map(item => `
+  const removed = data.removed_claims || [];
+  const removedHtml = removed.length ? `
+    <details class="roadblock-removed">
+      <summary>${removed.length} statement${removed.length === 1 ? "" : "s"} from the AI check ${removed.length === 1 ? "was" : "were"} removed because the Restricted Verticals sheet says otherwise</summary>
+      <ul>${removed.map(r => `<li><strong>${escapeHtml(r.product)}:</strong> ${escapeHtml(r.text)}</li>`).join("")}</ul>
+    </details>` : "";
+  cards.innerHTML = removedHtml + items.map(item => `
     <div class="roadblock-card risk-${escapeAttr(item.risk_level || "low")}">
       <div class="roadblock-card-head">
         <span class="roadblock-product">${escapeHtml(item.product_name)}</span>
         <span class="risk-badge risk-${escapeAttr(item.risk_level || "low")}">${escapeHtml((item.risk_level || "low").toUpperCase())} RISK</span>
       </div>
+      ${_roadblockMatrixHtml(item.matrix)}
       ${(item.risks || []).map(r => `
         <div class="roadblock-risk">
           <p class="roadblock-issue">⚠ ${escapeHtml(r.issue)}</p>
@@ -2161,6 +2566,35 @@ function renderRoadblocks(data) {
 // snapshot. allTiersForSubmit() flattens both into one array, in label
 // order, for sending to /api/generate.
 // --------------------------------------------------------------------------
+
+// Every option's lines follow its own flight dates: months are derived, never typed, so after a date change on
+// Step 02 (or a per-option override) the options that weren't re-rendered would otherwise keep the old count and
+// the totals, Step 06 and the export would disagree with the calendar. Only lines still marked reconciled move —
+// a reopened legacy line stays "saved" until the planner clicks Fix.
+function _resyncAllTierMonths() {
+  const sync = (lines, label) => {
+    const start = _mbParseDate(_effectiveStartDate(label));
+    const end = _mbParseDate(_effectiveEndDate(label));
+    if (!start || !end) {
+      // No dates to derive from yet: nothing saved is "legacy" — the lines just follow the first dates typed.
+      (lines || []).forEach(li => { if (li._monthsReconciled === undefined) li._monthsReconciled = true; });
+      return;
+    }
+    const count = _mbPeriodsBetween(start, end, state.timeUnit).length;     // base periods, not merged buckets
+    if (!count) return;
+    (lines || []).forEach(li => {
+      if (li._monthsReconciled === undefined) li._monthsReconciled = (li.months === count);
+      if (li._monthsReconciled && li.months !== count) {
+        _mbStampBaseline(li);          // BEFORE the months change, so the Step 06 rescale has something to compare against
+        li.months = count;
+        _mbRescaleLine(li);
+      }
+    });
+  };
+  if (!state.parsed) return;
+  sync(state.lineItems, state.activeTierLabel);
+  (state.tiers || []).forEach(t => sync(t.lineItems, t.label));
+}
 
 function allTiersForSubmit() {
   return [
@@ -2220,6 +2654,7 @@ function renameTier(label) {
 
 function switchTier(label) {
   if (label === state.activeTierLabel) return;
+  if (_mixEditBlocks()) return;
   const idx = state.tiers.findIndex(t => t.label === label);
   if (idx === -1) return;
   const target = state.tiers[idx];
@@ -2258,6 +2693,7 @@ function switchTier(label) {
 // options); omitted (manual "+ Add Option" click), the clone just keeps
 // the source tier's current budgets unchanged, for the planner to adjust.
 function addTier(targetBudget) {
+  if (_mixEditBlocks()) return;
   const totalTiers = 1 + state.tiers.length;
   if (totalTiers >= TIER_LABELS.length) return;
   const usedLabels = new Set([state.activeTierLabel, ...state.tiers.map(t => t.label)]);
@@ -2275,7 +2711,11 @@ function addTier(targetBudget) {
     const newId = newLineItemId();
     idMap[li.id] = newId;
     // Own copy of the allocations: a shared object would make Step 06 edits leak between options.
-    return { ...li, id: newId, monthly_allocations: li.monthly_allocations ? { ...li.monthly_allocations } : li.monthly_allocations };
+    // _monthsReconciled reset to true regardless of the source line's own
+    // state — a brand-new clone is never "legacy," it just gets a fresh
+    // auto-sync to whatever this new option's own (initially unset) dates
+    // derive, same as any other newly-created line.
+    return { ...li, id: newId, _monthsReconciled: true, monthly_allocations: li.monthly_allocations ? { ...li.monthly_allocations } : li.monthly_allocations };
   });
   const clonedAvails = {};
   Object.keys(state.availsData).forEach(oldId => {
@@ -2309,6 +2749,7 @@ function addTier(targetBudget) {
 }
 
 function removeTier(label) {
+  if (_mixEditBlocks()) return;
   const totalTiers = 1 + state.tiers.length;
   if (totalTiers <= 1) return;  // always keep at least one option
 
@@ -2382,20 +2823,27 @@ function onCopyAvails() {
   const source = state.tiers.find(t => t.label === sourceLabel);
   if (!source) return;
 
-  const sourceAvailsByProduct = new Map();
+  // Every source line with real data, in order, grouped by product — the k-th
+  // line of a product here takes the k-th source entry for that product, so
+  // two lines of one product (e.g. two targeting variants) each get their own
+  // numbers instead of both receiving the first match. (Free-form and
+  // uniques-only entries count too — they used to be skipped.)
+  const sourceByProduct = new Map();
   source.lineItems.forEach(li => {
     const avail = source.availsData[li.id];
-    if (avail && (avail.max_imps != null || avail.max_spend != null) && !sourceAvailsByProduct.has(li.product_name)) {
-      sourceAvailsByProduct.set(li.product_name, avail);
-    }
+    if (!_availsEntryHasData(avail)) return;
+    if (!sourceByProduct.has(li.product_name)) sourceByProduct.set(li.product_name, []);
+    sourceByProduct.get(li.product_name).push(avail);
   });
 
   let copiedCount = 0;
+  const seenHere = new Map();
   state.lineItems.forEach(li => {
-    const existing = state.availsData[li.id];
-    const hasExisting = existing && (existing.max_imps != null || existing.max_spend != null);
-    const match = sourceAvailsByProduct.get(li.product_name);
-    if (!hasExisting && match) {
+    const k = seenHere.get(li.product_name) || 0;
+    seenHere.set(li.product_name, k + 1);
+    const matches = sourceByProduct.get(li.product_name) || [];
+    const match = matches[k] || matches[0];
+    if (!_availsEntryHasData(state.availsData[li.id]) && match) {
       state.availsData[li.id] = { ...match };
       copiedCount++;
     }
@@ -2562,6 +3010,19 @@ function moveTier(fromLabel, toLabel, insertAfter) {
 // Step 4: Curation
 // --------------------------------------------------------------------------
 
+// The one true source for a line's "months" — the active tier's own real
+// flight-period count, at the proposal-wide granularity, respecting any
+// per-tier date override (same calendar math Step 06 already uses via
+// _mbEffectiveMonths, so the two can never disagree for anything created
+// from here on). null when the active tier's dates aren't parseable yet
+// (Step 02 not filled in) — callers show "—" rather than guessing.
+function _curateDerivedMonths() {
+  // Base (pre-merge) periods: combining periods in Step 06 regroups the allocation, it never changes how many
+  // periods are bought — so a merge can't shrink the plan.
+  const months = _mbEffectiveMonthsUnmerged();
+  return (months && months.length) ? months.length : null;
+}
+
 function renderLineItems() {
   renderAllTierTabStrips();
   const tbody = document.getElementById("line-items-body");
@@ -2571,7 +3032,28 @@ function renderLineItems() {
   const tierRealTotal = state.lineItems.reduce((s, li) => s + (li.is_added_value ? 0 : (li.monthly_budget || 0)), 0);
   const shares = _curateSharePercents();
   const paidCount = _paidLineIndices().length;
+  // "Months" is no longer free-typed (see col-months below) — every line
+  // in the active tier shares this same derived count. A line whose
+  // stored months disagrees with it is necessarily legacy data (reopened
+  // as-is, per explicit "flag mismatches, don't auto-fix" preference —
+  // see the col-months mismatch flag) rather than something this render
+  // silently rewrites; _monthsReconciled (stamped once per line, first
+  // render only) is what tells the two cases apart on every render after.
+  const derivedMonths = _curateDerivedMonths();
   state.lineItems.forEach((li, idx) => {
+    let monthsMismatch = false;
+    if (derivedMonths != null) {
+      if (li._monthsReconciled === undefined) li._monthsReconciled = (li.months === derivedMonths);
+      if (li._monthsReconciled) {
+        if (li.months !== derivedMonths) {
+          _mbStampBaseline(li);          // BEFORE the months change — see _resyncAllTierMonths
+          li.months = derivedMonths;
+          _mbRescaleLine(li);
+        }
+      } else {
+        monthsMismatch = li.months !== derivedMonths;
+      }
+    }
     const p = state.productIndex[li.product_name] || {};
     const tr = document.createElement("tr");
     // Catalog's minimum_spend is a MONTHLY figure; li.monthly_budget is
@@ -2685,8 +3167,13 @@ function renderLineItems() {
       </td>
       <td class="col-share">${_shareCellHtml(li, idx, shares[idx], paidCount)}</td>
       <td class="col-months">
-        <input type="number" step="1" min="1" value="${li.months}"
-               data-idx="${idx}" data-key="months" />
+        <span class="months-derived">${derivedMonths != null ? derivedMonths : "—"}</span>
+        ${monthsMismatch ? `
+          <div class="months-mismatch-flag" title="Saved as ${li.months} — this flight's real ${_mbUnitNoun().toLowerCase()} count is ${derivedMonths}. Left as-is; click Fix to match the real flight.">
+            ⚠ ${li.months} saved
+            <button type="button" class="months-fix-btn" data-idx="${idx}">Fix</button>
+          </div>
+        ` : ""}
       </td>
       <td class="col-target">
         <textarea rows="2" placeholder="(catalog default — describe the audience)"
@@ -2724,12 +3211,12 @@ function renderLineItems() {
     tbody.appendChild(tr);
   });
   // Wire row events
-  tbody.querySelectorAll("input:not([data-secondary-toggle]):not([data-added-value-toggle]):not([data-av-pct]):not([data-gross-budget-input]):not([data-share-input]), textarea").forEach(inp => {
+  tbody.querySelectorAll("input:not([data-secondary-toggle]):not([data-added-value-toggle]):not([data-av-pct]):not([data-gross-budget-input]):not([data-share-input]):not([data-mix-input]), textarea").forEach(inp => {
     inp.addEventListener("input", onLineItemEdit);
   });
-  // Step 06's split follows a typed budget/months once it's committed (blur/Enter), not per
-  // keystroke, so passing through "5" on the way to "5000" can't compound cent rounding.
-  tbody.querySelectorAll('input[data-key="monthly_budget"], input[data-key="months"], [data-gross-budget-input]').forEach(inp => {
+  // Step 06's split follows a typed budget once it's committed (blur/Enter), not per keystroke,
+  // so passing through "5" on the way to "5000" can't compound cent rounding.
+  tbody.querySelectorAll('input[data-key="monthly_budget"], [data-gross-budget-input]').forEach(inp => {
     inp.addEventListener("change", () => _mbRescaleLine(state.lineItems[parseInt(inp.dataset.idx)]));
   });
   tbody.querySelectorAll("[data-secondary-toggle]").forEach(cb => {
@@ -2821,21 +3308,19 @@ function renderLineItems() {
       _curateRefreshShares();
     });
   });
-  // % of total: applied on change (blur/Enter) against the budgets as they were on focus,
-  // so re-editing never compounds rounding drift.
-  tbody.querySelectorAll("[data-share-input]").forEach(inp => {
-    inp.addEventListener("focus", () => {
-      state._shareSnapshot = state.lineItems.map(li => li.monthly_budget || 0);
-      inp.select();
-    });
+  // Staged "Edit mix %" inputs (only exist while state.mixEdit is active).
+  tbody.querySelectorAll("[data-mix-input]").forEach(inp => {
+    inp.addEventListener("focus", () => inp.select());
+    inp.addEventListener("input", () => _mixEditInput(inp));
     inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
-    inp.addEventListener("change", () => {
-      const pct = parseFloat(String(inp.value).replace(/[^0-9.\-]/g, ""));
-      if (Number.isFinite(pct)) _applySharePct(parseInt(inp.dataset.idx), pct, state._shareSnapshot);
-      state._shareSnapshot = null;
-      _renderLineItemsKeepingFocus();
+    // On blur, snap what's shown to the stored 0.1% grid ("33.33" -> "33.3").
+    inp.addEventListener("blur", () => {
+      const li = state.lineItems.find(x => x.id === inp.dataset.lid);
+      if (li && state.mixEdit) inp.value = _mixInputValue(li, state.mixEdit.tenths[li.id] || 0);
     });
-    inp.addEventListener("blur", () => { state._shareSnapshot = null; });
+  });
+  tbody.querySelectorAll("[data-mix-fill]").forEach(btn => {
+    btn.addEventListener("click", () => _mixEditFillRest(btn.dataset.mixFill));
   });
   // Comma-formatted display layer for the Net/Gross budget inputs above —
   // each one's own "input" listener already parses/stores/syncs on every
@@ -2860,6 +3345,7 @@ function renderLineItems() {
     cb.addEventListener("change", () => {
       const idx = parseInt(cb.dataset.idx);
       const li = state.lineItems[idx];
+      if (_mixEditBlocks()) { cb.checked = !cb.checked; return; }
       li.is_added_value = cb.checked;
       if (cb.checked) li.monthly_budget = 0;  // an Added Value line is $0 by definition, not "$0 or whatever's left over"
       renderLineItems();  // refreshes the budget field's value/disabled state, the below-min highlight, and totals
@@ -2870,6 +3356,7 @@ function renderLineItems() {
   });
   tbody.querySelectorAll(".btn-remove").forEach(btn => {
     btn.addEventListener("click", () => {
+      if (_mixEditBlocks()) return;
       const idx = parseInt(btn.dataset.idx);
       const removed = state.lineItems[idx];
       if (removed) delete state.availsData[removed.id];
@@ -2895,7 +3382,23 @@ function renderLineItems() {
       renderLineItems();
     });
   });
+  // Explicit, planner-initiated correction for a legacy months mismatch
+  // (see the reconciliation block above and its col-months flag) — the
+  // ONLY thing that ever overwrites a flagged line's stored months.
+  tbody.querySelectorAll(".months-fix-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = parseInt(btn.dataset.idx);
+      const li = state.lineItems[idx];
+      if (!li || derivedMonths == null) return;
+      _mbStampBaseline(li);
+      li.months = derivedMonths;
+      li._monthsReconciled = true;
+      _mbRescaleLine(li);
+      renderLineItems();
+    });
+  });
   wireLineItemDrag(tbody);
+  _syncMixEditChrome();
   updateTotals();
 }
 
@@ -3063,51 +3566,330 @@ function _curateSharePercents() {
   return out;
 }
 
-// Editable once there's a total to divide and at least one other paid line to rebalance against.
-function _shareInputState(share, paidCount) {
-  if (share === null || share === undefined) return { editable: false, title: "Enter budgets first — the % needs a plan total to divide." };
-  if (paidCount < 2) return { editable: false, title: "The only paid line is always 100% of the plan." };
-  return { editable: true, title: "Edit to rebalance: the other lines adjust proportionally so the plan stays at 100%." };
+// The % column is READ-ONLY. It used to cascade — editing one line silently re-divided every other
+// line — which made it impossible to set a mix at a fixed point in time. Shares are now set for
+// the whole plan at once in "Edit mix %" mode (below) and only applied on Save.
+function _shareTitle(share, paidCount) {
+  if (share === null || share === undefined) return "Enter budgets first — the % needs a plan total to divide.";
+  if (paidCount < 2) return "The only paid line is always 100% of the plan.";
+  return "Read-only — click ✎ Edit mix % to set every line's share at once.";
 }
 
 function _shareCellHtml(li, idx, share, paidCount) {
   if (li.is_added_value) return `<span class="share-na" title="Added Value lines aren't part of the paid total">AV</span>`;
-  const { editable, title } = _shareInputState(share, paidCount);
-  return `<span class="share-wrap"><input type="text" inputmode="decimal" class="share-input" data-idx="${idx}" data-share-input
-    value="${share === null ? "" : share.toFixed(1)}" placeholder="—" ${editable ? "" : "disabled"} title="${escapeHtml(title)}" /><span class="share-suffix">%</span></span>`;
+  if (state.mixEdit) return _mixEditCellHtml(li, idx);
+  return `<span class="share-wrap"><input type="text" class="share-input" data-idx="${idx}" data-share-input
+    value="${share === null ? "" : share.toFixed(1)}" placeholder="—" disabled title="${escapeHtml(_shareTitle(share, paidCount))}" /><span class="share-suffix">%</span></span>`;
 }
 
 // Cheap patch while a Net/Gross value is being typed (a full re-render would steal focus).
 function _curateRefreshShares() {
+  _syncMixEditButton();     // typing the first budget into an all-$0 plan is what makes "Edit mix %" usable
   const shares = _curateSharePercents();
   const paidCount = _paidLineIndices().length;
   document.querySelectorAll("#line-items-body [data-share-input]").forEach(inp => {
-    if (inp === document.activeElement) return;
     const share = shares[parseInt(inp.dataset.idx)];
-    const { editable, title } = _shareInputState(share, paidCount);
     inp.value = share === null || share === undefined ? "" : share.toFixed(1);
-    inp.disabled = !editable;
-    inp.title = title;
+    inp.title = _shareTitle(share, paidCount);
   });
 }
 
-// A change handler fires while focus is already moving (Tab or a click on the next cell), so an
-// immediate re-render would destroy the cell being moved to. Wait for focus to land, re-render,
-// then focus the same cell in the rebuilt table.
-function _renderLineItemsKeepingFocus() {
-  setTimeout(() => {
-    const el = document.activeElement;
-    const inTable = el && el.closest && el.closest("#line-items-body") && el.dataset && el.dataset.idx !== undefined;
-    const marker = !inTable ? null : el.dataset.key !== undefined
-      ? `[data-key="${el.dataset.key}"]`
-      : Array.from(el.attributes).map(a => a.name).filter(n => n.startsWith("data-") && n !== "data-idx").map(n => `[${n}]`)[0];
-    renderLineItems();
-    const next = marker && document.querySelector(`#line-items-body [data-idx="${el.dataset.idx}"]${marker}`);
-    if (next && !next.disabled) {
-      next.focus();
-      if (next.tagName === "INPUT" && next.type === "text") next.select();
+// --------------------------------------------------------------------------
+// "Edit mix %" — set every paid line's share of the plan at one fixed point
+// in time, then Save. Nothing in state.lineItems changes until Save; the
+// staged values live only in state.mixEdit (so autosave never captures a
+// half-finished mix). Planners can think in %, $ or impressions — the other
+// two always show beside each line. All math is whole tenths of a percent
+// (curate-math.js), so a mix is either exactly 100.0% or it can't be saved.
+// --------------------------------------------------------------------------
+
+function _mixBase() {
+  return _paidLineIndices().reduce((s, i) => s + (state.lineItems[i].monthly_budget || 0), 0);
+}
+
+function _mixImpsSupported(li) {
+  const p = state.productIndex[li.product_name] || {};
+  return calcMaxSpendFromImps(_effectiveProduct(li, p), 1000000) !== null;
+}
+
+function _mixAmount(tenths) {
+  const raw = CurateMath.amountFromTenths(tenths, state.mixEdit.base);
+  const unit = CurateMath.roundingUnitFor(state.mixEdit.base);
+  return Math.round(raw / unit) * unit;
+}
+
+// What a line stands for in the staged mix, in dollars: exactly what the planner typed ($ or impressions) for it,
+// its own current budget while untouched (so a line nobody touched never drifts to a rounded share), else the
+// dollars its percentage works out to.
+function _mixLineAmount(li) {
+  const me = state.mixEdit;
+  if (li.id in me.dollars) return me.dollars[li.id];
+  if ((me.tenths[li.id] || 0) === (me.seed[li.id] || 0)) return li.monthly_budget || 0;
+  return _mixAmount(me.tenths[li.id] || 0);
+}
+
+function _mixDollarSum() {
+  return _paidLineIndices().reduce((sum, i) => sum + _mixLineAmount(state.lineItems[i]), 0);
+}
+
+// Is the staged mix complete? In % mode that's exactly 100.0%; in $ / impressions mode it's the plan total to the
+// cent — judged in dollars, because dollars typed line by line rarely land on whole tenths of a percent.
+function _mixBalance() {
+  const me = state.mixEdit;
+  if (me.mode === "pct") {
+    const sum = CurateMath.sumTenths(_mixTenthsList());
+    return { ok: sum === 1000, remaining: 1000 - sum, dollars: false, sum };
+  }
+  const unit = CurateMath.roundingUnitFor(me.base);
+  const sum = _mixDollarSum();
+  const remaining = Math.round((me.base - sum) * 100) / 100;
+  return { ok: Math.abs(remaining) < unit / 2 + 1e-9, remaining, dollars: true, sum };
+}
+
+function _mixImps(li, amount) {
+  const p = state.productIndex[li.product_name] || {};
+  const r = calcMaxImpsFromSpend(_effectiveProduct(li, p), amount);
+  return r ? Math.round(r.value) : null;
+}
+
+// What goes in the line's editable box for the active mode.
+function _mixInputValue(li, tenths) {
+  const mode = state.mixEdit.mode;
+  if (mode === "pct") return (tenths / 10).toFixed(1);
+  const amount = _mixLineAmount(li);
+  if (mode === "usd") return formatBudgetInputValue(amount);
+  const imps = _mixImps(li, amount);
+  return imps === null ? "" : imps.toLocaleString("en-US");
+}
+
+// The other two units, plus what the line is today — so the planner sees the consequence of each number.
+function _mixSubText(li, tenths) {
+  const mode = state.mixEdit.mode;
+  const p = state.productIndex[li.product_name] || {};
+  const amount = _mixLineAmount(li);
+  const pct = `${(tenths / 10).toFixed(1)}%`;
+  const unitsRef = _mbUnitsRefText(li, p, amount);
+  const parts = mode === "pct" ? [money(amount), unitsRef]
+    : mode === "usd" ? [pct, unitsRef]
+    : [pct, money(amount)];
+  const was = li.monthly_budget || 0;
+  const delta = amount - was;
+  const deltaText = Math.abs(delta) < 0.005 ? "" : `${delta > 0 ? "+" : "−"}${money(Math.abs(delta))} vs now`;
+  return [...parts.filter(Boolean), deltaText].filter(Boolean).map(escapeHtml).join(" · ");
+}
+
+function _mixEditCellHtml(li, idx) {
+  const me = state.mixEdit;
+  const tenths = me.tenths[li.id] || 0;
+  const unavailable = me.mode === "imps" && !_mixImpsSupported(li);
+  const suffix = me.mode === "pct" ? "%" : me.mode === "usd" ? "$" : "imps";
+  const title = unavailable ? "No rate or estimated CPM to convert impressions with — set this line by % or $" : "";
+  return `<span class="share-wrap mix-edit-cell"><input type="text" inputmode="decimal" class="share-input mix-input" data-mix-input data-lid="${escapeAttr(li.id)}" data-idx="${idx}"
+      value="${escapeHtml(unavailable ? "" : _mixInputValue(li, tenths))}" ${unavailable ? "disabled" : ""} title="${escapeHtml(title)}" /><span class="share-suffix">${suffix}</span></span>
+    <button type="button" class="mix-fill-btn" data-mix-fill="${escapeAttr(li.id)}" title="Put whatever is still unallocated on this line">+ rest</button>
+    <div class="mix-sub" data-mix-sub="${escapeAttr(li.id)}">${_mixSubText(li, tenths)}</div>`;
+}
+
+function _mixTenthsList() {
+  return _paidLineIndices().map(i => state.mixEdit.tenths[state.lineItems[i].id] || 0);
+}
+
+function _mixEditDirty() {
+  if (!state.mixEdit) return false;
+  const me = state.mixEdit;
+  const unit = CurateMath.roundingUnitFor(me.base);
+  return _paidLineIndices().some(i => {
+    const li = state.lineItems[i];
+    // A line typed in $ / impressions is judged by its dollars (its tenths come from rounding, which can differ
+    // from the largest-remainder seed for an ordinary equal split); any other line by its share.
+    if (li.id in me.dollars) return Math.abs(me.dollars[li.id] - (li.monthly_budget || 0)) >= unit / 2;
+    return (me.tenths[li.id] || 0) !== (me.seed[li.id] || 0);
+  });
+}
+
+// Light patch on every keystroke: the readout, Save's enabled state, and each line's sub-text.
+// Never touches the input being typed in (a full re-render would steal its focus).
+function _mixEditRefresh() {
+  if (!state.mixEdit) return;
+  const bal = _mixBalance();
+  const readout = document.getElementById("mix-readout");
+  readout.className = "mix-readout " + (bal.ok ? "mix-ok" : bal.remaining < 0 ? "mix-over" : "mix-under");
+  if (bal.dollars) {
+    readout.textContent = bal.ok
+      ? `✓ ${money(bal.sum)} allocated — ready to save`
+      : bal.remaining > 0
+        ? `Allocated ${money(bal.sum)} of ${money(state.mixEdit.base)} · ${money(bal.remaining)} still to place`
+        : `Allocated ${money(bal.sum)} of ${money(state.mixEdit.base)} · over by ${money(-bal.remaining)}`;
+  } else {
+    readout.textContent = bal.ok
+      ? "✓ 100.0% allocated — ready to save"
+      : bal.remaining > 0
+        ? `Allocated ${(bal.sum / 10).toFixed(1)}% · ${(bal.remaining / 10).toFixed(1)}% still to place`
+        : `Allocated ${(bal.sum / 10).toFixed(1)}% · over by ${(-bal.remaining / 10).toFixed(1)}%`;
+  }
+  const dirty = _mixEditDirty();
+  if (bal.ok && !dirty) readout.textContent = "Nothing changed yet — edit a line to enable Save";
+  document.getElementById("mix-save-btn").disabled = !bal.ok || !dirty;
+  state.lineItems.forEach(li => {
+    if (li.is_added_value) return;
+    const sub = document.querySelector(`#line-items-body [data-mix-sub="${CSS.escape(li.id)}"]`);
+    if (sub) sub.innerHTML = _mixSubText(li, state.mixEdit.tenths[li.id] || 0);
+  });
+}
+
+// Keeps the toolbar button, the edit bar and the "everything else is paused" styling in step with
+// state.mixEdit. Called at the end of every renderLineItems().
+function _syncMixEditButton() {
+  const btn = document.getElementById("mix-edit-btn");
+  const editing = !!state.mixEdit;
+  const paidCount = _paidLineIndices().length;
+  const base = _mixBase();
+  btn.disabled = editing || paidCount < 2 || !(base > 0);
+  btn.title = editing ? "" : paidCount < 2 ? "Needs at least two paid lines."
+    : !(base > 0) ? "Enter budgets first — the % needs a plan total to divide."
+    : "Set each product's share of the plan, then save to apply it";
+}
+
+function _syncMixEditChrome() {
+  const editing = !!state.mixEdit;
+  document.getElementById("step-4").classList.toggle("mix-editing", editing);
+  document.querySelectorAll('#line-items-body input[data-key="monthly_budget"], #line-items-body [data-gross-budget-input]')
+    .forEach(inp => { if (editing) inp.disabled = true; });   // a fresh render restores them when editing ends
+  document.getElementById("mix-edit-bar").classList.toggle("hidden", !editing);
+  _syncMixEditButton();
+  const paidCount = _paidLineIndices().length;
+  if (!editing) return;
+  document.getElementById("mix-edit-base").textContent = `of ${money(state.mixEdit.base)} per ${_mbUnitNoun().toLowerCase()} · ${paidCount} paid lines`;
+  document.querySelectorAll("#mix-mode-tabs [data-mix-mode]").forEach(b => b.classList.toggle("active", b.dataset.mixMode === state.mixEdit.mode));
+  _mixEditRefresh();
+}
+
+function onMixEditStart() {
+  if (state.mixEdit) return;
+  const paid = _paidLineIndices();
+  const base = _mixBase();
+  if (paid.length < 2 || !(base > 0)) return;
+  const shares = _curateSharePercents();
+  const tenths = {};
+  paid.forEach(i => { tenths[state.lineItems[i].id] = Math.round((shares[i] || 0) * 10); });
+  state.mixEdit = { base, mode: "pct", tenths, seed: { ...tenths }, dollars: {} };
+  renderLineItems();
+}
+
+function onMixEditCancel() {
+  if (!state.mixEdit) return;
+  state.mixEdit = null;
+  renderLineItems();
+}
+
+function onMixEditSave() {
+  const me = state.mixEdit;
+  if (!me) return;
+  if (!_mixBalance().ok) {
+    alert(me.mode === "pct"
+      ? "The shares have to add up to exactly 100.0% before the mix can be saved."
+      : "The amounts have to add up to the plan total before the mix can be saved.");
+    return;
+  }
+  const paid = _paidLineIndices();
+  const unit = CurateMath.roundingUnitFor(me.base);
+  const tenths = _mixTenthsList();
+  const untouched = paid.map((i, j) => {
+    const li = state.lineItems[i];
+    return !(li.id in me.dollars) && tenths[j] === (me.seed[li.id] || 0);
+  });
+  let budgets;
+  if (me.mode === "pct") {
+    budgets = CurateMath.percentsToBudgets(tenths, me.base);
+    if (!budgets) { alert("The shares have to add up to exactly 100.0% before the mix can be saved."); return; }
+  } else {
+    budgets = paid.map(i => Math.round(_mixLineAmount(state.lineItems[i]) / unit) * unit);
+  }
+  // A line the planner never touched keeps its exact current budget (re-deriving it from a rounded
+  // share would nudge it by a few dollars); the lines that did change absorb any leftover cents so
+  // the plan total stays exactly what it was.
+  untouched.forEach((keep, j) => { if (keep) budgets[j] = state.lineItems[paid[j]].monthly_budget || 0; });
+  const drift = Math.round((me.base - budgets.reduce((a, b) => a + b, 0)) * 100) / 100;
+  if (drift !== 0) {
+    let target = -1;
+    budgets.forEach((b, j) => { if (!untouched[j] && (target < 0 || b > budgets[target])) target = j; });
+    if (target >= 0) budgets[target] = Math.round((budgets[target] + drift) * 100) / 100;
+  }
+  _commitBudgets(paid, budgets);   // also rescales any Step 06 breakdown so each period keeps its %
+  state.mixEdit = null;
+  renderLineItems();
+  updateTotals();
+}
+
+function onMixEditEvenSplit() {
+  if (!state.mixEdit) return;
+  const paid = _paidLineIndices();
+  const even = CurateMath.evenTenths(paid.length);
+  paid.forEach((i, j) => { state.mixEdit.tenths[state.lineItems[i].id] = even[j]; });
+  state.mixEdit.dollars = {};
+  renderLineItems();
+}
+
+function onMixEditSetMode(mode) {
+  if (!state.mixEdit || state.mixEdit.mode === mode) return;
+  state.mixEdit.mode = mode;
+  state.mixEdit.dollars = {};     // the shares carry across; exact typed dollars were for the unit just left
+  renderLineItems();
+}
+
+// One typed value -> staged tenths, in whichever unit the planner is working in.
+function _mixEditInput(inp) {
+  const li = state.lineItems.find(x => x.id === inp.dataset.lid);
+  if (!li || !state.mixEdit) return;
+  const me = state.mixEdit;
+  const typed = parseFormattedInput(inp.value);
+  const unit = CurateMath.roundingUnitFor(me.base);
+  let tenths = 0;
+  let dollars = null;     // the exact amount a typed $ / impressions value stands for
+  if (typed !== null) {
+    if (me.mode === "pct") tenths = CurateMath.toTenths(typed);
+    else if (me.mode === "usd") dollars = Math.max(0, typed);
+    else {
+      const p = state.productIndex[li.product_name] || {};
+      const spend = calcMaxSpendFromImps(_effectiveProduct(li, p), typed);
+      dollars = spend ? Math.max(0, spend.value) : 0;
     }
-  }, 0);
+  } else if (me.mode !== "pct") {
+    dollars = 0;
+  }
+  if (dollars !== null) {
+    dollars = Math.round(dollars / unit) * unit;
+    tenths = CurateMath.tenthsFromAmount(dollars, me.base);
+    me.dollars[li.id] = dollars;
+  } else {
+    delete me.dollars[li.id];
+  }
+  me.tenths[li.id] = tenths;
+  _mixEditRefresh();
+}
+
+function _mixEditFillRest(lineId) {
+  const me = state.mixEdit;
+  if (!me) return;
+  const others = _paidLineIndices().filter(i => state.lineItems[i].id !== lineId);
+  if (me.mode === "pct") {
+    const used = others.reduce((sum, i) => sum + (me.tenths[state.lineItems[i].id] || 0), 0);
+    me.tenths[lineId] = Math.max(0, 1000 - used);
+    delete me.dollars[lineId];
+  } else {
+    const used = others.reduce((sum, i) => sum + _mixLineAmount(state.lineItems[i]), 0);
+    const rest = Math.max(0, Math.round((me.base - used) * 100) / 100);
+    me.dollars[lineId] = rest;
+    me.tenths[lineId] = CurateMath.tenthsFromAmount(rest, me.base);
+  }
+  renderLineItems();
+}
+
+// Anything that would rebuild or re-divide the plan while a mix is half-staged is held off.
+function _mixEditBlocks() {
+  if (!state.mixEdit) return false;
+  alert("Finish or cancel your mix edit first (Save mix / Cancel above the table).");
+  return true;
 }
 
 // Step 06's rescale needs the total an allocation was built against; a reopened proposal never restores it.
@@ -3136,14 +3918,6 @@ function _mbRescaleLine(li) {
   }
 }
 
-function _applySharePct(lineIdx, pct, snapshot) {
-  const paid = _paidLineIndices();
-  const k = paid.indexOf(lineIdx);
-  if (k < 0 || paid.length < 2) return;
-  const budgets = paid.map(i => (snapshot && snapshot[i] !== undefined ? snapshot[i] : state.lineItems[i].monthly_budget) || 0);
-  _commitBudgets(paid, CurateMath.setSharePct(budgets, k, pct));
-}
-
 // "Suggest ideal totals" — unlike "Generate new product mix" (onRecommend,
 // below, which can add/remove products), this NEVER changes which
 // products are in the plan. It only reallocates the plan's CURRENT total
@@ -3154,6 +3928,7 @@ function _applySharePct(lineIdx, pct, snapshot) {
 // current % share of the total rather than being zeroed out — the brief
 // not mentioning a product isn't a signal to defund it.
 function onSuggestIdealTotals() {
+  if (_mixEditBlocks()) return;
   const paid = _paidLineIndices();
   if (!paid.length) {
     alert("Add at least one paid (non-Added-Value) line first.");
@@ -3201,6 +3976,7 @@ function onSuggestIdealTotals() {
 }
 
 function onScaleToTotal() {
+  if (_mixEditBlocks()) return;
   const input = document.getElementById("total-budget-target");
   const target = parseFormattedInput(input.value);
   const unit = _mbUnitAdjective().toLowerCase();
@@ -3308,6 +4084,7 @@ function _applyTimeUnitLabels() {
 // period KEYS (e.g. "2026-09" for month, "W1-2026-09-01" for week) are
 // tied to the OLD granularity and become meaningless under the new one.
 function onTimeUnitChange(newUnit) {
+  if (_mixEditBlocks()) return;
   if (newUnit === state.timeUnit || !(newUnit in _MB_UNIT_ADJECTIVE)) return;
 
   const allTiers = allTiersForSubmit();
@@ -3356,6 +4133,7 @@ function updateTotals() {
 }
 
 function onAddProduct() {
+  if (_mixEditBlocks()) return;
   const picker = document.getElementById("product-picker");
   const name = picker.value;
   if (!name) return;
@@ -3365,7 +4143,8 @@ function onAddProduct() {
     id: newLineItemId(),
     product_name: name,
     monthly_budget: (p.minimum_spend || 0) * _timeUnitMinimumScale(),
-    months: state.parsed?.total_months || 3,
+    months: _curateDerivedMonths() || state.parsed?.total_months || 3,
+    _monthsReconciled: true,
     rate_override: null,
     notes_override: null,
     target_override: null,
@@ -3447,11 +4226,13 @@ function onToggleAddon(name, isPicked) {
 }
 
 function onDuplicateLineItem(idx) {
+  if (_mixEditBlocks()) return;
   const original = state.lineItems[idx];
   if (!original) return;
   const copy = {
     ...original,
     id: newLineItemId(),
+    _monthsReconciled: true,  // a fresh duplicate is never "legacy" — see addTier's clone for the same reasoning
     monthly_allocations: original.monthly_allocations ? { ...original.monthly_allocations } : original.monthly_allocations,
   };
   // Carry over any avails already entered for the original line, so
@@ -3473,9 +4254,18 @@ function onDuplicateLineItem(idx) {
 // which never touches which products are present. Placed last/least-
 // prominent in the toolbar since it's the more disruptive of the two.
 async function onRecommend() {
+  if (_mixEditBlocks()) return;
   const budget = parseFormattedInput(document.getElementById("total-budget-target").value);
   if (!budget || budget <= 0) {
     alert(`Enter a target ${_mbUnitAdjective().toLowerCase()} budget first.`);
+    return;
+  }
+  // A new mix replaces every line with a new id, and avails are tied to line
+  // ids — so entered avails can't survive it. Say so first rather than
+  // silently discarding them.
+  const availsEntered = Object.values(state.availsData).filter(_availsEntryHasData).length;
+  if (availsEntered > 0 && !confirm(
+    `Generating a new product mix replaces every line in this option, so the avails you've entered for ${availsEntered} line${availsEntered === 1 ? "" : "s"} will be cleared. Continue?`)) {
     return;
   }
   const btn = document.getElementById("recommend-btn");
@@ -3507,7 +4297,11 @@ async function onRecommend() {
     // Monthly Breakdown's _mbFindLineItem(), where every row resolved to
     // the very first one regardless of which row was actually edited.
     // Matches the same spread order onDuplicateLineItem already uses.
-    state.lineItems = data.line_items.map(li => ({ ...li, id: newLineItemId() }));
+    state.lineItems = data.line_items.map(li => ({
+      ...li, id: newLineItemId(),
+      months: _curateDerivedMonths() || li.months,     // the server stamps the campaign-wide count; this option's own dates win
+      _monthsReconciled: true,
+    }));
     state.availsData = {};  // previous avails were keyed to the old line items' ids
     // Stale indices from before this replacement shouldn't leave an
     // unrelated row's rate-override editor or "Other…" objective box
@@ -3773,6 +4567,20 @@ function formatBudgetInputValue(n) {
 }
 function parseFormattedInput(s) {
   if (!s) return null;
+  // This app's own estimated-value display is "Est. 333,462" — its "." survived
+  // the digit filter below, so that read as 0.333 (and clicking into an
+  // estimated Max Imps/Spend cell showed "0" to edit). Drop the label first.
+  s = String(s).replace(/^\s*(?:est\.?|~)\s*/i, "");
+  if (!s) return null;
+  // "500k" / "1.5M" / "2b" mean 500,000 / 1,500,000 / 2,000,000,000. Stripping
+  // every non-digit used to read them as 500 / 1.5 / 2 — silently wrong by
+  // 1000x on an impressions or budget field, with nothing to tell the planner.
+  const suffixed = String(s).trim().match(/^\$?\s*(\d[\d,]*\.?\d*|\.\d+)\s*([kmb])\s*(?:imps?|impressions?)?$/i);
+  if (suffixed) {
+    const base = parseFloat(suffixed[1].replace(/,/g, ""));
+    const mult = { k: 1e3, m: 1e6, b: 1e9 }[suffixed[2].toLowerCase()];
+    if (!isNaN(base)) return Math.round(base * mult * 100) / 100;
+  }
   const digits = s.replace(/[^0-9.]/g, "");
   if (!digits) return null;
   const n = parseFloat(digits);
@@ -4268,9 +5076,12 @@ function _mbEffectiveDistribution(li, months) {
 }
 
 function renderMonthlyBreakdown() {
+  _resyncAllTierMonths();
   const months = _mbEffectiveMonths();
   const emptyState = document.getElementById("mb-no-dates");
   const content = document.getElementById("mb-content");
+  const masterLabel = document.querySelector(".mb-master-toggle");
+  if (masterLabel) masterLabel.classList.toggle("hidden", !months || !months.length);   // nothing to switch without dates
   if (!months || !months.length) {
     emptyState.classList.remove("hidden");
     content.classList.add("hidden");
@@ -4302,7 +5113,7 @@ function renderMonthlyBreakdown() {
       } else {
         li.monthly_allocations = _mbRescaleForBudgetChange(li);
       }
-    } else if (li._mbBaseline === undefined) {
+    } else if (li._mbBaseline === undefined && !li.mb_off) {
       // "Line item added" (genuinely never seen by this render loop
       // before — _mbBaseline is only ever undefined the first time) —
       // Monthly/Weekly/Quarterly Breakdown is on by default for every
@@ -4317,6 +5128,17 @@ function renderMonthlyBreakdown() {
       _mbSetAllocation(li, _mbDefaultAllocation(li.monthly_budget * li.months, months));
     }
   });
+
+  // Master toggle reflects the real per-line data rather than assuming
+  // its own last click was the only thing that ever set it — a reopened
+  // legacy proposal (saved back when opt-out was per-line) can still have
+  // a genuine mix, shown as indeterminate rather than guessed one way.
+  const masterToggle = document.getElementById("mb-master-enable");
+  const enabledCount = eligibleLines.filter(li => li.monthly_allocations && Object.keys(li.monthly_allocations).length).length;
+  masterToggle.indeterminate = enabledCount > 0 && enabledCount < eligibleLines.length;
+  masterToggle.checked = eligibleLines.length > 0 && enabledCount === eligibleLines.length;
+  document.getElementById("mb-master-unit-label").textContent = _mbUnitAdjective();
+  document.getElementById("mb-master-scope-label").textContent = state.tiers.length ? "this option" : "this proposal";
 
   // Both views render from the exact same eligibleLines/months — "By
   // Month" is a pivot of the same monthly_allocations data, not a second
@@ -4410,10 +5232,6 @@ function _mbLineItemBlockHtml(li, months) {
           ${_mbTargetingSnippet(li) ? `<span class="mb-line-targeting">${escapeHtml(_mbTargetingSnippet(li))}</span>` : ""}
         </span>
         <span class="mb-line-total">Total: ${money(total)}</span>
-        <label class="mb-enable-toggle" onclick="event.stopPropagation()">
-          <input type="checkbox" class="mb-enable-checkbox" data-line="${li.id}" ${enabled ? "checked" : ""} />
-          Use ${_mbUnitAdjective()} Breakdown
-        </label>
         <span class="mb-status-badge ${statusClass}">${escapeHtml(statusText)}</span>
       </summary>
       <div class="mb-line-body">
@@ -4429,27 +5247,6 @@ function _mbLineItemBlockHtml(li, months) {
 function _mbFindLineItem(id) { return state.lineItems.find(li => String(li.id) === String(id)); }
 
 function _mbWireLineItemBlocks(months) {
-  document.querySelectorAll(".mb-enable-checkbox").forEach(cb => {
-    cb.addEventListener("change", (e) => {
-      const li = _mbFindLineItem(e.target.dataset.line);
-      if (!li) return;
-      if (e.target.checked) {
-        _mbSetAllocation(li, _mbDefaultAllocation(li.monthly_budget * li.months, months));
-      } else {
-        // Deliberately keep li._mbBaseline (don't delete it) — it's the
-        // ONLY signal that distinguishes "this line was already through
-        // Monthly Breakdown and got explicitly turned off" from "this
-        // line has never been touched at all". Deleting it used to make
-        // an unchecked line indistinguishable from a brand-new one, so
-        // renderMonthlyBreakdown()'s "auto-join a new line while the
-        // feature's already active elsewhere" convenience immediately
-        // re-checked it on the very next render — the exact "checkbox
-        // isn't unselectable" bug this fixes.
-        li.monthly_allocations = null;
-      }
-      renderMonthlyBreakdown();
-    });
-  });
   document.querySelectorAll(".mb-reset-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       const li = _mbFindLineItem(btn.dataset.line);
@@ -4807,6 +5604,41 @@ function _mbSetContinueEnabled(enabled) {
   btn.title = enabled ? "" : "One or more line items' monthly allocations don't balance to 100% / the full budget yet.";
 }
 
+// Takes the planner from Step 05 to the exact Step 04 field that controls
+// what Step 05 is showing: a line's own Target override, or the option's
+// Geo override (geo is per-option, not per-line, so every card's Geo pencil
+// lands on the same field). Step 05 only ever shows the ACTIVE option, and
+// Step 04's DOM is kept in step with state by renderLineItems(), so no tier
+// switch is needed — and onNext(4) is deliberately NOT used, since it
+// re-syncs the override panel and would collapse the <details> we open.
+function _jumpToCurateField(field, lineId) {
+  goToStep(4);
+  let el = null;
+  if (field === "geo") {
+    document.getElementById("tier-override-panel").open = true;
+    el = document.getElementById("tier-geo-input");
+  } else {
+    const findTextarea = () => {
+      const idx = state.lineItems.findIndex(x => x.id === lineId);
+      return idx === -1 ? null : document.querySelector(`#line-items-body textarea[data-idx="${idx}"][data-key="target_override"]`);
+    };
+    el = findTextarea();
+    if (!el) {  // e.g. a proposal resumed straight into Step 05 — Step 04's table was never built
+      renderLineItems();
+      el = findTextarea();
+    }
+  }
+  if (!el) return;
+  // goToStep() fires its own smooth scroll-to-top; give it a beat so this
+  // scroll doesn't fight it, and center the field clear of the sticky header.
+  setTimeout(() => {
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.focus({ preventScroll: true });
+    el.classList.add("jump-highlight");
+    setTimeout(() => el.classList.remove("jump-highlight"), 1800);
+  }, 80);
+}
+
 function renderAvailsGrid() {
   renderAllTierTabStrips();
   const rt = (state.parsed.request_type || "").toLowerCase();
@@ -4858,7 +5690,12 @@ function renderAvailsGrid() {
         <h3>${escapeHtml(li.product_name)}${escapeHtml(subtitle)}</h3>
         <span class="sov-badge" id="sov-badge-${escapeAttr(li.id)}"></span>
       </div>
-      <p class="avails-targeting-reminder">🎯 Target: ${escapeHtml(_effectiveTargetText(li))} &nbsp;·&nbsp; 📍 Geo: ${escapeHtml(_effectiveGeo(state.activeTierLabel) || "TBD")} &nbsp;·&nbsp; 📅 ${escapeHtml(_effectiveStartDate(state.activeTierLabel) || "TBD")} – ${escapeHtml(_effectiveEndDate(state.activeTierLabel) || "TBD")}</p>
+      <p class="avails-targeting-reminder">
+        <span class="avails-ref-item">🎯 Target: ${escapeHtml(_effectiveTargetText(li))}<button type="button" class="avails-edit-pencil" data-jump-field="target" data-lid="${escapeAttr(li.id)}" title="Edit this line's target (jumps to Step 04)">✎</button></span>
+        &nbsp;·&nbsp;
+        <span class="avails-ref-item">📍 Geo: ${escapeHtml(_effectiveGeo(state.activeTierLabel) || "TBD")}<button type="button" class="avails-edit-pencil" data-jump-field="geo" title="Edit this option's geo (jumps to Step 04)">✎</button></span>
+        &nbsp;·&nbsp; 📅 ${escapeHtml(_effectiveStartDate(state.activeTierLabel) || "TBD")} – ${escapeHtml(_effectiveEndDate(state.activeTierLabel) || "TBD")}
+      </p>
       <label class="freeform-toggle">
         <input type="checkbox" data-lid="${escapeAttr(li.id)}" data-freeform-toggle ${isFreeform ? "checked" : ""} />
         Free-form — type anything in these, no calculation
@@ -4967,8 +5804,16 @@ function renderAvailsGrid() {
   grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
     inp.addEventListener("focus", e => {
       const raw = parseFormattedInput(e.target.value);
-      e.target.value = raw === null ? "" : String(Math.round(raw));
+      // Frequency is legitimately fractional (5.5) — rounding it here and
+      // re-parsing on blur used to turn a mere click-in/click-out into 6.
+      const shown = raw === null ? null : (e.target.dataset.key === "frequency" ? raw : Math.round(raw));
+      e.target.value = shown === null ? "" : String(shown);
+      e.target._focusParsed = shown;
+      e.target._edited = false;
     });
+    // Typing counts as an edit even if the number ends up identical — re-entering an "Est." figure is how a
+    // planner says "this one is real".
+    inp.addEventListener("input", e => { e.target._edited = true; });
   });
 
   // On every keystroke: update the SOV traffic-light badge in real time,
@@ -5004,6 +5849,22 @@ function renderAvailsGrid() {
       const entry = state.availsData[lid];
 
       const value = parseFormattedInput(e.target.value);
+      // Clicking into a field and straight back out (no edit) must not re-derive
+      // anything: it used to flip the basis to "imps", clear the "Est." flag,
+      // or turn a shown default frequency into a stored one, changing numbers
+      // the planner never touched.
+      if (e.target._focusParsed !== undefined && value === e.target._focusParsed && !e.target._edited) {
+        e.target._focusParsed = undefined;
+        if (key === "max_imps") e.target.value = formatImpsDisplay(entry.max_imps, entry.max_imps_estimated);
+        else if (key === "max_spend") e.target.value = formatSpendDisplay(entry.max_spend, entry.max_spend_estimated);
+        else if (key === "est_uniques") e.target.value = formatPlainDisplay(entry.est_uniques);
+        else if (key === "frequency") {
+          const shownFreq = entry.frequency != null ? entry.frequency : _defaultFrequency(li, p);
+          e.target.value = shownFreq != null ? shownFreq : "";
+        }
+        return;
+      }
+      e.target._focusParsed = undefined;
       entry[key] = value;
 
       const impsInputEl = () => grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="max_imps"]`);
@@ -5107,6 +5968,7 @@ function syncAvailsFromGrid() {
 // --------------------------------------------------------------------------
 
 function renderGenerateSummary() {
+  _resyncAllTierMonths();
   const monthly = state.lineItems.reduce((s, li) => s + (li.monthly_budget || 0), 0);
   const flight = state.lineItems.reduce((s, li) => s + (li.monthly_budget || 0) * (li.months || 1), 0);
   const fee = state.parsed.agency_fee || 0;
@@ -5126,9 +5988,13 @@ function renderGenerateSummary() {
   // than after.
   const availsWarningEl = document.getElementById("tiers-avails-warning");
   if (availsWarningEl) {
-    const anyAvailsAnywhere = allTiers.some(t => Object.keys(t.avails_data || {}).length > 0);
+    // Counts real entries, not object keys: Search lines get a {freeform:true}
+    // stub the moment Step 05 renders, and any blur creates an empty {} — an
+    // option with only those used to look "filled in" and was never flagged.
+    const tierHasAvails = t => Object.values(t.avails_data || {}).some(_availsEntryHasData);
+    const anyAvailsAnywhere = allTiers.some(tierHasAvails);
     const emptyTiers = multiTier
-      ? allTiers.filter(t => (t.line_items || []).length > 0 && Object.keys(t.avails_data || {}).length === 0)
+      ? allTiers.filter(t => (t.line_items || []).length > 0 && !tierHasAvails(t))
       : [];
     if (anyAvailsAnywhere && emptyTiers.length > 0) {
       availsWarningEl.classList.remove("hidden");
@@ -5154,11 +6020,81 @@ function renderGenerateSummary() {
       return `${escapeHtml(_tierDisplayName(t.label))}: ${money(m)}/mo · ${(t.line_items || []).length} products`;
     }).join(" &nbsp;·&nbsp; ")}</span></div>` : ""}
   `;
-  // Sync suggested tabs into the checkboxes
-  Object.entries(state.suggestedTabs || {}).forEach(([k, v]) => {
-    const cb = document.querySelector(`.tabs-override [data-tab="${k}"]`);
-    if (cb) cb.checked = !!v;
+  // Show the best suggestion we have right now, then replace it with a fresh
+  // one from the server (the parse-time suggestion goes stale the moment the
+  // planner changes the mix, request type or agency fee).
+  _applyTabCheckboxes();
+  _refreshSuggestedTabs();
+  _refreshDisclaimersPreview();
+}
+
+// Checkbox state = the planner's own override where they made one, otherwise
+// the current suggestion.
+function _applyTabCheckboxes() {
+  document.querySelectorAll(".tabs-override [data-tab]").forEach(cb => {
+    const k = cb.dataset.tab;
+    cb.checked = k in state.tabsTouched ? !!state.tabsTouched[k] : !!(state.suggestedTabs || {})[k];
+    // No suggestion to show (it couldn't be fetched): an untouched box isn't "off" — the server still picks the
+    // tabs at generate time — so say so instead of rendering it unchecked.
+    cb.indeterminate = !(k in state.tabsTouched) && !state.suggestedTabs;
   });
+}
+
+async function _refreshSuggestedTabs() {
+  if (!state.parsed) return;
+  // Every line of every option, repeats included: the generator counts them that way (two options that each hold
+  // Display + Search are what trigger the sections tab), so de-duplicating here would show a different suggestion.
+  const names = allTiersForSubmit().flatMap(t => (t.line_items || []).map(li => li.product_name));
+  try {
+    const res = await fetch("/api/suggest-tabs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: state.parsed, product_names: names }),
+    });
+    if (!res.ok) return;
+    state.suggestedTabs = (await res.json()).tabs;
+    _applyTabCheckboxes();
+  } catch (e) {
+    // keep whatever suggestion we already had — the server re-derives tabs
+    // from the final plan at generate time either way
+  }
+}
+
+// Whether a Step 05 avails entry holds anything the planner actually typed.
+function _availsEntryHasData(e) {
+  if (!e) return false;
+  if (["max_imps", "max_spend", "est_uniques", "sov_pct_freeform"].some(k => e[k] != null && e[k] !== "")) return true;
+  return ["max_imps_text", "max_spend_text", "est_uniques_text"].some(k => String(e[k] || "").trim() !== "");
+}
+
+// Which admin-managed disclaimers (Admin -> Disclaimers) the export will
+// carry for each option, from the same resolver /api/generate uses — shown
+// BEFORE generating so a banner never appears in a deliverable as a
+// surprise. Purely informational: a failure just hides the line.
+async function _refreshDisclaimersPreview() {
+  const box = document.getElementById("disclaimers-preview");
+  if (!box || !state.parsed) return;
+  try {
+    const res = await fetch("/api/disclaimers/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request: state.parsed, tiers: allTiersForSubmit(), line_items: state.lineItems }),
+    });
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    const multiTier = Object.keys(data.tiers).length > 1;
+    const lines = Object.entries(data.tiers)
+      .filter(([, list]) => list.length)
+      .map(([label, list]) => {
+        const names = list.map(d => escapeHtml(d.name)).join(", ");
+        return multiTier ? `<li><strong>${escapeHtml(_tierDisplayName(label))}:</strong> ${names}</li>` : `<li>${names}</li>`;
+      });
+    if (!lines.length) { box.classList.add("hidden"); return; }
+    box.innerHTML = `<strong>Disclaimers that will be added to the export</strong> <small>(managed in Admin → Disclaimers)</small><ul>${lines.join("")}</ul>`;
+    box.classList.remove("hidden");
+  } catch (e) {
+    box.classList.add("hidden");
+  }
 }
 
 // Fields shared by /api/generate and /api/proposal/draft — the whole
@@ -5167,15 +6103,14 @@ function renderGenerateSummary() {
 // spot, not near-identical copies" lesson as normalize_newlines/
 // llm_utils on the backend — see main.py's _build_reopen_state).
 function _buildWizardStatePayload() {
-  const forceTabs = {};
-  document.querySelectorAll(".tabs-override [data-tab]").forEach(cb => {
-    forceTabs[cb.dataset.tab] = cb.checked;
-  });
+  _resyncAllTierMonths();
   return {
     request: state.parsed,
     line_items: state.lineItems,     // legacy field — kept for back-compat; the server prefers `tiers` when present
     tiers: allTiersForSubmit(),
-    force_tabs: forceTabs,
+    // `_v` marks the new "only the boxes the planner actually toggled" format, so a save where all six were
+    // toggled isn't mistaken on reopen for an old full set of never-synced defaults. The server ignores it.
+    force_tabs: Object.keys(state.tabsTouched).length ? { ...state.tabsTouched, _v: 2 } : {},
     avails_data: state.availsData,
     strategy_brief: _briefWithSelectedTactics(),
     roadblocks: state.roadblocks || null,
@@ -5198,7 +6133,14 @@ function _buildWizardStatePayload() {
   };
 }
 
+// The wizard state without the AI results (which Generate itself changes), for "did anything change meanwhile".
+function _wizardStateKey() {
+  return JSON.stringify(_buildWizardStatePayload());
+}
+
 async function onGenerate() {
+  const epoch = _resetEpoch;
+  const sentStateKey = _wizardStateKey();
   const payload = {
     ..._buildWizardStatePayload(),
     // Echoes back an id from an earlier draft save (or a reopened
@@ -5244,9 +6186,16 @@ async function onGenerate() {
       return;
     }
     const data = await res.json();
+    if (epoch !== _resetEpoch) return;     // the planner started another proposal while this one generated
     state.proposalId = data.proposal_id;
+    state.generatedProposalId = data.proposal_id;
     state.proposalSummary = data.summary;
     showResult(data);
+    // The result itself changes state.enrichment, which would otherwise make the very next autosave /
+    // "New proposal" file the just-generated proposal again as a stray draft. Only when nothing was edited
+    // while Generate was running, though — an edit made meanwhile isn't in the generated file and must still
+    // be saved.
+    if (_wizardStateKey() === sentStateKey) _lastSavedDraftSnapshot = _flushAndSnapshotDraftState();
   } finally {
     clearInterval(stageTimer);
     loadingEl.classList.add("hidden");
@@ -5588,7 +6537,8 @@ function _resetEmailRepromptScope() {
 async function onEmailReprompt() {
   const text = document.getElementById("email-reprompt-input").value.trim();
   if (!text) { alert("Enter what you'd like to change first."); return; }
-  if (!state.proposalId || !state.enrichment) return;
+  const deliverableId = state.generatedProposalId || state.proposalId;
+  if (!deliverableId || !state.enrichment) return;
   const scopeInput = document.querySelector('input[name="email-reprompt-scope"]:checked');
   const scope = scopeInput ? scopeInput.value : "both";
 
@@ -5597,7 +6547,7 @@ async function onEmailReprompt() {
   btn.textContent = "Regenerating…";
 
   try {
-    const res = await fetch(`/api/proposal/${state.proposalId}/reprompt-emails`, {
+    const res = await fetch(`/api/proposal/${deliverableId}/reprompt-emails`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -5630,6 +6580,10 @@ async function onEmailReprompt() {
     setText("internal-email-body", data.internal_email_body || "");
     setText("client-email-subject", "Subject: " + (data.client_email_subject || ""));
     setText("client-email-body", data.client_email_body || "");
+    // The revision is already stored with the generated proposal; an autosave must not file it as a new draft.
+    if (state.generatedProposalId && state.generatedProposalId === state.proposalId) {
+      _lastSavedDraftSnapshot = _flushAndSnapshotDraftState();
+    }
 
     document.getElementById("email-reprompt-area").classList.add("hidden");
     document.getElementById("email-reprompt-btn").style.display = "";
@@ -5653,7 +6607,8 @@ function setText(id, text) {
 }
 
 async function onDriveUpload() {
-  if (!state.proposalId) return;
+  const deliverableId = state.generatedProposalId || state.proposalId;
+  if (!deliverableId) return;
   const status = document.getElementById("drive-status");
   status.classList.remove("hidden", "ok", "warn");
   status.innerHTML = '<span class="btn-inline-spinner"></span>Uploading to Drive…';
@@ -5666,7 +6621,7 @@ async function onDriveUpload() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        proposal_id: state.proposalId,
+        proposal_id: deliverableId,
         seller_email: state.parsed.salesperson_email || "",
       }),
     });

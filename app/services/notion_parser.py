@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+from app.services import monthly_allocation as mo
+
 
 # ---------------------------------------------------------------------------
 # Output schema
@@ -594,6 +596,17 @@ def parse_notion(text: str, catalog_names: list[str], db_aliases: Optional[dict]
     req.start_date = _extract_label(text, "Start date")
     req.end_date = _extract_label(text, "End date")
     req.total_months = _parse_int(_extract_label(text, "Total months"))
+    # The real flight dates are authoritative over whatever "Total months"
+    # text a Notion paste happened to say — the two otherwise silently
+    # disagree (see monthly_allocation.py's own note on this exact drift).
+    # Only overrides the freshly-parsed value from a brand-new paste; a
+    # reopened/regenerated proposal never re-runs parse_request() (see
+    # _reconstruct_proposal_request in main.py), so this never touches an
+    # already-generated proposal's stored total_months.
+    _start_d = mo.parse_flexible_date(req.start_date)
+    _end_d = mo.parse_flexible_date(req.end_date)
+    if _start_d and _end_d:
+        req.total_months = len(mo.months_between(_start_d, _end_d))
     req.monthly_budget = _parse_float(_extract_label(text, "Monthly budget"))
     req.tiered_budget = _parse_bool(_extract_label(text, "Tiered budget?"))
 

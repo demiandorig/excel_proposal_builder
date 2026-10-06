@@ -61,3 +61,62 @@ def normalize_newlines(text: str) -> str:
         text = re.sub(r"\\+r\\+n", "\n", text)
         text = re.sub(r"\\+n", "\n", text)
     return text
+
+
+# The catalog appends an internal rate-tier list to 11 products' descriptions
+# ("Variants (contact planning for exact tier): Standard: $13 CPM; Custom
+# Audience: $15 CPM."). It's useful on the planner's rate card, but it's an
+# instruction to Entravision's own planning team printed into a client-facing
+# proposal cell, and misleading input for an AI blurb (which then talks about
+# "versions" the client didn't buy). Always the LAST thing in a description.
+_VARIANTS_TAIL = re.compile(r"\s*Variants\s*\(contact planning for exact tier\):.*\Z", re.DOTALL | re.IGNORECASE)
+
+
+# --- sentence splitting (shared by the blurb tightener and the Roadblocks sheet filter) -------------------------
+
+# A new sentence starts at a capital, digit, $, quote/bracket, a bullet marker, or a camelCase brand ("eDigital", "iHeart").
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])(\s+)(?=[A-Z0-9$\"'(\[]|[-\u2022*]\s|[a-z][A-Z])")
+# A sentence break that is really an abbreviation's period ("U.S.", "Inc.", "vs.", "e.g.").
+_ABBREVIATION_END = re.compile(
+    r"(?:\b[A-Za-z](?:\.[A-Za-z])+|\b(?:Inc|Ltd|Co|Corp|vs|St|Mr|Mrs|Ms|Dr|No|Jr|Sr|Mt|Ave|Blvd|approx|est|avg|"
+    r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|Sec|Fig|Ref|Vol))\.$"
+)
+_LIST_MARKER = re.compile(r"^\s*\d{1,2}[.)]$")                          # "1." on its own: the break is a numbered step
+_CITATION_ONLY = re.compile(r"^[(\[][^()\[\]]{2,100}[)\]]\.?$")          # "(eMarketer, 2025)." standing alone
+
+
+def split_sentences(text: str) -> list[str]:
+    """`text` as sentence segments, each INCLUDING the whitespace that follows it, so "".join(result) == text and
+    a caller can drop segments without flattening the original line breaks. Abbreviation periods ("U.S.",
+    "Inc.") and numbered-step markers ("1.") don't end a sentence, and a citation standing alone
+    ("(Nielsen, 2025).") stays with the sentence it supports."""
+    text = text or ""
+    segments: list[str] = []
+    pending = ""      # a piece that ended on an abbreviation / step marker continues into the next one
+    last = 0
+    for m in _SENTENCE_BOUNDARY.finditer(text):
+        piece = pending + text[last:m.end()]
+        last = m.end()
+        head = piece.rstrip()
+        last_token = head.rsplit(None, 1)[-1] if head else ""      # only the final word can be the abbreviation
+        if _ABBREVIATION_END.search(last_token) or _LIST_MARKER.match(head):
+            pending = piece
+            continue
+        pending = ""
+        if segments and _CITATION_ONLY.match(head):
+            segments[-1] += piece
+        else:
+            segments.append(piece)
+    tail = pending + text[last:]
+    if tail or not segments:
+        if segments and _CITATION_ONLY.match(tail.strip()):
+            segments[-1] += tail
+        else:
+            segments.append(tail)
+    return segments
+
+
+def strip_variant_pricing(description: str | None) -> str:
+    """`description` without its trailing internal "Variants (...)" rate-tier
+    list. A description that is nothing BUT that list becomes ""."""
+    return _VARIANTS_TAIL.sub("", description or "").rstrip()

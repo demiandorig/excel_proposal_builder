@@ -332,3 +332,73 @@ CREATE TABLE drive_tokens (
     scopes         TEXT[] NOT NULL DEFAULT '{}',
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ---------------------------------------------------------------------------
+-- disclaimers — admin-managed, keyword-triggered banner callouts that appear
+-- below the totals (above the legal footer) in the Excel sheets and on the
+-- PPT's closing slide. See app/disclaimers.py. Replaces the single
+-- hard-coded "Live Sports" banner the Excel footer used to carry, which is
+-- seeded below as an editable default so existing behavior is unchanged.
+--
+-- keywords: lowercase whole-word/phrase matches against the plan's own text
+-- (an option's products/targeting/notes + the request's client/geo/goal
+-- fields). season_start/season_end: optional recurring "MM-DD" window the
+-- flight must overlap (a season-only rule with no keywords fires on dates
+-- alone). Idempotent like every other newer table here — safe to re-run.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS disclaimers (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    keywords       TEXT[] NOT NULL DEFAULT '{}',
+    banner_text    TEXT NOT NULL,
+    color          TEXT NOT NULL DEFAULT 'red' CHECK (color IN ('red', 'amber', 'green', 'blue', 'gray')),
+    applies_to     TEXT NOT NULL DEFAULT 'both' CHECK (applies_to IN ('both', 'excel', 'ppt')),
+    season_start   TEXT,
+    season_end     TEXT,
+    is_active      BOOLEAN NOT NULL DEFAULT TRUE,
+    sort_order     INTEGER NOT NULL DEFAULT 100,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO disclaimers (id, name, keywords, banner_text, color, applies_to, sort_order)
+VALUES (
+    'seed-live-sports',
+    'Live Sports Inventory',
+    ARRAY['live sports', 'tentpole', 'nbc sports', 'fox sports'],
+    E'\U0001F4CA\U0001F449 Live Sports Inventory: The numbers provided in this proposal are geo-based estimates. Because publishers hold all cards and can adjust pricing or inventory without notice, we''ll need a mandatory 3\u20135 business day pit stop for a full re-avail before any campaign goes live. Keep this buffer in your SLAs and potential secondary avenues for inventory delivery (i.e. audience-based buys).',
+    'red', 'both', 10
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- restriction_categories / restriction_sync — Entravision's "Restricted
+-- Verticals by Platforms" Google Sheet, ingested as the source of truth for
+-- the Roadblocks step (app/services/restrictions.py). One row per sheet tab
+-- (vertical). kind: 'allowlist' (only the listed products accept it, e.g.
+-- Political), 'blanket_hold' (nothing accepts it, e.g. Cannabis) or
+-- 'guidance' (free-text platform advice, passed to the model verbatim).
+-- product_map: {sheet product name: [catalog product names]} — auto-matched at
+-- sync time and admin-editable. Until the first sync a built-in snapshot of
+-- the Political and Cannabis tabs applies (see builtin_categories()), and any
+-- trouble reading these tables falls back to it rather than breaking
+-- Roadblocks. Idempotent like the other newer tables here.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS restriction_categories (
+    name         TEXT PRIMARY KEY,
+    kind         TEXT NOT NULL CHECK (kind IN ('allowlist', 'blanket_hold', 'guidance')),
+    keywords     TEXT[] NOT NULL DEFAULT '{}',
+    items        TEXT[] NOT NULL DEFAULT '{}',
+    summary      TEXT NOT NULL DEFAULT '',
+    body         TEXT NOT NULL DEFAULT '',
+    product_map  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS restriction_sync (
+    id            TEXT PRIMARY KEY DEFAULT 'default',
+    sheet_url     TEXT,
+    source_title  TEXT,
+    synced_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    synced_by     TEXT
+);
