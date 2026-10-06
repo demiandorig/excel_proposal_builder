@@ -152,8 +152,8 @@ def match_catalog_products(item: str, products: Optional[Iterable] = None) -> li
     matching FEWER products: an unmatched product reads "not on the approved
     list" (visible, fixable in Admin), whereas a wrongly matched one would
     read ALLOWED."""
-    from app.catalog import CATALOG
-    products = list(products if products is not None else CATALOG)
+    from app.catalog import effective_catalog
+    products = list(products if products is not None else effective_catalog())
     t = _norm(item)
     low = lambda p: p.name.lower()
     geo = bool(re.search(r"geo ?fenc", t))      # "Geo Fence", "Geofencing", "Geo-Fencing", "Geo Fencing"
@@ -606,6 +606,43 @@ def update_category(name: str, *, keywords: Any, product_map: dict[str, Any]) ->
     return _row_to_category(row) if row else None
 
 
+def inherit_product_approvals(source_name: str, new_name: str, edited_by: str) -> int:
+    """A copy of a product is approved wherever the original is: add `new_name` to every sheet entry of every
+    approved-products list that already maps `source_name`. Returns how many entries it was added to. Persists the
+    built-in snapshot first if that's still what applies (the same step editing a mapping takes)."""
+    from psycopg.types.json import Jsonb
+    state = load_state()
+    if state.get("error"):
+        return 0
+    sources = {source_name}
+    try:
+        from app.catalog import name_variants
+        sources |= name_variants(source_name)
+    except Exception:  # noqa: BLE001
+        pass
+    changed: dict[str, dict[str, list[str]]] = {}
+    for cat in state["categories"]:
+        if cat.kind != "allowlist":
+            continue
+        product_map = {k: list(v) for k, v in (cat.product_map or auto_product_map(cat.items)).items()}
+        touched = False
+        for item, names in product_map.items():
+            if sources & set(names) and new_name not in names:
+                names.append(new_name)
+                touched = True
+        if touched:
+            changed[cat.name] = product_map
+    if not changed:
+        return 0
+    if state["using_builtin"]:
+        seed_builtin_into_db(edited_by)
+    with get_connection() as conn:
+        for cat_name, product_map in changed.items():
+            conn.execute("UPDATE restriction_categories SET product_map = %s, updated_at = now() WHERE name = %s",
+                         (Jsonb(product_map), cat_name))
+    return sum(1 for pm in changed.values() for names in pm.values() if new_name in names)
+
+
 def seed_builtin_into_db(synced_by: str) -> None:
     """Lets an admin edit keywords/mappings of the built-in snapshot before the
     first real sync, by persisting it as rows."""
@@ -667,7 +704,7 @@ def _worst(statuses: list[str]) -> str:
 
 
 def evaluate_product(product_name: str, family: Optional[str], categories: list[Category],
-                     aliases: Optional[Iterable[str]] = None, custom: bool = False) -> dict[str, Any]:
+                     aliases: Optional[Iterable[str]] = None) -> dict[str, Any]:
     """{"verdict": allowed|not_allowed|guidance|n/a|none, "checks": [...]} for
     one product against the confirmed verticals. `aliases` are the other names
     the product answers to (its renamed display name / stable raw name) — the
@@ -689,13 +726,14 @@ def evaluate_product(product_name: str, family: Optional[str], categories: list[
             listed = next((item for item, mapped in product_map.items() if names & set(mapped)), None)
             if listed:
                 checks.append({"category": cat.name, "status": "allowed", "note": f"Approved on the sheet as: {listed}"})
-            elif custom or family is None:
+            elif family is None:
                 checks.append({"category": cat.name, "status": "guidance",
-                               "note": f"A custom product the {cat.name} sheet doesn't list — confirm with Sales Planning "
-                                       "(or map it in Admin → Restrictions)."})
+                               "note": f"Not in the product list, so the {cat.name} sheet can't be checked against it — "
+                                       "confirm with Sales Planning."})
             else:
                 checks.append({"category": cat.name, "status": "not_allowed",
-                               "note": f"Not on the approved product list for {cat.name} ads."})
+                               "note": f"Not on the approved product list for {cat.name} ads "
+                                       "(if it should be, map it in Admin → Restrictions)."})
         else:
             checks.append({"category": cat.name, "status": "guidance", "note": cat.summary})
     return {"verdict": _worst([c["status"] for c in checks]), "checks": checks}
@@ -704,20 +742,17 @@ def evaluate_product(product_name: str, family: Optional[str], categories: list[
 def build_matrix(product_names: list[str], category_names: Optional[list[str]]) -> dict[str, Any]:
     """Everything Roadblocks needs: the confirmed Category objects, a verdict
     per product, and where the data came from."""
-    from app.catalog import CATALOG, by_name, name_variants
+    from app.catalog import by_name, name_variants
     state = load_state()
     wanted = {n.strip().lower() for n in (category_names or []) if n and n.strip()}
     selected = [c for c in state["categories"] if c.name.lower() in wanted]
     found = {c.name.lower() for c in selected}
     unresolved = sorted(n for n in (category_names or []) if n and n.strip() and n.strip().lower() not in found)
-    builtin_names = {p.name for p in CATALOG}
     verdicts: dict[str, dict] = {}
     for name in dict.fromkeys(product_names):
         product = by_name(name)
         variants = name_variants(name)
-        verdicts[name] = evaluate_product(
-            name, product.family if product else None, selected,
-            aliases=variants, custom=product is not None and not (variants & builtin_names))
+        verdicts[name] = evaluate_product(name, product.family if product else None, selected, aliases=variants)
     sync = state["sync"] or {}
     return {
         "categories": selected, "verdicts": verdicts, "using_builtin": state["using_builtin"],

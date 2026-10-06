@@ -323,13 +323,22 @@ PRODUCT_ALIASES: dict[str, str] = {
     "preroll": "Video - Pre-roll (OLV)",
     "video pre-roll": "Video - Pre-roll (OLV)",
     # YouTube
-    "youtube ads": "YouTube Ads",
-    "youtube video ads": "YouTube Ads",
-    "youtube preroll": "YouTube Ads",
-    "youtube pre-roll": "YouTube Ads",
-    "youtube trueview": "YouTube Ads",
-    "trueview": "YouTube Ads",
-    "youtube discovery": "YouTube Ads",
+    "youtube ads": "YouTube Ads - Skippable",
+    "youtube video ads": "YouTube Ads - Skippable",
+    "youtube preroll": "YouTube Ads - Skippable",
+    "youtube pre-roll": "YouTube Ads - Skippable",
+    "youtube trueview": "YouTube Ads - Skippable",
+    "trueview": "YouTube Ads - Skippable",
+    "youtube discovery": "YouTube Ads - Skippable",
+    "youtube skippable": "YouTube Ads - Skippable",
+    "youtube ads skippable": "YouTube Ads - Skippable",
+    "youtube non-skippable": "YouTube Ads - Non-Skippable",
+    "youtube nonskippable": "YouTube Ads - Non-Skippable",
+    "youtube non skippable": "YouTube Ads - Non-Skippable",
+    "youtube ads non-skippable": "YouTube Ads - Non-Skippable",
+    "youtube bumper": "YouTube Ads - Non-Skippable",
+    "youtube bumper ads": "YouTube Ads - Non-Skippable",
+    "bumper ads": "YouTube Ads - Non-Skippable",
     # CTV / OTT / Entravision Plus
     "connected tv (ott) - entravision plus": "Entravision Plus CTV/OTT - English Content",
     "connected tv (ott)": "Entravision Plus CTV/OTT - English Content",
@@ -484,11 +493,20 @@ def _match_product(raw: str, catalog_names: list[str], db_aliases: Optional[dict
         if cn.lower() == r:
             return cn
 
-    # 2. alias (static, hand-curated)
-    for alias, canonical in PRODUCT_ALIASES.items():
-        if alias in r:
-            if canonical in catalog_names:
-                return canonical
+    # 2. alias (static, hand-curated). Longest alias first, so "youtube non-skippable" is tried before the bare
+    # "youtube ads"; and a YouTube phrase naming the non-skippable / bumper formats goes to that product however
+    # the words are ordered ("YouTube Ads - non skippable", "bumper ads on YouTube"). A target an admin has since
+    # renamed is followed through the recorded renames.
+    def _current(canonical: str) -> str:
+        return (db_aliases or {}).get(canonical, canonical)
+
+    if "youtube" in r and re.search(r"\b(?:non[\s-]?skippable|un[\s-]?skippable|bumper)", r):
+        target = _current("YouTube Ads - Non-Skippable")
+        if target in catalog_names:
+            return target
+    for alias, canonical in sorted(PRODUCT_ALIASES.items(), key=lambda kv: -len(kv[0])):
+        if alias in r and _current(canonical) in catalog_names:
+            return _current(canonical)
 
     # 2b. alias (DB-driven — an admin renamed this product at some point;
     # see catalog.py's record_product_alias/all_product_aliases). Exact

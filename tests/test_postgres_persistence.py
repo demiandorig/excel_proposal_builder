@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.real_db
 def test_postgres_persistence_survives_fresh_process_and_cleans_up(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -32,14 +33,7 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
     proposals_dir = tmp_path / "proposals"
     monkeypatch.setenv("PROPOSALS_DIR", str(proposals_dir))
 
-    from app.catalog import (
-        CATALOG,
-        add_custom_product,
-        delete_custom_product,
-        load_custom_products,
-        load_rate_overrides,
-        save_rate_overrides,
-    )
+    from app.catalog import create_product, effective_catalog, list_products, update_product
     from app.db import execute
     from app.main import _save_proposal_metadata
     from app.market_config import delete_market_entry, set_market_entry
@@ -49,26 +43,21 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
     market_key = f"__pytest_persistence_market_{suffix}"
     proposal_id = f"__pytest_persistence_proposal_{suffix}"
     proposal_filename = f"{proposal_id}.xlsx"
-    original_overrides = load_rate_overrides()
-    builtin = CATALOG[0]
+    original = {p["name"]: p for p in list_products()}          # also seeds an empty products table
+    seeded = effective_catalog()[0]
+    original_form = original[seeded.name]
     proposal_path = proposals_dir / proposal_filename
 
     try:
-        # Rate overrides: use a built-in product so this covers the normal
-        # admin rate-override path, then verify the value in a fresh process.
-        overrides = {
-            name: dict(fields) for name, fields in original_overrides.items()
-        }
-        overrides[builtin.name] = {
-            **overrides.get(builtin.name, {}),
-            "minimum_spend": float(builtin.minimum_spend) + 123.45,
+        # Editing an existing product: change two fields, then verify them in a fresh process.
+        update_product(original_form["id"], {
+            "minimum_spend": float(seeded.minimum_spend) + 123.45,
             "notes": f"pytest persistence marker {suffix}",
-        }
-        save_rate_overrides(overrides)
+        })
 
-        # Custom products: create a complete record with non-default values so
-        # numeric, boolean, tuple, and text fields all have to round-trip.
-        add_custom_product(
+        # A new product: a complete record with non-default values so numeric, boolean, tuple and text
+        # fields all have to round-trip.
+        create_product(
             {
                 "name": custom_name,
                 "family": "Pytest Persistence",
@@ -76,7 +65,8 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
                 "buying_model": "CPM",
                 "base_rate": 37.5,
                 "minimum_spend": 875.25,
-                "minimum_flight_days": (11, 44),
+                "minimum_flight_days_min": 11,
+                "minimum_flight_days_max": 44,
                 "estimated_impressions": True,
                 "discloses_impressions": False,
                 "proposal_description": "Temporary persistence regression product",
@@ -165,15 +155,15 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
             import asyncio
             from pathlib import Path
 
-            from app.catalog import load_custom_products, load_rate_overrides
+            from app.catalog import by_name, effective_catalog
             from app.main import _get_proposal_metadata, download, reopen_proposal
             from app.market_config import load_market_config
 
-            overrides = load_rate_overrides()
-            assert overrides[{builtin.name!r}]["minimum_spend"] == {float(builtin.minimum_spend) + 123.45!r}
-            assert overrides[{builtin.name!r}]["notes"] == {"pytest persistence marker " + suffix!r}
+            edited = by_name({seeded.name!r})
+            assert edited.minimum_spend == {float(seeded.minimum_spend) + 123.45!r}
+            assert edited.notes == {"pytest persistence marker " + suffix!r}
 
-            custom = next(p for p in load_custom_products() if p.name == {custom_name!r})
+            custom = next(p for p in effective_catalog() if p.name == {custom_name!r})
             assert custom.family == "Pytest Persistence"
             assert custom.minimum_flight_days == (11, 44)
             assert custom.base_rate == 37.5
@@ -232,6 +222,6 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
         # so a partially completed setup cannot leak into a later run.
         execute("DELETE FROM proposals WHERE proposal_id = %s", (proposal_id,))
         delete_market_entry(market_key)
-        delete_custom_product(custom_name)
-        save_rate_overrides(original_overrides)
+        execute("DELETE FROM products WHERE name = %s", (custom_name,))
+        update_product(original_form["id"], {k: original_form[k] for k in ("minimum_spend", "notes")})
         proposal_path.unlink(missing_ok=True)

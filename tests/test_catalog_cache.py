@@ -1,57 +1,14 @@
 """
-Covers the new short-TTL read-through cache in app/catalog.py — the actual
-confirmed root cause of "Suggest Mix takes forever": _apply_override()
-called load_rate_overrides() (a full-table SELECT) once PER PRODUCT, and
-effective_catalog() is called fresh by by_family() once PER RECOMMENDED
-TACTIC, so a single Suggest Mix click was triggering on the order of
-hundreds of DB round trips. This only tests the caching layer itself (call
-counting against a stubbed connection, never a real DATABASE_URL) — not
-the SQL/row-shape logic those functions already had, which is unchanged.
+The short-TTL read-through cache in app/catalog.py. It exists because effective_catalog()/by_name()/by_family()
+are called constantly (per product, per recommended tactic, per line item): reading the product table each time
+would be hundreds of database round trips for one "Suggest mix" click. These tests count reads against a stubbed
+reader — never a real DATABASE_URL.
 """
 from __future__ import annotations
 
 import pytest
 
 from app import catalog
-
-
-class _FakeResult:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def fetchall(self):
-        return list(self._rows)
-
-
-class _CountingConn:
-    """Returns empty results for anything — this test only cares HOW MANY
-    TIMES the connection is opened, not what comes back."""
-    def __init__(self, counter: list):
-        self._counter = counter
-
-    def __enter__(self):
-        self._counter.append(1)
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def execute(self, sql, params=()):
-        return _FakeResult([])
-
-
-@pytest.fixture(autouse=True)
-def _reset_catalog_caches():
-    """These caches are module-level singletons — reset before AND after
-    every test in this file so no test's cache state leaks into another
-    (in here or in a different test file run in the same pytest session)."""
-    catalog._rate_overrides_cache.invalidate()
-    catalog._custom_products_cache.invalidate()
-    catalog._deleted_builtin_names_cache.invalidate()
-    yield
-    catalog._rate_overrides_cache.invalidate()
-    catalog._custom_products_cache.invalidate()
-    catalog._deleted_builtin_names_cache.invalidate()
 
 
 def test_ttl_cache_serves_repeated_gets_from_cache():
@@ -92,77 +49,96 @@ def test_ttl_cache_expires_after_ttl(monkeypatch):
     assert len(calls) == 2
 
 
-def test_load_rate_overrides_only_hits_the_db_once_across_repeated_calls(monkeypatch):
-    open_count = []
-    monkeypatch.setattr(catalog, "get_connection", lambda: _CountingConn(open_count))
-
-    catalog.load_rate_overrides()
-    catalog.load_rate_overrides()
-    catalog.load_rate_overrides()
-
-    assert len(open_count) == 1
+def _row(name, family="Display", deleted=False, pid=1):
+    p = catalog.Product(
+        family=family, name=name, short_label="x", proposal_description="", sizes="", buying_model="CPM", base_rate=1.0,
+        estimated_impressions=False, discloses_impressions=True, minimum_spend=0.0, minimum_flight_days=(7, 90),
+        sla_data_days=None, sla_creative_days=None, sla_activate_days=None, sla_total_days=None,
+        media_allocation_pct=0.0, margin_upper=0.5, margin_lower=0.3, tech_platform="", wide_orbit_code=name)
+    return {"id": pid, "is_deleted": deleted, "product": p}
 
 
-def test_load_custom_products_only_hits_the_db_once_across_repeated_calls(monkeypatch):
-    open_count = []
-    monkeypatch.setattr(catalog, "get_connection", lambda: _CountingConn(open_count))
+def test_the_product_table_is_read_once_across_repeated_lookups(monkeypatch):
+    reads = []
+    monkeypatch.setattr(catalog, "_read_product_rows", lambda: (reads.append(1), [_row("A")])[1])
+    catalog.invalidate_product_caches()
 
-    catalog.load_custom_products()
-    catalog.load_custom_products()
-
-    assert len(open_count) == 1
-
-
-def test_load_deleted_builtin_names_only_hits_the_db_once_across_repeated_calls(monkeypatch):
-    open_count = []
-    monkeypatch.setattr(catalog, "get_connection", lambda: _CountingConn(open_count))
-
-    catalog.load_deleted_builtin_names()
-    catalog.load_deleted_builtin_names()
-
-    assert len(open_count) == 1
+    for _ in range(5):
+        catalog.effective_catalog()
+        catalog.by_name("A")
+        catalog.by_family("Display")
+    assert len(reads) == 1
 
 
-def test_save_rate_overrides_invalidates_so_the_next_read_is_fresh(monkeypatch):
-    open_count = []
-    monkeypatch.setattr(catalog, "get_connection", lambda: _CountingConn(open_count))
-    # save_rate_overrides() itself reads load_custom_products() (for name
-    # validation) and writes rate_overrides — both go through the same
-    # stubbed connection, so count everything together.
-
-    catalog.load_rate_overrides()
-    assert len(open_count) == 1
-    catalog.save_rate_overrides({})  # writes + must invalidate on its own
-    catalog.load_rate_overrides()
-    # The write itself opened a connection, AND invalidated the cache, so
-    # this next read opens ANOTHER connection rather than serving stale
-    # data from before the write.
-    assert len(open_count) > 1
+def test_a_write_invalidates_so_the_next_read_is_fresh(monkeypatch):
+    reads = []
+    monkeypatch.setattr(catalog, "_read_product_rows", lambda: (reads.append(1), [_row("A")])[1])
+    catalog.invalidate_product_caches()
+    catalog.effective_catalog()
+    catalog.invalidate_product_caches()          # what create/update/delete call when they finish
+    catalog.effective_catalog()
+    assert len(reads) == 2
 
 
-def test_clear_rate_override_invalidates(monkeypatch):
-    open_count = []
-    monkeypatch.setattr(catalog, "get_connection", lambda: _CountingConn(open_count))
+def test_an_unreadable_table_falls_back_to_the_seed_list_and_is_not_retried_for_a_few_seconds(monkeypatch):
+    reads = []
+    monkeypatch.setattr(catalog, "_read_product_rows", lambda: (reads.append(1), None)[1])
+    catalog.invalidate_product_caches()
 
-    catalog.load_rate_overrides()
-    before = len(open_count)
-    catalog.clear_rate_override("Some Product")
-    catalog.load_rate_overrides()
-    # The clear (a write) + the fresh reload after it (no longer served
-    # from a stale cache) both open a connection = 2 more than before.
-    assert len(open_count) == before + 2
+    first = catalog.effective_catalog()
+    for _ in range(4):
+        catalog.effective_catalog()
+    assert len(reads) == 1                                  # one failed read, then the seed list for a moment
+    assert {p.name for p in first} >= {"Search - SEM", "YouTube Ads - Skippable"}   # the fallback is the real seed list
+
+    fake_now = [catalog.time.monotonic() + 16]
+    monkeypatch.setattr(catalog.time, "monotonic", lambda: fake_now[0])
+    catalog.effective_catalog()
+    assert len(reads) == 2                                  # retried after the window
 
 
-def test_set_builtin_deleted_invalidates_both_caches(monkeypatch):
-    open_count = []
-    monkeypatch.setattr(catalog, "get_connection", lambda: _CountingConn(open_count))
+def test_an_empty_table_is_seeded_once_then_read_back(monkeypatch):
+    state = {"rows": [], "seeded": 0}
 
-    catalog.load_deleted_builtin_names()
-    catalog.load_rate_overrides()
-    before = len(open_count)
-    catalog.set_builtin_deleted("Some Product", True)
-    catalog.load_deleted_builtin_names()
-    catalog.load_rate_overrides()
-    # 1 write + 2 fresh reads = 3 more connections, not 0 (stale cache) or
-    # just 1 (only one of the two caches actually invalidated).
-    assert len(open_count) == before + 3
+    def read():
+        return list(state["rows"])
+
+    def seed():
+        state["seeded"] += 1
+        state["rows"] = [_row("Seeded A", pid=1), _row("Seeded B", pid=2)]
+    monkeypatch.setattr(catalog, "_read_product_rows", read)
+    monkeypatch.setattr(catalog, "_seed_products_table", seed)
+    catalog.invalidate_product_caches()
+
+    assert [p.name for p in catalog.effective_catalog()] == ["Seeded A", "Seeded B"]
+    catalog.effective_catalog()
+    assert state["seeded"] == 1
+
+
+def test_a_failed_seed_degrades_to_the_seed_list_instead_of_raising(monkeypatch):
+    monkeypatch.setattr(catalog, "_read_product_rows", lambda: [])
+
+    def boom():
+        raise RuntimeError("insert failed")
+    monkeypatch.setattr(catalog, "_seed_products_table", boom)
+    catalog.invalidate_product_caches()
+    assert any(p.name == "Search - SEM" for p in catalog.effective_catalog())
+
+
+def test_a_missing_legacy_table_never_takes_the_seed_list_down(monkeypatch):
+    def boom():
+        raise RuntimeError("relation rate_overrides does not exist")
+    monkeypatch.setattr(catalog, "load_rate_overrides", boom)
+    monkeypatch.setattr(catalog, "load_custom_products", boom)
+    monkeypatch.setattr(catalog, "load_deleted_builtin_names", boom)
+    seed = catalog._seed_products()
+    assert len(seed) == len(catalog.CATALOG)
+
+
+def test_writes_refuse_to_run_when_the_table_cant_be_reached(monkeypatch):
+    monkeypatch.setattr(catalog, "_read_product_rows", lambda: None)
+    catalog.invalidate_product_caches()
+    with pytest.raises(RuntimeError, match="schema.sql"):
+        catalog.create_product({"name": "X", "family": "F", "buying_model": "CPM"})
+    with pytest.raises(RuntimeError):
+        catalog.list_products()

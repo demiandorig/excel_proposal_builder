@@ -2740,6 +2740,8 @@ input[readonly] {
   line-height: 1.5;
   color: var(--ink);
 }
+ .gamma-create-status { margin: 4px 0 10px; font-size: 13px; }
+.gamma-create-status.gamma-create-error { color: var(--danger, #b3261e); }
 .roadblock-removed {
   margin: 0 0 12px;
   padding: 8px 12px;

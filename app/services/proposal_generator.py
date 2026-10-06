@@ -16,7 +16,7 @@ from typing import Optional
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
-from app.catalog import CATALOG, Product, by_name, families, by_family
+from app.catalog import Product, by_name, families, by_family
 from app.services.notion_parser import ProposalRequest, classify_output_tabs
 from app import excel_template as et
 from app.market_config import get_market_address

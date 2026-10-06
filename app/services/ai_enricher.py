@@ -965,8 +965,13 @@ def _blurb_sentence_ok(sentence: str, product_name: str, avoid: Optional["re.Pat
     name = (product_name or "").lower()
     if avoid is not None and avoid.search(sentence.lower()):
         return False
+    # "skippable" / "non-skippable" is allowed only for the product whose own name says that one — a skippable
+    # product's blurb mentioning the non-skippable format (or the reverse) is the format menu the prompt forbids.
+    name_non = bool(re.search(r"\bnon-?skippable\b", name))
+    name_skip = not name_non and bool(re.search(r"\bskippable\b", name))
     for m in _BLURB_FORBIDDEN.finditer(sentence):
-        if "skippable" in m.group(0).lower() and "skippable" in name:
+        word = m.group(0).lower()
+        if "skippable" in word and (name_non if word.startswith("non") else name_skip):
             continue
         return False
     if _LANGUAGE_CLAIM.search(sentence) and not _LANGUAGE_IN_NAME.search(name):

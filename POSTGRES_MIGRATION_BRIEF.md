@@ -1,5 +1,9 @@
 # Postgres migration brief — Proposal Builder admin data
 
+> **Historical.** The `rate_overrides.json` / `custom_products.json` stores described below were later replaced
+> by a single freeform `products` table (see the end of `schema.sql`); the legacy tables are now only read once,
+> to seed it.
+
 **Purpose:** move this app's admin-editable data off local JSON files (which
 get wiped on every Replit redeploy) onto the Postgres database already
 provisioned in Replit (the one shown in your Database tool, connection

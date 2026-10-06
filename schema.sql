@@ -4,6 +4,7 @@
 -- "Development Database" had 0 tables at the time this was written).
 
 -- ---------------------------------------------------------------------------
+-- LEGACY (superseded by `products` at the end of this file; read only to seed it)
 -- rate_overrides — one row per BUILT-IN catalog product that has at least
 -- one field overridden. Mirrors app/catalog.py's _OVERRIDABLE_FIELDS
 -- exactly; add a column here if that tuple ever grows. Every column is
@@ -27,6 +28,7 @@ CREATE TABLE rate_overrides (
 );
 
 -- ---------------------------------------------------------------------------
+-- LEGACY (superseded by `products`; read only to seed it)
 -- custom_products — one row per admin-added product (full record, not a
 -- diff against anything). Column set matches app/catalog.py's Product
 -- dataclass field-for-field.
@@ -402,3 +404,56 @@ CREATE TABLE IF NOT EXISTS restriction_sync (
     synced_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     synced_by     TEXT
 );
+
+-- ---------------------------------------------------------------------------
+-- products — THE product list (Admin -> Products). Every product is an equal,
+-- fully editable row: there is no "original" catalog to revert to and no
+-- built-in/custom split. The first time the app reads an EMPTY table it seeds
+-- it from the rate card in app/catalog.py with every legacy override
+-- (rate_overrides), admin-added product (custom_products) and deletion folded
+-- in — those three older tables are only read for that, never written again,
+-- and can be dropped afterwards. is_deleted hides a row from every list but
+-- keeps it resolvable by name so an already-saved proposal never loses a line.
+-- sort_order is the display order. Idempotent like the other newer tables.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS products (
+    id                         BIGSERIAL PRIMARY KEY,
+    name                       TEXT NOT NULL UNIQUE,
+    sort_order                 INTEGER NOT NULL DEFAULT 0,
+    is_deleted                 BOOLEAN NOT NULL DEFAULT FALSE,
+    family                     TEXT NOT NULL,
+    short_label                TEXT NOT NULL DEFAULT 'Product',
+    proposal_description       TEXT NOT NULL DEFAULT '',
+    sizes                      TEXT NOT NULL DEFAULT 'Custom',
+    buying_model               TEXT NOT NULL CHECK (buying_model IN ('CPM', 'CPP', 'Fixed')),
+    base_rate                  NUMERIC(12, 2),
+    estimated_impressions      BOOLEAN NOT NULL DEFAULT FALSE,
+    discloses_impressions      BOOLEAN NOT NULL DEFAULT TRUE,
+    minimum_spend              NUMERIC(12, 2) NOT NULL DEFAULT 0,
+    minimum_flight_days_min    INTEGER NOT NULL DEFAULT 7,
+    minimum_flight_days_max    INTEGER NOT NULL DEFAULT 90,
+    sla_data_days              INTEGER,
+    sla_creative_days          INTEGER,
+    sla_activate_days          INTEGER,
+    sla_total_days             INTEGER,
+    media_allocation_pct       NUMERIC(5, 4) NOT NULL DEFAULT 0,
+    margin_upper               NUMERIC(5, 4) NOT NULL DEFAULT 0.5,
+    margin_lower               NUMERIC(5, 4) NOT NULL DEFAULT 0.3,
+    tech_platform              TEXT NOT NULL DEFAULT '',
+    wide_orbit_code            TEXT NOT NULL DEFAULT '',
+    billing_interval           TEXT NOT NULL DEFAULT 'Monthly',
+    billing_calendar           TEXT NOT NULL DEFAULT 'Standard/prorated',
+    billing_source             TEXT NOT NULL DEFAULT '1st Party Actual',
+    national_supported         BOOLEAN NOT NULL DEFAULT TRUE,
+    notes                      TEXT NOT NULL DEFAULT '',
+    estimated_cpm_for_imps     NUMERIC(12, 2),
+    hispanic_targeting_forced  BOOLEAN,
+    cannabis_policy            TEXT NOT NULL DEFAULT 'not_allowed'
+                                 CHECK (cannabis_policy IN ('allowed', 'custom_request_only', 'mh_only', 'not_allowed')),
+    political_policy           TEXT NOT NULL DEFAULT 'allowed'
+                                 CHECK (political_policy IN ('allowed', 'restricted', 'not_allowed')),
+    is_addon                   BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS products_sort_idx ON products (sort_order, id);

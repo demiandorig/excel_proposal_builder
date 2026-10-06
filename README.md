@@ -5,7 +5,8 @@ proposal workbook (Net + With-Sections + Gross + DOOH + Avails tabs).
 
 Stage 2 deliverable of the TapClicks / AdFlo proposal pipeline. The
 catalog, pricing rules, and Excel template are shared with the Stage 1
-business-logic spec — there is exactly one source of truth (`app/catalog.py`).
+business-logic spec. The product list lives in the database and is edited in **Admin → Products**
+(`app/catalog.py` only holds the starting list that seeds an empty table).
 
 ---
 
@@ -44,7 +45,7 @@ Open <http://127.0.0.1:8000> and follow the 5-step UI:
 ```
 webapp/
 ├── app/
-│   ├── catalog.py                 # canonical product catalog (35 SKUs, 11 families)
+│   ├── catalog.py                 # product model + the starting list; the live list is the `products` table
 │   ├── excel_template.py          # builds the empty template (Stage 1 generator)
 │   ├── main.py                    # FastAPI app + JSON endpoints
 │   ├── services/
@@ -61,12 +62,22 @@ webapp/
 └── run.sh
 ```
 
-### The catalog is the contract
+### The product list is one freeform list
 
-`app/catalog.py` defines a single `CATALOG` list of `Product` dataclasses.
-Every other module — the Excel builder, parser aliases, recommender,
-generator — imports from this list. Changes to a rate, a minimum, or a
-planner note happen in one place. There are no duplicated price tables.
+Products are rows in the `products` table, all equal: an admin adds, edits, duplicates (to make a variant) and
+deletes them in **Admin → Products**, and every other module — the Excel builder, parser, recommender, generator —
+reads that list through `catalog.effective_catalog()`. `CATALOG` in `app/catalog.py` is only the *seed*: the first
+time the app finds the table empty it copies that list in (folding in anything the retired `rate_overrides` /
+`custom_products` tables held), and it is the read-only fallback if the table can't be reached. Apply `schema.sql`
+before first use. A renamed product keeps resolving under its old name (`product_aliases`); a deleted one stays
+hidden-but-resolvable so saved proposals still open.
+
+### Create in Gamma
+
+Step 07's **Create in Gamma** button sends the outline to Gamma's public API from the server (the key never reaches
+the browser) and opens the finished deck in a new tab. Set `GAMMA_API_KEY` (Replit Secrets / `.env`; optional
+`GAMMA_THEME_ID`, `GAMMA_FOLDER_ID`, `GAMMA_WORKSPACE_ACCESS`). Without a key the button copies the outline and
+opens Gamma's own create page instead.
 
 ### Why the recommender is deterministic
 

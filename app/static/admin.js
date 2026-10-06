@@ -17,7 +17,8 @@ const adminState = {
   analytics: null,
   analyticsLoaded: false,
   analyticsWindow: "all",  // "30d" | "90d" | "12m" | "all"
-  rates: [],
+  rates: [],          // the product list: [{id, name, family, ...}]
+  productFamilies: [],
   ratesLoaded: false,
   markets: [],
   marketsLoaded: false,
@@ -37,8 +38,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireSearch();
   wireProposalsControls();
   wireAnalyticsControls();
-  wireAddProduct();
-  wireEditProduct();
+  wireProductForm();
   wireBulkUpload();
   wireMarketConfig();
   wireAddUser();
@@ -304,7 +304,6 @@ function wireBulkUpload() {
       if (!res.ok) throw new Error(body.detail || res.statusText);
       renderBulkUploadResult(body);
       await loadRates();
-      renderRates(filterRates(document.getElementById("rates-search").value));
     } catch (err) {
       resultEl.innerHTML = `<span class="bur-error">Bulk upload failed: ${escapeHtml(err.message)}</span>`;
     } finally {
@@ -315,11 +314,13 @@ function wireBulkUpload() {
 
 function renderBulkUploadResult(body) {
   const resultEl = document.getElementById("bulk-upload-result");
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
   const parts = [];
-  parts.push(`<strong>Processed ${body.total_rows_processed} row${body.total_rows_processed === 1 ? "" : "s"}.</strong>`);
-  parts.push(`${body.created.length} added, ${body.updated_as_rate_override.length} rate override${body.updated_as_rate_override.length === 1 ? "" : "s"} updated, ${body.updated_custom_product.length} custom product${body.updated_custom_product.length === 1 ? "" : "s"} replaced.`);
+  parts.push(`<strong>Processed ${plural(body.total_rows_processed, "row")}.</strong>`);
+  const unchanged = (body.unchanged || []).length;
+  parts.push(`${body.created.length} added, ${body.updated.length} updated${unchanged ? `, ${unchanged} unchanged` : ""}.`);
   if (body.errors.length) {
-    parts.push(`<div class="bur-error">${body.errors.length} row${body.errors.length === 1 ? "" : "s"} skipped:</div>`);
+    parts.push(`<div class="bur-error">${plural(body.errors.length, "row")} skipped:</div>`);
     parts.push(`<ul>${body.errors.map(e => `<li class="bur-error">${escapeHtml(e)}</li>`).join("")}</ul>`);
   }
   resultEl.innerHTML = parts.join(" ");
@@ -436,16 +437,21 @@ function shortenUA(ua) {
 }
 
 // --------------------------------------------------------------------------
-// Rate overrides
+// Products — the one product list. Every row is equal and fully editable;
+// there is no "original" list to revert to.
 // --------------------------------------------------------------------------
 
 async function loadRates() {
   try {
-    const res = await fetch("/api/admin/rates");
-    const data = await res.json();
+    const res = await fetch("/api/admin/products");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
     adminState.rates = data.products || [];
+    adminState.productFamilies = data.families || [];
     adminState.ratesLoaded = true;
-    renderRates(adminState.rates);
+    document.getElementById("pf-families").innerHTML =
+      adminState.productFamilies.map(f => `<option value="${escapeAttr(f)}"></option>`).join("");
+    renderRates(filterRates(document.getElementById("rates-search").value));
   } catch (e) {
     document.getElementById("rates-body").innerHTML =
       `<tr><td colspan="7" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
@@ -453,18 +459,14 @@ async function loadRates() {
 }
 
 function filterRates(query) {
-  const q = query.trim().toLowerCase();
+  const q = (query || "").trim().toLowerCase();
   if (!q) return adminState.rates;
-  return adminState.rates.filter(p =>
-    p.name.toLowerCase().includes(q) || p.family.toLowerCase().includes(q) ||
-    (p.stable_name || "").toLowerCase().includes(q)  // finds a renamed product by its former name too
-  );
+  return adminState.rates.filter(p => p.name.toLowerCase().includes(q) || p.family.toLowerCase().includes(q));
 }
 
 function renderRates(list) {
   const body = document.getElementById("rates-body");
-  document.getElementById("rates-count").textContent =
-    `${list.length} product${list.length === 1 ? "" : "s"}`;
+  document.getElementById("rates-count").textContent = `${list.length} product${list.length === 1 ? "" : "s"}`;
 
   if (!list.length) {
     body.innerHTML = `<tr><td colspan="7" class="admin-empty">No products match.</td></tr>`;
@@ -472,84 +474,100 @@ function renderRates(list) {
   }
 
   body.innerHTML = list.map(p => `
-    <tr data-product="${escapeAttr(p.stable_name)}" class="${p.is_deleted ? "row-deleted" : ""}">
+    <tr data-product="${p.id}">
       <td class="mono">${escapeHtml(p.family)}</td>
       <td class="wrap">
         ${escapeHtml(p.name)}
-        ${p.has_override ? '<span class="override-badge">Override</span>' : ""}
-        ${p.is_custom ? '<span class="custom-badge">Custom</span>' : ""}
         ${p.is_addon ? '<span class="addon-badge">Add-on</span>' : ""}
-        ${p.is_deleted ? '<span class="deleted-badge">Deleted</span>' : ""}
-        ${p.name !== p.stable_name ? `<span class="rename-hint" title="Original catalog name — still recognized in old pastes and saved proposals">was: ${escapeHtml(p.stable_name)}</span>` : ""}
       </td>
       <td class="mono">${escapeHtml(p.buying_model)}</td>
       <td>${numInput(p, "base_rate")}</td>
       <td>${numInput(p, "minimum_spend")}</td>
       <td>${numInput(p, "estimated_cpm_for_imps")}</td>
       <td>
-        <button class="btn-save-row" data-action="save" data-product="${escapeAttr(p.stable_name)}" ${p.is_deleted ? "disabled" : ""}>Save</button>
-        <button class="btn-revert" data-action="revert" data-product="${escapeAttr(p.stable_name)}"
-                ${p.has_override ? "" : "disabled"}>Revert</button>
-        <button class="btn-secondary" data-action="edit" data-product="${escapeAttr(p.stable_name)}" ${p.is_deleted ? "disabled" : ""}>✎ Edit</button>
-        ${p.is_deleted
-          ? `<button class="btn-secondary" data-action="restore" data-product="${escapeAttr(p.stable_name)}">↺ Restore</button>`
-          : `<button class="btn-delete-row" data-action="delete" data-product="${escapeAttr(p.stable_name)}" data-custom="${p.is_custom ? "1" : "0"}">Delete</button>`}
+        <button class="btn-save-row" data-action="save" data-product="${p.id}">Save</button>
+        <button class="btn-secondary" data-action="edit" data-product="${p.id}">✎ Edit</button>
+        <button class="btn-secondary" data-action="duplicate" data-product="${p.id}" title="Start a new product from a copy of this one">⧉ Duplicate</button>
+        <button class="btn-delete-row" data-action="delete" data-product="${p.id}">Delete</button>
       </td>
     </tr>
   `).join("");
 
-  body.querySelectorAll('[data-action="save"]').forEach(btn => {
-    btn.addEventListener("click", () => onSaveRate(btn.dataset.product));
+  // Numbers typed into a row but not saved yet survive a re-render (a filter keystroke, another row's save…).
+  const dirty = adminState.dirtyRates || (adminState.dirtyRates = {});
+  body.querySelectorAll("tr[data-product]").forEach(row => {
+    const id = row.dataset.product;
+    row.querySelectorAll("input[data-field]").forEach(inp => {
+      if (dirty[id] && Object.prototype.hasOwnProperty.call(dirty[id], inp.dataset.field)) inp.value = dirty[id][inp.dataset.field];
+      inp.addEventListener("input", () => {
+        const saved = inp.getAttribute("value") || "";
+        dirty[id] = dirty[id] || {};
+        if (inp.value === saved) delete dirty[id][inp.dataset.field]; else dirty[id][inp.dataset.field] = inp.value;
+        if (!Object.keys(dirty[id]).length) delete dirty[id];
+      });
+    });
   });
-  body.querySelectorAll('[data-action="revert"]').forEach(btn => {
-    btn.addEventListener("click", () => onRevertRate(btn.dataset.product));
+  body.querySelectorAll('[data-action="save"]').forEach(btn => {
+    btn.addEventListener("click", () => onSaveRate(parseInt(btn.dataset.product)));
   });
   body.querySelectorAll('[data-action="edit"]').forEach(btn => {
-    btn.addEventListener("click", () => onOpenEditProduct(btn.dataset.product));
+    btn.addEventListener("click", () => openProductForm("edit", productById(btn.dataset.product)));
+  });
+  body.querySelectorAll('[data-action="duplicate"]').forEach(btn => {
+    btn.addEventListener("click", () => openProductForm("copy", productById(btn.dataset.product)));
   });
   body.querySelectorAll('[data-action="delete"]').forEach(btn => {
-    btn.addEventListener("click", () => onDeleteProduct(btn.dataset.product, btn.dataset.custom === "1"));
+    btn.addEventListener("click", () => onDeleteProduct(parseInt(btn.dataset.product)));
   });
-  body.querySelectorAll('[data-action="restore"]').forEach(btn => {
-    btn.addEventListener("click", () => onRestoreProduct(btn.dataset.product));
-  });
+}
+
+function productById(id) {
+  return adminState.rates.find(p => String(p.id) === String(id));
 }
 
 function numInput(product, field) {
   const value = product[field];
-  const catalogValue = product[`catalog_${field}`];
-  const isOverridden = product.has_override && value !== catalogValue;
-  return `<input type="number" step="0.01" min="0"
+  return `<input type="number" step="any" min="0"
             value="${value === null || value === undefined ? "" : value}"
             placeholder="NA"
-            class="${isOverridden ? "overridden" : ""}"
             data-field="${field}" />`;
 }
 
-async function onSaveRate(productName) {
-  const row = document.querySelector(`tr[data-product="${cssEscape(productName)}"]`);
+// The quick numbers right in the table row: rate, minimum spend, est. CPM.
+async function onSaveRate(productId) {
+  const row = document.querySelector(`tr[data-product="${productId}"]`);
   if (!row) return;
   const btn = row.querySelector('[data-action="save"]');
   btn.disabled = true;
   btn.textContent = "Saving…";
 
-  const payload = { product_name: productName };
+  const payload = {};
+  let invalid = null;
   row.querySelectorAll("input[data-field]").forEach(inp => {
     const v = inp.value.trim();
-    payload[inp.dataset.field] = v === "" ? null : parseFloat(v);
+    if (v === "" && inp.dataset.field === "minimum_spend") return;        // a blank minimum means "leave it"
+    const n = v === "" ? null : Number(v);
+    if (n !== null && (!Number.isFinite(n) || n < 0)) invalid = inp.dataset.field.replace(/_/g, " ");
+    payload[inp.dataset.field] = n;
   });
+  if (invalid) {
+    alert(`Save failed: ${invalid} must be a number of 0 or more.`);
+    btn.disabled = false;
+    btn.textContent = "Save";
+    return;
+  }
 
   try {
-    const res = await fetch("/api/admin/rates", {
-      method: "POST",
+    const res = await fetch(`/api/admin/products/${productId}`, {
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(res.statusText);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(body.detail, res.statusText));
     btn.textContent = "Saved ✓";
-    await loadRates();  // refresh so the override badge / revert button update
-    // Re-apply the search filter after reload
-    renderRates(filterRates(document.getElementById("rates-search").value));
+    if (adminState.dirtyRates) delete adminState.dirtyRates[String(productId)];
+    await loadRates();
   } catch (e) {
     alert("Save failed: " + e.message);
     btn.disabled = false;
@@ -557,220 +575,173 @@ async function onSaveRate(productName) {
   }
 }
 
-async function onRevertRate(productName) {
-  if (!confirm(`Revert "${productName}" to its catalog default rate?`)) return;
+async function onDeleteProduct(productId) {
+  const p = productById(productId);
+  if (!p) return;
+  if (!confirm(`Delete "${p.name}"? It disappears from every list. Proposals that already use it keep working.`)) return;
   try {
-    await fetch(`/api/admin/rates/${encodeURIComponent(productName)}`, { method: "DELETE" });
-    await loadRates();
-    renderRates(filterRates(document.getElementById("rates-search").value));
-  } catch (e) {
-    alert("Revert failed: " + e.message);
-  }
-}
-
-async function onDeleteProduct(productName, isCustom) {
-  const confirmMsg = isCustom
-    ? `Permanently delete "${productName}"? This can't be undone.`
-    : `Delete "${productName}"? It'll be hidden from new proposals (and the catalog dropdown), but any proposal that already uses it keeps working, and you can restore it here later.`;
-  if (!confirm(confirmMsg)) return;
-  try {
-    const res = await fetch(`/api/admin/products/${encodeURIComponent(productName)}`, { method: "DELETE" });
+    const res = await fetch(`/api/admin/products/${productId}`, { method: "DELETE" });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
+      throw new Error(detailText(body.detail, res.statusText));
     }
+    if (adminState.dirtyRates) delete adminState.dirtyRates[String(productId)];
     await loadRates();
-    renderRates(filterRates(document.getElementById("rates-search").value));
   } catch (e) {
     alert("Delete failed: " + e.message);
   }
 }
 
-async function onRestoreProduct(productName) {
-  try {
-    const res = await fetch(`/api/admin/products/${encodeURIComponent(productName)}/restore`, { method: "POST" });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
-    }
-    await loadRates();
-    renderRates(filterRates(document.getElementById("rates-search").value));
-  } catch (e) {
-    alert("Restore failed: " + e.message);
-  }
-}
-
 // --------------------------------------------------------------------------
-// Add a new product
+// One form for adding, editing and duplicating
 // --------------------------------------------------------------------------
 
-function wireAddProduct() {
-  const panel = document.getElementById("add-product-panel");
-  const form = document.getElementById("add-product-form");
-  const cancelBtn = document.getElementById("add-product-cancel-btn");
+const PRODUCT_FORM_FIELDS = [
+  // [element id, product key, kind]
+  ["pf-family", "family", "text"], ["pf-name", "name", "text"], ["pf-short-label", "short_label", "text"],
+  ["pf-buying-model", "buying_model", "text"], ["pf-base-rate", "base_rate", "number"],
+  ["pf-min-spend", "minimum_spend", "number"], ["pf-est-cpm", "estimated_cpm_for_imps", "number"],
+  ["pf-sizes", "sizes", "text"], ["pf-tech-platform", "tech_platform", "text"],
+  ["pf-description", "proposal_description", "text"], ["pf-notes", "notes", "text"],
+  ["pf-is-addon", "is_addon", "bool"],
+  ["pf-flight-min", "minimum_flight_days_min", "number"], ["pf-flight-max", "minimum_flight_days_max", "number"],
+  ["pf-wide-orbit", "wide_orbit_code", "text"],
+  ["pf-margin-upper", "margin_upper", "number"], ["pf-margin-lower", "margin_lower", "number"],
+  ["pf-sla-data", "sla_data_days", "number"], ["pf-sla-creative", "sla_creative_days", "number"],
+  ["pf-sla-activate", "sla_activate_days", "number"], ["pf-sla-total", "sla_total_days", "number"],
+  ["pf-estimated-impressions", "estimated_impressions", "bool"],
+  ["pf-discloses-impressions", "discloses_impressions", "bool"],
+  ["pf-national-supported", "national_supported", "bool"],
+];
+
+function wireProductForm() {
+  const form = document.getElementById("product-form");
   if (!form) return;
-
-  form.addEventListener("submit", onAddProduct);
-  cancelBtn.addEventListener("click", () => {
-    form.reset();
-    document.getElementById("add-product-error").classList.add("hidden");
-    panel.open = false;
-  });
+  form.addEventListener("submit", onSubmitProduct);
+  // A field the browser refuses (a negative, a margin over 1…) may sit inside the collapsed Advanced section —
+  // open it, or the message would point at something the planner can't see.
+  form.addEventListener("invalid", (ev) => {
+    const adv = ev.target.closest && ev.target.closest(".pf-advanced");
+    if (adv) adv.open = true;
+  }, true);
+  document.getElementById("product-cancel-btn").addEventListener("click", closeProductForm);
+  document.getElementById("add-product-btn").addEventListener("click", () => openProductForm("add"));
 }
 
-async function onAddProduct(e) {
-  e.preventDefault();
-  const errEl = document.getElementById("add-product-error");
-  errEl.classList.add("hidden");
+function closeProductForm() {
+  adminState.productFormToken = Symbol();                                   // a response still in flight is stale now
+  const form = document.getElementById("product-form");
+  form.dataset.mode = "add";
+  form.dataset.productId = "";
+  document.getElementById("product-panel-title").textContent = "+ Add a product";
+  document.getElementById("product-submit-btn").textContent = "Add Product";
+  document.getElementById("product-submit-btn").disabled = false;
+  document.getElementById("product-panel").open = false;
+  document.getElementById("product-form-error").classList.add("hidden");
+}
 
-  const val = id => document.getElementById(id).value.trim();
-  const numOrNull = id => {
-    const v = val(id);
-    return v === "" ? null : parseFloat(v);
+// mode: "add" (blank), "edit" (a product), "copy" (a new product that starts as a copy of one).
+function openProductForm(mode, product) {
+  const form = document.getElementById("product-form");
+  form.reset();
+  adminState.productFormToken = Symbol();
+  document.querySelectorAll(".pf-advanced").forEach(d => { d.open = false; });
+  form.dataset.mode = mode;
+  form.dataset.productId = product ? String(product.id) : "";
+  const titles = {
+    add: "+ Add a product",
+    edit: `✎ Edit ${product ? product.name : ""}`,
+    copy: `⧉ New product — a copy of ${product ? product.name : ""}`,
   };
-
-  const payload = {
-    family: val("np-family"),
-    name: val("np-name"),
-    short_label: val("np-short-label") || null,
-    buying_model: val("np-buying-model"),
-    base_rate: numOrNull("np-base-rate"),
-    minimum_spend: numOrNull("np-min-spend"),
-    estimated_cpm_for_imps: numOrNull("np-est-cpm"),
-    sizes: val("np-sizes") || null,
-    tech_platform: val("np-tech-platform") || null,
-    proposal_description: val("np-description") || null,
-    notes: val("np-notes") || null,
-    is_addon: document.getElementById("np-is-addon").checked,
-  };
-
-  const submitBtn = e.target.querySelector('button[type="submit"]');
-  submitBtn.disabled = true;
-  submitBtn.textContent = "Adding…";
-
-  try {
-    const res = await fetch("/api/admin/products", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
-    }
-    e.target.reset();
-    document.getElementById("add-product-panel").open = false;
-    await loadRates();
-    renderRates(filterRates(document.getElementById("rates-search").value));
-  } catch (err) {
-    errEl.textContent = err.message;
-    errEl.classList.remove("hidden");
-  } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = "Add Product";
-  }
-}
-
-// --------------------------------------------------------------------------
-// Edit an existing product (built-in or custom) — every field, not just
-// the 3 the inline rate-table row edits. Reuses the add-product panel's
-// visual pattern (a second <details> form) rather than a modal.
-// --------------------------------------------------------------------------
-
-function wireEditProduct() {
-  const panel = document.getElementById("edit-product-panel");
-  const form = document.getElementById("edit-product-form");
-  const cancelBtn = document.getElementById("edit-product-cancel-btn");
-  if (!form) return;
-
-  form.addEventListener("submit", onSaveEditProduct);
-  cancelBtn.addEventListener("click", () => {
-    panel.open = false;
-    document.getElementById("edit-product-error").classList.add("hidden");
+  document.getElementById("product-panel-title").textContent = titles[mode];
+  document.getElementById("product-submit-btn").textContent = mode === "edit" ? "Save Changes" : "Add Product";
+  document.getElementById("product-submit-btn").disabled = false;
+  PRODUCT_FORM_FIELDS.forEach(([id, key, kind]) => {
+    const el = document.getElementById(id);
+    let value = product ? product[key] : undefined;
+    if (mode === "add") value = key === "discloses_impressions" || key === "national_supported" ? true : undefined;
+    if (kind === "bool") el.checked = !!value;
+    else el.value = value === null || value === undefined ? "" : value;
   });
-}
+  if (mode === "copy") document.getElementById("pf-name").value = `${product.name} (copy)`;
+  if (mode === "add") document.getElementById("pf-buying-model").value = "Fixed";
+  document.getElementById("product-form-error").classList.add("hidden");
 
-function onOpenEditProduct(stableName) {
-  const p = adminState.rates.find(r => r.stable_name === stableName);
-  if (!p) return;
-
-  document.getElementById("edit-product-name-label").textContent = `— ${p.name}`;
-  document.getElementById("edit-product-form").dataset.productName = p.stable_name;
-  document.getElementById("ep-family").value = p.family || "";
-  document.getElementById("ep-name").value = p.name || "";
-  document.getElementById("ep-short-label").value = p.short_label || "";
-  document.getElementById("ep-buying-model").value = p.buying_model || "Fixed";
-  document.getElementById("ep-base-rate").value = p.base_rate ?? "";
-  document.getElementById("ep-min-spend").value = p.minimum_spend ?? "";
-  document.getElementById("ep-est-cpm").value = p.estimated_cpm_for_imps ?? "";
-  document.getElementById("ep-sizes").value = p.sizes || "";
-  document.getElementById("ep-tech-platform").value = p.tech_platform || "";
-  document.getElementById("ep-description").value = p.proposal_description || "";
-  document.getElementById("ep-notes").value = p.notes || "";
-  document.getElementById("ep-is-addon").checked = !!p.is_addon;
-  document.getElementById("edit-product-error").classList.add("hidden");
-
-  const panel = document.getElementById("edit-product-panel");
+  const panel = document.getElementById("product-panel");
   panel.open = true;
   panel.scrollIntoView({ behavior: "smooth", block: "center" });
+  const nameEl = document.getElementById("pf-name");
+  nameEl.focus();
+  if (mode === "copy") nameEl.select();
 }
 
-async function onSaveEditProduct(e) {
+function productFormPayload() {
+  const payload = {};
+  PRODUCT_FORM_FIELDS.forEach(([id, key, kind]) => {
+    const el = document.getElementById(id);
+    if (kind === "bool") payload[key] = el.checked;
+    else if (kind === "number") {
+      const v = el.value.trim();
+      payload[key] = v === "" ? null : parseFloat(v);
+    } else payload[key] = el.value.trim();
+  });
+  // blank flight days mean "leave as is", not "zero"
+  ["minimum_flight_days_min", "minimum_flight_days_max"].forEach(k => { if (payload[k] === null) delete payload[k]; });
+  return payload;
+}
+
+async function onSubmitProduct(e) {
   e.preventDefault();
-  const errEl = document.getElementById("edit-product-error");
+  const form = e.target;
+  const mode = form.dataset.mode || "add";
+  const errEl = document.getElementById("product-form-error");
   errEl.classList.add("hidden");
+  const payload = productFormPayload();
+  if (mode === "copy") payload.copy_from_id = parseInt(form.dataset.productId);
 
-  const val = id => document.getElementById(id).value.trim();
-  // Empty = "leave as the catalog default" (same convention the single-
-  // field rate editor already uses), not "override to blank" — so an
-  // untouched field never accidentally stamps an empty-string override.
-  const strOrNull = id => val(id) || null;
-  const numOrNull = id => {
-    const v = val(id);
-    return v === "" ? null : parseFloat(v);
-  };
-
-  const productName = e.target.dataset.productName;
-  const payload = {
-    product_name: productName,
-    new_name: strOrNull("ep-name"),
-    family: strOrNull("ep-family"),
-    short_label: strOrNull("ep-short-label"),
-    buying_model: strOrNull("ep-buying-model"),
-    base_rate: numOrNull("ep-base-rate"),
-    minimum_spend: numOrNull("ep-min-spend"),
-    estimated_cpm_for_imps: numOrNull("ep-est-cpm"),
-    sizes: strOrNull("ep-sizes"),
-    tech_platform: strOrNull("ep-tech-platform"),
-    proposal_description: strOrNull("ep-description"),
-    notes: strOrNull("ep-notes"),
-    is_addon: document.getElementById("ep-is-addon").checked,
-  };
-
-  const submitBtn = e.target.querySelector('button[type="submit"]');
+  const submitBtn = document.getElementById("product-submit-btn");
+  const idleLabel = submitBtn.textContent;
+  const token = adminState.productFormToken = Symbol();
   submitBtn.disabled = true;
-  submitBtn.textContent = "Saving…";
-
+  submitBtn.textContent = mode === "edit" ? "Saving…" : "Adding…";
   try {
-    const res = await fetch("/api/admin/products/edit", {
-      method: "POST",
+    const res = await fetch(mode === "edit" ? `/api/admin/products/${form.dataset.productId}` : "/api/admin/products", {
+      method: mode === "edit" ? "PUT" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
-    }
-    document.getElementById("edit-product-panel").open = false;
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(body.detail, res.statusText));
+    if (adminState.productFormToken === token) closeProductForm();         // not if the planner moved on meanwhile
+    showProductNotice(mode, body);
     await loadRates();
-    renderRates(filterRates(document.getElementById("rates-search").value));
   } catch (err) {
-    errEl.textContent = err.message;
-    errEl.classList.remove("hidden");
+    if (adminState.productFormToken === token) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("hidden");
+    }
   } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = "Save Changes";
+    // Only the form this request belongs to gets its button back; one the planner reopened is already reset.
+    if (adminState.productFormToken === token) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = idleLabel;
+    }
   }
+}
+
+// What happened to the Restricted Verticals approvals when a product was duplicated.
+function showProductNotice(mode, body) {
+  const el = document.getElementById("product-notice");
+  if (!el) return;
+  if (mode !== "copy" || !body || !body.product) { el.classList.add("hidden"); return; }
+  const n = body.restrictions_inherited || 0;
+  const from = escapeHtml(body.product.copied_from || "The original");
+  let html;
+  if (body.restrictions_warning) html = `<span class="bur-error">${escapeHtml(body.restrictions_warning)}</span>`;
+  else if (n > 0) html = `<strong>${escapeHtml(body.product.name)}</strong> added. It inherits ${n} Restricted Verticals approval${n === 1 ? "" : "s"} from ${from}.`;
+  else html = `<strong>${escapeHtml(body.product.name)}</strong> added. ${from} isn't mapped in Restricted Verticals, so the copy isn't either.`;
+  el.innerHTML = html;
+  el.classList.remove("hidden");
 }
 
 // --------------------------------------------------------------------------

@@ -832,6 +832,7 @@ Client name: ...
           <div class="ai-section-head">
             <h3>Gamma Outline — Media Strategy Co-Pilot</h3>
             <div class="ai-section-actions">
+              <button class="btn-primary" id="gamma-create-btn" title="Builds the presentation in Gamma from this outline and opens it there">Create in Gamma ↗</button>
               <button class="btn-copy" data-copy-target="gamma-outline-body">Copy</button>
               <a class="btn-secondary" id="gamma-gpt-link"
                  href="https://chatgpt.com/g/g-68c0554e8ef08191bec6b1fd5d043eee-media-strategy-co-pilot-for-digital-sales-planners"
@@ -841,7 +842,8 @@ Client name: ...
                  target="_blank" rel="noopener">↗ Open Planning Gemini Co-Pilot</a>
             </div>
           </div>
-          <p class="gamma-outline-hint">Copy the outline below, then paste it into either co-pilot (opens in a new tab) to build the Gamma presentation.</p>
+          <p class="gamma-outline-hint">"Create in Gamma" builds the presentation from this outline and opens it in Gamma, where you finish it by hand (it uses Gamma credits). Refine the outline first if you want. Or copy it and paste it into either co-pilot (opens in a new tab).</p>
+          <p class="gamma-create-status hidden" id="gamma-create-status" role="status"></p>
           <pre class="email-body" id="gamma-outline-body"></pre>
 
           <!-- Reprompt area — the ONLY AI call in this whole section; the

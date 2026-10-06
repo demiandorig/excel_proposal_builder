@@ -1023,6 +1023,7 @@ function wireEvents() {
     document.getElementById("gamma-reprompt-input").value = "";
   });
   document.getElementById("gamma-reprompt-submit-btn").addEventListener("click", onGammaOutlineReprompt);
+  document.getElementById("gamma-create-btn").addEventListener("click", onGammaCreate);
 
   // Copy-to-clipboard buttons (delegated — buttons may not exist yet)
   document.addEventListener("click", e => {
@@ -1122,6 +1123,7 @@ function _clearPerProposalState() {
   if (picker) picker.classList.add("hidden");
   _resetStrategyUI();
   _resetRoadblocksUI();
+  _gammaReset();                       // the previous proposal's "deck is ready" link / error doesn't carry over
 }
 
 let _resetEpoch = 0;   // bumped by every resetAll() and re-parse, so a response that was in flight across it can tell
@@ -4179,7 +4181,7 @@ function renderAddonsModule() {
     .filter(p => p.is_addon);
 
   if (!addonProducts.length) {
-    list.innerHTML = `<p class="addons-empty">No add-ons configured yet — an admin can add some from the Rates tab.</p>`;
+    list.innerHTML = `<p class="addons-empty">No add-ons configured yet — an admin can add some from the Products tab.</p>`;
     return;
   }
 
@@ -6285,6 +6287,127 @@ function buildGammaOutline() {
   return lines.join("\n").trim();
 }
 
+// "Create in Gamma": the outline (as the planner may have refined it) goes to Gamma's API through the server,
+// which holds the key; Gamma builds the deck and the planner is taken to it to finish by hand. A blank tab is
+// opened straight from the click (a tab opened after waiting for Gamma would be blocked as a pop-up) and pointed
+// at the deck when it's ready. Without a Gamma key on the server, the outline is copied and Gamma's create page
+// opens instead.
+const GAMMA_CREATE_PAGE = "https://gamma.app/create";
+
+function _gammaStatus(text, { error = false } = {}) {
+  const el = document.getElementById("gamma-create-status");
+  el.textContent = text;
+  el.classList.toggle("hidden", !text);
+  el.classList.toggle("gamma-create-error", error);
+}
+
+// Back to the idle state: no message, button usable (a build still in flight stops on its own, see onGammaCreate).
+function _gammaReset() {
+  const btn = document.getElementById("gamma-create-btn");
+  if (btn) btn.disabled = false;
+  const el = document.getElementById("gamma-create-status");
+  if (el) { el.textContent = ""; el.classList.add("hidden"); el.classList.remove("gamma-create-error"); }
+}
+
+function _gammaShowLink(url) {
+  const el = document.getElementById("gamma-create-status");
+  el.classList.remove("hidden", "gamma-create-error");
+  el.textContent = "Your deck is ready: ";
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = "open it in Gamma ↗";
+  el.appendChild(link);
+}
+
+async function _copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (err) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+}
+
+async function onGammaCreate() {
+  const btn = document.getElementById("gamma-create-btn");
+  if (btn.disabled) return;
+  const outline = document.getElementById("gamma-outline-body").textContent.trim();
+  if (!outline) { _gammaStatus("There's no outline to send yet.", { error: true }); return; }
+
+  // Opened right here, from the click, so the browser lets it through; pointed at the deck below.
+  const tab = window.open("", "_blank");
+  if (tab) {
+    tab.document.write("<p style=\"font-family:sans-serif;padding:2rem\">Building your presentation in Gamma… this tab will switch to it when it's ready.</p>");
+    tab.document.close();
+    try { tab.opener = null; } catch (err) { /* the tab is only ever pointed at gamma.app; this just cuts the link back */ }
+  }
+  const epoch = _resetEpoch;
+  btn.disabled = true;
+  _gammaStatus("Sending the outline to Gamma…");
+  try {
+    const res = await fetch("/api/gamma/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outline, title: state.finalProposalTitle || buildProposalNamePreview(state.parsed) }),
+    });
+    const data = await _readJsonResponse(res);
+    if (epoch !== _resetEpoch) { if (tab) tab.close(); return; }
+
+    if (!data.configured) {
+      const copied = await _copyText(outline);
+      if (tab) tab.location.href = GAMMA_CREATE_PAGE;
+      _gammaStatus(copied
+        ? "Gamma isn't connected to this app, so the outline is copied — paste it into Gamma's text box."
+        : "Gamma isn't connected to this app — use Copy, then paste the outline into Gamma.", { error: !copied });
+      return;
+    }
+
+    // Poll until Gamma finishes (usually under a minute). One failed poll isn't the deck failing — the build runs on
+    // Gamma's side regardless — so a few in a row are tolerated before giving up.
+    const started = Date.now();
+    let failedPolls = 0;
+    while (Date.now() - started < 5 * 60 * 1000) {
+      await new Promise(r => setTimeout(r, 3000));
+      if (epoch !== _resetEpoch) { if (tab) tab.close(); return; }
+      let status;
+      try {
+        const sres = await fetch(`/api/gamma/status/${encodeURIComponent(data.generation_id)}`);
+        status = await _readJsonResponse(sres);
+        failedPolls = 0;
+      } catch (pollError) {
+        if (epoch !== _resetEpoch) { if (tab) tab.close(); return; }
+        if (++failedPolls >= 5) {
+          throw new Error(`lost contact with Gamma while it was building (${pollError.message}). The deck may still finish — check your Gamma workspace.`);
+        }
+        continue;
+      }
+      if (status.status === "completed" && status.gamma_url) {
+        if (tab && !tab.closed) tab.location.href = status.gamma_url;
+        _gammaShowLink(status.gamma_url);
+        return;
+      }
+      if (status.status === "failed") throw new Error(status.error || "Gamma couldn't build the deck.");
+      _gammaStatus(`Gamma is building the deck… ${Math.round((Date.now() - started) / 1000)}s`);
+    }
+    throw new Error("Gamma is taking longer than expected — check your Gamma workspace in a minute.");
+  } catch (e) {
+    if (tab && !tab.closed) tab.close();
+    if (epoch !== _resetEpoch) return;     // another proposal is on screen — this failure isn't its business
+    _gammaStatus(`Couldn't create the deck: ${e.message}`, { error: true });
+  } finally {
+    if (epoch === _resetEpoch) btn.disabled = false;     // after a reset, _gammaReset() already freed the button
+  }
+}
+
 // Refines the Gamma outline via the ONE AI call this whole feature makes
 // — building the outline itself (above) is pure client-side string
 // assembly with zero request, so this only runs when the planner
@@ -6441,6 +6564,7 @@ async function buildInternalEmailMailtoLink() {
 async function showResult(data) {
   const result = document.getElementById("result");
   result.classList.remove("hidden");
+  _gammaStatus("");                    // a fresh Generate rebuilds the outline — an earlier deck link is for the old one
 
   // Proposal title (naming convention) — now the REAL, server-computed
   // title (campaign name AI-inferred, real ID assigned), so the persistent

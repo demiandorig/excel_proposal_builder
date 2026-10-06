@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import tempfile
+import time
 from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -51,12 +52,11 @@ from app import disclaimers as disclaimers_svc
 
 from app.db import fetch_all, fetch_one, get_connection
 from app.catalog import (
-    CATALOG, by_name, families, by_family,
-    effective_catalog, load_rate_overrides, save_rate_overrides, clear_rate_override,
-    load_custom_products, add_custom_product, delete_custom_product, update_custom_product,
-    _OVERRIDABLE_FIELDS,
-    record_product_alias, resolve_product_alias, all_product_aliases,
-    load_deleted_builtin_names, set_builtin_deleted,
+    by_name, families, by_family, effective_catalog, all_product_aliases,
+    list_products as catalog_list_products, create_product as catalog_create_product,
+    update_product as catalog_update_product, delete_product as catalog_delete_product,
+    bulk_upsert_products as catalog_bulk_upsert_products,
+    EDITABLE_FIELDS as PRODUCT_EDITABLE_FIELDS,
 )
 from app.services.notion_parser import (
     ProposalRequest,
@@ -79,6 +79,7 @@ from app.services import strategy_brief as strategy_brief_svc
 from app.services import ad_presence as ad_presence_svc
 from app.services import roadblocks as roadblocks_svc
 from app.services import restrictions as restrictions_svc
+from app.services import gamma_client
 from app.services import monthly_allocation
 from app.services import notion_client
 
@@ -848,7 +849,7 @@ async def me(request: Request) -> dict:
 
 @app.get("/api/catalog")
 async def get_catalog() -> dict:
-    """Return the AdFlo product catalog (with any admin rate overrides applied), grouped by family."""
+    """Return the product list (as the admin has it in Admin -> Products), grouped by family."""
     grouped: dict[str, list] = {}
     for p in effective_catalog():
         grouped.setdefault(p.family, []).append({
@@ -1568,6 +1569,59 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     }
 
 
+def _with_current_product_names(reopen_state: dict) -> dict:
+    """A saved proposal carries the product names it had when saved; a product that was renamed (or split, like
+    "YouTube Ads") since then is shown under its current name — in the lines, the per-product avails, the add-ons,
+    the picked-product list, and the AI roadblocks / blurbs — so the planner's pickers, minimums and rates still
+    line up."""
+    cache: dict = {}
+
+    def current(name):
+        if not isinstance(name, str) or not name:
+            return name
+        if name not in cache:
+            product = by_name(name)
+            cache[name] = product.name if product is not None else name
+        return cache[name]
+
+    def fix_rows(rows):
+        for row in rows or []:
+            if isinstance(row, dict) and row.get("product_name"):
+                row["product_name"] = current(row["product_name"])
+
+    def fix_keys(mapping):
+        """A dict keyed by product name; an entry already under the current name wins over a renamed duplicate."""
+        if not isinstance(mapping, dict):
+            return mapping
+        out = {k: v for k, v in mapping.items() if current(k) == k}
+        for k, v in mapping.items():
+            out.setdefault(current(k), v)
+        return out
+
+    fix_rows(reopen_state.get("line_items"))
+    fix_rows(reopen_state.get("addons"))
+    if reopen_state.get("avails_data"):
+        reopen_state["avails_data"] = fix_keys(reopen_state["avails_data"])
+    for tier in reopen_state.get("tiers") or []:
+        if isinstance(tier, dict):
+            fix_rows(tier.get("line_items"))
+            if tier.get("avails_data"):
+                tier["avails_data"] = fix_keys(tier["avails_data"])
+    request = reopen_state.get("request")
+    if isinstance(request, dict) and isinstance(request.get("products_selected"), list):
+        picked = []
+        for name in request["products_selected"]:
+            name = current(name)
+            if name not in picked:
+                picked.append(name)
+        request["products_selected"] = picked
+    if isinstance(reopen_state.get("roadblocks"), dict):
+        fix_rows(reopen_state["roadblocks"].get("product_roadblocks"))
+    if isinstance(reopen_state.get("enrichment"), dict):
+        fix_rows(reopen_state["enrichment"].get("product_blurbs"))
+    return reopen_state
+
+
 @app.get("/api/proposal/{proposal_id}/reopen")
 async def reopen_proposal(proposal_id: str) -> dict:
     """
@@ -1584,6 +1638,7 @@ async def reopen_proposal(proposal_id: str) -> dict:
     reopen_state = meta.get("reopen_state")
     if not reopen_state:
         raise HTTPException(status_code=410, detail="This proposal was generated before reopening was supported.")
+    reopen_state = _with_current_product_names(reopen_state)
     return {
         "proposal_title": meta.get("proposal_title", ""),
         "status": meta.get("status") or "generated",
@@ -1727,6 +1782,48 @@ class GammaOutlineRefineRequest(BaseModel):
     reprompt: str
 
 
+class GammaCreateRequest(BaseModel):
+    outline: str = Field(min_length=20, max_length=400_000)
+    title: Optional[str] = Field(default=None, max_length=500)
+
+
+_GAMMA_MIN_INTERVAL = 8.0           # seconds between two deck builds by the same user — each one spends Gamma credits
+_gamma_last_start: dict[str, float] = {}
+
+
+@app.post("/api/gamma/create")
+async def gamma_create(body: GammaCreateRequest, request: Request) -> dict:
+    """Push the Step 07 outline to Gamma, which builds the presentation in the planner's workspace. Without a
+    GAMMA_API_KEY nothing is called and `configured` is false — the page then falls back to copying the outline.
+    Each build costs credits, so one user can't start another within a few seconds, and who started which build
+    is logged."""
+    if not gamma_client.is_configured():
+        return {"configured": False}
+    user = (getattr(request.state, "user", None) or {}).get("email") or "unknown"
+    now = time.monotonic()
+    if now - _gamma_last_start.get(user, -1e9) < _GAMMA_MIN_INTERVAL:
+        raise HTTPException(status_code=429, detail="A deck was just started — give it a few seconds before starting another.")
+    _gamma_last_start[user] = now
+    try:
+        generation_id = await asyncio.to_thread(gamma_client.start_generation, body.outline, body.title)
+    except gamma_client.GammaError as e:
+        _gamma_last_start.pop(user, None)                         # nothing was built, so nothing to wait out
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    logging.getLogger(__name__).info("gamma build %s started by %s (%r)", generation_id, user, body.title)
+    return {"configured": True, "generation_id": generation_id}
+
+
+@app.get("/api/gamma/status/{generation_id}")
+async def gamma_status(generation_id: str) -> dict:
+    """Where a Gamma build is: pending, completed (with the link to open) or failed."""
+    if not gamma_client.is_configured():
+        raise HTTPException(status_code=409, detail="Gamma isn't connected to this app.")
+    try:
+        return await asyncio.to_thread(gamma_client.get_generation, generation_id)
+    except gamma_client.GammaError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+
+
 @app.post("/api/refine-gamma-outline")
 async def refine_gamma_outline_endpoint(body: GammaOutlineRefineRequest) -> dict:
     """
@@ -1863,37 +1960,45 @@ async def drive_callback(code: str, request: Request) -> HTMLResponse:
 
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "catalog_size": len(CATALOG)}
+    return {"status": "ok", "catalog_size": len(effective_catalog())}
 
 
 # ---------------------------------------------------------------------------
-# Admin — proposal history + rate overrides + user management
+# Admin — proposal history + products + user management
 #
 # Behind login (see _require_login above) — every /api/admin/* route AND
 # the /admin page itself additionally require is_admin, not just a valid
 # session.
 # ---------------------------------------------------------------------------
 
-class RateOverrideRequest(BaseModel):
-    product_name: str
+class ProductRequest(BaseModel):
+    """One product, as the Admin -> Products form sends it. Every field is optional: a key that is ABSENT keeps
+    the product's current value, and a nullable key sent as null (rate, est. CPM, SLA days) clears it."""
+    name: Optional[str] = Field(default=None, max_length=200)
+    family: Optional[str] = Field(default=None, max_length=120)
+    short_label: Optional[str] = Field(default=None, max_length=200)
+    buying_model: Optional[str] = None  # "CPM" | "CPP" | "Fixed"
     base_rate: Optional[float] = None
     minimum_spend: Optional[float] = None
     estimated_cpm_for_imps: Optional[float] = None
-
-
-class NewProductRequest(BaseModel):
-    family: str
-    name: str
-    short_label: Optional[str] = None
-    buying_model: str  # "CPM" | "CPP" | "Fixed"
-    base_rate: Optional[float] = None
-    minimum_spend: Optional[float] = None
-    proposal_description: Optional[str] = None
-    sizes: Optional[str] = None
-    notes: Optional[str] = None
-    estimated_cpm_for_imps: Optional[float] = None
-    tech_platform: Optional[str] = None
-    is_addon: bool = False
+    sizes: Optional[str] = Field(default=None, max_length=500)
+    tech_platform: Optional[str] = Field(default=None, max_length=200)
+    proposal_description: Optional[str] = Field(default=None, max_length=5000)
+    notes: Optional[str] = Field(default=None, max_length=5000)
+    is_addon: Optional[bool] = None
+    minimum_flight_days_min: Optional[int] = None
+    minimum_flight_days_max: Optional[int] = None
+    sla_data_days: Optional[int] = None
+    sla_creative_days: Optional[int] = None
+    sla_activate_days: Optional[int] = None
+    sla_total_days: Optional[int] = None
+    margin_upper: Optional[float] = None
+    margin_lower: Optional[float] = None
+    wide_orbit_code: Optional[str] = Field(default=None, max_length=200)
+    estimated_impressions: Optional[bool] = None
+    discloses_impressions: Optional[bool] = None
+    national_supported: Optional[bool] = None
+    copy_from_id: Optional[int] = None  # create only: start from a copy of this product (a quick variant)
 
 
 class MarketConfigRequest(BaseModel):
@@ -1907,7 +2012,7 @@ class MarketConfigRequest(BaseModel):
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page() -> HTMLResponse:
-    """Serve the admin SPA (proposal history + rate overrides)."""
+    """Serve the admin SPA (proposal history, products, users, settings)."""
     return _serve_html_with_cache_busted_static(TEMPLATES_DIR / "admin.html")
 
 
@@ -2046,12 +2151,9 @@ class RestrictionUpdateRequest(BaseModel):
 
 
 def _restriction_admin_payload(warnings: Optional[list[str]] = None) -> dict:
-    from app.catalog import CATALOG, effective_catalog
     state = restrictions_svc.load_state()
     sync = state["sync"] or {}
-    # Mappings are keyed by a product's stable catalog name, but a renamed or custom product only
-    # exists under its display name — offer (and accept) both so nothing reads "not a catalog product".
-    known_names = sorted({p.name for p in CATALOG} | {p.name for p in effective_catalog(include_deleted=True)})
+    known_names = sorted(p.name for p in effective_catalog())
     return {
         "warnings": warnings or [],
         "categories": [c.to_dict() for c in state["categories"]],
@@ -2204,7 +2306,7 @@ async def admin_list_users() -> dict:
 @app.get("/api/admin/users/export")
 async def admin_export_users() -> Response:
     """Download the user list as a CSV — same "at least see what's there
-    at a glance, outside the app" audit use as the Rates tab's export.
+    at a glance, outside the app" audit use as the Products tab's export.
     Never includes password hashes/salts — list_users() itself never
     returns those (see auth_svc._public_user)."""
     buf = io.StringIO()
@@ -2686,428 +2788,178 @@ async def admin_notion_schema() -> dict:
         raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
-def _resolve_admin_product_key(product_name: str) -> tuple[str, bool]:
-    """
-    Given a display name an admin action is targeting — the product's
-    CURRENT name (possibly renamed), its ORIGINAL/never-renamed name, or an
-    even older former name — resolve it to (stable_key, is_builtin).
-    stable_key is the raw CATALOG literal name for a built-in (the actual
-    rate_overrides.product_name / by_name() lookup key, which never
-    changes regardless of renames), or the custom product's own current
-    `name` column for a custom (customs have no separate stable/display
-    split the way built-ins do — see update_custom_product). Raises
-    ValueError (surfaced as a 404) if nothing matches.
-    """
-    builtin_raw_names = {p.name for p in CATALOG}
-    custom_names = {p.name for p in load_custom_products()}
-    # 1. Direct raw/current match — covers "never renamed", the common case
-    # for both built-ins and customs.
-    if product_name in builtin_raw_names:
-        return product_name, True
-    if product_name in custom_names:
-        return product_name, False
-    # 2. Current EFFECTIVE (renamed) display name for a built-in.
-    overrides = load_rate_overrides()
-    for p in CATALOG:
-        if overrides.get(p.name, {}).get("name") == product_name:
-            return p.name, True
-    # 3. An older former name, from further back than the latest rename.
-    current = resolve_product_alias(product_name)
-    if current and current != product_name:
-        return _resolve_admin_product_key(current)
-    raise ValueError(f"Unknown product '{product_name}'")
+def _product_fields(body: ProductRequest) -> dict:
+    return body.model_dump(exclude_unset=True, exclude={"copy_from_id"})
 
 
-@app.get("/api/admin/rates")
-async def admin_get_rates() -> dict:
-    """Return the full catalog (built-in + admin-added) with current overrides
-    flagged, for both the inline rate editor and the "Edit product" panel —
-    every _OVERRIDABLE_FIELDS field is override-aware here now, not just the
-    original 3 numeric ones (family/buying_model/sizes/etc. used to always
-    show the raw catalog value even when overridden — a real display bug,
-    fixed alongside adding the fields the edit panel needs). Soft-deleted
-    built-ins are included (not hidden like effective_catalog()'s default)
-    so the admin can see and restore them."""
-    overrides = load_rate_overrides()
-    custom_names = {p.name for p in load_custom_products()}
-    deleted_names = load_deleted_builtin_names()
-    products = []
-    for p in CATALOG + load_custom_products():
-        override = overrides.get(p.name, {})
-        products.append({
-            "name": override.get("name", p.name),
-            # The raw/original name — stays stable across renames, so
-            # admin.js can target edit/delete/restore actions unambiguously
-            # even after the display `name` above has changed.
-            "stable_name": p.name,
-            "family": override.get("family", p.family),
-            "short_label": override.get("short_label", p.short_label),
-            "buying_model": override.get("buying_model", p.buying_model),
-            "base_rate": override.get("base_rate", p.base_rate),
-            "minimum_spend": override.get("minimum_spend", p.minimum_spend),
-            "estimated_cpm_for_imps": override.get("estimated_cpm_for_imps", p.estimated_cpm_for_imps),
-            "sizes": override.get("sizes", p.sizes),
-            "tech_platform": override.get("tech_platform", p.tech_platform),
-            "proposal_description": override.get("proposal_description", p.proposal_description),
-            "notes": override.get("notes", p.notes),
-            "catalog_base_rate": p.base_rate,
-            "catalog_minimum_spend": p.minimum_spend,
-            "catalog_estimated_cpm_for_imps": p.estimated_cpm_for_imps,
-            "has_override": p.name in overrides,
-            "is_custom": p.name in custom_names,
-            "is_deleted": p.name in deleted_names,
-            "is_addon": override.get("is_addon", p.is_addon),
-        })
-    return {"products": products, "overridable_fields": list(_OVERRIDABLE_FIELDS)}
-
-
-@app.post("/api/admin/rates")
-async def admin_save_rate(body: RateOverrideRequest) -> dict:
-    """Save (or update) a rate override for one product."""
+@app.get("/api/admin/products")
+async def admin_list_products() -> dict:
+    """The product list, in display order — every product an equal, fully editable row."""
     try:
-        stable_key, _ = _resolve_admin_product_key(body.product_name)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-    overrides = load_rate_overrides()
-    fields_ = {
-        k: v for k, v in {
-            "base_rate": body.base_rate,
-            "minimum_spend": body.minimum_spend,
-            "estimated_cpm_for_imps": body.estimated_cpm_for_imps,
-        }.items() if v is not None
-    }
-    # Merge onto (rather than replace) any existing override row so this
-    # narrow 3-field editor can't silently drop OTHER overridden fields —
-    # a rename (`name`) or an "Edit product" panel change, for instance.
-    existing = overrides.get(stable_key, {})
-    merged = {**existing, **fields_}
-    if merged:
-        overrides[stable_key] = merged
-    else:
-        overrides.pop(stable_key, None)
-    save_rate_overrides(overrides)
-    return {"saved": True, "product_name": stable_key, "override": merged}
-
-
-@app.delete("/api/admin/rates/{product_name}")
-async def admin_clear_rate(product_name: str) -> dict:
-    """Revert one product's rate override back to the catalog default
-    (also undoes any rename or soft-delete recorded on that row)."""
-    try:
-        stable_key, _ = _resolve_admin_product_key(product_name)
-    except ValueError:
-        stable_key = product_name  # nothing to resolve — clearing is a no-op either way
-    clear_rate_override(stable_key)
-    return {"cleared": True, "product_name": stable_key}
+        products = catalog_list_products()
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"products": products, "families": families()}
 
 
 @app.post("/api/admin/products")
-async def admin_add_product(body: NewProductRequest) -> dict:
-    """Add a brand-new catalog product from the admin UI — persisted alongside
-    (not mixed into) the built-in AdFlo catalog, available everywhere immediately."""
+async def admin_create_product(body: ProductRequest, request: Request) -> dict:
+    """Add a product — blank, or (copy_from_id) a copy of an existing one with the form's changes laid over it.
+    A copy also inherits the original's Restricted Verticals approvals, so a variant of an approved product
+    isn't suddenly "not accepted"."""
     try:
-        product = add_custom_product({
-            "family": body.family,
-            "name": body.name,
-            "short_label": body.short_label,
-            "buying_model": body.buying_model,
-            "base_rate": body.base_rate,
-            "minimum_spend": body.minimum_spend,
-            "proposal_description": body.proposal_description,
-            "sizes": body.sizes,
-            "notes": body.notes,
-            "estimated_cpm_for_imps": body.estimated_cpm_for_imps,
-            "tech_platform": body.tech_platform,
-            "is_addon": body.is_addon,
-        })
+        created = catalog_create_product(_product_fields(body), body.copy_from_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    return {"added": True, "product": asdict(product)}
-
-
-@app.delete("/api/admin/products/{product_name}")
-async def admin_delete_product(product_name: str) -> dict:
-    """
-    Remove a product. A built-in is SOFT-deleted (hidden from new
-    selection everywhere except the admin Rates table itself, which still
-    shows it — with a Restore action — so this is reversible; the CATALOG
-    Python list itself is untouched, since it's meant to stay a pure
-    reflection of the rate card, per catalog.py's own module docstring). A
-    custom (admin-added) product is hard-deleted, same as before.
-    """
-    try:
-        stable_key, is_builtin = _resolve_admin_product_key(product_name)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    if is_builtin:
-        set_builtin_deleted(stable_key, True)
-        return {"deleted": True, "product_name": stable_key, "mode": "soft_delete"}
-    deleted = delete_custom_product(stable_key)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Custom product '{stable_key}' not found.")
-    return {"deleted": True, "product_name": stable_key, "mode": "hard_delete"}
-
-
-@app.post("/api/admin/products/{product_name}/restore")
-async def admin_restore_product(product_name: str) -> dict:
-    """Undo a built-in product's soft-delete. Custom products are hard-deleted (see above) — nothing to restore."""
-    try:
-        stable_key, is_builtin = _resolve_admin_product_key(product_name)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    if not is_builtin:
-        raise HTTPException(status_code=400, detail="Custom products aren't soft-deleted, so there's nothing to restore — it would need to be re-added instead.")
-    set_builtin_deleted(stable_key, False)
-    return {"restored": True, "product_name": stable_key}
-
-
-class ProductEditRequest(BaseModel):
-    """Full-field edit for an EXISTING product (built-in or custom) — the
-    admin "Edit" panel's payload. Same field set as NewProductRequest, plus
-    `new_name` (renaming IS supported here now — see catalog.py's
-    _OVERRIDABLE_FIELDS/by_name/record_product_alias for how an old name
-    keeps resolving afterward, for both the parser and already-saved
-    proposals). `product_name` identifies which product to edit and may be
-    its current name, its original/never-renamed name, or any former name
-    — see _resolve_admin_product_key. Every other field is optional and
-    None means "leave as shown" — the edit panel pre-fills from the
-    product's current effective values and sends null for anything the
-    admin cleared, same "empty = revert to catalog default" convention the
-    single-field rate editor already uses."""
-    product_name: str
-    new_name: Optional[str] = None
-    family: Optional[str] = None
-    short_label: Optional[str] = None
-    buying_model: Optional[str] = None
-    base_rate: Optional[float] = None
-    minimum_spend: Optional[float] = None
-    estimated_cpm_for_imps: Optional[float] = None
-    sizes: Optional[str] = None
-    tech_platform: Optional[str] = None
-    proposal_description: Optional[str] = None
-    notes: Optional[str] = None
-    is_addon: Optional[bool] = None
-
-
-@app.post("/api/admin/products/edit")
-async def admin_edit_product(body: ProductEditRequest) -> dict:
-    """
-    Edit any field of an EXISTING product, built-in or custom:
-      - Built-in: stored as a rate override (like the single-field editor,
-        just covering every field that form doesn't) — only fields that
-        actually differ from the real catalog value are kept, so
-        resubmitting the form unchanged doesn't stamp redundant overrides.
-      - Custom: updated in place via update_custom_product (full replace
-        under the hood, so every field — not just the overridable set —
-        actually changes).
-    A `new_name` that differs from the product's current effective name
-    renames it and records an alias (see catalog.py) so the parser and any
-    already-saved proposal keep resolving the name it used to have.
-    """
-    try:
-        stable_key, is_builtin = _resolve_admin_product_key(body.product_name)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-    overrides = load_rate_overrides()
-    current_effective_name = overrides.get(stable_key, {}).get("name", stable_key) if is_builtin else stable_key
-
-    new_name = (body.new_name or "").strip() or None
-    if new_name and new_name == current_effective_name:
-        new_name = None  # resubmitted unchanged — not actually a rename
-    if new_name:
-        taken = {p.name for p in effective_catalog(include_deleted=True)} - {current_effective_name}
-        if new_name in taken:
-            raise HTTPException(status_code=400, detail=f"A product named '{new_name}' already exists.")
-
-    fields = {k: v for k, v in body.model_dump(exclude={"product_name", "new_name"}).items() if v is not None}
-    if new_name:
-        fields["name"] = new_name
-
-    if is_builtin:
-        catalog_product = next(p for p in CATALOG if p.name == stable_key)
-        kept = {k: v for k, v in fields.items() if v != getattr(catalog_product, k, None)}
-        if kept:
-            overrides[stable_key] = kept
-        else:
-            overrides.pop(stable_key, None)
-        save_rate_overrides(overrides)
-        if new_name:
-            record_product_alias(current_effective_name, new_name)
-        return {"saved": True, "product_name": new_name or stable_key, "mode": "override", "override": overrides.get(stable_key, {})}
-    else:
+    inherited, warning = 0, None
+    if created.get("copied_from"):
         try:
-            updated = update_custom_product(stable_key, fields)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        if new_name:
-            record_product_alias(current_effective_name, new_name)
-        return {"saved": True, "product_name": updated.name, "mode": "custom"}
+            inherited = restrictions_svc.inherit_product_approvals(created["copied_from"], created["name"], request.state.user["email"])
+        except Exception:  # noqa: BLE001 — the copy is saved; only the approvals carry-over is best effort
+            logging.getLogger(__name__).exception("couldn't copy restriction approvals to %r", created["name"])
+            warning = ("The product was added, but copying its Restricted Verticals approvals failed — "
+                       "map it in Admin → Restrictions or it will read as not accepted.")
+    return {"added": True, "product": created, "restrictions_inherited": inherited, "restrictions_warning": warning}
 
 
-# Shared column order for both the export and the bulk-upsert import, so a
-# planner can export -> edit in Excel -> re-upload the same file to update
-# records without reshaping anything. is_custom/has_override are exported
-# for visibility but ignored on import — they're derived status, not real
-# editable fields (a row can't "become" built-in, and has_override is just
-# "does base_rate/minimum_spend/estimated_cpm_for_imps differ from the
-# built-in catalog's own value," which importing the row already implies).
+@app.put("/api/admin/products/{product_id}")
+async def admin_update_product(product_id: int, body: ProductRequest) -> dict:
+    """Edit any field of a product. A new name is recorded so the old one keeps resolving in saved proposals and
+    pasted requests."""
+    try:
+        updated = catalog_update_product(product_id, _product_fields(body))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"saved": True, "product": updated}
+
+
+@app.delete("/api/admin/products/{product_id}")
+async def admin_delete_product(product_id: int) -> dict:
+    """Remove a product from every list. Proposals that already use it keep working."""
+    try:
+        name = catalog_delete_product(product_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    if name is None:
+        raise HTTPException(status_code=404, detail="Product not found.")
+    return {"deleted": True, "name": name}
+
+
+# CSV columns shared by the export and the bulk upload, so a planner can export -> edit in Excel -> re-upload.
 _PRODUCT_CSV_COLUMNS = [
     "name", "family", "short_label", "buying_model", "base_rate", "minimum_spend",
-    "estimated_cpm_for_imps", "sizes", "tech_platform", "proposal_description",
-    "notes", "is_addon", "is_custom", "has_override", "is_deleted",
+    "estimated_cpm_for_imps", "sizes", "tech_platform", "proposal_description", "notes", "is_addon",
 ]
 
 
 @app.get("/api/admin/products/export")
 async def admin_export_products() -> Response:
-    """Download the full effective catalog (built-ins + overrides applied
-    + custom products) as a CSV — for review/audit, and as a starting
-    point for the bulk-upsert import below (same column order)."""
-    overrides = load_rate_overrides()
-    custom_names = {p.name for p in load_custom_products()}
-    deleted_names = load_deleted_builtin_names()
-    raw_products = list(CATALOG) + load_custom_products()
+    """The product list as a CSV — for review, and as the starting point for the bulk upload (same columns)."""
+    try:
+        products = catalog_list_products()
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=_PRODUCT_CSV_COLUMNS, extrasaction="ignore")
     writer.writeheader()
-    # include_deleted=True (and zipped against the equally-unfiltered
-    # raw_products) so a soft-deleted built-in doesn't misalign this
-    # pairing — has_override/is_deleted are checked by each product's
-    # STABLE name (`raw.name`), not `p.name`, which is the CURRENT
-    # (possibly renamed) display name once overrides are applied below.
-    for p, raw in zip(effective_catalog(include_deleted=True), raw_products):
-        writer.writerow({
-            "name": p.name,
-            "family": p.family,
-            "short_label": p.short_label,
-            "buying_model": p.buying_model,
-            "base_rate": p.base_rate,
-            "minimum_spend": p.minimum_spend,
-            "estimated_cpm_for_imps": p.estimated_cpm_for_imps,
-            "sizes": p.sizes,
-            "tech_platform": p.tech_platform,
-            "proposal_description": p.proposal_description,
-            "notes": p.notes,
-            "is_addon": p.is_addon,
-            "is_custom": p.name in custom_names,
-            "has_override": raw.name in overrides,
-            "is_deleted": raw.name in deleted_names,
-        })
+    for p in products:
+        writer.writerow({k: p.get(k) for k in _PRODUCT_CSV_COLUMNS})
     return Response(
         content=buf.getvalue(),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=adflo_catalog_export.csv"},
+        headers={"Content-Disposition": "attachment; filename=products_export.csv"},
     )
 
 
+_TRUE_CELLS = ("true", "1", "yes", "y")
+_FALSE_CELLS = ("false", "0", "no", "n")
+
+
 def _parse_csv_bool(v: str) -> bool:
-    return (v or "").strip().lower() in ("true", "1", "yes", "y")
+    v = (v or "").strip().lower()
+    if v in _TRUE_CELLS:
+        return True
+    if v in _FALSE_CELLS:
+        return False
+    raise ValueError(f"'{v}' isn't yes/no (use true/false, yes/no, 1/0).")
 
 
-def _parse_csv_float(v: str) -> Optional[float]:
-    v = (v or "").strip()
+def _parse_csv_float(v: str, label: str = "value") -> Optional[float]:
+    """A number from a spreadsheet cell: "$1,000.00" and "1,500" are what Excel shows, so those parse. A blank
+    cell is None; anything else that isn't a number is an error (never a silent blank that would wipe the value)."""
+    v = (v or "").strip().replace("$", "").replace(",", "").replace(" ", "")
     if not v:
         return None
     try:
         return float(v)
     except ValueError:
-        return None
+        raise ValueError(f"{label} '{v}' isn't a number.") from None
+
+
+def _decode_csv(raw: bytes) -> str:
+    """Excel on Windows saves "CSV" as cp1252 unless asked for UTF-8; accept both (a BOM is tolerated)."""
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
 
 
 @app.post("/api/admin/products/bulk-upsert")
 async def admin_bulk_upsert_products(file: UploadFile = File(...)) -> dict:
     """
-    Add or update many products at once from an uploaded CSV (same columns
-    as the export above). Matched by `name`:
-      - Name matches a BUILT-IN catalog product -> saved as a rate override
-        (only base_rate/minimum_spend/estimated_cpm_for_imps — a built-in's
-        other fields are the canonical catalog and aren't editable this way,
-        same restriction the single-row rate editor already has).
-      - Name matches an EXISTING CUSTOM product -> replaced entirely with
-        the row's values (delete + re-add, so every field — not just the
-        3 overridable ones — actually updates).
-      - Name matches nothing -> added as a new custom product.
-    Never raises for a single bad row — collects per-row errors instead, so
-    one typo in a 60-row sheet doesn't block the other 59.
+    Add or update many products from an uploaded CSV (the export's columns), matched by `name` (case-insensitive):
+    a name that's in the list updates that product, anything else is added. A blank text cell leaves the product's
+    value alone; a blank rate / est. CPM clears it. One bad row never blocks the others — its error is reported
+    instead — and the whole upload is one database transaction.
     """
-    raw = (await file.read()).decode("utf-8-sig")  # -sig: tolerate an Excel-saved CSV's BOM
+    raw = _decode_csv(await file.read())
     reader = csv.DictReader(io.StringIO(raw))
     if reader.fieldnames is None:
         raise HTTPException(status_code=400, detail="Empty or unreadable CSV file.")
+    reader.fieldnames = [(f or "").strip() for f in reader.fieldnames]
     missing_cols = {"name", "family", "buying_model"} - set(reader.fieldnames)
     if missing_cols:
         raise HTTPException(status_code=400, detail=f"CSV is missing required column(s): {', '.join(sorted(missing_cols))}")
 
-    builtin_names = {p.name for p in CATALOG}
-    custom_names = {p.name for p in load_custom_products()}
-    created, updated_override, updated_custom, errors = [], [], [], []
+    items, errors = [], []
     rows_processed = 0
-
     for i, row in enumerate(reader, start=2):  # row 1 is the header
         rows_processed += 1
         name = (row.get("name") or "").strip()
         if not name:
             errors.append(f"Row {i}: missing name — skipped.")
             continue
+        fields: dict = {"name": name}
         try:
-            if name in builtin_names:
-                fields = {
-                    k: _parse_csv_float(row.get(k))
-                    for k in ("base_rate", "minimum_spend", "estimated_cpm_for_imps")
-                }
-                # Only actually store a field as an override when it differs
-                # from the built-in catalog's OWN value — otherwise
-                # re-uploading an unedited (or only-partially-edited) export
-                # would silently stamp a redundant override onto every
-                # single built-in product, cluttering the whole catalog
-                # with "Override" badges for values nobody actually changed.
-                catalog_product = next((p for p in CATALOG if p.name == name), None)
-                kept = {
-                    k: v for k, v in fields.items()
-                    if v is not None and (catalog_product is None or v != getattr(catalog_product, k, None))
-                }
-                if kept:
-                    overrides = load_rate_overrides()
-                    overrides[name] = kept
-                    save_rate_overrides(overrides)
-                    updated_override.append(name)
-                # else: every provided value matched the catalog default (or
-                # the row left them all blank) — nothing to do, not an error.
-            else:
-                new_fields = {
-                    "family": row.get("family"),
-                    "name": name,
-                    "short_label": row.get("short_label"),
-                    "buying_model": row.get("buying_model"),
-                    "base_rate": _parse_csv_float(row.get("base_rate")),
-                    "minimum_spend": _parse_csv_float(row.get("minimum_spend")),
-                    "estimated_cpm_for_imps": _parse_csv_float(row.get("estimated_cpm_for_imps")),
-                    "sizes": row.get("sizes"),
-                    "tech_platform": row.get("tech_platform"),
-                    "proposal_description": row.get("proposal_description"),
-                    "notes": row.get("notes"),
-                    "is_addon": _parse_csv_bool(row.get("is_addon")),
-                }
-                if name in custom_names:
-                    delete_custom_product(name)  # re-add below with the full new field set
-                    add_custom_product(new_fields)
-                    updated_custom.append(name)
-                else:
-                    add_custom_product(new_fields)
-                    custom_names.add(name)
-                    created.append(name)
+            for key in ("family", "short_label", "buying_model", "sizes", "tech_platform", "proposal_description", "notes"):
+                if (row.get(key) or "").strip():
+                    fields[key] = row[key].strip()
+            for key in ("base_rate", "estimated_cpm_for_imps"):
+                if key in row:
+                    fields[key] = _parse_csv_float(row.get(key), key.replace("_", " "))
+            spend = _parse_csv_float(row.get("minimum_spend"), "minimum spend")
+            if spend is not None:
+                fields["minimum_spend"] = spend
+            if (row.get("is_addon") or "").strip():
+                fields["is_addon"] = _parse_csv_bool(row.get("is_addon"))
         except ValueError as e:
             errors.append(f"Row {i} ('{name}'): {e}")
+            continue
+        items.append({"line": i, "fields": fields})
 
-    return {
-        "created": created,
-        "updated_as_rate_override": updated_override,
-        "updated_custom_product": updated_custom,
-        "errors": errors,
-        "total_rows_processed": rows_processed,
-    }
+    try:
+        result = await asyncio.to_thread(catalog_bulk_upsert_products, items)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    errors.extend(result["errors"])
+    return {"created": result["created"], "updated": result["updated"], "unchanged": result["unchanged"],
+            "errors": errors, "total_rows_processed": rows_processed}
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ from openpyxl.worksheet.formula import ArrayFormula
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.comments import Comment
 
-from app.catalog import CATALOG, Product, families, by_family
+from app.catalog import Product, effective_catalog, families, by_family
 from app.services.notion_parser import compose_target_fallback
 from app.services import monthly_allocation as _monthly_allocation
 from app.services.text_utils import strip_variant_pricing
@@ -2251,9 +2251,9 @@ def build_workbook(output_path: Path, families_to_include=None) -> None:
     default = wb.active
     wb.remove(default)
 
-    products = CATALOG
+    products = effective_catalog()
     if families_to_include:
-        products = [p for p in CATALOG if p.family in families_to_include]
+        products = [p for p in products if p.family in families_to_include]
 
     build_proposal_a(wb, products, with_sections=False)
     build_proposal_a(wb, products, with_sections=True)
