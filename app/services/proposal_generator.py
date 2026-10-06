@@ -21,6 +21,7 @@ from app.services.notion_parser import ProposalRequest, classify_output_tabs
 from app import excel_template as et
 from app.market_config import get_market_address
 from app.services import monthly_allocation as mo
+from app.services.text_utils import strip_variant_pricing
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +161,7 @@ def generate_proposal(
     addons: Optional[list[AddonItem]] = None,   # Step 04's Add-Ons module picks — proposal-wide, not per-tier
     monthly_distribution_mode: str = "even",   # Step 06's plan-wide default-split choice — "even" or "prorated"
     time_unit: str = "month",   # Step 04's toggle — "week" | "month" | "quarter", proposal-wide
+    disclaimers_by_tier: Optional[dict] = None,   # {tier_label: [banner dict, ...]} — see app/disclaimers.py
 ) -> dict:
     """
     Generate an Excel proposal for the given request + line items.
@@ -201,6 +203,12 @@ def generate_proposal(
                 Also relabels the Curate/Avails-adjacent "months" language
                 app.js renders — this function only cares about periods.
 
+        disclaimers_by_tier: admin keyword disclaimers already matched per
+                option by app/disclaimers.py (resolved in main.py and passed
+                in, so this module never reads the DB itself) — each banner
+                is drawn on that option's own Net/wsections/Gross/Avails-Only
+                sheets, below the totals and above the legal footer.
+
     Returns:
         dict with summary: {tabs_built: [...], total_net: float,
         total_gross: float, warnings: [...], tiers: [...] | None}. `tiers`
@@ -221,7 +229,7 @@ def generate_proposal(
         addons_dicts = []
         for a in addons:
             p = by_name(a.product_name)
-            desc = (p.proposal_description if p else "") or ""
+            desc = strip_variant_pricing((p.proposal_description if p else "") or "")
             if a.notes_override:
                 desc = f"{desc}\n— {a.notes_override}" if desc else a.notes_override
             addons_dicts.append({
@@ -241,8 +249,22 @@ def generate_proposal(
         all_product_names,
         has_agency_fee=request.agency_fee is not None and request.agency_fee > 0,
     )
+    forced_tabs_ignored = False
     if force_tabs:
-        tabs.update(force_tabs)
+        tabs.update({k: bool(v) for k, v in force_tabs.items() if k in tabs})
+        # A tab override that switches EVERY deliverable off can only be a
+        # stale/unsynced set of checkboxes (the Generate step's tab boxes used
+        # to start unchecked and were only filled in when that step rendered)
+        # — never a real request, since it would build an empty workbook, or
+        # worse, silently drop the avails-bearing tabs. Fall back to the
+        # classification instead and say so.
+        if not any(tabs.get(k) for k in ("net", "wsections", "gross", "avails_only", "dooh_summary", "dooh_screenlist")):
+            tabs = classify_output_tabs(
+                request.request_type,
+                all_product_names,
+                has_agency_fee=request.agency_fee is not None and request.agency_fee > 0,
+            )
+            forced_tabs_ignored = True
 
     # Build a blurb lookup from enrichment (product_name → blurb text) — a
     # product's blurb doesn't depend on which tier it appears in, so this is
@@ -258,6 +280,8 @@ def generate_proposal(
 
     tabs_built = []
     warnings: list[str] = list(request.warnings)
+    if forced_tabs_ignored:
+        warnings.append("Every export tab was switched off, so the suggested tabs were generated instead.")
     start_date = request.start_date or ""
     end_date = request.end_date or ""
     total_months = request.total_months or 3
@@ -295,13 +319,36 @@ def generate_proposal(
         # header both see the SAME already-merged period list.
         _tier_start_parsed = mo.parse_flexible_date(tier_start_date)
         _tier_end_parsed = mo.parse_flexible_date(tier_end_date)
-        tier_months = (
-            mo.apply_period_merges(
-                mo.periods_between(_tier_start_parsed, _tier_end_parsed, time_unit),
-                tier.get("period_merge_groups"),
-            )
+        _tier_base_periods = (
+            mo.periods_between(_tier_start_parsed, _tier_end_parsed, time_unit)
             if (_tier_start_parsed and _tier_end_parsed) else []
         )
+        tier_months = mo.apply_period_merges(_tier_base_periods, tier.get("period_merge_groups")) if _tier_base_periods else []
+        # The grand-total multiplier (Excel's I10 cell/live formulas) must
+        # use THIS tier's own real period count, not the single campaign-
+        # wide total_months — two tiers with different date overrides can
+        # genuinely span a different number of months, and the old shared
+        # total_months silently applied one tier's (or the campaign's)
+        # figure to every tier's grand total regardless. Falls back to the
+        # campaign-wide total_months only when this tier's own dates don't
+        # parse (Monthly Breakdown is skipped for the same reason above).
+        # ...but a proposal reopened from before months were derived from the dates keeps each line's OWN saved
+        # period count (Step 04 shows those as "saved" and the summary totals use them), so when this tier's lines
+        # agree on one, that's the multiplier — otherwise the workbook's grand total would disagree with the
+        # total_net the same request reports.
+        _own_months = {li.months for li in tier["line_items"] if li.months and not li.is_added_value}
+        if len(_own_months) > 1:
+            warnings.append(
+                f"{'Option ' + label + ': ' if len(tiers) > 1 else ''}lines have different month counts "
+                f"({', '.join(str(m) for m in sorted(_own_months))}), so the workbook's grand total uses the flight's "
+                "calendar span and may not match the line totals — set one month count in Step 04.")
+        # (merging periods in Step 06 only regroups the allocation; it never changes how many periods are bought)
+        tier_total_months = _own_months.pop() if len(_own_months) == 1 else (len(_tier_base_periods) or total_months)
+        # This option's matched disclaimer banners that apply to the Excel export.
+        tier_banners = [
+            b for b in (disclaimers_by_tier or {}).get(label, [])
+            if b.get("applies_to", "both") in ("both", "excel")
+        ]
         # Whether to build the Monthly Breakdown columns/tab at all for
         # this tier — entirely inferred from data (does any line item
         # actually have an allocation?), never a separate flag that could
@@ -360,8 +407,9 @@ def generate_proposal(
         if tabs.get("net"):
             sheet_title = _safe_sheet_name(tier_display_name, "", used_sheet_titles) if multi_tier else f"Proposal {label}"
             ws = et.build_proposal_a(wb, products, with_sections=False,
-                                     start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
-                                     sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit)
+                                     start_date=tier_start_date, end_date=tier_end_date, total_months=tier_total_months,
+                                     sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit,
+                                     banners=tier_banners)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=False, mb_width=tier_mb_width)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
@@ -376,8 +424,9 @@ def generate_proposal(
         if tabs.get("wsections"):
             sheet_title = _safe_sheet_name(tier_display_name, "(wsections)", used_sheet_titles) if multi_tier else f"Proposal {label} (wsections)"
             ws = et.build_proposal_a(wb, products, with_sections=True,
-                                     start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
-                                     sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit)
+                                     start_date=tier_start_date, end_date=tier_end_date, total_months=tier_total_months,
+                                     sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit,
+                                     banners=tier_banners)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=False, mb_width=tier_mb_width)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
@@ -392,8 +441,9 @@ def generate_proposal(
         if tabs.get("gross"):
             sheet_title = _safe_sheet_name(tier_display_name, "(Gross)", used_sheet_titles) if multi_tier else f"Proposal {label} (Gross)"
             ws = et.build_proposal_a_gross(wb, products,
-                                           start_date=tier_start_date, end_date=tier_end_date, total_months=total_months,
-                                           sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit)
+                                           start_date=tier_start_date, end_date=tier_end_date, total_months=tier_total_months,
+                                           sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit,
+                                           banners=tier_banners)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=True, mb_width=tier_mb_width)
             _populate_meta(ws, request, gross=True, proposal_title=proposal_title,
                            campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
@@ -416,7 +466,8 @@ def generate_proposal(
             sheet_title = _safe_sheet_name(tier_display_name, "(Avails)", used_sheet_titles) if multi_tier else avails_sheet_name
             ws = et.build_avails_only(wb, products, line_items=tier_line_items, request=request,
                                       start_date=tier_start_date, end_date=tier_end_date, avails_data=tier_avails,
-                                      campaign_name=campaign_name, sheet_name=sheet_title, time_unit=time_unit)
+                                      campaign_name=campaign_name, sheet_name=sheet_title, time_unit=time_unit,
+                                      banners=tier_banners)
             _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
                            title_suffix=f" (Avails-Only){tier_title_suffix}",
                            include_billing=False, include_campaign_meta=False, tier_geo=tier_geo,
@@ -784,7 +835,8 @@ def _populate_line_items(
         # catalog on its own, only potentially more insightful.
         blurb_text = blurbs.get(product.name) if blurbs else None
         if blurb_text and not _blurb_seems_cross_contaminated(blurb_text, product.family):
-            combined_details = f"{product.proposal_description}\n\n{blurb_text}" if product.proposal_description else blurb_text
+            catalog_text = strip_variant_pricing(product.proposal_description)
+            combined_details = f"{catalog_text}\n\n{blurb_text}" if catalog_text else blurb_text
             ws[f"E{row}"] = combined_details
             # Re-estimate row height for the (usually longer) combined text
             ws.row_dimensions[row].height = et._estimate_row_height(combined_details, col_width=50)
@@ -843,7 +895,8 @@ def _populate_line_items(
                                       buying_model_override=li.buying_model_override, time_unit=time_unit)
         et.write_avails_cells(ws, row, avail or {}, product, gross=gross, sov_pct=sov_pct, sov_col=sov_col,
                               budget_col="L", cpm_override=li.estimated_cpm_override,
-                              buying_model_override=li.buying_model_override, time_unit=time_unit)
+                              buying_model_override=li.buying_model_override, time_unit=time_unit,
+                              use_formulas=not li.is_added_value, is_added_value=li.is_added_value)
 
         row += 1
 

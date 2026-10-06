@@ -5,6 +5,7 @@ Falls back gracefully when python-docx is not installed.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 try:
     from docx import Document
@@ -132,11 +133,13 @@ def build_roadblocks_docx(
     overall_summary: str,
     product_roadblocks: list,
     used_web_search: bool,
+    categories: Optional[list] = None,
 ) -> bool:
     """
-    Write the Step 05 AI Roadblocks / Restrictions Check as a Word document —
-    one section per product with its risk level, risks (issue/detail/source),
-    and recommended mitigation.
+    Write the Step 07 AI Roadblocks / Restrictions Check as a Word document —
+    one section per product with its risk level, its verdict from Entravision's
+    Restricted Verticals sheet (when verticals were confirmed), risks
+    (issue/detail/source), and recommended mitigation.
     Returns True on success, False if python-docx is unavailable.
     """
     if not _HAS_DOCX:
@@ -156,6 +159,11 @@ def build_roadblocks_docx(
         )
         note_run.italic = True
 
+    if categories:
+        verticals = doc.add_paragraph()
+        verticals.add_run("Restricted verticals checked: ").bold = True
+        verticals.add_run(", ".join(categories) + " (per Entravision's Restricted Verticals sheet)")
+
     if overall_summary:
         doc.add_paragraph("")
         summary_label = doc.add_paragraph()
@@ -172,6 +180,14 @@ def build_roadblocks_docx(
         risk_para = doc.add_paragraph()
         risk_para.add_run("Risk Level: ").bold = True
         risk_para.add_run(risk_level)
+
+        for check in (item.get("matrix") or {}).get("checks") or []:
+            label = {"allowed": "Allowed", "not_allowed": "Not accepted", "guidance": "See guidance"}.get(
+                check.get("status"), "n/a")
+            line = doc.add_paragraph()
+            line.add_run(f"{check.get('category', '')}: {label}").bold = True
+            if check.get("note"):
+                line.add_run(" — " + check["note"])
 
         for risk in item.get("risks") or []:
             p = doc.add_paragraph(style="List Bullet")

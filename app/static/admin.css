@@ -459,3 +459,76 @@ tr.row-deleted td { background: var(--paper-warm); }
   font-family: var(--font-mono);
   color: var(--ink-soft);
 }
+
+
+/* ----- Disclaimers tab ----- */
+.dz-list { display: flex; flex-direction: column; gap: 14px; margin-top: 18px; }
+.dz-card {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  background: var(--paper-card);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dz-card.dz-inactive { opacity: 0.6; }
+.dz-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.dz-card-head h3 { margin: 0; font-size: 15px; }
+.dz-meta { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); }
+/* The banner as it renders in the export: pale fill, dark text, wrapped. */
+.dz-banner {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.dz-triggers { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dz-triggers-label { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint); margin-right: 4px; }
+.dz-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  background: var(--paper-warm);
+  border: 1px solid var(--rule-soft);
+  color: var(--ink-soft);
+}
+.dz-chip-season { background: var(--amber-soft); color: var(--amber); border-color: transparent; }
+.dz-actions { display: flex; align-items: center; gap: 12px; }
+.dz-actions .checkbox-label { margin-right: auto; }
+.dz-preview-wrap { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.dz-preview-label { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint); }
+
+
+/* ----- Restrictions tab (reuses the .dz-card look) ----- */
+.rs-field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; font-weight: 600; }
+.rs-field small { font-weight: 400; color: var(--ink-faint); }
+.rs-field input[type="text"], .rs-field textarea {
+  padding: 8px 10px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper-card);
+}
+.rs-item { font-weight: 600; }
+.rs-map { display: flex; flex-direction: column; gap: 10px; }
+.rs-summary { margin: 0; font-size: 12.5px; color: var(--ink-soft); }
+.rs-warnings {
+  margin-top: 10px;
+  padding: 10px 14px;
+  border: 1px solid #e7c873;
+  background: #fff8e1;
+  color: #5c4a00;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.rs-warnings ul { margin: 6px 0 0 18px; padding: 0; }
+.rs-warnings li { margin: 3px 0; }
+.rs-hint { margin: 0; font-size: 12px; color: var(--ink-faint); }
+.rs-or { font-size: 12px; color: var(--ink-faint); }
+.rs-unknown { font-size: 11.5px; color: var(--amber); margin-right: auto; }
+.rs-body summary { cursor: pointer; font-size: 12px; color: var(--ink-soft); }
+.rs-body pre { white-space: pre-wrap; font-family: var(--font-mono); font-size: 11.5px; background: var(--paper-warm); padding: 10px 12px; border-radius: var(--radius); max-height: 260px; overflow: auto; }

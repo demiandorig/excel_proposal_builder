@@ -199,7 +199,7 @@ CATALOG: list[Product] = [
         family='Search',
         name='Search - SEM',
         short_label='Click-To-Call / Website Conversion',
-        proposal_description='Variants (contact planning for exact tier): Search - AdWords - SEM: $1000 CPP; Search - SEM PRO: $5000 CPP.',
+        proposal_description='Text ads on Google Search that appear when people look for what you offer, driving calls and website visits. Variants (contact planning for exact tier): Search - AdWords - SEM: $1000 CPP; Search - SEM PRO: $5000 CPP.',
         sizes='N/A (text/responsive ads)',
         buying_model='CPP',
         base_rate=1000.0,
@@ -2401,6 +2401,31 @@ def by_name(name: str) -> Optional[Product]:
     if current and current != name:
         return by_name(current)
     return None
+
+
+def name_variants(name: str) -> set[str]:
+    """Every name `name`'s product answers to: the name as given, its CURRENT
+    (possibly renamed) display name, and its stable raw catalog/custom name.
+    Anything keyed by the raw literal (e.g. the Restricted Verticals mapping)
+    has to be looked up through all three, or a renamed product silently
+    stops matching."""
+    out = {name}
+    product = by_name(name)
+    if product is None:
+        return out
+    out.add(product.name)
+    renamed = False
+    for raw in list(CATALOG) + load_custom_products():
+        if _apply_override(raw).name == product.name:
+            out.add(raw.name)
+            renamed = renamed or raw.name != product.name
+    if renamed:
+        # ...and the names it carried in between (A -> B -> C), which an admin may have typed into a mapping.
+        try:
+            out.update(alias for alias, current in all_product_aliases().items() if current in out)
+        except Exception:  # noqa: BLE001 — the alias table is optional context here, never a reason to fail
+            pass
+    return out
 
 
 def by_family(family: str, include_deleted: bool = False) -> list[Product]:

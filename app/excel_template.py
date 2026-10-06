@@ -12,6 +12,7 @@ Generates 6 worksheets:
 """
 
 import argparse
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +29,7 @@ from openpyxl.comments import Comment
 from app.catalog import CATALOG, Product, families, by_family
 from app.services.notion_parser import compose_target_fallback
 from app.services import monthly_allocation as _monthly_allocation
+from app.services.text_utils import strip_variant_pricing
 
 # Try to import Image support for logo embedding (optional)
 try:
@@ -285,18 +287,6 @@ def _mixed_number_sum_formula(range_ref: str, strip_prefixes: tuple = (), strip_
     return f'=SUMPRODUCT(IFERROR(VALUE({expr}),0))'
 
 
-def _is_live_sports_product(product: Product) -> bool:
-    """Whether this product's own name flags it as live-sports/tentpole
-    inventory — sold on publisher-controlled, geo-based estimates that can
-    change without notice (today: "NBC Sports Stream Sponsorship", "Fox
-    Sports Go Video Sponsorship"). A name-based check rather than a fixed
-    product list so it still catches any future product named similarly,
-    matching how the disclaimer was actually requested ("anything that
-    says live sports or 'tentpole' in the product name")."""
-    name = product.name.lower()
-    return "sports" in name or "tentpole" in name
-
-
 def compute_sov_pct(product: Product, monthly_budget: float, avail: dict,
                     cpm_override: Optional[float] = None,
                     rate_override: Optional[float] = None,
@@ -460,8 +450,14 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
                        sov_col: Optional[str] = None, budget_col: Optional[str] = None,
                        rate_col: str = "K", est_cpm_col: Optional[str] = None,
                        cpm_override: Optional[float] = None, buying_model_override: Optional[str] = None,
-                       time_unit: str = "month") -> None:
+                       time_unit: str = "month", use_formulas: bool = True, is_added_value: bool = False) -> None:
     """
+    use_formulas: False writes the stored numbers for the DERIVED side
+    (max_spend when imps were typed, max_imps when spend was typed) instead of
+    live formulas over the line's rate. Added Value lines need this: their
+    NET RATE cell is forced to $0, so a rate-based formula evaluates to 0 even
+    though the planner's screen showed the real catalog-rate figure.
+
     Write planner-entered avails (from the app's Step 06) into the
     Max. Recommended Monthly Imps / Spend / Est. Monthly Uniques columns.
     Net sheets: N/O/P. Gross sheets: P/Q/R. Pass `cols=("I","J","K")` for the
@@ -580,7 +576,7 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
     max_spend = avail.get("max_spend")
 
     imps_formula = spend_formula = None
-    if product is not None:
+    if product is not None and use_formulas:
         if basis == "imps" and max_imps is not None:
             spend_formula = _spend_formula_from_imps(product, imps_cell_ref, rate_cell_ref, est_cpm_cell_ref, cpm_override, buying_model_override)
         elif basis == "spend" and max_spend is not None:
@@ -675,7 +671,10 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
     else:
         _grey_out_empty_avails_cell(ws, f"{uniques_col}{row}")
 
-    if sov_col:
+    if sov_col and is_added_value:
+        # $0 of real budget has no share of voice to speak of — a live budget/spend formula would read 0.0%.
+        _merge_thin_border(ws[f"{sov_col}{row}"])
+    elif sov_col:
         cell = ws[f"{sov_col}{row}"]
         if budget_col and (max_spend is not None or spend_formula) and not spend_is_text:
             budget_term = _sov_budget_formula_term(budget_col, row, time_unit)
@@ -960,8 +959,11 @@ def _sov_budget_formula_term(budget_col: str, row: int, time_unit: str) -> str:
 def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
                      start_date: str = "", end_date: str = "", total_months: int = 3,
                      sheet_name: Optional[str] = None, addons: Optional[list[dict]] = None,
-                     time_unit: str = "month") -> Worksheet:
+                     time_unit: str = "month", banners: Optional[list[dict]] = None) -> Worksheet:
     """Build the Net-only proposal sheet. Returns the worksheet.
+
+    banners: this option's matched disclaimer banners — see
+    _write_addons_grand_total_footer.
 
     sheet_name: override the default "Proposal A" / "Proposal A (wsections)"
     name — used for tiered-budget proposals, where each option gets its own
@@ -1098,8 +1100,7 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
 
     _write_addons_grand_total_footer(
         ws, total_row, gross=False, box_max_col="L", addons=addons,
-        show_live_sports_disclaimer=any(_is_live_sports_product(p) for p in products),
-        time_unit=time_unit,
+        banners=banners, time_unit=time_unit,
     )
 
     ws.freeze_panes = "C18"
@@ -1111,10 +1112,46 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     return ws
 
 
+def _banner_row_height(text: str, width_chars: float) -> float:
+    """Merged cells don't auto-fit in Excel, so a wrapped banner needs an
+    explicit height. 9pt Arial fits ~1.15 characters per column-width unit
+    (the unit is sized for 11pt Calibri); rounded DOWN so a banner gets a
+    little too much room rather than clipped text."""
+    chars_per_line = max(40, int(width_chars * 1.15))
+    lines = sum(max(1, -(-len(par) // chars_per_line)) for par in (text or "").split("\n"))
+    return max(26.0, 12.5 * lines + 10)
+
+
+_XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _write_disclaimer_banners(ws: Worksheet, start_row: int, banners: list[dict], box_max_col: str) -> int:
+    """Admin-managed, keyword-triggered callouts (app/disclaimers.py) —
+    colored full-width banners, one per matched rule, each followed by a
+    blank spacer row. Returns the first row free after the last one."""
+    if not banners:
+        return start_row
+    from openpyxl.utils import column_index_from_string, get_column_letter
+    first, last = column_index_from_string("C"), column_index_from_string(box_max_col)
+    width = sum((ws.column_dimensions[get_column_letter(i)].width or 8.43) for i in range(first, last + 1))
+    row = start_row
+    for banner in banners:
+        cell = ws[f"C{row}"]
+        cell.value = _XML_ILLEGAL.sub("", banner["text"])
+        cell.data_type = "s"                      # text that starts with "=" must stay text, not become a formula
+        cell.font = Font(name="Arial", size=9, color="FF" + banner["font_color"])
+        cell.fill = PatternFill("solid", start_color="FF" + banner["fill"])
+        cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        ws.merge_cells(f"C{row}:{box_max_col}{row}")
+        ws.row_dimensions[row].height = _banner_row_height(banner["text"], width)
+        row += 2
+    return row
+
+
 def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bool,
                                      box_max_col: str, months_cell: str = "I10",
                                      addons: Optional[list[dict]] = None,
-                                     show_live_sports_disclaimer: bool = False,
+                                     banners: Optional[list[dict]] = None,
                                      time_unit: str = "month") -> int:
     """
     Shared by build_proposal_a and build_proposal_a_gross: the ADD-ONS /
@@ -1137,12 +1174,12 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     derived from the NET amount via the $I$14 agency-fee cell) and a GROSS
     grand total alongside the NET one.
 
-    show_live_sports_disclaimer: True when this tier includes any product
-    whose name mentions "sports" or "tentpole" — live sports/tentpole
-    inventory is sold on publisher-controlled, geo-based estimates that can
-    change without notice, so those proposals carry an extra highlighted
-    callout (a real re-avail buffer requirement, not boilerplate) right
-    before the signature block.
+    banners: this option's matched admin disclaimers (app/disclaimers.py),
+    each {"text", "fill", "font_color"} — drawn as colored callouts directly
+    below the grand total and ABOVE the Google Tag Manager / payment /
+    validity / terms lines. (This replaces the old hard-coded Live Sports
+    banner, which sat below the legal text and only keyed off a product
+    name; that rule is now a seeded, editable default in the admin list.)
 
     Returns the signature dotted-line row.
     """
@@ -1219,8 +1256,11 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     _box_range(ws, grand_row, grand_row, "C", box_max_col)
     _fill_box_range(ws, grand_row, grand_row, "C", box_max_col, TOTAL_FILL)
 
+    # Matched disclaimer banners first (below the totals), then the standing
+    # footer copy.
+    foot = _write_disclaimer_banners(ws, grand_row + 2, banners or [], box_max_col)
+
     # Footer
-    foot = grand_row + 2
     ws[f"C{foot}"] = (
         "To maximize the efficiency of your digital media investment, we strongly recommend "
         "installing a Google Tag Manager container on your website."
@@ -1237,29 +1277,8 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     ws.merge_cells(f"C{foot+2}:{box_max_col}{foot+2}")
     ws[f"C{foot+3}"] = "Client accepts Entravision's Terms of Sales (https://entravision.com/termsofsales/)"
 
-    # Live Sports / tentpole inventory callout — only when this tier
-    # actually includes one of those products. Highlighted (not just
-    # italic grey like the footer notes above) since it's a real
-    # operational requirement (a re-avail buffer) the AE needs to plan
-    # around, not routine boilerplate.
-    next_row = foot + 5
-    if show_live_sports_disclaimer:
-        ws[f"C{next_row}"] = (
-            "\U0001F4F6\U0001F3C8 Live Sports Inventory: The numbers provided in this proposal are "
-            "geo-based estimates. Because publishers hold all cards and can adjust pricing or "
-            "inventory without notice, we'll need a mandatory 3-5 business day pit stop for a "
-            "full re-avail before any campaign goes live. Keep this buffer in your SLAs and "
-            "potential secondary avenues for inventory delivery (i.e. audience-based buys)."
-        )
-        ws[f"C{next_row}"].font = Font(name="Arial", size=9, color="FF58151C")
-        ws[f"C{next_row}"].fill = PatternFill("solid", start_color=SOV_RED)
-        ws[f"C{next_row}"].alignment = LEFT
-        ws.merge_cells(f"C{next_row}:{box_max_col}{next_row}")
-        ws.row_dimensions[next_row].height = 42
-        next_row += 2
-
     # Signature block
-    sig = next_row
+    sig = foot + 5
     ws[f"C{sig}"] = "Customer Signature"
     ws[f"E{sig}"] = "Name"
     ws[f"F{sig}"] = "Title"
@@ -1292,7 +1311,7 @@ def _write_product_row(ws: Worksheet, row: int, p: Product, gross: bool = False,
     ws[f"D{row}"].border = THIN_BORDER
 
     # DETAILS (E)
-    ws[f"E{row}"] = p.proposal_description
+    ws[f"E{row}"] = strip_variant_pricing(p.proposal_description)
     ws[f"E{row}"].font = BODY_FONT
     ws[f"E{row}"].alignment = LEFT
     ws[f"E{row}"].border = THIN_BORDER
@@ -1388,14 +1407,16 @@ def _write_product_row(ws: Worksheet, row: int, p: Product, gross: bool = False,
 
     # Row height auto-adjusts to the DETAILS (E) text length, with a touch of
     # breathing room, instead of a one-size-fits-all fixed height.
-    ws.row_dimensions[row].height = _estimate_row_height(p.proposal_description, col_width=50)
+    ws.row_dimensions[row].height = _estimate_row_height(strip_variant_pricing(p.proposal_description), col_width=50)
 
 
 def build_proposal_a_gross(wb: Workbook, products: list,
                            start_date: str = "", end_date: str = "", total_months: int = 3,
                            sheet_name: Optional[str] = None, addons: Optional[list[dict]] = None,
-                           time_unit: str = "month") -> Worksheet:
+                           time_unit: str = "month", banners: Optional[list[dict]] = None) -> Worksheet:
     """Build the Gross variant.
+
+    banners: see build_proposal_a.
 
     sheet_name: override the default "Proposal A (Gross)" — used for
     tiered-budget proposals ("Proposal B (Gross)", etc.).
@@ -1504,8 +1525,7 @@ def build_proposal_a_gross(wb: Workbook, products: list,
 
     _write_addons_grand_total_footer(
         ws, total_row, gross=True, box_max_col="N", addons=addons,
-        show_live_sports_disclaimer=any(_is_live_sports_product(p) for p in products),
-        time_unit=time_unit,
+        banners=banners, time_unit=time_unit,
     )
 
     ws.freeze_panes = "C18"
@@ -1522,7 +1542,8 @@ def build_avails_only(wb: Workbook, products: list, *,
                       campaign_name: str = "",
                       start_date: str = "", end_date: str = "",
                       sheet_name: Optional[str] = None,
-                      time_unit: str = "month") -> Worksheet:
+                      time_unit: str = "month",
+                      banners: Optional[list[dict]] = None) -> Worksheet:
     """Avails-only sheet — layout per spec:
     LINE NAME | TARGET | GEO | BUY TYPE | CPM | Est. CPM |
     Max. Recommended Monthly Imps | Max. Recommended Monthly Spend | Est. Monthly Uniques
@@ -1703,14 +1724,21 @@ def build_avails_only(wb: Workbook, products: list, *,
         avail = avails_by.get(li.id) if (li and li.id) else None
         if avail is None:
             avail = avails_by.get(p.name)
-        if avail and (avail.get("max_imps") is not None or avail.get("max_spend") is not None or avail.get("freeform")):
+        # Imps/spend/free-form text take the direct-write path. A line with ONLY Est. Uniques stays on the
+        # open-J fallback below (so a planner who types impressions later still gets the live K/M formulas)
+        # and has its uniques value written into L there — it is kept either way.
+        if avail and (
+            avail.get("max_imps") is not None or avail.get("max_spend") is not None or avail.get("freeform")
+        ):
             # Planner already computed avails in the app (Step 06) — write directly.
             sov_pct = compute_sov_pct(p, li.monthly_budget if li else 0, avail,
                                        cpm_override=cpm_override, rate_override=rate_override,
                                        buying_model_override=buying_model_override, time_unit=time_unit)
             write_avails_cells(ws, row, avail, p, cols=("J", "K", "L"), sov_pct=sov_pct, sov_col="M",
                                budget_col="I", rate_col="G", est_cpm_col="H", cpm_override=cpm_override,
-                               buying_model_override=buying_model_override, time_unit=time_unit)
+                               buying_model_override=buying_model_override, time_unit=time_unit,
+                               use_formulas=not (li and li.is_added_value),
+                               is_added_value=bool(li and li.is_added_value))
         else:
             # Fallback: leave J open for manual planner input, auto-calc K from
             # it live. J and L are greyed out (not just left blank) to flag
@@ -1732,7 +1760,12 @@ def build_avails_only(wb: Workbook, products: list, *,
             _format_money_cell(ws[f"K{row}"])
             ws[f"K{row}"].border = THIN_BORDER
 
-            _grey_out_empty_avails_cell(ws, f"L{row}")
+            if avail and avail.get("est_uniques") is not None:
+                ws[f"L{row}"] = avail["est_uniques"]
+                _format_imps_cell(ws[f"L{row}"])
+                ws[f"L{row}"].border = THIN_BORDER
+            else:
+                _grey_out_empty_avails_cell(ws, f"L{row}")
             ws[f"L{row}"].alignment = CENTER
 
             # SOV still works here as a live formula — Monthly Budget (I) over
@@ -1794,7 +1827,9 @@ def build_avails_only(wb: Workbook, products: list, *,
     _box_range(ws, total_row, total_row, "C", "M")
     _fill_box_range(ws, total_row, total_row, "C", "M", TOTAL_FILL)
 
-    foot = total_row + 2
+    # Same matched disclaimer banners the proposal sheets carry (a live-sports
+    # re-avail caveat matters most on the avails deliverable itself).
+    foot = _write_disclaimer_banners(ws, total_row + 2, banners or [], "M")
     ws[f"C{foot}"] = (
         "*Avails are valid for 1 month after presentation. "
         "This forecast does not constitute a guarantee of delivery."

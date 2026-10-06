@@ -39,30 +39,49 @@ def test_scale_from_all_zero_splits_evenly_and_zero_lines_stay_zero():
     assert _call("scaleToTotal", [0, 400, 600], 2000) == [0, 800, 1200]
 
 
-def test_set_share_rebalances_others_proportionally_and_keeps_total():
-    budgets = [10000, 5000, 3333.33, 1666.67]
-    result = _call("setSharePct", budgets, 0, 30)
-    assert round(sum(result), 2) == round(sum(budgets), 2)
-    assert result[0] == 6000
-    # the others keep their 3 : 2 : 1 ratio (to rounding)
-    assert abs(result[1] / result[3] - 3) < 0.01 and abs(result[2] / result[3] - 2) < 0.01
+def test_percents_to_budgets_hits_the_total_exactly_when_tenths_sum_to_100():
+    result = _call("percentsToBudgets", [333, 333, 334], 10000)
+    assert result == [3330, 3330, 3340]
+    assert _call("percentsToBudgets", [333, 333, 334], 7) == [2, 2, 3]
+    assert round(sum(_call("percentsToBudgets", [500, 250, 250], 10000.5)), 2) == 10000.5
 
 
-def test_set_share_extremes_and_clamping():
+def test_percents_to_budgets_refuses_anything_that_is_not_exactly_100():
+    # the allocator alone would renormalize 87.5% up to 100% — the helper must not
+    assert _call("percentsToBudgets", [500, 375], 10000) is None
+    assert _call("percentsToBudgets", [600, 500], 10000) is None
+    assert _call("percentsToBudgets", [1000, 0], 0) is None
+    assert _call("percentsToBudgets", [], 100) is None
+
+
+def test_percents_to_budgets_allows_a_zero_line():
+    assert _call("percentsToBudgets", [700, 300, 0], 1000) == [700, 300, 0]
+
+
+def test_tenths_helpers_snap_clamp_and_convert():
+    assert _call("toTenths", 33.34) == 333 and _call("toTenths", 33.35) == 334
+    assert _call("toTenths", 250) == 1000 and _call("toTenths", -5) == 0 and _call("toTenths", "x") == 0
+    assert _call("sumTenths", [333, 333, 334]) == 1000
+    assert _call("tenthsFromAmount", 4000, 10000) == 400
+    assert _call("tenthsFromAmount", 4003, 10000) == 400          # snaps to the 0.1% grid
+    assert _call("tenthsFromAmount", 100, 0) == 0
+    assert _call("amountFromTenths", 400, 10000) == 4000
+
+
+def test_even_tenths_always_sum_to_exactly_100_percent():
+    assert sorted(_call("evenTenths", 3)) == [333, 333, 334]
+    assert _call("evenTenths", 4) == [250, 250, 250, 250]
+    for n in (1, 2, 3, 6, 7, 9):
+        assert sum(_call("evenTenths", n)) == 1000
+    assert _call("evenTenths", 0) == []
+
+
+def test_share_round_trip_through_the_display_shares_is_lossless():
     budgets = [5000, 3000, 2000]
-    assert _call("setSharePct", budgets, 0, 100) == [10000, 0, 0]
-    assert _call("setSharePct", budgets, 0, 0) == [0, 6000, 4000]
-    assert _call("setSharePct", budgets, 1, 250) == [0, 10000, 0]
-    assert _call("setSharePct", budgets, 1, -5) == [7143, 0, 2857]  # others keep their 5 : 2 ratio
-
-
-def test_set_share_when_other_lines_are_zero_splits_the_rest_evenly():
-    assert _call("setSharePct", [6000, 0, 0], 0, 50) == [3000, 1500, 1500]
-
-
-def test_set_share_is_a_no_op_for_single_line_or_zero_total():
-    assert _call("setSharePct", [5000], 0, 40) == [5000]
-    assert _call("setSharePct", [0, 0], 0, 40) == [0, 0]
+    shares = _call("sharePercents", budgets)                     # what the read-only column shows
+    tenths = [round(x * 10) for x in shares]
+    assert sum(tenths) == 1000
+    assert _call("percentsToBudgets", tenths, 10000) == budgets  # entering edit mode and saving untouched changes nothing
 
 
 def test_share_percents_always_display_as_exactly_100():

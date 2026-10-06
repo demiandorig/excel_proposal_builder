@@ -44,15 +44,23 @@ CALENDAR PERIODS vs. periods_between()
 `months` (LineItem.months, an int) is the flat flight-length figure the
 rest of the app already uses (total_budget() = monthly_budget * months,
 the Excel total-row multiplication, etc.) — it is unit-agnostic
-arithmetic (just a multiplier) and does NOT get renamed/reinterpreted
-per granularity. Monthly Breakdown does NOT replace or reconcile against
-it either way. It derives its own period list purely from the tier's
-effective start/end CALENDAR dates via periods_between() below, which
-can have a different count than `months` (e.g. `months=3` with a
-start/end date pair that only actually spans 2 calendar months, or spans
-a partial 4th) — that's an expected, harmless mismatch: the dollar total
-these periods must sum to is still LineItem.total_budget() either way,
-never `months` itself.
+arithmetic (just a multiplier). Monthly Breakdown derives its own period
+list purely from the tier's effective start/end CALENDAR dates via
+periods_between() below.
+
+As of the Step 04 "derived months" fix, the frontend no longer lets a
+planner free-type `months` independently of the real flight dates — a
+NEW line item's months is always computed from the same calendar math
+periods_between() uses here (see app.js's _curateDerivedMonths), so for
+anything created going forward the two can't drift apart. A REOPENED
+proposal from before this fix can still have a stored `months` that
+disagrees with its real calendar period count — that's legacy data, not
+a new occurrence, and the frontend flags it (with an explicit, planner-
+initiated "Fix" action) rather than silently correcting it. This module
+itself still tolerates the two disagreeing either way (it always reads
+whichever `months`/`total_budget()` the caller hands it, never assumes
+they match len(periods_between(...))), so old, unfixed proposals keep
+generating exactly as they always did.
 
 WEEK / QUARTER GRANULARITY, AND MERGING ADJACENT PERIODS
 ---------------------------------------------------------------------
