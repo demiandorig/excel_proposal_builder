@@ -253,13 +253,27 @@ Client name: ...
           <label>Start date <input data-field="start_date" type="date" /></label>
           <label>End date <input data-field="end_date" type="date" /></label>
           <label>Months
-            <input data-field="total_months" type="number" min="1" readonly title="Computed from the Start/End dates above" />
+            <input data-field="total_months" type="number" min="1" readonly title="Computed from the Start/End dates above: the calendar months the flight touches. In Full Flight the export still shows Months: 1." />
           </label>
           <div class="months-mismatch-flag hidden" id="total-months-mismatch-flag">
             <span class="months-mismatch-text"></span>
             <button type="button" class="months-fix-btn" id="total-months-fix-btn">Fix</button>
           </div>
-          <label>Monthly budget
+          <!-- The proposal-wide billing period (the same setting as Step 04's
+               Weekly/Monthly/Quarterly/Full Flight pill). Deliberately NO
+               data-field: it is not a request field, and data-field elements
+               are copied into state.parsed and blanked on reset. Wired in
+               wireEvents(); kept in sync by _applyTimeUnitLabels(). -->
+          <label>Billing period
+            <select id="step02-billing-period" title="How this proposal is billed and shown in the export. Full flight bills the whole flight as one period — no monthly breakdown.">
+              <option value="week">Weekly</option>
+              <option value="month" selected>Monthly</option>
+              <option value="quarter">Quarterly</option>
+              <option value="full_flight">Full Flight</option>
+            </select>
+          </label>
+          <p class="field-hint hidden" id="step02-billing-period-hint">Billed as one period for the whole flight — the export shows Months: 1 and one total per line. The budget below (and Tier #1–#4) is the flight's total, used exactly as typed — nothing is multiplied by months.</p>
+          <label><span id="step02-budget-label">Monthly budget</span>
             <input data-field="monthly_budget" type="number" step="0.01" min="0" />
           </label>
         </fieldset>
@@ -271,7 +285,7 @@ Client name: ...
         </fieldset>
 
         <fieldset class="span-2">
-          <legend>Tiered Budget <small>(optional — alternate monthly options)</small></legend>
+          <legend>Tiered Budget <small id="step02-tier-note">(optional — alternate monthly options)</small></legend>
           <label class="checkbox-label">
             <input type="checkbox" data-field="tiered_budget" /> This request has tiered budget options
           </label>
@@ -458,8 +472,9 @@ Client name: ...
           <button type="button" class="time-unit-slider-option" data-unit="week">Weekly</button>
           <button type="button" class="time-unit-slider-option active" data-unit="month">Monthly</button>
           <button type="button" class="time-unit-slider-option" data-unit="quarter">Quarterly</button>
+          <button type="button" class="time-unit-slider-option" data-unit="full_flight">Full Flight</button>
         </div>
-        <p class="time-unit-toggle-hint">Changes how totals, avails, the Step 06 breakdown, and the export all read — everywhere this proposal says "month."</p>
+        <p class="time-unit-toggle-hint">Changes how totals, avails, the Step 06 breakdown, and the export all read — everywhere this proposal says "month." Full Flight bills the whole flight as one period: no monthly split, each line's budget is its flight total, and it only has to clear the product's monthly minimum once.</p>
       </div>
 
       <div class="curation-toolbar">
@@ -473,15 +488,18 @@ Client name: ...
         <button class="btn-secondary" id="recommend-btn" title="Builds a brand-new product mix from the confirmed strategy brief — replaces the current lines">🔄 Generate New Product Mix</button>
         <div class="spacer"></div>
         <div class="totals-display">
+          <!-- In Full Flight the monthly and flight totals are the same number, so the
+               "Flight total" cells (flight-total-cell / flight-total-gross-cell) are hidden
+               (#step-4.ff-mode) and the first cell is relabelled "Full-Flight total". -->
           <div class="totals-row">
-            <div><span class="label" id="monthly-total-label">Monthly total</span><span class="value" id="monthly-total">$0</span></div>
-            <div><span class="label">Flight total</span><span class="value" id="flight-total">$0</span></div>
+            <div id="monthly-total-cell"><span class="label" id="monthly-total-label">Monthly total</span><span class="value" id="monthly-total">$0</span></div>
+            <div id="flight-total-cell"><span class="label" id="flight-total-label">Flight total</span><span class="value" id="flight-total">$0</span></div>
           </div>
           <div class="totals-gross hidden" id="totals-gross-wrap">
             <div class="totals-divider"></div>
             <div class="totals-row">
-              <div><span class="label" id="monthly-total-gross-label">Monthly total (Gross)</span><span class="value" id="monthly-total-gross">$0</span></div>
-              <div><span class="label">Flight total (Gross)</span><span class="value" id="flight-total-gross">$0</span></div>
+              <div id="monthly-total-gross-cell"><span class="label" id="monthly-total-gross-label">Monthly total (Gross)</span><span class="value" id="monthly-total-gross">$0</span></div>
+              <div id="flight-total-gross-cell"><span class="label" id="flight-total-gross-label">Flight total (Gross)</span><span class="value" id="flight-total-gross">$0</span></div>
             </div>
           </div>
         </div>
@@ -518,7 +536,7 @@ Client name: ...
               <th>Product</th>
               <th>Model</th>
               <th>Rate</th>
-              <th>Min</th>
+              <th id="col-min-header">Min</th>
               <th id="col-budget-header">Monthly $</th>
               <th class="col-share-header" title="Each paid line's share of the plan's total (read-only). Use ✎ Edit mix % to set the shares for the whole plan at once.">% of total</th>
               <th id="col-months-header">Months</th>
@@ -585,6 +603,13 @@ Client name: ...
       <p class="tier-switcher-hint" id="tier-switcher-hint-monthly">
         <span id="mb-step-name">Monthly Breakdown</span> is entered separately per option — you're editing <strong id="tier-switcher-active-label-monthly">Option A</strong> below. Switch tabs above before generating, or that option's export has none.
       </p>
+
+      <!-- Full Flight only (shown by renderMonthlyBreakdown, hidden otherwise): the whole
+           flight is ONE period, so the breakdown machinery below is replaced by this note. -->
+      <div id="mb-fullflight-note" class="mb-empty-state mb-fullflight-note hidden">
+        <p><strong>Full-Flight billing:</strong> each line is billed as one period — nothing to split.</p>
+        <p class="mb-fullflight-detail" id="mb-fullflight-detail"></p>
+      </div>
 
       <div id="mb-no-dates" class="mb-empty-state hidden">
         <p id="mb-no-dates-text">Monthly Breakdown needs a campaign flight to divide into months. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.</p>

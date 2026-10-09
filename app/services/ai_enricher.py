@@ -22,6 +22,7 @@ from typing import Optional
 
 from app.catalog import by_name as _catalog_by_name
 from app.services import llm_utils
+from app.services import period_copy
 from app.services.text_utils import normalize_newlines as _normalize_newlines, split_sentences, strip_variant_pricing
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 
@@ -279,7 +280,7 @@ _REVISE_MAX_COMPLETION_TOKENS = 16000
 
 
 def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional[dict] = None,
-                    tiers: Optional[list] = None) -> ProposalEnrichment:
+                    tiers: Optional[list] = None, time_unit: str = "month") -> ProposalEnrichment:
     """
     Call OpenAI to generate all AI enrichment for a proposal — campaign
     name, per-product blurbs (short plain descriptions), and both emails.
@@ -303,6 +304,12 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     which doesn't vary by tier); this only changes how the emails are
     structured, so they lay out each option explicitly instead of
     describing a single plan.
+
+    time_unit: the proposal's billing period ("week"/"month"/"quarter"/"full_flight").
+    For "full_flight" every line's dollar figure is the flat total for the whole flight
+    (single billing period), so the prompt says so and the emails must never present
+    it as a monthly rate or multiply it by a month count. Every other value keeps the
+    original "$/month x N months" wording.
     """
     api_key = os.getenv("OPENAI_API_KEY")
     if not _HAS_OPENAI:
@@ -317,7 +324,7 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
         )
 
     client = _OpenAI(api_key=api_key)
-    prompt = _build_prompt(request, line_items, strategy_brief=strategy_brief, tiers=tiers)
+    prompt = _build_prompt(request, line_items, strategy_brief=strategy_brief, tiers=tiers, time_unit=time_unit)
     truncated = ProposalEnrichment(
         campaign_name=_fallback_campaign_name(request),
         error="Content generation was cut off before it finished, even after an automatic retry.",
@@ -354,6 +361,16 @@ def _fallback_campaign_name(request) -> str:
     return request.client_name or "Campaign"
 
 
+# The Full Flight billing rule, said ONCE so the original email prompt (_build_prompt) and the planner's revision
+# prompt (reprompt_emails) can never drift: without it a "mention the cost per month" revision request could
+# reintroduce the monthly wording the first pass was told never to use.
+_FULL_FLIGHT_RULE_TEXT = (
+    "this is a FULL-FLIGHT proposal — the whole flight is billed as ONE period, not month by month. "
+    "Every dollar figure and every impression figure above is a flat total for the ENTIRE flight. Never write one as "
+    "per month, monthly, each month or a run rate, and never multiply or divide one by a number of months"
+)
+
+
 def reprompt_emails(
     request,
     line_items,
@@ -364,6 +381,7 @@ def reprompt_emails(
     current_client_body: str,
     reprompt: str,
     scope: str = "both",
+    time_unit: str = "month",
 ) -> dict:
     """
     Step 07 — revise the internal + client-facing emails in place, based on
@@ -371,6 +389,10 @@ def reprompt_emails(
     shorter", "emphasize the Q4 start date"), WITHOUT touching campaign_name,
     product blurbs, or the already-generated Excel file/title — those are
     fixed by the time the planner is reviewing emails at this step.
+
+    time_unit: the proposal's billing period. For "full_flight" the revision prompt
+    carries the same billing rule as the original email prompt (flat flight totals,
+    never per month); every other value leaves the prompt exactly as it always was.
 
     scope: "both" (default) revises both emails, the original behavior.
     "internal"/"client" revises only that one — enforced as a hard
@@ -415,6 +437,14 @@ def reprompt_emails(
         "client": "Revise ONLY the CLIENT-FACING email to incorporate the planner's requested change. Return the INTERNAL email's subject and body EXACTLY as shown above, character-for-character unchanged — the planner only asked to change the client-facing one this time.",
     }.get(scope, "Revise BOTH emails to incorporate the planner's requested change.")
 
+    # Empty for every unit but Full Flight, so those prompts stay byte-identical. Built here (outside the f-string) for the
+    # same quoting reason as scope_instruction above, and placed in the instructions — never inside the JSON exemplar.
+    billing_note = (
+        f"CRITICAL — BILLING PERIOD: {_FULL_FLIGHT_RULE_TEXT}. If the planner's requested change asks for a per-month "
+        "figure, give the flat flight total instead.\n\n"
+        if period_copy.resolve_time_unit(time_unit, where="email reprompt prompt") == period_copy.FULL_FLIGHT else ""
+    )
+
     prompt = f"""You are revising two already-drafted emails for a digital media proposal, based on the planner's final review feedback. Respond ONLY with valid JSON — no preamble, no markdown fences.
 
 ## PROPOSAL CONTEXT
@@ -446,7 +476,7 @@ CRITICAL — PRESERVE THESE LINES VERBATIM, EXACTLY AS WRITTEN, WHEREVER THEY AP
 Any line starting with "Proposal:", "Presentation:", or "Google Drive Link:" is a system-inserted reference line, not AI-authored content — copy it into your revised email character-for-character, in the same position relative to the surrounding text. Never reword, remove, or relocate these lines even if the requested change is about tone or structure elsewhere in the email.
 The INTERNAL email's final two lines (a "{{Name}}, part of your digital strategy team" line followed by an email address line) are the real planner's system-inserted signature, not AI-authored content — keep them character-for-character, at the very end, exactly as given. Never invent a different sign-off in their place.
 
-Respond with this exact JSON structure:
+{billing_note}Respond with this exact JSON structure:
 {{
   "internal_email_subject": "revised subject",
   "internal_email_body": "revised full internal email body",
@@ -556,6 +586,11 @@ def _estimate_monthly_impressions(line_items) -> Optional[int]:
     guess, since a wrong impressions figure in a seller-facing email is
     worse than no figure at all. Returns None if nothing in the set
     supports an impressions estimate (e.g. all CPP, or no rate on file).
+
+    The figure covers ONE billing period of the line items it is given (the
+    name predates the Weekly/Quarterly/Full Flight toggle). In Full Flight each
+    line's monthly_budget is the whole-flight dollar amount, so the result is
+    the whole-flight estimate — _build_prompt labels it accordingly.
     """
     total = 0.0
     found_any = False
@@ -586,7 +621,13 @@ def _format_impressions(n: Optional[int]) -> str:
 
 
 def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
-                  tiers: Optional[list] = None) -> str:
+                  tiers: Optional[list] = None, time_unit: str = "month") -> str:
+    # Full Flight = one billing period for the whole flight: every figure below is a flat flight total, so none
+    # of it may be worded "/month x N months", and the impressions figure is the whole-flight estimate.
+    time_unit = period_copy.resolve_time_unit(time_unit, where="proposal enrichment prompt")
+    full_flight = time_unit == period_copy.FULL_FLIGHT
+    imps_label = "total flight impressions" if full_flight else "monthly impressions"
+
     # Ground each product in what it ACTUALLY is (the catalog's own rate-
     # card description), not just its name + budget — the model had
     # nothing else to go on before this beyond the product's name and the
@@ -610,8 +651,13 @@ def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
             "\n    What this actually is: (no rate-card description on file — describe it in one plain, generic sentence from its "
             "name and its Knowledge Base row only; invent no specifics)"
         )
+        if full_flight:
+            return (
+                f"  - {li.product_name}: ${li.monthly_budget * li.months:,.0f} flat for the whole flight "
+                f"(single billing period — not a monthly rate){desc_line}"
+            )
         return (
-            f"  - {li.product_name}: ${li.monthly_budget:,.0f}/month × {li.months} months "
+            f"  - {li.product_name}: ${li.monthly_budget:,.0f}/month × {period_copy.months_phrase(li.months)} "
             f"= ${li.monthly_budget * li.months:,.0f} total{desc_line}"
         )
 
@@ -630,13 +676,19 @@ def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
             t_total = sum(li.monthly_budget * li.months for li in t_items)
             t_monthly = sum(li.monthly_budget for li in t_items)
             t_imps = _estimate_monthly_impressions(t_items)
-            imps_str = f", {_format_impressions(t_imps)} monthly impressions" if t_imps else ""
+            imps_str = f", {_format_impressions(t_imps)} {imps_label}" if t_imps else ""
             products_str = ", ".join(li.product_name for li in t_items) or "(no products)"
             option_name = (t.get("name") or "").strip() or f"Option {t.get('label', '?')}"
-            option_lines.append(
-                f"  - {option_name}: ${t_monthly:,.0f}/month "
-                f"(${t_total:,.0f} total flight{imps_str}) — {products_str}"
-            )
+            if full_flight:
+                option_lines.append(
+                    f"  - {option_name}: ${t_total:,.0f} total flight "
+                    f"(single billing period{imps_str}) — {products_str}"
+                )
+            else:
+                option_lines.append(
+                    f"  - {option_name}: ${t_monthly:,.0f}/month "
+                    f"(${t_total:,.0f} total flight{imps_str}) — {products_str}"
+                )
         tiers_block = f"""
 ## MULTIPLE BUDGET OPTIONS — THIS PROPOSAL HAS {len(tiers)} DISTINCT OPTIONS
 The client is being presented {len(tiers)} alternative budget/product-mix
@@ -647,7 +699,7 @@ as a single plan — both emails must clearly lay out EACH option separately
 (its own heading, budget, and product mix) so the reader can compare them
 side by side. **Use the exact option name given below as its heading** —
 never the generic "Option A"/"Option B" unless that's literally what's
-given (no planner name set). The monthly impressions figures below (where
+given (no planner name set). The {imps_label} figures below (where
 given) are pre-computed from real rates — use them verbatim if you
 reference impressions; never compute or guess your own.
 {chr(10).join(option_lines)}
@@ -726,6 +778,16 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
         "Please see your requested plan in the link below:"
     )
 
+    # The two period-sensitive lines of PROPOSAL CONTEXT, and the Full Flight rule. Built out here (not inline in
+    # the big f-string) so the month wording stays visibly the original text, and so the Full Flight rule lives in
+    # the RULES block — never inside the JSON exemplar's strings, where a stray quote or brace breaks the JSON.
+    flight_period = "single flight, billed as one period" if full_flight else period_copy.months_phrase(request.total_months or 3)
+    total_imps_note = (
+        f" ({_format_impressions(total_impressions)} {imps_label} — pre-computed from real rates, use verbatim, never recompute)"
+        if total_impressions and not tiers_block else ""
+    )
+    billing_rule = f"- Billing period: {_FULL_FLIGHT_RULE_TEXT}\n" if full_flight else ""
+
     # Built as its own variable (not inline in the JSON block below) so its
     # own quoting doesn't have to fight the surrounding f-string's quoting —
     # a dash-based structure instead of numbered steps, so the optional
@@ -774,8 +836,8 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
 - Seller (AE): {request.requested_by or request.salesperson_email or "TBD"}
 - AE Email: {request.salesperson_email or "TBD"}
 - Campaign Goal: {request.campaign_goal or "Awareness"}
-- Flight: {request.start_date or "TBD"} → {request.end_date or "TBD"} ({request.total_months or 3} months)
-- Total Net Investment: ${total_budget:,.0f}{f" (~{_format_impressions(total_impressions)} monthly impressions — pre-computed from real rates, use verbatim, never recompute)" if total_impressions and not tiers_block else ""}
+- Flight: {request.start_date or "TBD"} → {request.end_date or "TBD"} ({flight_period})
+- Total Net Investment: ${total_budget:,.0f}{total_imps_note}
 - Request Type: {request.request_type or "Proposal"}
 - AE Comments: {request.salesperson_comments or "None"}
 - Question Details: {getattr(request, "question_details", "") or "None"}
@@ -888,7 +950,7 @@ EMAIL AND OUTPUT RULES:
 - Client email: professional but readable; absolutely no internal document references
 - Do not mention a presentation, deck, or any deliverable that isn't actually part of this request (see Request Type above) — only reference what's really being delivered
 - Campaign name: no quotes, no special characters, and must NOT contain the client/advertiser's name (it's combined with the client name separately downstream — including it here would repeat it)
-- Respond ONLY with the JSON object, starting with {{ and ending with }}"""
+{billing_rule}- Respond ONLY with the JSON object, starting with {{ and ending with }}"""
 
 
 # ---------------------------------------------------------------------------

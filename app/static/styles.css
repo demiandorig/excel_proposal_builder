@@ -779,17 +779,22 @@ html, body {
   color: var(--ink-faint);
 }
 
-/* Sliding 3-way segmented control — an oval track with a smaller purple
-   oval "thumb" that slides to whichever of the 3 positions is selected,
-   the selected label turning white/bold over it while the other two stay
-   plain/grey. Position is set via a translateX() on the thumb (see
-   _applyTimeUnitLabels in app.js) — percentages there are relative to
-   the THUMB's own width, so 0%/100%/200% land it exactly on each of the
-   3 equal segments regardless of the track's actual pixel width. */
+/* Sliding N-way segmented control (Weekly | Monthly | Quarterly | Full
+   Flight) — an oval track with a smaller purple oval "thumb" that slides
+   to whichever position is selected, the selected label turning
+   white/bold over it while the others stay plain/grey. Position is set
+   via a translateX() on the thumb (see _applyTimeUnitLabels in app.js) —
+   percentages there are relative to the THUMB's own width, so
+   0%/100%/200%/300% land it exactly on each of the N equal segments
+   regardless of the track's actual pixel width. That only holds while
+   every option really is 1/N of the track: --time-unit-count must match
+   the number of buttons in index.html, and the options carry min-width: 0
+   (below) so a long label can never widen its own segment. */
 .time-unit-slider {
+  --time-unit-count: 4;
   position: relative;
   display: inline-flex;
-  width: 300px;
+  width: 420px;
   max-width: 100%;
   background: var(--paper-card);
   border: 1px solid var(--rule);
@@ -801,7 +806,7 @@ html, body {
   top: 4px;
   bottom: 4px;
   left: 4px;
-  width: calc((100% - 8px) / 3);
+  width: calc((100% - 8px) / var(--time-unit-count));
   background: var(--accent);
   border-radius: 999px;
   transition: transform 0.2s ease;
@@ -811,6 +816,7 @@ html, body {
   position: relative;
   z-index: 2;
   flex: 1 1 0;
+  min-width: 0;
   border: none;
   background: transparent;
   padding: 7px 10px;
@@ -823,6 +829,17 @@ html, body {
   white-space: nowrap;
 }
 .time-unit-slider-option.active { color: white; }
+/* Phones: four options in a ~230px track — the mono label no longer fits its
+   quarter, so drop to the body font at a smaller size with tighter padding
+   (still one line, still equal-width segments so the thumb stays aligned). */
+@media (max-width: 520px) {
+  .time-unit-slider { width: 100%; }
+  .time-unit-slider-option {
+    padding: 7px 2px;
+    font-family: var(--font-body);
+    font-size: 11px;
+  }
+}
 .copy-avails-control {
   display: flex;
   align-items: center;
@@ -1215,6 +1232,23 @@ input[readonly] {
 }
 
 .line-items .col-months { min-width: 70px; }
+/* Full Flight (#step-4.ff-mode / #step-6.ff-mode, toggled by
+   _applyTimeUnitLabels): every line is ONE period, so Step 04 has no month
+   count to show and only one total (the "Flight total" cells would repeat the
+   same number), and Step 06 has no breakdown — only the read-only note. */
+#step-4.ff-mode #col-months-header,
+#step-4.ff-mode .line-items .col-months,
+#step-4.ff-mode #flight-total-cell,
+#step-4.ff-mode #flight-total-gross-cell { display: none; }
+#step-6.ff-mode .mb-master-toggle,
+#step-6.ff-mode #tier-switcher-monthly-wrap,
+#step-6.ff-mode #tier-switcher-hint-monthly,
+#step-6.ff-mode #mb-no-dates,
+#step-6.ff-mode #mb-content { display: none !important; }
+/* Step 06 is only a read-only note in Full Flight: "Skip" and "Continue" would do the same thing. */
+#step-6.ff-mode #monthly-breakdown-skip-btn { display: none; }
+.mb-fullflight-note p { margin: 0; }
+.mb-fullflight-note .mb-fullflight-detail { margin-top: 6px; font-size: 13px; color: var(--ink-faint); }
 .months-derived {
   font-family: var(--font-mono);
   font-size: 14px;

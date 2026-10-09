@@ -40,8 +40,11 @@ exact static family is installed on the viewer's machine.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
+
+from app.services import period_copy
 
 try:
     from pptx import Presentation
@@ -52,6 +55,8 @@ try:
     _HAS_PPTX = True
 except ImportError:
     _HAS_PPTX = False
+
+logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 # The user's given URL (EVC_Claim_Purple.png) 404'd when fetched — this is
@@ -95,6 +100,16 @@ if _HAS_PPTX:
     # any future edit — nothing auto-corrects a mismatch here.
     _COL_WIDTHS_IN = [3.6, 3.6, 0.9, 2.1, 2.133]  # Product, Target, Months, Monthly Budget, Total
     assert abs(sum(_COL_WIDTHS_IN) - 12.333) < 0.01, "pptx table column widths must sum to CONTENT_W"
+    # Full Flight has no per-period columns — Product, Target, Flight Budget. Same rule as above: this must sum
+    # to CONTENT_W or the shortfall/leftover lands on a column that was never meant to absorb it. Product and
+    # Target stay >= the 3.6" the row-height estimate (_estimate_wrapped_lines' 38 chars per line) is calibrated
+    # to: wider columns only make that estimate MORE conservative (rows booked a touch taller than they render,
+    # never shorter), so pagination can't under-count and overrun the footer/signature block. Narrowing either
+    # below 3.6" would break that guarantee — hence the second assertion.
+    _FULL_FLIGHT_COL_WIDTHS_IN = [4.7, 4.7, 2.933]  # Product, Target, Flight Budget
+    assert abs(sum(_FULL_FLIGHT_COL_WIDTHS_IN) - 12.333) < 0.01, "pptx full-flight table column widths must sum to CONTENT_W"
+    assert min(_FULL_FLIGHT_COL_WIDTHS_IN[:2]) >= _COL_WIDTHS_IN[0], \
+        "pptx full-flight Product/Target columns must stay >= 3.6in (the row-height estimate's calibration width)"
 
     # Y where content starts: slide 1 has the full header block below it;
     # slide 2+ only has a small logo, so content can start much higher.
@@ -254,7 +269,9 @@ def _estimate_wrapped_lines(text: str, *, chars_per_line: int = 38, max_lines: i
 
 
 def _line_item_impressions(product, li) -> Optional[int]:
-    """Best-effort monthly impressions for ONE line item — same math Excel
+    """Best-effort impressions for ONE line item's budget — one billing period's
+    worth (a month's in the default Monthly deck; in Full Flight, where the
+    budget IS the whole flight, the whole-flight estimate) — same math Excel
     itself uses (see excel_template._write_product_row / ai_enricher.py's
     _estimate_monthly_impressions, which does the same thing summed across
     a whole set rather than per-line). None when this product's buying
@@ -276,6 +293,10 @@ def _line_item_impressions(product, li) -> Optional[int]:
 
 
 def _product_cell_text(product, li, unit_suffix: str = "/mo") -> str:
+    """Product name, plus an "Est. N impressions<suffix>" sub-line when the
+    product supports an estimate. unit_suffix is the layout's per-period
+    marker ("/mo", "/wk", "/qtr"; empty in Full Flight, where the figure is
+    the whole-flight total and needs no qualifier)."""
     imps = _line_item_impressions(product, li)
     if imps is None:
         return product.name
@@ -299,7 +320,19 @@ def _row_height_in(product_name: str, target_text: str, *, header: bool = False,
 # instead of always forcing a fresh slide per tier.
 # ---------------------------------------------------------------------------
 
-def _build_items(tiers: list, *, gross: bool, agency_fee: Optional[float]) -> list[dict]:
+def _tier_flight_window(tier: dict, campaign_start: str, campaign_end: str) -> tuple[str, str]:
+    """An option's EFFECTIVE flight: its own start/end override, else the campaign's — per bound, the same
+    fallback the Excel export applies (proposal_generator: tier_start_date / tier_end_date)."""
+    start = (tier.get("start_date") or "").strip() or campaign_start
+    end = (tier.get("end_date") or "").strip() or campaign_end
+    return start, end
+
+
+def _build_items(tiers: list, *, gross: bool, agency_fee: Optional[float],
+                 flight_windows: bool = False, campaign_start: str = "", campaign_end: str = "") -> list[dict]:
+    """flight_windows (Full Flight only): an option whose flight differs from the campaign's says so on its bar —
+    a Full Flight deck has no Months column, so the window is the only thing telling a reader what that option's
+    'Flight Budget' covers. Options that run the campaign's own dates carry nothing extra (the header has them)."""
     show_tier_bars = len(tiers) > 1
     items: list[dict] = []
     for tier in tiers:
@@ -307,7 +340,12 @@ def _build_items(tiers: list, *, gross: bool, agency_fee: Optional[float]) -> li
         if not pairs:
             continue
         if show_tier_bars:
-            items.append({"kind": "tier_bar", "label": tier["name"], "height": _TIER_BAR_HEIGHT_IN})
+            bar_label = tier["name"]
+            if flight_windows:
+                window = _tier_flight_window(tier, campaign_start, campaign_end)
+                if all(window) and window != (campaign_start, campaign_end):
+                    bar_label = f"{bar_label}  ·  {window[0]} – {window[1]}"
+            items.append({"kind": "tier_bar", "label": bar_label, "height": _TIER_BAR_HEIGHT_IN})
         tier_total = 0.0
         for product, li in pairs:
             monthly = li.monthly_budget
@@ -325,7 +363,7 @@ def _build_items(tiers: list, *, gross: bool, agency_fee: Optional[float]) -> li
             })
         items.append({
             "kind": "subtotal", "label": tier["name"] if show_tier_bars else "TOTAL",
-            "total": tier_total, "height": _SUBTOTAL_HEIGHT_IN,
+            "tier_name": tier["name"], "total": tier_total, "height": _SUBTOTAL_HEIGHT_IN,
         })
     return items
 
@@ -365,12 +403,64 @@ def _greedy_chunk(items: list, *, start_idx: int, avail_height_in: float):
     return chunk, idx, used
 
 
-# Step 04's Week/Month/Quarter toggle, as the table's column headers and per-row budget suffix.
-_UNIT_COPY = {
-    "week": ("Weeks", "Weekly Budget", "/wk"),
-    "month": ("Months", "Monthly Budget", "/mo"),
-    "quarter": ("Quarters", "Quarterly Budget", "/qtr"),
-}
+# The table's column SET depends on the billing period (Step 04's toggle). Every column has a ROLE; alignment,
+# the subtotal row's blank cells, the total's position and each data cell's content are driven by role, never by
+# a column index — a layout with a different number of columns (Full Flight) can't mis-place a total or leave a
+# stray blank column, and the 5-column week/month/quarter layout is unchanged.
+_ROLE_PRODUCT = "product"
+_ROLE_TARGET = "target"
+_ROLE_PERIODS = "periods"              # how many periods the line runs ("Months")
+_ROLE_PERIOD_BUDGET = "period_budget"  # dollars per ONE period ("Monthly Budget")
+_ROLE_TOTAL = "total"                  # the line's whole-flight dollars; the column subtotal rows sum into
+
+
+class _TableSpec(NamedTuple):
+    columns: tuple     # ((role, header text), ...), left to right
+    widths_in: list    # one width per column (inches), summing to CONTENT_W
+    unit_suffix: str   # appended to a per-period dollar figure and to the impressions sub-line
+
+
+def _per_period_spec(periods_header: str, budget_header: str, suffix: str) -> "_TableSpec":
+    return _TableSpec(
+        columns=((_ROLE_PRODUCT, "Product"), (_ROLE_TARGET, "Target"), (_ROLE_PERIODS, periods_header),
+                 (_ROLE_PERIOD_BUDGET, budget_header), (_ROLE_TOTAL, "Total")),
+        widths_in=_COL_WIDTHS_IN, unit_suffix=suffix)
+
+
+if _HAS_PPTX:
+    # One entry for every billing period in monthly_allocation.TIME_UNITS (tests pin that they stay in step).
+    _TABLE_SPECS = {
+        "week": _per_period_spec("Weeks", "Weekly Budget", "/wk"),
+        "month": _per_period_spec("Months", "Monthly Budget", "/mo"),
+        "quarter": _per_period_spec("Quarters", "Quarterly Budget", "/qtr"),
+        # Full Flight: ONE period, so no period-count or per-period column and no "/mo" anywhere. The line's
+        # dollars are the whole-flight figure and so is its impressions estimate (hence no suffix on that
+        # sub-line either) — the single budget column is the TOTAL role.
+        period_copy.FULL_FLIGHT: _TableSpec(
+            columns=((_ROLE_PRODUCT, "Product"), (_ROLE_TARGET, "Target"), (_ROLE_TOTAL, "Flight Budget")),
+            widths_in=_FULL_FLIGHT_COL_WIDTHS_IN, unit_suffix=""),
+    }
+
+
+def _table_spec(time_unit: Optional[str]) -> "_TableSpec":
+    """The column layout + wording for a billing period. An unrecognized value
+    falls back to the month layout, but loudly (a logged warning) — never the
+    old silent `.get(unit, month)`, which let an unhandled period ship month
+    wording unnoticed. Never raises: the deck is an optional, non-fatal export."""
+    unit = period_copy.resolve_time_unit(time_unit, where="pptx table")
+    spec = _TABLE_SPECS.get(unit)
+    if spec is None:  # a period added to TIME_UNITS without PowerPoint wording
+        logger.warning("No PowerPoint table layout for billing period %r; using the month layout.", unit)
+        spec = _TABLE_SPECS["month"]
+    return spec
+
+
+def _role_align(role: str):
+    if role in (_ROLE_PRODUCT, _ROLE_TARGET):
+        return PP_ALIGN.LEFT
+    if role == _ROLE_PERIODS:
+        return PP_ALIGN.CENTER
+    return PP_ALIGN.RIGHT
 
 
 def _add_table(slide, *, top_in: float, chunk: list, gross: bool, time_unit: str = "month") -> float:
@@ -378,15 +468,18 @@ def _add_table(slide, *, top_in: float, chunk: list, gross: bool, time_unit: str
     starts with a column-header row). Returns the Y position (inches)
     after the table — the exact sum of the row heights this function
     itself just set, not a separate estimate that could drift."""
-    unit_plural, unit_budget, unit_suffix = _UNIT_COPY.get(time_unit, _UNIT_COPY["month"])
-    columns = ["Product", "Target", unit_plural, unit_budget, "Total"]
+    spec = _table_spec(time_unit)
+    columns = spec.columns
+    roles = [role for role, _ in columns]
+    col_of = {role: c for c, role in enumerate(roles)}
+    unit_suffix = spec.unit_suffix
     header_h = _row_height_in("", "", header=True)
     row_heights_in = [header_h] + [item["height"] for item in chunk]
     n_rows = len(row_heights_in)
 
     gfx = slide.shapes.add_table(n_rows, len(columns), MARGIN, Inches(top_in), CONTENT_W, Inches(sum(row_heights_in)))
     table = gfx.table
-    for i, w in enumerate(_COL_WIDTHS_IN):
+    for i, w in enumerate(spec.widths_in):
         table.columns[i].width = Inches(w)
     for i, h in enumerate(row_heights_in):
         table.rows[i].height = Inches(h)
@@ -431,9 +524,8 @@ def _add_table(slide, *, top_in: float, chunk: list, gross: bool, time_unit: str
         table.cell(r, 0).merge(table.cell(r, len(columns) - 1))
         _cell(r, 0, text, bold=True, color=WHITE, size=11, font=FONT_MAIN, fill=fill)
 
-    for c, label in enumerate(columns):
-        align = PP_ALIGN.LEFT if c < 2 else (PP_ALIGN.CENTER if c == 2 else PP_ALIGN.RIGHT)
-        _cell(0, c, label, bold=True, color=WHITE, align=align, size=11, font=FONT_MAIN, fill=PRIMARY)
+    for c, (role, label) in enumerate(columns):
+        _cell(0, c, label, bold=True, color=WHITE, align=_role_align(role), size=11, font=FONT_MAIN, fill=PRIMARY)
 
     data_row_i = 0  # for zebra striping — only counts real product rows
     for i, item in enumerate(chunk):
@@ -442,19 +534,31 @@ def _add_table(slide, *, top_in: float, chunk: list, gross: bool, time_unit: str
             _merged_banner(r, item["label"], fill=SECONDARY)
         elif item["kind"] == "subtotal":
             label = item["label"] if item["label"] == "TOTAL" else f"{item['label']} — Total"
-            _cell(r, 0, label, bold=True, color=WHITE, fill=TERTIARY)
-            for c in (1, 2, 3):
-                _cell(r, c, "", fill=TERTIARY)
-            _cell(r, 4, f"${item['total']:,.0f}", bold=True, color=WHITE, align=PP_ALIGN.RIGHT, fill=TERTIARY)
+            _cell(r, col_of[_ROLE_PRODUCT], label, bold=True, color=WHITE, fill=TERTIARY)
+            for c, role in enumerate(roles):
+                if role not in (_ROLE_PRODUCT, _ROLE_TOTAL):
+                    _cell(r, c, "", fill=TERTIARY)
+            _cell(r, col_of[_ROLE_TOTAL], f"${item['total']:,.0f}", bold=True, color=WHITE, align=PP_ALIGN.RIGHT, fill=TERTIARY)
         else:  # "row"
             product, li = item["product"], item["line_item"]
             fill = ROW_ALT_FILL if data_row_i % 2 == 1 else WHITE
             data_row_i += 1
-            _cell(r, 0, _product_cell_text(product, li, unit_suffix), fill=fill)
-            _cell(r, 1, item["target"], color=INK_SOFT, size=10, fill=fill)
-            _cell(r, 2, str(li.months), align=PP_ALIGN.CENTER, fill=fill)
-            _cell(r, 3, "Added Value" if li.is_added_value else f"${item['monthly']:,.0f}{unit_suffix}", align=PP_ALIGN.RIGHT, fill=fill)
-            _cell(r, 4, f"${item['line_total']:,.0f}", align=PP_ALIGN.RIGHT, bold=True, fill=fill)
+            for c, role in enumerate(roles):
+                if role == _ROLE_PRODUCT:
+                    _cell(r, c, _product_cell_text(product, li, unit_suffix), fill=fill)
+                elif role == _ROLE_TARGET:
+                    _cell(r, c, item["target"], color=INK_SOFT, size=10, fill=fill)
+                elif role == _ROLE_PERIODS:
+                    _cell(r, c, str(li.months), align=PP_ALIGN.CENTER, fill=fill)
+                elif role == _ROLE_PERIOD_BUDGET:
+                    _cell(r, c, "Added Value" if li.is_added_value else f"${item['monthly']:,.0f}{unit_suffix}", align=PP_ALIGN.RIGHT, fill=fill)
+                else:  # _ROLE_TOTAL
+                    if li.is_added_value and _ROLE_PERIOD_BUDGET not in col_of:
+                        # No per-period column to carry the tag (Full Flight): the single budget column shows
+                        # it, styled like the tag in the 5-column layout, instead of a "$0" that reads as a data error.
+                        _cell(r, c, "Added Value", align=PP_ALIGN.RIGHT, fill=fill)
+                    else:
+                        _cell(r, c, f"${item['line_total']:,.0f}", align=PP_ALIGN.RIGHT, bold=True, fill=fill)
 
     return top_in + sum(row_heights_in) + _TABLE_TO_SIGNATURE_GAP_IN
 
@@ -636,7 +740,9 @@ def build_signature_deck(
     raises to the caller for a missing optional dependency).
 
     tiers: [{"name": str, "products": list[Product], "line_items":
-    list[LineItem]}, ...] — one entry per budget option. A single-tier
+    list[LineItem], "start_date": str|None, "end_date": str|None}, ...] — one
+    entry per budget option. start_date/end_date (optional) are the option's OWN
+    flight override; only a "full_flight" deck uses them (see _build_items). A single-tier
     proposal (the common case) renders exactly as before (no tier bar, one
     plain "TOTAL" row); more than one gets each option labeled with its own
     colored bar and its own subtotal — never a combined grand total across
@@ -649,11 +755,16 @@ def build_signature_deck(
     de-duplicated across options by the caller (the closing block is shared
     by every option).
 
-    time_unit: Step 04's "week"/"month"/"quarter" toggle, for the table's
-    column headers and per-row budget suffix.
+    time_unit: the proposal's billing period — Step 04's "week"/"month"/
+    "quarter" toggle, or "full_flight". Sets the table's columns, headers and
+    per-row budget suffix. "full_flight" (the whole flight billed as ONE
+    period) drops the Months and per-period columns: Product | Target |
+    Flight Budget, each line showing its whole-flight dollars, with no "/mo"
+    anywhere. An unrecognized value logs a warning and uses the month layout.
     """
     if not _HAS_PPTX:
         return False
+    time_unit = period_copy.resolve_time_unit(time_unit, where="pptx deck")
     tiers = [t for t in tiers if t.get("products") and t.get("line_items")]
     if not tiers:
         return False
@@ -675,7 +786,13 @@ def build_signature_deck(
     agency_fee = getattr(request, "agency_fee", None)
     fee_for_gross = agency_fee if gross else None
 
-    items = _build_items(tiers, gross=gross, agency_fee=fee_for_gross)
+    full_flight = time_unit == period_copy.FULL_FLIGHT
+    if full_flight and len(tiers) == 1:
+        # One option, no tier bar: the header is the only place for its flight, so a single option running its own
+        # dates (rather than the campaign's) must be what the header says — as it is in the workbook.
+        start_date, end_date = _tier_flight_window(tiers[0], start_date, end_date)
+    items = _build_items(tiers, gross=gross, agency_fee=fee_for_gross, flight_windows=full_flight,
+                         campaign_start=start_date, campaign_end=end_date)
     banners = banners or []
     # The closing block (legal copy + investment line + signature rules) has a fixed height; banners are
     # placed one by one in whatever room is left, flowing onto a new slide when the next one doesn't fit
@@ -728,18 +845,10 @@ def build_signature_deck(
     current["is_last"] = True
 
     total_slides = len(slide_plans)
-    # Recomputed directly per tier (not read back off the `items` subtotal
-    # entries) so two tiers sharing a display name can't be conflated.
-    tier_totals = []
-    for t in tiers:
-        pairs = list(zip(t["products"], t["line_items"]))
-        total = 0.0
-        for product, li in pairs:
-            line_total = li.monthly_budget * li.months
-            if gross and fee_for_gross:
-                line_total = line_total / (1 - fee_for_gross)
-            total += line_total
-        tier_totals.append((t["name"], total))
+    # The closing "Total Investment" line reads the very same per-tier totals the table's subtotal rows show
+    # (one subtotal item per tier, in tier order, so two tiers sharing a display name can't be conflated) — it
+    # used to be recomputed here from scratch, a second copy of the math that could drift from the table.
+    tier_totals = [(item["tier_name"], item["total"]) for item in items if item["kind"] == "subtotal"]
 
     # Phase 2 — actually draw each slide from the plan above.
     for i, plan in enumerate(slide_plans):
