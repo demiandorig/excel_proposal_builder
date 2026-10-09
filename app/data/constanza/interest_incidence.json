@@ -1,0 +1,30 @@
+{
+  "_meta": {
+    "description": "Curated public interest-incidence rates for Constanza's audience layer (app/services/constanza_audience.py). Deliberately small — every entry needs an actual cited source; an interest phrase that doesn't map to one of these returns 'unsupported_trait' rather than an invented rate. See the Phase 2 plan doc.",
+    "policy": "No rate ships without a source + source_date. Extend by adding entries here, not by asking the LLM to estimate a rate."
+  },
+  "categories": [
+    {
+      "category": "sports_fan",
+      "label": "Sports fan (general)",
+      "keywords": ["sports", "sports fan", "follows sports", "watches sports", "likes sports", "football", "basketball", "baseball", "soccer fan"],
+      "rate_by_gender": {"all": 0.68, "male": 0.68, "female": 0.68},
+      "source": "Gallup, 'As Industry Grows, Percentage of U.S. Sports Fans Steady' + Gallup Sports historical trend (68% of Americans self-identify as a fan of at least one sport, stable 2023-2026)",
+      "source_url": "https://news.gallup.com/poll/183689/industry-grows-percentage-sports-fans-steady.aspx",
+      "source_date": "2026-04",
+      "sample_scope": "US adults, general population. Gallup reports men as more likely to be fans than women, but did not publish an exact gender split in the sources checked — the same 68% rate is applied to all genders here rather than inventing a split percentage; a confirmed gender-specific split would tighten this.",
+      "confidence": "moderate"
+    },
+    {
+      "category": "video_gamer",
+      "label": "Plays video games (weekly)",
+      "keywords": ["gaming", "video games", "gamer", "plays video games", "plays games"],
+      "rate_by_gender": {"all": 0.60, "male": 0.52, "female": 0.47},
+      "source": "Entertainment Software Association (ESA) 2025 Essential Facts report, conducted with YouGov — 60% of US adults play video games weekly; 52% of male / 47% of female adults play weekly",
+      "source_url": "https://www.theesa.com/two-thirds-of-americans-play-video-games-every-week-according-tonew-report-from-the-entertainment-software-association/",
+      "source_date": "2025",
+      "sample_scope": "US adults 18+, general population. Age-band-specific rates aren't modeled in v1 (ESA's report shows the gender skew reverses for older cohorts — boomer women play more than boomer men — but that nuance isn't encoded here yet); the flat gender rate is applied across all ages.",
+      "confidence": "moderate"
+    }
+  ]
+}

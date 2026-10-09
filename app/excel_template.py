@@ -591,9 +591,30 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
             cell.alignment = CENTER
             cell.font = BODY_FONT
         elif avail.get("max_imps_estimated"):
-            cell.value = f"Est. {max_imps:,.0f}"
-            cell.alignment = CENTER
-            cell.font = BODY_FONT
+            if spend_formula:
+                # spend_formula references THIS cell arithmetically
+                # (imps_cell*rate/1000, etc. — see _spend_formula_from_imps,
+                # every branch of which multiplies imps_cell directly) — it
+                # needs a real number here, not "Est. …" text, or the spend
+                # formula breaks (text * number = a formula error in real
+                # Excel, caught by IFERROR into a blank cell). A custom
+                # number format gets the same "Est. 12,081,928" display
+                # while keeping the underlying value numeric. This exact
+                # combination (basis="imps" + max_imps_estimated=True) never
+                # arose before Constanza — the Step 05 UI only ever set
+                # max_imps_estimated=False when basis="imps" (a directly-
+                # typed value is, by definition, not "estimated") — so nothing
+                # previously exercised it; caught by generating and
+                # inspecting a real .xlsx with a Constanza-derived avails
+                # entry rather than just checking the UI's own form fields.
+                cell.value = max_imps
+                cell.number_format = '"Est. "#,##0'
+                cell.font = BODY_FONT
+                cell.alignment = CENTER
+            else:
+                cell.value = f"Est. {max_imps:,.0f}"
+                cell.alignment = CENTER
+                cell.font = BODY_FONT
         else:
             cell.value = max_imps
             _format_imps_cell(cell)
@@ -616,10 +637,24 @@ def write_avails_cells(ws: Worksheet, row: int, avail: dict, product: Optional[P
                 # (a bare, un-formatted number with no $ or thousands comma).
                 _format_money_cell(cell)
         elif avail.get("max_spend_estimated"):
-            cell.value = f"Est. ${max_spend:,.0f}"
-            cell.alignment = CENTER
-            cell.font = BODY_FONT
-            spend_is_text = True
+            if imps_formula:
+                # Same fix as the imps cell above, mirrored: imps_formula
+                # (_imps_formula_from_spend) references spend_cell
+                # arithmetically in every branch, so it must stay numeric.
+                # Not reachable via Constanza today (it only ever sets
+                # basis="imps", never "spend"), but the same contradiction
+                # would occur if anything else ever produced this
+                # combination — fixed here too rather than leaving a latent
+                # twin of the same bug.
+                cell.value = max_spend
+                cell.number_format = '"Est. $"#,##0'
+                cell.font = BODY_FONT
+                cell.alignment = CENTER
+            else:
+                cell.value = f"Est. ${max_spend:,.0f}"
+                cell.alignment = CENTER
+                cell.font = BODY_FONT
+                spend_is_text = True
         else:
             cell.value = max_spend
             _format_money_cell(cell)
