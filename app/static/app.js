@@ -2,6 +2,20 @@
  * Entravision Proposal Builder — front-end controller
  * ======================================================================== */
 
+// The proposal-wide billing period ("time_unit" on the wire, state.timeUnit here).
+// FULL_FLIGHT bills the WHOLE flight as ONE period — no per-month/week/quarter
+// split, no multiplication by a month count: a full-flight line has months == 1
+// and monthly_budget == the whole-flight net dollars, so every existing
+// "monthly_budget × months" total is already the plain sum of the lines.
+// Mirrors app/services/monthly_allocation.py (FULL_FLIGHT, FULL_FLIGHT_KEY,
+// TIME_UNITS) — the string is stored/sent verbatim, never display text.
+const FULL_FLIGHT = "full_flight";
+// The one period's key: a CONSTANT (never derived from the dates, so editing a
+// flight can't orphan anything keyed by it) with no "+" (the UI treats any
+// key containing "+" as a merged bucket).
+const FULL_FLIGHT_KEY = "full_flight";
+const TIME_UNITS = ["week", "month", "quarter", FULL_FLIGHT];
+
 const state = {
   catalog: null,            // { families: [...], products_by_family: {...} }
   productIndex: {},         // name -> product object (flat lookup)
@@ -24,7 +38,11 @@ const state = {
   mixEdit: null,
   strategyBrief: null,      // confirmed AI strategy brief (or null if skipped)
   roadblocks: null,         // Step 07 AI roadblocks/restrictions result (or null if skipped)
-  lineItems: [],            // array of { id, product_name, monthly_budget, months, ... }
+  // array of { id, product_name, monthly_budget, months, ... } — monthly_budget is
+  // "$ per ONE state.timeUnit period" and months is the period count, so a line's
+  // total is monthly_budget × months. In Full Flight (state.timeUnit ===
+  // FULL_FLIGHT) months is always 1 and monthly_budget is the whole flight.
+  lineItems: [],
   // Keyed by line item `id` — NOT product_name. Two lines can share the same
   // product (e.g. same product, different targeting), so a name-keyed dict
   // would silently collide between them; id is unique per line even then.
@@ -62,12 +80,15 @@ const state = {
   // whenever it no longer matches a real period in the current flight
   // (see renderMonthlyBreakdown's own guard).
   mbActiveMonthKey: null,
-  // Step 04's Week/Month/Quarter toggle — "week" | "month" | "quarter".
-  // Proposal-wide (not per-tier — the toggle lives once at Step 04 and
-  // governs the whole proposal, same reasoning as mbDistributionMode
-  // above), drives which of the _mbPeriodsBetween granularities Curate/
-  // Avails/Step 06/the export all use. Defaults to "month" — this app's
-  // original, only-ever behavior before the toggle existed.
+  // The proposal's billing period — "week" | "month" | "quarter" |
+  // "full_flight" (FULL_FLIGHT: the whole flight is ONE period). Set from
+  // Step 04's Weekly/Monthly/Quarterly/Full Flight pill AND Step 02's
+  // "Billing period" select (both drive onTimeUnitChange, both re-synced by
+  // _applyTimeUnitLabels). Proposal-wide (not per-tier — it governs the
+  // whole proposal, same reasoning as mbDistributionMode above), drives
+  // which of the _mbPeriodsBetween granularities Curate/Avails/Step 06/the
+  // export all use. Defaults to "month" — this app's original, only-ever
+  // behavior before the toggle existed.
   timeUnit: "month",
   // Step 06's "combine adjacent periods into one bucket" control for the
   // ACTIVE tier — [["2026-09","2026-10"], ...], each inner array 2+
@@ -529,8 +550,9 @@ async function maybeReopenProposal() {
     // (see reopen_state's own comment in main.py). Absent entirely on a
     // proposal generated before this feature existed — defaults to
     // "month", correct for every such proposal since that was the only
-    // granularity that existed then.
-    state.timeUnit = data.time_unit || "month";
+    // granularity that existed then. "full_flight" round-trips like any
+    // other value (_applyTimeUnitLabels below re-syncs every control).
+    state.timeUnit = _normalizeTimeUnit(data.time_unit);
     // Same "absent on an older proposal -> default" treatment as
     // time_unit above — both were only added to reopen_state once this
     // round's consistency pass closed the gap (see _build_reopen_state
@@ -569,6 +591,9 @@ async function maybeReopenProposal() {
     state.availsData = active.availsData;
     state.activeTierPeriodMergeGroups = active.periodMergeGroups || [];
     state.tiers = rest;
+    // A Full Flight proposal's saved lines may carry the server's synthesized single-period allocation; the
+    // client never works with allocations in Full Flight (see _normalizeFullFlightState), so drop them now.
+    _normalizeFullFlightState();
     _applyTimeUnitLabels();
 
     // Forced export-tab selections the planner made before generating. A save
@@ -874,6 +899,20 @@ function wireEvents() {
   });
   document.getElementById("total-months-fix-btn").addEventListener("click", onFixStep02Months);
 
+  // Step 02's "Billing period" select — the second control (beside Step 04's
+  // slider) for the ONE proposal-wide state.timeUnit. Deliberately has no
+  // data-field (fillForm/syncFormToParsed/resetAll would otherwise write it
+  // into state.parsed and blank it on reset). onTimeUnitChange may refuse the
+  // change (mix edit in progress) or the planner may cancel its confirm — in
+  // both cases state.timeUnit is untouched, so the select snaps back to it.
+  const step02Period = document.getElementById("step02-billing-period");
+  if (step02Period) {
+    step02Period.addEventListener("change", () => {
+      onTimeUnitChange(step02Period.value);
+      step02Period.value = state.timeUnit;
+    });
+  }
+
   // Proposal name bar — editable campaign-name segment.
   document.getElementById("save-draft-btn").addEventListener("click", onSaveDraft);
   document.getElementById("proposal-name-edit-btn").addEventListener("click", onEditProposalNameClick);
@@ -937,9 +976,9 @@ function wireEvents() {
   document.getElementById("roadblocks-regenerate-btn").addEventListener("click", () => onRoadblocksGenerate());
 
   // Curation
-  // Week/Month/Quarter toggle. Wired once (not re-wired per render — see
-  // the mb-mode-tabs comment above for why); renderLineItems()/onTimeUnitChange
-  // keep .active in sync.
+  // Weekly/Monthly/Quarterly/Full Flight toggle. Wired once (not re-wired per
+  // render — see the mb-mode-tabs comment above for why); _applyTimeUnitLabels
+  // (via onTimeUnitChange) keeps .active and the thumb in sync.
   document.querySelectorAll("#time-unit-toggle .time-unit-slider-option").forEach(btn => {
     btn.addEventListener("click", () => onTimeUnitChange(btn.dataset.unit));
   });
@@ -1519,6 +1558,10 @@ function onNext(n) {
   }
   if (n === 4) {
     // Pre-populate budget + line items for Curate step
+    //
+    // Step 02's budget figure seeds Step 04's Total budget exactly as typed in
+    // EVERY billing period — in Full Flight it is simply the flight's budget
+    // (one period: nothing is multiplied by a month count).
     const budget = state.parsed.monthly_budget || parseBudgetFromRenewal(state.parsed);
     if (budget) {
       document.getElementById("total-budget-target").value = formatBudgetInputValue(Number(budget));
@@ -1537,14 +1580,16 @@ function onNext(n) {
         return {
           id: newLineItemId(),
           product_name: name,
-          // state.timeUnit is always "month" (its default) the first time
-          // this pre-fill runs — nothing earlier in the flow can have
-          // changed it yet — so no scaling needed here specifically, but
-          // _timeUnitMinimumScale() is a no-op (×1) for "month" anyway.
+          // state.timeUnit is NOT necessarily "month" here: Step 02's Billing
+          // period select can already have switched it (and a re-parse keeps
+          // the choice). The catalog minimum is monthly, so scale it to the
+          // active unit — ×1 for month AND for Full Flight (one period: one
+          // monthly minimum), see _timeUnitMinimumScale.
           monthly_budget: p ? (p.minimum_spend || 0) * _timeUnitMinimumScale() : 0,
           // Derived from the flight dates (falls back to the legacy
           // planner-typed total_months only if dates aren't parseable
           // yet) — never free-typed from here, see _curateDerivedMonths.
+          // Always 1 in Full Flight (that function returns 1 first).
           months: _curateDerivedMonths() || state.parsed.total_months || 3,
           _monthsReconciled: true,
           rate_override: null,
@@ -1640,9 +1685,11 @@ function parseBudgetFromRenewal(parsed) {
   return null;
 }
 
-// Distribute a total monthly budget across line items proportionally by catalog rate weight
+// Distribute a total budget (per period; the whole flight in Full Flight) across
+// line items proportionally by catalog rate weight.
 function distributeBudgetProportionally(items, totalBudget) {
   if (!items.length) return;
+  const scale = _timeUnitMinimumScale();
   // Weight by catalog minimum_spend (proxy for product "size")
   const weights = items.map(li => {
     const p = state.productIndex[li.product_name];
@@ -1652,7 +1699,7 @@ function distributeBudgetProportionally(items, totalBudget) {
   items.forEach((li, i) => {
     const share = Math.round((weights[i] / totalWeight) * totalBudget / 50) * 50;
     const p = state.productIndex[li.product_name];
-    li.monthly_budget = Math.max(share, p ? (p.minimum_spend || 0) * _timeUnitMinimumScale() : 0);
+    li.monthly_budget = Math.max(share, p ? (p.minimum_spend || 0) * scale : 0);
   });
   // Adjust last item to make sum exact
   const sum = items.reduce((s, li) => s + li.monthly_budget, 0);
@@ -1748,6 +1795,7 @@ function fillForm(req) {
   // fair comparison instead of carrying over the previous proposal's.
   state._totalMonthsReconciled = undefined;
   _refreshStep02MonthsField();
+  _refreshStep02FlightNote();
 }
 
 // Campaign-level "Months" (Step 02) — same derived/flagged-legacy pattern
@@ -1782,6 +1830,35 @@ function _refreshStep02MonthsField() {
       flag.title = `Saved as ${state.parsed.total_months} — the flight's real month count is ${derived}. Left as-is; click Fix to match the real flight.`;
     }
   }
+}
+
+// Step 02's Full Flight note — shown only in Full Flight. Full Flight is ONE billing period and nothing in it is multiplied
+// by a month count, so the budget figure (and Tier #1-#4) is the flight's budget exactly as typed: the field and the Tiered
+// Budget legend are relabeled to say so (a field still called "Monthly budget" beside a note saying "flight total" would
+// invite a planner to type the wrong thing). Re-run by _applyTimeUnitLabels and fillForm.
+const _STEP02_FF_NOTE = "Billed as one period for the whole flight — the export shows Months: 1 and one total per line. " +
+  "The budget below (and Tier #1–#4) is the flight's total, used exactly as typed — nothing is multiplied by months.";
+function _refreshStep02FlightNote() {
+  const ff = _isFullFlight();
+  const hint = document.getElementById("step02-billing-period-hint");
+  if (hint) {
+    hint.classList.toggle("hidden", !ff);
+    if (ff) hint.textContent = _STEP02_FF_NOTE;
+  }
+  const budgetLabel = document.getElementById("step02-budget-label");
+  if (budgetLabel) budgetLabel.textContent = ff ? "Flight budget" : "Monthly budget";
+  const tierNote = document.getElementById("step02-tier-note");
+  if (tierNote) tierNote.textContent = ff ? "(optional — alternate flight budgets)" : "(optional — alternate monthly options)";
+}
+
+// Step 04's "Min" column header explains the Full Flight rule: the whole flight is ONE period, so a line has to clear the
+// product's monthly minimum once (not once per calendar month). No title in any other billing period (their markup is
+// unchanged).
+function _refreshMinHeaderTitle() {
+  const header = document.getElementById("col-min-header");
+  if (!header) return;
+  if (_isFullFlight()) header.title = "Full Flight is one billing period: each line needs the product's monthly minimum once.";
+  else header.removeAttribute("title");
 }
 
 function onFixStep02Months() {
@@ -1922,7 +1999,9 @@ async function onStrategyGenerate(reprompt = null, mode = "consistent") {
     const res = await fetch("/api/strategy", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ request: state.parsed, reprompt, mode, ad_presence: _adPresenceToCarry() }),
+      // time_unit: Full Flight changes how the brief should talk about the budget (one flight total, no
+      // monthly multiplication); every billing period is sent so the server never has to guess.
+      body: JSON.stringify({ request: state.parsed, reprompt, mode, ad_presence: _adPresenceToCarry(), time_unit: state.timeUnit }),
     });
     const brief = await _readJsonResponse(res);
     if (epoch !== _resetEpoch) return;     // a different proposal is on screen now
@@ -2006,13 +2085,15 @@ function renderStrategyBrief(brief) {
   renderAdPresence(brief.ad_presence || null, { fresh: adPresenceFresh });
   if (adPresenceFresh) _debouncedRebuildStrategyDoc();
 
-  // Budget note
+  // Budget note — "$X/mo × N mo = $T" in the monthly-style billing periods; in Full Flight the figure IS the flight's
+  // budget (one period, nothing multiplied), so it is stated as that.
   const budget = state.parsed.monthly_budget || parseBudgetFromRenewal(state.parsed) || 0;
   const months = state.parsed.total_months || 3;
   const budgetNote = document.getElementById("brief-budget-note");
-  budgetNote.textContent = budget
-    ? `Based on $${money(budget).replace("$","")}/mo × ${months} mo = ${money(budget * months)} total`
-    : "";
+  budgetNote.textContent = !budget ? ""
+    : _isFullFlight()
+      ? `Based on ${money(budget)} total flight budget (billed as one period)`
+      : `Based on $${money(budget).replace("$","")}/mo × ${months} mo = ${money(budget * months)} total`;
 
   // Tactics cards — each has a "include in brief" checkbox (defaults
   // checked/selected: undefined and selected: true both count as
@@ -2036,7 +2117,7 @@ function renderStrategyBrief(brief) {
           <input type="checkbox" class="tactic-select-checkbox" data-idx="${idx}" ${t.selected ? "checked" : ""} />
         </label>
         <span class="tactic-family">${escapeHtml(t.product_family)}</span>
-        <span class="tactic-pct">${pct}%${alloc ? ` · ~${money(alloc)}/mo` : ""}</span>
+        <span class="tactic-pct">${pct}%${alloc ? ` · ~${money(alloc)}${_isFullFlight() ? "" : "/mo"}` : ""}</span>
       </div>
       <p class="tactic-rationale">${escapeHtml(t.rationale)}</p>
       <p class="tactic-data">📊 ${escapeHtml(t.data_point)} <em class="tactic-citation">(${escapeHtml(t.citation)})</em></p>
@@ -2126,6 +2207,7 @@ const _debouncedRebuildStrategyDoc = _debounce(async () => {
         recommended_tactics: _selectedTactics(),
         key_insights: brief.key_insights,
         ad_presence: brief.ad_presence,
+        time_unit: state.timeUnit,
       }),
     });
   } catch (e) {
@@ -2571,8 +2653,34 @@ function renderRoadblocks(data) {
 // Step 02 (or a per-option override) the options that weren't re-rendered would otherwise keep the old count and
 // the totals, Step 06 and the export would disagree with the calendar. Only lines still marked reconciled move —
 // a reopened legacy line stays "saved" until the planner clicks Fix.
+// Full Flight's ONE period, enforced on a line whose months is still > 1 (a stale or hand-built saved state — the SPA
+// itself never produces one): the line is FOLDED, exactly as the server's normalize_full_flight_lines does —
+// monthly_budget x months becomes the whole-flight amount and months becomes 1 — so its total never changes.
+// Merely setting months to 1 would silently cut the line to a fraction of what the export prints (and what the
+// planner saw). Idempotent; a no-op when months is already 1; Added Value lines carry no money to fold.
+function _foldLineIntoOnePeriod(li) {
+  const periods = Number(li.months) > 1 ? Number(li.months) : 1;
+  if (periods > 1 && !li.is_added_value) li.monthly_budget = _round2((Number(li.monthly_budget) || 0) * periods);
+  li.months = 1;
+}
+
 function _resyncAllTierMonths() {
   const sync = (lines, label) => {
+    // Full Flight: ONE period, so months is 1 no matter what the dates say — and even with no dates at all
+    // (otherwise a date-less option would keep its old count and every total would still be multiplied by it).
+    // A legacy "saved N" line is forced too: 1 is definitional here, not derived from the calendar, so there is
+    // nothing to flag. Leaving Full Flight re-derives from the dates the normal way (the early-return below).
+    if (_isFullFlight()) {
+      (lines || []).forEach(li => {
+        li._monthsReconciled = true;
+        if (li.months !== 1) {
+          _mbStampBaseline(li);          // BEFORE the months change (no-op while allocations are null, as they are in Full Flight)
+          _foldLineIntoOnePeriod(li);
+          _mbRescaleLine(li);
+        }
+      });
+      return;
+    }
     const start = _mbParseDate(_effectiveStartDate(label));
     const end = _mbParseDate(_effectiveEndDate(label));
     if (!start || !end) {
@@ -2715,12 +2823,20 @@ function addTier(targetBudget) {
     // state — a brand-new clone is never "legacy," it just gets a fresh
     // auto-sync to whatever this new option's own (initially unset) dates
     // derive, same as any other newly-created line.
-    return { ...li, id: newId, _monthsReconciled: true, monthly_allocations: li.monthly_allocations ? { ...li.monthly_allocations } : li.monthly_allocations };
+    // Full Flight has no allocations at all (and its single period is always months === 1).
+    return {
+      ...li, id: newId, _monthsReconciled: true,
+      months: _isFullFlight() ? 1 : li.months,
+      monthly_allocations: _isFullFlight() ? null : (li.monthly_allocations ? { ...li.monthly_allocations } : li.monthly_allocations),
+    };
   });
   const clonedAvails = {};
   Object.keys(state.availsData).forEach(oldId => {
     if (idMap[oldId]) clonedAvails[idMap[oldId]] = { ...state.availsData[oldId] };
   });
+  // The NEW option starts with no date override (below), so its flight — and
+  // in Full Flight its minimum scale — is the campaign's, not the source
+  // option's (which is still the active one at this point).
   if (targetBudget) distributeBudgetProportionally(clonedItems, targetBudget);
 
   state.activeTierLabel = nextLabel;
@@ -3017,6 +3133,9 @@ function moveTier(fromLabel, toLabel, insertAfter) {
 // from here on). null when the active tier's dates aren't parseable yet
 // (Step 02 not filled in) — callers show "—" rather than guessing.
 function _curateDerivedMonths() {
+  // Full Flight is ONE period by definition — 1 even with no (or unreadable) dates, so no caller's
+  // "|| state.parsed.total_months || 3" fallback can ever inject a month count into a full-flight line.
+  if (_isFullFlight()) return 1;
   // Base (pre-merge) periods: combining periods in Step 06 regroups the allocation, it never changes how many
   // periods are bought — so a merge can't shrink the plan.
   const months = _mbEffectiveMonthsUnmerged();
@@ -3040,8 +3159,12 @@ function renderLineItems() {
   // silently rewrites; _monthsReconciled (stamped once per line, first
   // render only) is what tells the two cases apart on every render after.
   const derivedMonths = _curateDerivedMonths();
+  _refreshMinHeaderTitle();
   state.lineItems.forEach((li, idx) => {
     let monthsMismatch = false;
+    // Full Flight never shows the "N saved / Fix" legacy flag: months is definitionally 1 (derivedMonths is 1),
+    // so a reopened line that still says 3 is simply folded into one period here (its total kept) rather than flagged.
+    if (_isFullFlight()) { li._monthsReconciled = true; _foldLineIntoOnePeriod(li); }
     if (derivedMonths != null) {
       if (li._monthsReconciled === undefined) li._monthsReconciled = (li.months === derivedMonths);
       if (li._monthsReconciled) {
@@ -3759,7 +3882,9 @@ function _syncMixEditChrome() {
   _syncMixEditButton();
   const paidCount = _paidLineIndices().length;
   if (!editing) return;
-  document.getElementById("mix-edit-base").textContent = `of ${money(state.mixEdit.base)} per ${_mbUnitNoun().toLowerCase()} · ${paidCount} paid lines`;
+  document.getElementById("mix-edit-base").textContent = _isFullFlight()
+    ? `of ${money(state.mixEdit.base)} for the full flight · ${paidCount} paid lines`
+    : `of ${money(state.mixEdit.base)} per ${_mbUnitNoun().toLowerCase()} · ${paidCount} paid lines`;
   document.querySelectorAll("#mix-mode-tabs [data-mix-mode]").forEach(b => b.classList.toggle("active", b.dataset.mixMode === state.mixEdit.mode));
   _mixEditRefresh();
 }
@@ -4035,15 +4160,20 @@ function syncLineItemsFromTable() {
 }
 
 // Every static "Month"/"Monthly"/"Months" label this toggle governs, in
-// one place — called on toggle change AND once at page init/reopen so a
+// one place — called on toggle change AND once at page init/reopen/reset so a
 // non-default state.timeUnit (a reopened proposal) shows correctly from
-// the start. Deliberately does NOT touch any $ or count NUMBER (see
-// onTimeUnitChange's own comment on why those are left for the planner
-// to manually review rather than auto-converted).
+// the start. It is also what keeps EVERY control that shows the billing
+// period in sync (Step 04's pill + thumb, Step 02's "Billing period" select)
+// and what toggles the Full Flight layout (`.ff-mode` on Steps 02/04/06: the
+// CSS hides Step 04's Months column and duplicate flight total and Step 06's
+// breakdown machinery). Deliberately does NOT touch any $ or count NUMBER
+// (see onTimeUnitChange's own comment on how those are handled). Must
+// tolerate state.parsed === null — it runs at DOMContentLoaded and on reset.
 function _applyTimeUnitLabels() {
   const noun = _mbUnitNoun();
   const nounPlural = _mbUnitNounPlural();
   const adjective = _mbUnitAdjective();
+  const ff = _isFullFlight();
 
   const sliderOptions = Array.from(document.querySelectorAll("#time-unit-toggle .time-unit-slider-option"));
   const activeIdx = sliderOptions.findIndex(btn => btn.dataset.unit === state.timeUnit);
@@ -4051,59 +4181,251 @@ function _applyTimeUnitLabels() {
   const thumb = document.getElementById("time-unit-slider-thumb");
   // Percentages here are relative to the THUMB's own width (one segment),
   // not the track's — translateX(100%) moves it exactly one thumb-width
-  // right, landing it on the middle segment regardless of the track's
-  // actual pixel width. Falls back to the "month" position (index 1) if
-  // state.timeUnit somehow doesn't match any option.
+  // right, landing it on the next segment regardless of the track's
+  // actual pixel width (the thumb is 1/N of the track, N = the number of
+  // options — see .time-unit-slider in styles.css). Falls back to the
+  // "month" position (index 1) if state.timeUnit somehow doesn't match any option.
   if (thumb) thumb.style.transform = `translateX(${(activeIdx === -1 ? 1 : activeIdx) * 100}%)`;
 
+  // Step 02's select + its Full Flight hint (the select carries no data-field, so nothing else keeps it in step).
+  const step02Select = document.getElementById("step02-billing-period");
+  if (step02Select) step02Select.value = TIME_UNITS.includes(state.timeUnit) ? state.timeUnit : "month";
+  _refreshStep02FlightNote();
+  _refreshMinHeaderTitle();
+  // Step 06's Full Flight note follows the unit too (the step can be re-entered without a re-render, e.g. Back from Step 07).
+  const fullFlightNote = document.getElementById("mb-fullflight-note");
+  if (fullFlightNote) fullFlightNote.classList.toggle("hidden", !ff);
+  if (ff) _mbRenderFullFlightNote();
+  ["step-2", "step-4", "step-6"].forEach(id => {
+    const section = document.getElementById(id);
+    if (section) section.classList.toggle("ff-mode", ff);
+  });
+
   const setText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
-  setText("budget-target-label", `Total ${adjective.toLowerCase()} budget`);
-  setText("monthly-total-label", `${adjective} total`);
-  setText("monthly-total-gross-label", `${adjective} total (Gross)`);
-  setText("col-budget-header", `${adjective} $`);
-  setText("col-months-header", nounPlural);
-  setText("mb-step-title", `${adjective} breakdown`);
-  setText("mb-step-lede", `Split each line item's budget across the ${nounPlural.toLowerCase()} your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat ${adjective.toLowerCase()} figure is all you need; nothing else changes if you do.`);
-  setText("mb-step-name", `${adjective} Breakdown`);
-  setText("mb-no-dates-text", `${adjective} Breakdown needs a campaign flight to divide into ${nounPlural.toLowerCase()}. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.`);
-  setText("mb-mode-even-btn", `Even across ${nounPlural.toLowerCase()}`);
+  // Full Flight gets explicit copy wherever "Full-Flight monthly breakdown"-style interpolation would read
+  // badly; Weekly/Monthly/Quarterly keep exactly the interpolated text they always had.
+  setText("budget-target-label", ff ? "Total full-flight budget" : `Total ${adjective.toLowerCase()} budget`);
+  setText("monthly-total-label", ff ? "Full-Flight total" : `${adjective} total`);
+  setText("monthly-total-gross-label", ff ? "Full-Flight total (Gross)" : `${adjective} total (Gross)`);
+  setText("col-budget-header", ff ? "Full-Flight $" : `${adjective} $`);
+  setText("col-months-header", nounPlural);     // hidden in Full Flight (#step-4.ff-mode)
+  setText("mb-step-title", ff ? "Full-Flight billing" : `${adjective} breakdown`);
+  setText("mb-step-lede", ff
+    ? "This proposal bills the whole flight as one period, so there is no per-period breakdown to build — each line is a single amount in the proposal. To split budgets across months, weeks or quarters, change the billing period in Step 04 (or Step 02)."
+    : `Split each line item's budget across the ${nounPlural.toLowerCase()} your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat ${adjective.toLowerCase()} figure is all you need; nothing else changes if you do.`);
+  setText("mb-step-name", ff ? "Full-Flight billing" : `${adjective} Breakdown`);
+  setText("mb-no-dates-text", ff
+    ? "Full-Flight billing has no breakdown to build."
+    : `${adjective} Breakdown needs a campaign flight to divide into ${nounPlural.toLowerCase()}. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.`);
+  setText("mb-mode-even-btn", ff ? "Even split" : `Even across ${nounPlural.toLowerCase()}`);
   setText("nav-step-6-label", ` ${adjective}`);
   const navStep6 = document.getElementById("nav-step-6");
   if (navStep6) navStep6.title = adjective;
 }
 
-// Step 04's Week/Month/Quarter toggle. Deliberately does NOT auto-convert
-// any existing $ or count number when the unit changes (e.g. rescale a
-// curated "$2,000/month" line into "$461/week") — that's real billing
-// data, and a silent automatic conversion is exactly the kind of thing
-// that could ship a wrong number into a client-facing proposal if this
-// logic ever had a subtle bug. Instead the raw numbers stay exactly as
-// curated and the planner reviews/adjusts them under the new labels,
-// same as any other curation field. What DOES get cleared: every option's
-// Step 06 Monthly Breakdown allocations and merge groups, since their
-// period KEYS (e.g. "2026-09" for month, "W1-2026-09-01" for week) are
-// tied to the OLD granularity and become meaningless under the new one.
+// The new per-period budget for one line when the billing period flips INTO full
+// flight (periodCount === null: monthly_budget × months — the flight total it
+// already is) or OUT of it (periodCount = how many periods of the NEW unit the
+// option's flight has: the flight total ÷ that). Either way the line's FLIGHT
+// TOTAL is preserved — the old "never auto-convert dollars" rule is too
+// dangerous around full flight, because its factor is the flight's month count
+// (switching in would shrink every line by that factor, switching out would
+// multiply it).
+function _convertBudgetForFullFlightSwitch(budget, months, periodCount) {
+  const flightTotal = (Number(budget) || 0) * (months || 1);
+  return periodCount == null ? _round2(flightTotal) : _round2(flightTotal / periodCount);
+}
+
+// "$2,000" / "$1,666.67" — whole dollars unless there are cents, for the confirm's worked example.
+function _moneyExact(n) { return "$" + formatBudgetInputValue(_round2(n)); }
+
+// The confirm() text for a switch that touches Full Flight (a switch among week/month/quarter keeps the
+// original wording — see onTimeUnitChange). `example` is the line shown as a worked number (a converted line is
+// preferred over a restored one); fromTotal/toTotal are the plan's flight totals before/after, summed over every
+// converted line, so the text can say PLAINLY whether rounding to cents moved them — leaving Full Flight divides each
+// flight total into equal per-period amounts, which cannot be exact for every total (1,000 over 6 weeks is
+// 166.67 x 6 = 1,000.02), so the old unconditional "Totals stay the same, to the cent." was untrue.
+function _fullFlightSwitchConfirmText({ oldUnit, newUnit, example, converts, clears, skippedTiers, fromTotal, toTotal }) {
+  const parts = [`Switch the billing period to ${_TIME_UNIT_DISPLAY[newUnit]}?`];
+  if (converts && example) {
+    const who = example.name ? `${example.name}: ` : "";
+    const moved = Math.abs(_round2((toTotal || 0) - (fromTotal || 0))) >= 0.005;
+    if (newUnit === FULL_FLIGHT) {
+      if (example.restored) {
+        parts.push(`Each line goes back to the exact flight total it had before you left Full Flight (e.g. ${who}${_moneyExact(example.from)} → ${_moneyExact(example.to)}).`);
+      } else {
+        const noun = _MB_UNIT_NOUN[oldUnit].toLowerCase();
+        const nounPlural = _MB_UNIT_NOUN_PLURAL[oldUnit].toLowerCase();
+        parts.push(`Each line's budget becomes its flight total (e.g. ${who}${_moneyExact(example.from)}/${noun} × ${example.months} ${example.months === 1 ? noun : nounPlural} = ${_moneyExact(example.to)}).`);
+      }
+      parts.push(moved
+        ? `The plan total goes from ${_moneyExact(fromTotal)} to ${_moneyExact(toTotal)} (the earlier rounding to cents is undone).`
+        : "Totals stay the same.");
+    } else {
+      const noun = _MB_UNIT_NOUN[newUnit].toLowerCase();
+      const nounPlural = _MB_UNIT_NOUN_PLURAL[newUnit].toLowerCase();
+      parts.push(`Each line's flight total is divided across the ${nounPlural} of its option's flight (e.g. ${who}${_moneyExact(example.flightTotal)} ÷ ${example.count} ${example.count === 1 ? noun : nounPlural} = ${_moneyExact(example.to)}/${noun}).`);
+      parts.push(moved
+        ? `Rounding each ${noun} to the cent moves the plan total by ${_moneyExact(Math.abs(toTotal - fromTotal))} (${_moneyExact(fromTotal)} → ${_moneyExact(toTotal)}); switching straight back restores the original.`
+        : "Totals stay the same.");
+    }
+  }
+  if (skippedTiers) {
+    parts.push(`${skippedTiers === 1 ? "One option has" : skippedTiers + " options have"} no readable flight dates, so ${skippedTiers === 1 ? "its" : "their"} budgets can't be divided across periods and are left as they are — once the dates are set they are flagged for review (not multiplied automatically).`);
+  }
+  if (clears) {
+    parts.push(`Every option's Step 06 breakdown and combined periods will be cleared — the old ${_MB_UNIT_NOUN[oldUnit].toLowerCase()}-based numbers won't carry over.`);
+  }
+  parts.push("Continue?");
+  return parts.join(" ");
+}
+
+// The billing-period switch — Step 04's pill and Step 02's select both land here.
+// Switching among Weekly / Monthly / Quarterly deliberately does NOT auto-convert
+// any existing $ or count number (e.g. rescale a curated "$2,000/month" line into
+// "$461/week") — that's real billing data, and a silent automatic conversion is
+// exactly the kind of thing that could ship a wrong number into a client-facing
+// proposal if this logic ever had a subtle bug. Instead the raw numbers stay
+// exactly as curated and the planner reviews/adjusts them under the new labels,
+// same as any other curation field. What DOES get cleared: every option's Step 06
+// Monthly Breakdown allocations and merge groups, since their period KEYS (e.g.
+// "2026-09" for month, "W1-2026-09-01" for week) are tied to the OLD
+// granularity and become meaningless under the new one.
+//
+// Switching INTO or OUT OF Full Flight is the exception: there the factor is the
+// flight's month count, so leaving the dollars alone would silently cut every
+// line to a fraction of its total (in) or multiply it (out). Every line of every
+// option therefore keeps its FLIGHT TOTAL — in: monthly_budget × months, months
+// becomes 1; out: the flight total ÷ the periods of the new unit in that option's
+// own effective dates — and the confirm says so, with a number from the plan.
+//
+// Leaving Full Flight is NOT exactly invertible (equal per-period cents), so each converted line remembers the
+// exact flight total it came from (li._ffBase: a client-only memo, never sent to the server): a straight return to
+// Full Flight — nothing edited, same dates — restores those exact numbers instead of the rounded product, so
+// passing through Weekly/Monthly/Quarterly and back can never drift. The Total budget input is restored the same way.
+// Switching in the other direction (-> Full Flight from a unit) multiplies, which is exact, so it needs no memo.
+//
+// An option whose flight dates can't be read keeps its numbers when leaving Full Flight (nothing to divide by); its
+// lines are flagged "saved" (the app's existing legacy-months machinery) so that when dates are entered later the
+// flag appears instead of the whole-flight dollars being silently multiplied by the new month count.
 function onTimeUnitChange(newUnit) {
   if (_mixEditBlocks()) return;
-  if (newUnit === state.timeUnit || !(newUnit in _MB_UNIT_ADJECTIVE)) return;
+  if (newUnit === state.timeUnit || !TIME_UNITS.includes(newUnit)) return;
+
+  const oldUnit = state.timeUnit;
+  const intoFF = newUnit === FULL_FLIGHT;
+  const outOfFF = oldUnit === FULL_FLIGHT;
+  const touchesFF = intoFF || outOfFF;
+  // Money is about to be converted by each line's months: make sure they follow the CURRENT dates first (Step 02
+  // may have just changed them). A switch among Weekly/Monthly/Quarterly converts nothing and stays untouched.
+  if (touchesFF) _resyncAllTierMonths();
+  // Full Flight lines carry no allocations of their own (a reopened one may hold the server's single synthetic
+  // period) — so leaving it must not warn about a "breakdown" that was never the planner's.
+  if (outOfFF) _normalizeFullFlightState();
+
+  const tierSets = [
+    { label: state.activeTierLabel, lines: state.lineItems || [] },
+    ...(state.tiers || []).map(t => ({ label: t.label, lines: t.lineItems || [] })),
+  ];
+
+  // The planned conversion (nothing is written until the planner confirms).
+  const plan = [];
+  const skippedLines = [];
+  let skippedTiers = 0;
+  if (touchesFF) {
+    tierSets.forEach(t => {
+      let count = null;
+      if (outOfFF) {
+        const start = _mbParseDate(_effectiveStartDate(t.label));
+        const end = _mbParseDate(_effectiveEndDate(t.label));
+        count = (start && end) ? _mbPeriodsBetween(start, end, newUnit).length : 0;
+        if (!count) {      // can't tell how many periods this option has: leave its numbers alone
+          const withMoney = t.lines.filter(li => (li.monthly_budget || 0) > 0);
+          if (withMoney.length) { skippedTiers++; skippedLines.push(...withMoney); }
+          return;
+        }
+      }
+      t.lines.forEach(li => {
+        const flightTotal = (li.monthly_budget || 0) * (li.months || 1);
+        const memo = li._ffBase;
+        // A straight return: the per-period number is still exactly what the conversion produced and the period
+        // count is unchanged, so the line gets its original flight total back, to the cent.
+        const restored = intoFF && !!memo && Math.abs((li.monthly_budget || 0) - memo.perPeriod) < 0.005 && (li.months || 1) === memo.periods;
+        const to = restored ? memo.flightTotal : _convertBudgetForFullFlightSwitch(li.monthly_budget, li.months, count);
+        plan.push({ li, label: t.label, count, from: li.monthly_budget || 0, to, months: li.months || 1, flightTotal, restored });
+      });
+    });
+  }
+  const changing = plan.filter(x => Math.abs(x.to - x.from) >= 0.005);
+  const converts = changing.length > 0;
+  // The plan's FLIGHT totals before / after (out of Full Flight each converted line then bills `count` periods).
+  const fromTotal = plan.reduce((sum, x) => sum + x.flightTotal, 0);
+  const toTotal = plan.reduce((sum, x) => sum + x.to * (x.count || 1), 0);
 
   const allTiers = allTiersForSubmit();
   const hasAllocations = allTiers.some(t => (t.line_items || []).some(li => li.monthly_allocations && Object.keys(li.monthly_allocations).length));
   const hasMerges = allTiers.some(t => (t.period_merge_groups || []).length);
-  if (hasAllocations || hasMerges) {
-    const ok = confirm(
-      `Switching to ${_MB_UNIT_ADJECTIVE[newUnit]} will clear every budget option's Step 06 breakdown and combined periods — ` +
-      `the old ${_mbUnitNoun().toLowerCase()}-based numbers won't carry over. Curated budgets and product mix are untouched either way. Continue?`
-    );
-    if (!ok) return;
+  const clears = hasAllocations || hasMerges;
+  if (clears || converts || skippedTiers > 0) {
+    let message;
+    if (touchesFF) {
+      const first = changing.find(x => x.label === state.activeTierLabel && !x.restored) || changing.find(x => !x.restored) || changing[0];
+      message = _fullFlightSwitchConfirmText({
+        oldUnit, newUnit, converts, clears, skippedTiers, fromTotal, toTotal,
+        example: first ? { name: first.li.product_name, from: first.from, to: first.to, months: first.months, count: first.count, flightTotal: first.flightTotal, restored: first.restored } : null,
+      });
+    } else {
+      message =
+        `Switching to ${_MB_UNIT_ADJECTIVE[newUnit]} will clear every budget option's Step 06 breakdown and combined periods — ` +
+        `the old ${_mbUnitNoun().toLowerCase()}-based numbers won't carry over. Curated budgets and product mix are untouched either way. Continue?`;
+    }
+    if (!confirm(message)) return;
+  }
+
+  // The Total budget input is a target in the OLD unit — carry it across by the factor the active option's
+  // plan just moved by (into Full Flight: its months; out: 1 ÷ its periods), or "Scale plan to total" would
+  // squash the converted lines straight back to the unconverted number. A straight return to Full Flight (every
+  // active line restored, target untouched since it was converted) restores the exact original target.
+  const targetInput = document.getElementById("total-budget-target");
+  const typedTarget = targetInput ? parseFormattedInput(targetInput.value) : null;
+  const activePlan = plan.filter(x => x.label === state.activeTierLabel);
+  const fromSum = activePlan.reduce((sum, x) => sum + x.from, 0);
+  const toSum = activePlan.reduce((sum, x) => sum + x.to, 0);
+  const targetMemo = state._ffTargetBase;
+  if (converts && typedTarget > 0 && fromSum > 0 && toSum > 0) {
+    const straightReturn = intoFF && targetMemo && targetMemo.unit === oldUnit && activePlan.length > 0
+      && activePlan.every(x => x.restored) && Math.abs(typedTarget - targetMemo.converted) < 0.005;
+    const newTarget = straightReturn ? targetMemo.original : _round2(typedTarget * toSum / fromSum);
+    targetInput.value = formatBudgetInputValue(newTarget);
+    state._ffTargetBase = outOfFF ? { unit: newUnit, original: typedTarget, converted: newTarget } : null;
+  } else {
+    state._ffTargetBase = null;
   }
 
   state.timeUnit = newUnit;
 
-  const clearLine = (li) => { li.monthly_allocations = null; delete li._mbBaseline; };
-  state.lineItems.forEach(clearLine);
-  state.tiers.forEach(t => { (t.lineItems || []).forEach(clearLine); t.periodMergeGroups = []; });
+  plan.forEach(x => {
+    if (outOfFF) x.li._ffBase = { flightTotal: x.flightTotal, perPeriod: x.to, periods: x.count };
+    x.li.monthly_budget = x.to;
+  });
+  // Lines of an option with no readable dates were not divided: flag them as "saved" so entering the dates later
+  // shows the "N saved / Fix" marker instead of silently multiplying their whole-flight dollars.
+  if (outOfFF) skippedLines.forEach(li => { li._monthsReconciled = false; });
+  // Back in Full Flight the memos have done their job (or are stale).
+  if (intoFF) tierSets.forEach(t => t.lines.forEach(li => { delete li._ffBase; }));
+  const clearLine = (li) => {
+    li.monthly_allocations = null;
+    delete li._mbBaseline;
+    // li.mb_off is the planner's own opt-out: left exactly as it was (see _normalizeFullFlightState).
+    if (intoFF) { li.months = 1; li._monthsReconciled = true; }
+  };
+  tierSets.forEach(t => t.lines.forEach(clearLine));
+  state.tiers.forEach(t => { t.periodMergeGroups = []; });
   state.activeTierPeriodMergeGroups = [];
+  state.mbActiveMonthKey = null;
+  // Out of Full Flight every line is "reconciled", so this re-derives months from each option's own dates
+  // (the very counts the conversion above divided by).
+  _resyncAllTierMonths();
 
   _applyTimeUnitLabels();
   renderLineItems();
@@ -4233,7 +4555,9 @@ function onDuplicateLineItem(idx) {
     ...original,
     id: newLineItemId(),
     _monthsReconciled: true,  // a fresh duplicate is never "legacy" — see addTier's clone for the same reasoning
-    monthly_allocations: original.monthly_allocations ? { ...original.monthly_allocations } : original.monthly_allocations,
+    // Full Flight: always the single period (months 1) and never any allocations.
+    months: _isFullFlight() ? 1 : original.months,
+    monthly_allocations: _isFullFlight() ? null : (original.monthly_allocations ? { ...original.monthly_allocations } : original.monthly_allocations),
   };
   // Carry over any avails already entered for the original line, so
   // duplicating a filled-in row for a targeting variant doesn't lose them.
@@ -4478,7 +4802,11 @@ function calcMaxImpsFromSpend(p, maxSpend) {
 // Deliberately simple round factors (×4 / ÷3), not the more precise
 // 12/52 used for minimum-spend scaling elsewhere — explicit planner
 // preference for this specific comparison.
-const _SOV_MONTHLY_EQUIVALENT_SCALE = { week: 4, month: 1, quarter: 1 / 3 };
+//
+// Full Flight: the whole flight is ONE period, so its (whole-flight) budget is
+// compared with the monthly ceiling exactly as it stands (scale 1) — identical in
+// the Python compute_sov_pct and the Excel formula.
+const _SOV_MONTHLY_EQUIVALENT_SCALE = { week: 4, month: 1, quarter: 1 / 3, full_flight: 1 };
 function _sovMonthlyEquivalentBudget(budget) {
   return budget * (_SOV_MONTHLY_EQUIVALENT_SCALE[state.timeUnit] ?? 1);
 }
@@ -4529,7 +4857,15 @@ function applySovDisplay(lid, pct) {
   }
   if (helper) {
     helper.className = `sov-helper sov-${tier}`;
-    helper.textContent = `Proposed product allocation uses: ${pctLabel}% of total avails`;
+    let text = `Proposed product allocation uses: ${pctLabel}% of total avails`;
+    if (_isFullFlight()) {
+      // The ceilings are MONTHLY, the budget is the whole flight (one period): say what is being compared.
+      const li = state.lineItems.find(x => x.id === lid);
+      if (li && (li.monthly_budget || 0) > 0) {
+        text += ` · Full Flight compares the whole-flight budget (${_moneyExact(li.monthly_budget)}) with the monthly ceiling`;
+      }
+    }
+    helper.textContent = text;
   }
 }
 
@@ -4737,12 +5073,48 @@ function _mbQuartersBetween(start, end) {
   return quarters;
 }
 
+// The WHOLE flight as ONE period (Full Flight billing) — mirrors
+// monthly_allocation.py's flight_between() byte for byte: the same key, label,
+// date_range_label, day counts and period_count, because /api/generate and the
+// export identify the period by them.
+//   key          FULL_FLIGHT_KEY — a constant, never derived from the dates
+//   label        "November–December 2026" (same-year span, built exactly like a
+//                merged pair of months), "November 2026" (flight inside one
+//                month — NOT "November–November 2026"), "December 2026–January
+//                2027" (crosses a year)
+//   date_range_label  "Nov 24 – Dec 31, 2026"
+//   days_in_month / active_days  summed over every month the flight touches
+//   period_count 1 — the whole flight is ONE period, so the minimum-spend check
+//                holds a full-flight line to ONE monthly minimum (see
+//                _mbEffectiveMinimumForPeriod)
+// [] when there are no months (unparseable dates).
+function _mbFullFlightPeriods(start, end) {
+  if (!start || !end) return [];
+  const months = _mbMonthsBetween(start, end);
+  if (!months.length) return [];
+  const first = months[0], last = months[months.length - 1];
+  return [{
+    key: FULL_FLIGHT_KEY,
+    label: months.length === 1 ? first.label : _mbCombinedPeriodLabel(first, last),
+    date_range_label: _mbDateRangeLabel(first.start, last.end),
+    start: first.start,
+    end: last.end,
+    days_in_month: months.reduce((s, m) => s + m.days_in_month, 0),
+    active_days: months.reduce((s, m) => s + m.active_days, 0),
+    period_count: 1,
+  }];
+}
+
 // THE one place a caller asks for "the periods this flight touches"
 // without hardcoding which granularity that means — mirrors
-// monthly_allocation.py's periods_between() dispatcher exactly.
+// monthly_allocation.py's periods_between() dispatcher exactly (including its
+// fall-back to months for an unrecognized value — which here is also logged,
+// so a stray value can never silently pass for Monthly).
 function _mbPeriodsBetween(start, end, granularity) {
+  if (granularity === FULL_FLIGHT) return _mbFullFlightPeriods(start, end);
   if (granularity === "week") return _mbWeeksBetween(start, end);
   if (granularity === "quarter") return _mbQuartersBetween(start, end);
+  if (granularity !== "month") console.warn("Unknown billing period", granularity, "— treating it as month");
   return _mbMonthsBetween(start, end);
 }
 
@@ -4811,8 +5183,13 @@ function _mbCombinedPeriodLabel(first, last) {
 // state.timeUnit) AND _mbEffectiveMinimumForPeriod below (which further
 // multiplies by a specific period's period_count, >1 only for a merged
 // Step 06 bucket).
-const _MB_GRANULARITY_MIN_SCALE = { week: 12 / 52, month: 1, quarter: 3 };
-function _timeUnitMinimumScale() { return _MB_GRANULARITY_MIN_SCALE[state.timeUnit] ?? 1; }
+//
+// Full Flight is ONE period (its period_count is 1): a line has to clear ONE
+// monthly minimum, however many calendar months the flight touches — scale 1.
+const _MB_GRANULARITY_MIN_SCALE = { week: 12 / 52, month: 1, quarter: 3, full_flight: 1 };
+function _timeUnitMinimumScale() {
+  return _MB_GRANULARITY_MIN_SCALE[state.timeUnit] ?? 1;
+}
 
 // Deliberately NOT further prorated by the period's own active_days —
 // see monthly_allocation.py's _effective_minimum_for_period docstring for
@@ -4825,12 +5202,40 @@ function _mbEffectiveMinimumForPeriod(minimumSpend, period) {
 // Granularity-aware display text — the single source every "Month"/
 // "Monthly"/"# of months" string in Step 04/05/06 reads from, so the
 // toggle actually relabels everywhere rather than just changing the math.
-const _MB_UNIT_NOUN = { week: "Week", month: "Month", quarter: "Quarter" };
-const _MB_UNIT_NOUN_PLURAL = { week: "Weeks", month: "Months", quarter: "Quarters" };
-const _MB_UNIT_ADJECTIVE = { week: "Weekly", month: "Monthly", quarter: "Quarterly" };
-function _mbUnitNoun() { return _MB_UNIT_NOUN[state.timeUnit] || "Month"; }
-function _mbUnitNounPlural() { return _MB_UNIT_NOUN_PLURAL[state.timeUnit] || "Months"; }
-function _mbUnitAdjective() { return _MB_UNIT_ADJECTIVE[state.timeUnit] || "Monthly"; }
+//
+// Full Flight's noun/plural/adjective are only the fallbacks for generic
+// interpolation ("per flight", "of $X per flight"); every spot where those
+// would read badly has explicit full-flight copy in _applyTimeUnitLabels and
+// the places listed there. "Full-Flight" (hyphenated) is the adjective in a
+// label ("Full-Flight total"); the pill/select text is _TIME_UNIT_DISPLAY.
+const _MB_UNIT_NOUN = { week: "Week", month: "Month", quarter: "Quarter", [FULL_FLIGHT]: "Flight" };
+const _MB_UNIT_NOUN_PLURAL = { week: "Weeks", month: "Months", quarter: "Quarters", [FULL_FLIGHT]: "Flights" };
+const _MB_UNIT_ADJECTIVE = { week: "Weekly", month: "Monthly", quarter: "Quarterly", [FULL_FLIGHT]: "Full-Flight" };
+// What the planner picks between (Step 04 pill, Step 02 select) — not an adjective.
+const _TIME_UNIT_DISPLAY = { week: "Weekly", month: "Monthly", quarter: "Quarterly", [FULL_FLIGHT]: "Full Flight" };
+// A unit the tables don't know can't come from the UI (every writer validates against TIME_UNITS);
+// say so loudly instead of silently reading as Monthly, then fall back to the original default.
+function _mbUnitWord(table, fallback) {
+  const word = table[state.timeUnit];
+  if (word !== undefined) return word;
+  console.warn("Unknown billing period", state.timeUnit, "— labelling it as", fallback);
+  return fallback;
+}
+function _mbUnitNoun() { return _mbUnitWord(_MB_UNIT_NOUN, "Month"); }
+function _mbUnitNounPlural() { return _mbUnitWord(_MB_UNIT_NOUN_PLURAL, "Months"); }
+function _mbUnitAdjective() { return _mbUnitWord(_MB_UNIT_ADJECTIVE, "Monthly"); }
+
+// Lenient coercion for a value read back from storage (reopen/draft): absent or unknown -> "month",
+// exactly what a proposal saved before the toggle existed means. Mirrors normalize_time_unit() in
+// monthly_allocation.py.
+function _normalizeTimeUnit(value) {
+  const v = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return TIME_UNITS.includes(v) ? v : "month";
+}
+
+function _isFullFlight() { return state.timeUnit === FULL_FLIGHT; }
+
+function _round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
 // Day-prorated split — mirrors monthly_allocation.py's prorated_allocation()
 // exactly, including "last month absorbs the rounding remainder" so dollars
@@ -5077,10 +5482,27 @@ function _mbEffectiveDistribution(li, months) {
 
 function renderMonthlyBreakdown() {
   _resyncAllTierMonths();
-  const months = _mbEffectiveMonths();
   const emptyState = document.getElementById("mb-no-dates");
   const content = document.getElementById("mb-content");
   const masterLabel = document.querySelector(".mb-master-toggle");
+  const fullFlightNote = document.getElementById("mb-fullflight-note");
+
+  // Full Flight: every line is ONE period, so there is nothing to split. The step stays reachable (no renumbering,
+  // no nav changes — a saved draft can still resume at Step 06) but shows only a read-only note, and returns
+  // BEFORE any allocation reconcile / default-allocation logic below: Full Flight lines carry no allocations (the
+  // server writes the single-period breakdown itself), and the machinery would otherwise create month-keyed ones.
+  if (_isFullFlight()) {
+    if (fullFlightNote) fullFlightNote.classList.remove("hidden");
+    emptyState.classList.add("hidden");
+    content.classList.add("hidden");
+    if (masterLabel) masterLabel.classList.add("hidden");
+    _mbRenderFullFlightNote();
+    _mbSetContinueEnabled(true);
+    return;
+  }
+  if (fullFlightNote) fullFlightNote.classList.add("hidden");   // leaving Full Flight restores the normal step below
+
+  const months = _mbEffectiveMonths();
   if (masterLabel) masterLabel.classList.toggle("hidden", !months || !months.length);   // nothing to switch without dates
   if (!months || !months.length) {
     emptyState.classList.remove("hidden");
@@ -5164,6 +5586,19 @@ function renderMonthlyBreakdown() {
   }
   _mbRenderPlanSummary(months);
   _mbUpdateContinueState(months);
+}
+
+// Step 06's read-only Full Flight panel: names the option's single period (the same label the export's one
+// breakdown column carries) and its flight total.
+function _mbRenderFullFlightNote() {
+  const detail = document.getElementById("mb-fullflight-detail");
+  if (!detail) return;
+  const period = (_mbEffectiveMonthsUnmerged() || [])[0];
+  const total = state.lineItems.reduce((s, li) => s + (li.monthly_budget || 0) * (li.months || 1), 0);
+  const optionPrefix = state.tiers.length ? `${_tierDisplayName(state.activeTierLabel)} — ` : "";
+  detail.textContent = period
+    ? `${optionPrefix}${period.label} (${period.date_range_label}): ${money(total)} net across ${state.lineItems.length} line${state.lineItems.length === 1 ? "" : "s"}.`
+    : "Set the flight's Start/End dates in Step 02 (or a per-option override in Step 04) so the period can be named.";
 }
 
 // "For reference" — impressions (or, for a CPP/rating-point product,
@@ -5973,10 +6408,7 @@ function renderGenerateSummary() {
   const flight = state.lineItems.reduce((s, li) => s + (li.monthly_budget || 0) * (li.months || 1), 0);
   const fee = state.parsed.agency_fee || 0;
   const gross = fee > 0 ? flight / (1 - fee) : flight;
-  const months = state.parsed.total_months
-    || (state.lineItems[0] && state.lineItems[0].months)
-    || parseBudgetFromRenewal(state.parsed) && state.lineItems[0]?.months
-    || 3;
+  const ff = _isFullFlight();
 
   const allTiers = allTiersForSubmit();
   const multiTier = allTiers.length > 1;
@@ -6011,13 +6443,16 @@ function renderGenerateSummary() {
     <div class="sum-row"><span class="lbl">Seller</span><span class="val mono">${escapeHtml(state.parsed.salesperson_email || "—")}</span></div>
     <div class="sum-row"><span class="lbl">Request type</span><span class="val mono">${escapeHtml(state.parsed.request_type || "—")}</span></div>
     <div class="sum-row"><span class="lbl">Products${tierLabel}</span><span class="val">${state.lineItems.length}</span></div>
-    <div class="sum-row"><span class="lbl">Monthly total (Net)${tierLabel}</span><span class="val">${money(monthly)}</span></div>
-    <div class="sum-row"><span class="lbl">Flight total (Net)${tierLabel}</span><span class="val">${money(flight)}</span></div>
+    ${ff
+      // Full Flight: monthly total and flight total are the same number — one row, not two.
+      ? `<div class="sum-row"><span class="lbl">Full-Flight total (Net)${tierLabel}</span><span class="val">${money(flight)}</span></div>`
+      : `<div class="sum-row"><span class="lbl">Monthly total (Net)${tierLabel}</span><span class="val">${money(monthly)}</span></div>
+    <div class="sum-row"><span class="lbl">Flight total (Net)${tierLabel}</span><span class="val">${money(flight)}</span></div>`}
     ${fee > 0 ? `<div class="sum-row"><span class="lbl">Agency fee</span><span class="val mono">${(fee*100).toFixed(2)}%</span></div>` : ""}
-    ${fee > 0 ? `<div class="sum-row"><span class="lbl">Flight total (Gross)${tierLabel}</span><span class="val">${money(gross)}</span></div>` : ""}
+    ${fee > 0 ? `<div class="sum-row"><span class="lbl">${ff ? "Full-Flight" : "Flight"} total (Gross)${tierLabel}</span><span class="val">${money(gross)}</span></div>` : ""}
     ${multiTier ? `<div class="sum-row sum-tiers-row"><span class="lbl">Budget Options</span><span class="val">${allTiers.map(t => {
       const m = (t.line_items || []).reduce((s, li) => s + (li.monthly_budget || 0), 0);
-      return `${escapeHtml(_tierDisplayName(t.label))}: ${money(m)}/mo · ${(t.line_items || []).length} products`;
+      return `${escapeHtml(_tierDisplayName(t.label))}: ${money(m)}${ff ? "" : "/mo"} · ${(t.line_items || []).length} products`;
     }).join(" &nbsp;·&nbsp; ")}</span></div>` : ""}
   `;
   // Show the best suggestion we have right now, then replace it with a fresh
@@ -6097,6 +6532,29 @@ async function _refreshDisclaimersPreview() {
   }
 }
 
+// Full Flight's data contract, enforced on EVERY line of EVERY option right before a payload leaves: months 1
+// (a line that still carries months > 1 is FOLDED first, total kept — see _foldLineIntoOnePeriod), no
+// monthly_allocations (the server writes the single-period breakdown itself, so no period key ever has to cross the
+// wire), and no combined periods. li.mb_off is deliberately left alone: it is meaningless in Full Flight (Step 06 is a
+// note and the server ignores it) but it is the planner's own opt-out — resetting it here would silently re-enable
+// every breakdown they had turned off the moment they return to Weekly/Monthly/Quarterly. Idempotent, a no-op in any
+// other billing period, and defensive on purpose: a reopened or stale state can't silently export a wrong total.
+function _normalizeFullFlightState() {
+  if (!_isFullFlight()) return;
+  const fix = (li) => {
+    _foldLineIntoOnePeriod(li);
+    li._monthsReconciled = true;
+    li.monthly_allocations = null;
+    delete li._mbBaseline;
+  };
+  (state.lineItems || []).forEach(fix);
+  (state.tiers || []).forEach(t => {
+    (t.lineItems || []).forEach(fix);
+    t.periodMergeGroups = [];
+  });
+  state.activeTierPeriodMergeGroups = [];
+}
+
 // Fields shared by /api/generate and /api/proposal/draft — the whole
 // wizard state needed to resume or finish a proposal. Kept in ONE place
 // so the two payloads can't quietly drift apart (the same "one shared
@@ -6104,6 +6562,7 @@ async function _refreshDisclaimersPreview() {
 // llm_utils on the backend — see main.py's _build_reopen_state).
 function _buildWizardStatePayload() {
   _resyncAllTierMonths();
+  _normalizeFullFlightState();
   return {
     request: state.parsed,
     line_items: state.lineItems,     // legacy field — kept for back-compat; the server prefers `tiers` when present
@@ -6122,9 +6581,10 @@ function _buildWizardStatePayload() {
     // inline total row next to "TOTAL DIGITAL MONTHLY"); a line WITH its
     // own monthly_allocations already carries real numbers regardless.
     monthly_distribution_mode: state.mbDistributionMode,
-    // Step 04's Week/Month/Quarter toggle — drives which period
-    // granularity the server validates monthly_allocations against and
-    // which one the export's Monthly Breakdown columns/labels use.
+    // The billing period (Step 04's pill / Step 02's select: week | month |
+    // quarter | full_flight) — drives which period granularity the server
+    // validates monthly_allocations against and which one the export's
+    // Monthly Breakdown columns/labels use.
     time_unit: state.timeUnit,
     // Planner override for the campaign-name segment of the naming
     // convention (see the proposal-name-bar's Edit button) — null unless
@@ -6231,7 +6691,13 @@ function buildGammaOutline() {
   if (targeting) lines.push(`- Target: ${targeting}`);
   const flightBits = [];
   if (req.start_date) flightBits.push(req.start_date + (req.end_date ? ` – ${req.end_date}` : ""));
-  if (req.total_months) flightBits.push(`(${req.total_months} month${req.total_months === 1 ? "" : "s"})`);
+  if (_isFullFlight()) {
+    // The whole flight is one billing period — "(N months)" would read as if it were billed monthly (and for a
+    // 5-week flight "2 months" is only the calendar span). The dates above already say how long it runs.
+    flightBits.push("(billed as one full-flight period)");
+  } else if (req.total_months) {
+    flightBits.push(`(${req.total_months} month${req.total_months === 1 ? "" : "s"})`);
+  }
   if (flightBits.length) lines.push(`- Flight: ${flightBits.join(" ")}`);
   lines.push("");
 
@@ -6258,7 +6724,10 @@ function buildGammaOutline() {
       const p = state.productIndex[li.product_name] || {};
       tierTotal += (li.monthly_budget || 0) * (li.months || 1);
       const target = li.target_override || targeting || "(campaign default)";
-      lines.push(`  - ${li.product_name}${p.family ? ` (${p.family})` : ""} — ${money(li.monthly_budget)}/mo × ${li.months}mo — Target: ${target}`);
+      const amountText = _isFullFlight()
+        ? `${money(li.monthly_budget)} flat for the full flight`
+        : `${money(li.monthly_budget)}/mo × ${li.months}mo`;
+      lines.push(`  - ${li.product_name}${p.family ? ` (${p.family})` : ""} — ${amountText} — Target: ${target}`);
     });
     lines.push(`  Option total: ${money(tierTotal)}`);
     lines.push("");
@@ -6560,6 +7029,7 @@ async function onEmailReprompt() {
         current_client_body: state.enrichment.client_email_body || "",
         reprompt: text,
         scope,
+        time_unit: state.timeUnit,
       }),
     });
     const data = await res.json();

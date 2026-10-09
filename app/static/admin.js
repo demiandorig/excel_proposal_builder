@@ -136,6 +136,17 @@ function _analyticsBarList(rows, labelKey, countKey, formatLabel) {
   }).join("");
 }
 
+// The billing-period values the wizard stores in reopen_state.time_unit. "full_flight" is two words — a plain
+// capitalize would print "Full_flight" — so it is spelled out; every other value keeps the label it always had
+// (capitalized: Week / Month / Quarter), with underscores read as spaces for anything unforeseen.
+const _TIME_UNIT_LABELS = { full_flight: "Full Flight" };
+function _formatTimeUnitLabel(u) {
+  const key = String(u == null ? "" : u);
+  if (_TIME_UNIT_LABELS[key]) return _TIME_UNIT_LABELS[key];
+  const words = key.replace(/_/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Unknown";
+}
+
 const _ANALYTICS_MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function _formatMonthBucket(ym) {
   const [y, m] = ym.split("-");
@@ -181,7 +192,7 @@ function renderAnalytics(data) {
   document.getElementById("analytics-request-type-bars").innerHTML =
     _analyticsBarList(data.by_request_type, "request_type", "count");
   document.getElementById("analytics-time-unit-bars").innerHTML =
-    _analyticsBarList(data.by_time_unit, "time_unit", "count", u => u.charAt(0).toUpperCase() + u.slice(1));
+    _analyticsBarList(data.by_time_unit, "time_unit", "count", _formatTimeUnitLabel);
 }
 
 // Debounces a function — waits `ms` after the LAST call before actually

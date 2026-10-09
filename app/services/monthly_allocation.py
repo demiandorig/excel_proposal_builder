@@ -87,6 +87,30 @@ solved by auto-prorating the minimum down for a partial period (see next
 section) — an unprompted stub is still meant to be visibly flagged so
 the planner makes an explicit merge decision, not silently waved through.
 
+FULL FLIGHT (the 4th billing period, time_unit == "full_flight")
+---------------------------------------------------------------------
+Not a granularity at all — the whole flight is billed as ONE period, with
+no per-month/week/quarter split. periods_between(..., "full_flight")
+returns a list of exactly one period (see flight_between()):
+    key          FULL_FLIGHT_KEY — a CONSTANT, deliberately not derived from
+                 the dates, so editing a flight's dates can never orphan a
+                 stored allocation (a date-derived key like "2026-11+2026-12"
+                 would change on every date edit). Contains no "+", so the
+                 UI never mistakes it for a merged bucket.
+    label        "November–December 2026" (same-year span), "November 2026"
+                 (one month), "December 2026–January 2027" (crosses a year)
+    period_count 1 — the whole flight is ONE period, so the minimum-spend
+                 check holds a full-flight line to ONE monthly minimum (not
+                 N x it) and the SOV check compares the whole-flight budget
+                 with the monthly ceiling as it stands. The calendar months
+                 the flight touches only ever feed the period's label and
+                 the "Minimum 3 month Commitment" wording.
+The data contract for a full-flight line: months == 1 and monthly_budget is
+the WHOLE-flight net dollars, so every existing "monthly_budget x months"
+total is already the plain sum of the lines with nothing multiplied.
+`proposal_generator.normalize_full_flight_lines()` enforces that contract
+server-side (a stale or legacy payload can't silently multiply a total).
+
 MINIMUM SPEND, BY GRANULARITY
 ---------------------------------------------------------------------
 Product.minimum_spend is already used elsewhere in this codebase
@@ -117,6 +141,27 @@ from typing import Optional
 _CENT = 0.005
 
 _DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d")
+
+# The proposal-wide billing period ("time_unit"). Every layer — the Step 02/04
+# controls, /api/generate, the Excel/PPTX builders — must handle ALL of these;
+# the app.js mirror is `FULL_FLIGHT` / `_MB_UNIT_*`.
+FULL_FLIGHT = "full_flight"
+FULL_FLIGHT_KEY = "full_flight"   # the single period's key — see the module docstring
+TIME_UNITS = ("week", "month", "quarter", FULL_FLIGHT)
+
+
+def is_full_flight(time_unit: Optional[str]) -> bool:
+    return time_unit == FULL_FLIGHT
+
+
+def normalize_time_unit(value: Optional[str]) -> str:
+    """Lenient coercion for places that must never fail (draft autosave,
+    reopen, analytics): None / "" / an unknown value -> "month", the app's
+    original behavior and what a proposal saved before the toggle existed
+    means. /api/generate is STRICT instead (see main.GenerateRequest) so a
+    typo can't silently export as the wrong billing period."""
+    value = (value or "").strip().lower() if isinstance(value, str) else ""
+    return value if value in TIME_UNITS else "month"
 
 
 def parse_flexible_date(raw: Optional[str]) -> Optional[date]:
@@ -286,14 +331,44 @@ def quarters_between(start: date, end: date) -> list[dict]:
     return quarters
 
 
-_GRANULARITY_FNS = {"week": weeks_between, "month": months_between, "quarter": quarters_between}
+def flight_between(start: date, end: date) -> list[dict]:
+    """
+    The whole flight as ONE period (Full Flight billing). Built on
+    months_between() so the label/day counts agree with every other unit,
+    but `period_count` is 1 — it is ONE billing period however many
+    calendar months it spans, so nothing (minimum spend, SOV) is scaled by
+    a month count. See the module docstring's FULL FLIGHT section for the
+    key/label contract.
+    """
+    ms = months_between(start, end)
+    first, last = ms[0], ms[-1]
+    # _combined_label() of two identical months reads "November–November
+    # 2026" — a single-month flight is just that month.
+    label = first["label"] if len(ms) == 1 else _combined_label(first, last)
+    return [{
+        "key": FULL_FLIGHT_KEY,
+        "label": label,
+        "date_range_label": _date_range_label(first["start"], last["end"]),
+        "start": first["start"],
+        "end": last["end"],
+        "days_in_month": sum(m["days_in_month"] for m in ms),
+        "active_days": sum(m["active_days"] for m in ms),
+        "period_count": 1,
+    }]
+
+
+_GRANULARITY_FNS = {
+    "week": weeks_between, "month": months_between, "quarter": quarters_between,
+    FULL_FLIGHT: flight_between,
+}
 
 
 def periods_between(start: date, end: date, granularity: str) -> list[dict]:
     """THE one place a caller asks for "the periods this flight touches"
-    without hardcoding which granularity that means — week/month/quarter,
-    defaulting to month for any unrecognized value (matches this app's
-    original, pre-toggle behavior exactly when nothing overrides it)."""
+    without hardcoding which granularity that means — week/month/quarter
+    (or "full_flight": the whole flight as one period), defaulting to
+    month for any unrecognized value (matches this app's original,
+    pre-toggle behavior exactly when nothing overrides it)."""
     return _GRANULARITY_FNS.get(granularity, months_between)(start, end)
 
 
@@ -500,7 +575,9 @@ def reconcile_allocation(total_budget: float, allocations: dict[str, float]) -> 
 # never 3.04x or whatever a specific 3-month span's real day-count
 # would give) — simple, predictable, and matches how a rate card actually
 # states minimums (a flat monthly figure, not a per-day rate).
-_GRANULARITY_MINIMUM_SCALE = {"week": 12 / 52, "month": 1.0, "quarter": 3.0}
+# "full_flight" is 1.0: the whole flight is ONE period (period_count 1, see
+# flight_between), so a full-flight line is held to one monthly minimum.
+_GRANULARITY_MINIMUM_SCALE = {"week": 12 / 52, "month": 1.0, "quarter": 3.0, FULL_FLIGHT: 1.0}
 
 
 def granularity_scale(granularity: str) -> float:

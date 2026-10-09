@@ -64,7 +64,7 @@ from app.services.notion_parser import (
     parse_notion,
     classify_output_tabs,
 )
-from app.services.proposal_generator import LineItem, AddonItem, generate_proposal
+from app.services.proposal_generator import LineItem, AddonItem, generate_proposal, normalize_full_flight_lines
 from app.services.recommender import recommend_line_items
 from app.market_config import (
     load_market_config, set_market_entry, delete_market_entry, DEFAULT_KEY,
@@ -665,13 +665,28 @@ class GenerateRequest(BaseModel):
     # a line with its own monthly_allocations already carries real planner
     # numbers regardless of this setting.
     monthly_distribution_mode: str = "even"
-    # The Step 04 toggle's granularity — "week" | "month" | "quarter".
-    # Proposal-wide (not per-tier, matching where the toggle actually
-    # lives in the UI), drives how Curate/Avails/Step 05 label totals and
+    # The billing period — "week" | "month" | "quarter" | "full_flight"
+    # (Step 02's "Billing period" select and Step 04's pill). Proposal-wide
+    # (not per-tier), drives how Curate/Avails/Step 05 label totals and
     # which of monthly_allocation.py's period functions Step 05 and the
-    # export use to build each line's breakdown. Defaults to "month" —
-    # this app's original, only-ever behavior before the toggle existed.
+    # export use to build each line's breakdown. "full_flight" bills the
+    # whole flight as ONE period (see monthly_allocation.py's FULL FLIGHT
+    # section). Defaults to "month" — this app's original behavior before
+    # the toggle existed. STRICT here: this is the request that produces
+    # the real export, and every downstream lookup silently falls back to
+    # "month" for an unknown value, so a typo must be a 422, not a wrong
+    # workbook (drafts and reopen coerce leniently instead — see
+    # DraftSaveRequest).
     time_unit: str = "month"
+
+    @field_validator("time_unit", mode="before")
+    @classmethod
+    def _time_unit_is_known(cls, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return "month"
+        if not isinstance(v, str) or v.strip().lower() not in monthly_allocation.TIME_UNITS:
+            raise ValueError(f"time_unit must be one of: {', '.join(monthly_allocation.TIME_UNITS)}")
+        return v.strip().lower()
     # Planner-set override for the proposal name bar's editable campaign-
     # name segment (see app.js's proposal-name-edit UI) — when present,
     # replaces whatever the AI enrichment call itself would have guessed,
@@ -715,6 +730,12 @@ class DraftSaveRequest(BaseModel):
     time_unit: str = "month"
     campaign_name_override: Optional[str] = None
     enrichment: Optional[dict] = None  # Step 07 AI email content, if the planner got that far before saving
+
+    @field_validator("time_unit", mode="before")
+    @classmethod
+    def _lenient_time_unit(cls, v):
+        # A draft must always be saveable: an unknown/empty value becomes "month" instead of a 422.
+        return monthly_allocation.normalize_time_unit(v)
     # Client-computed preview title (buildProposalNamePreview()) or the
     # real one once known — shown in My Proposals so a draft row isn't
     # blank; falls back to client_name server-side if empty.
@@ -733,6 +754,14 @@ class StrategyRequest(BaseModel):
     mode: str = "consistent"
     # A prior /api/ad-presence result to fold into the brief on regenerate.
     ad_presence: Optional[dict] = None
+    # The proposal's billing period — only changes how the budget sentence is
+    # worded (a full-flight budget is a flat total, never "$X/month x N months").
+    time_unit: str = "month"
+
+    @field_validator("time_unit", mode="before")
+    @classmethod
+    def _lenient_time_unit(cls, v):
+        return monthly_allocation.normalize_time_unit(v)
 
 
 class AdPresenceRequest(BaseModel):
@@ -749,6 +778,13 @@ class RecommendRequest(BaseModel):
     # what unit the planner is actually curating in (a ~4x overshoot in
     # Weekly mode). See recommender.granularity_scale.
     time_unit: str = "month"
+
+    @field_validator("time_unit", mode="before")
+    @classmethod
+    def _lenient_time_unit(cls, v):
+        # Suggest Mix is not the export: an unrecognized unit degrades to "month" exactly as it always did (only
+        # /api/generate is strict, because only it produces the file that would silently be the wrong billing period).
+        return monthly_allocation.normalize_time_unit(v)
 
 
 class RoadblocksRequest(BaseModel):
@@ -778,6 +814,12 @@ class RepromptEmailsRequest(BaseModel):
     # "client": revise only that one — see ai_enricher.reprompt_emails()'s
     # own docstring for the guardrail that enforces this server-side.
     scope: str = "both"
+    time_unit: str = "month"
+
+    @field_validator("time_unit", mode="before")
+    @classmethod
+    def _lenient_time_unit(cls, v):
+        return monthly_allocation.normalize_time_unit(v)
 
 
 # ---------------------------------------------------------------------------
@@ -895,7 +937,7 @@ async def strategy(body: StrategyRequest) -> dict:
     via /api/download-strategy/{token}, same pattern as the roadblocks step."""
     req = _reconstruct_proposal_request(body.request)
     brief = await strategy_brief_svc.generate_brief(req, reprompt=body.reprompt, mode=body.mode,
-                                                    ad_presence=body.ad_presence)
+                                                    ad_presence=body.ad_presence, time_unit=body.time_unit)
 
     doc_token: Optional[str] = None
     if brief.get("strategy_summary") or brief.get("recommended_tactics"):
@@ -928,6 +970,7 @@ async def strategy(body: StrategyRequest) -> dict:
             monthly_budget=req.monthly_budget or 0.0,
             total_months=req.total_months or 0,
             ad_presence=brief.get("ad_presence"),
+            time_unit=body.time_unit,
         )
         if built:
             (PROPOSALS_DIR / f"strategy_{doc_token}.json").write_text(json.dumps({
@@ -983,6 +1026,12 @@ class StrategyDocRebuildRequest(BaseModel):
     recommended_tactics: list = []
     key_insights: list = []
     ad_presence: Optional[dict] = None
+    time_unit: str = "month"
+
+    @field_validator("time_unit", mode="before")
+    @classmethod
+    def _lenient_time_unit(cls, v):
+        return monthly_allocation.normalize_time_unit(v)
 
 
 @app.post("/api/strategy/{doc_token}/rebuild")
@@ -1020,6 +1069,7 @@ async def rebuild_strategy_doc(doc_token: str, body: StrategyDocRebuildRequest) 
         monthly_budget=req.monthly_budget or 0.0,
         total_months=req.total_months or 0,
         ad_presence=body.ad_presence,
+        time_unit=body.time_unit,
     )
     if not built:
         raise HTTPException(status_code=500, detail="Could not rebuild strategy brief doc.")
@@ -1100,7 +1150,8 @@ async def recommend(body: RecommendRequest) -> dict:
     """Given a parsed request + a monthly budget, suggest line items."""
     req = _reconstruct_proposal_request(body.request)
 
-    items = recommend_line_items(req, body.monthly_budget, strategy_brief=body.strategy_brief, time_unit=body.time_unit)
+    items = recommend_line_items(req, body.monthly_budget, strategy_brief=body.strategy_brief,
+                                 time_unit=body.time_unit)
     return {"line_items": [asdict(li) for li in items]}
 
 
@@ -1204,13 +1255,18 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     """
     req = _reconstruct_proposal_request(body.request)
 
+    full_flight = monthly_allocation.is_full_flight(body.time_unit)
+
     def _to_line_items(models: list[LineItemModel]) -> list[LineItem]:
         return [
             LineItem(
                 id=li.id,
                 product_name=li.product_name,
                 monthly_budget=li.monthly_budget,
-                months=li.months,
+                # Full Flight is ONE period: a line whose `months` was never sent must not inherit the model's default of
+                # 3 (normalize_full_flight_lines would fold it x3 — a silent tripling for any non-SPA client). An explicit
+                # months > 1 is still folded (total preserved), see proposal_generator.normalize_full_flight_lines.
+                months=li.months if (not full_flight or "months" in li.model_fields_set) else 1,
                 rate_override=li.rate_override,
                 notes_override=li.notes_override,
                 target_override=li.target_override,
@@ -1253,6 +1309,14 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             "period_merge_groups": None,
         }]
     multi_tier = len(tiers) > 1
+    # Full Flight: enforce months == 1 / whole-flight dollars / one {"full_flight": total} allocation per paid line
+    # BEFORE the sync + validation below — a stale month/week/quarter-keyed allocation must never overwrite the
+    # curated total (sync lets allocations win) or raise false below-minimum warnings (lookup is by period key).
+    full_flight_warnings: list[str] = []
+    if monthly_allocation.is_full_flight(body.time_unit):
+        for t in tiers:
+            full_flight_warnings.extend(normalize_full_flight_lines(t["line_items"]))
+            t["period_merge_groups"] = None
     _sync_monthly_budgets_to_allocations(tiers)
 
     # Monthly Breakdown validation — no longer a hard gate (per explicit
@@ -1307,6 +1371,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     enrichment = await asyncio.to_thread(
         ai_enricher.enrich_proposal,
         req, union_line_items, short_id, strategy_brief=body.strategy_brief, tiers=tier_context,
+        time_unit=body.time_unit,
     )
     # A planner-set name override wins over whatever the AI itself guessed
     # — used verbatim (not re-run through the AI) so it can't drift from
@@ -1359,6 +1424,9 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
+    if full_flight_warnings:
+        # generate_proposal re-normalizes (idempotently, so it has nothing left to report) — surface what THIS pass folded.
+        summary["warnings"] = full_flight_warnings + list(summary.get("warnings") or [])
 
     # 7. Insert a copy-paste-ready proposal line near the top of the internal
     #    email (planner adds the Drive link after upload). The AI is prompted
@@ -1445,6 +1513,9 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             pptx_tiers.append({
                 "name": (t.get("name") or "").strip() or f"Option {t['label']}",
                 "products": t_products, "line_items": t_line_items,
+                # The option's OWN flight-date override (None = the campaign dates). Only a Full Flight deck shows it —
+                # it has no Months column, so the window is the only thing saying what the 'Flight Budget' covers.
+                "start_date": t.get("start_date"), "end_date": t.get("end_date"),
             })
     ppt_banners = disclaimers_svc.union_for_ppt(disclaimers_by_tier)
     if pptx_tiers:
@@ -1588,6 +1659,9 @@ async def reopen_proposal(proposal_id: str) -> dict:
         "proposal_title": meta.get("proposal_title", ""),
         "status": meta.get("status") or "generated",
         **reopen_state,
+        # A proposal saved before the billing-period toggle has no time_unit; one holding an unrecognized value
+        # (e.g. after a rollback) must not poison the next save — coerce to a known unit ("month" = the original behavior).
+        "time_unit": monthly_allocation.normalize_time_unit(reopen_state.get("time_unit")),
     }
 
 
@@ -1700,7 +1774,7 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
         req, line_items, body.campaign_name,
         body.current_internal_subject, body.current_internal_body,
         body.current_client_subject, body.current_client_body,
-        body.reprompt, scope=body.scope,
+        body.reprompt, scope=body.scope, time_unit=body.time_unit,
     )
 
     # scope="internal" guarantees client_email_body is unchanged (see the
