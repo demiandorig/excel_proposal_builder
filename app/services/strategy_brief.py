@@ -23,6 +23,7 @@ except ImportError:
     _HAS_OPENAI = False
 
 from app.services import llm_utils
+from app.services import period_copy
 from app.services.text_utils import normalize_newlines as _normalize_newlines
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 from app.catalog import by_name as _catalog_by_name
@@ -95,7 +96,7 @@ _TRUNCATED_MSG = "The brief was cut off before it finished, even after an automa
 
 
 async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "consistent",
-                         ad_presence: Optional[dict] = None) -> dict:
+                         ad_presence: Optional[dict] = None, time_unit: str = "month") -> dict:
     """
     Generate (or regenerate with reprompt) a strategic brief for this proposal.
 
@@ -116,6 +117,12 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
     "consistent" mode when products_selected is empty or maps to no
     recognizable family — "stay consistent with nothing selected" has no
     meaningful constraint to apply.
+
+    time_unit: the proposal's billing period ("week"/"month"/"quarter"/"full_flight").
+    Only changes how the Step 02 budget is worded to the model: the week/month/quarter
+    wording is "$X/month x N months = $T total flight"; "full_flight" states the
+    figure as the flat flight total (nothing is multiplied — Step 04 seeds it as typed)
+    and that it is billed as one period — see period_copy.budget_sentence.
 
     Grounded in live web search (Responses API + the web_search tool); falls back
     to a plain completion, with a disclaimer in `error`, if search fails.
@@ -148,7 +155,8 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
         # mode="new_mix", rather than constraining to an empty set.
 
     client = _OpenAI(api_key=api_key)
-    prompt = _build_prompt(request, reprompt, ad_intel=ad_intel, allowed_families=allowed_families)
+    prompt = _build_prompt(request, reprompt, ad_intel=ad_intel, allowed_families=allowed_families,
+                           time_unit=time_unit)
     # The OpenAI client is synchronous; off the event loop so one brief can't stall every other request.
     result = await asyncio.to_thread(_run_brief_call, client, prompt)
 
@@ -211,10 +219,11 @@ def _run_brief_call(client, prompt: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _build_prompt(request, reprompt: Optional[str], ad_intel: Optional[dict] = None,
-                   allowed_families: Optional[set] = None) -> str:
-    monthly = request.monthly_budget or 0
-    months = request.total_months or 3
-    total = monthly * months
+                   allowed_families: Optional[set] = None, time_unit: str = "month") -> str:
+    # One shared sentence (also what the Strategy Brief .docx prints) so the prompt and the document can't disagree.
+    # A missing month count falls back to 3 for the monthly wording, as it always has (Full Flight ignores it).
+    unit = period_copy.resolve_time_unit(time_unit, where="strategy brief prompt")
+    budget_line = period_copy.budget_sentence(request.monthly_budget or 0, request.total_months or 3, unit)
 
     # Build an explicit, labeled targeting block — this is the single most
     # important input to get right. Every downstream section must anchor to
@@ -273,7 +282,7 @@ or a negative.
 - Client: {request.client_name or "TBD"} | Website: {request.client_website or "N/A"}
 - Market: {request.salesperson_market or "TBD"}
 - Campaign Goal: {request.campaign_goal or "Brand Awareness"}
-- Budget: ${monthly:,.0f}/month × {months} months = ${total:,.0f} total flight
+- {budget_line}
 - Request Type: {request.request_type or "Proposal"}
 - AE Comments: {request.salesperson_comments or "None"}
 - Question Details: {getattr(request, "question_details", "") or "None"}

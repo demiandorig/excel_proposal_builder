@@ -19,7 +19,7 @@ from typing import Optional
 from app.catalog import CATALOG, by_name, by_family
 from app.services.notion_parser import ProposalRequest, compose_target_fallback
 from app.services.proposal_generator import LineItem
-from app.services.monthly_allocation import granularity_scale
+from app.services.monthly_allocation import granularity_scale, is_full_flight
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +115,10 @@ def recommend_line_items(
     means "month" anyway; see LineItem.monthly_budget's own module-wide
     convention of never renaming this field per granularity).
 
+    Full Flight (time_unit == "full_flight"): the budget is the WHOLE
+    flight's and every line gets months == 1 — one billing period, so each
+    product's catalog MONTHLY minimum applies once (granularity_scale is 1.0).
+
     Strategy:
         1. Seed with whatever the salesperson already selected (matched products).
         2. If budget remains, add goal-priority products until budget is exhausted
@@ -131,6 +135,8 @@ def recommend_line_items(
 
     months = request.total_months or 3
     scale = granularity_scale(time_unit)
+    if is_full_flight(time_unit):
+        months = 1
 
     # If a confirmed AI strategy brief is provided, use its tactic recommendations
     # as the primary product priority + budget weights instead of goal-based rules.

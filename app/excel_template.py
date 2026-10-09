@@ -847,7 +847,19 @@ _UNIT_LABELS = {
     "week": {"noun": "Week", "noun_plural": "Weeks", "adjective": "Weekly", "input_label": "Weeks:"},
     "month": {"noun": "Month", "noun_plural": "Months", "adjective": "Monthly", "input_label": "Months:"},
     "quarter": {"noun": "Quarter", "noun_plural": "Quarters", "adjective": "Quarterly", "input_label": "Quarters:"},
+    # Full Flight: the whole flight is ONE period — nothing is multiplied by a month count. Mirrors
+    # the reference export a planner edited by hand: "Months: 1", a plain "TOTAL DIGITAL" row and a
+    # plain "TOTAL DIGITAL — CAMPAIGN" grand-total row (no "N-MONTH" suffix).
+    # banner_label: the breakdown block's title. The planner's own hand-edited export kept "MONTHLY BREAKDOWN (GROSS)"
+    # over the single full-flight column (headed by the flight's date span), so Full Flight says "MONTHLY" too.
+    "full_flight": {"noun": "Flight", "noun_plural": "Flights", "adjective": "Full-Flight", "input_label": "Months:",
+                    "total_row_label": "TOTAL DIGITAL", "campaign_label": "TOTAL DIGITAL — CAMPAIGN",
+                    "banner_label": "MONTHLY BREAKDOWN"},
 }
+
+
+def is_full_flight(time_unit: Optional[str]) -> bool:
+    return time_unit == "full_flight"
 
 
 def _unit_labels(time_unit: str) -> dict:
@@ -873,7 +885,16 @@ _BILLING_CADENCE_NOTE_BASE = (
 )
 
 
+_FULL_FLIGHT_NOTE = (
+    "Full-flight plan: the entire flight is treated as a single period — each amount shown is that line's "
+    "full-flight total, with no monthly split."
+)
+
+
 def _billing_cadence_note(time_unit: str) -> str:
+    if time_unit == "full_flight":
+        # Finance policy, unchanged by the billing period: billing is always invoiced on a monthly (30-day) cycle.
+        return _FULL_FLIGHT_NOTE + " " + _BILLING_CADENCE_NOTE_BASE
     if time_unit == "week":
         return (_BILLING_CADENCE_NOTE_BASE + " This plan is entered and paced by week, but each month's "
                 "invoice totals whatever weeks fall in that calendar month.")
@@ -892,7 +913,11 @@ def _billing_cadence_note(time_unit: str) -> str:
 # used for minimum-spend scaling elsewhere — explicit planner preference
 # for this specific comparison (mirrors app.js's own
 # _SOV_MONTHLY_EQUIVALENT_SCALE — keep both in sync if this ever changes).
-SOV_MONTHLY_EQUIVALENT_SCALE = {"week": 4.0, "month": 1.0, "quarter": 1.0 / 3.0}
+#
+# "full_flight" is 1.0: the whole flight is ONE period, so its (whole-flight)
+# budget is compared with the monthly ceiling exactly as it stands — no
+# division by the calendar months the flight touches.
+SOV_MONTHLY_EQUIVALENT_SCALE = {"week": 4.0, "month": 1.0, "quarter": 1.0 / 3.0, "full_flight": 1.0}
 
 
 def _sov_monthly_equivalent_budget(budget: float, time_unit: str) -> float:
@@ -962,9 +987,7 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     ws["H10"] = labels["input_label"]
     ws["H10"].alignment = RIGHT
     ws["H10"].font = BODY_BOLD
-    ws["I10"] = total_months
-    ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
-    ws["I10"].alignment = CENTER
+    _write_months_cell(ws, total_months, time_unit)
 
     # Avails section banner — merged across rows 15-16, not just row 16.
     # _write_meta_block knocks both those rows down to a 6pt spacer, which
@@ -1039,7 +1062,7 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     # Totals
     last_data_row = row - 1
     total_row = row + 1
-    ws[f"C{total_row}"] = f"TOTAL DIGITAL {labels['adjective'].upper()}"
+    ws[f"C{total_row}"] = labels.get("total_row_label") or f"TOTAL DIGITAL {labels['adjective'].upper()}"
     ws[f"C{total_row}"].font = TOTAL_FONT
     ws[f"C{total_row}"].fill = TOTAL_FILL
     ws[f"L{total_row}"] = f"=ROUNDDOWN(SUM(L19:L{last_data_row}),0)"
@@ -1075,6 +1098,25 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     # editable on-screen — this only governs Print / Export-to-PDF.
     ws.print_area = f"A1:L{ws.max_row}"
     return ws
+
+
+def _write_months_cell(ws: Worksheet, total_months: int, time_unit: str) -> None:
+    """The "Months:" value (I10). Everywhere except Full Flight it is the
+    planner-adjustable multiplier the grand-total formulas read (blue). In
+    Full Flight no formula reads it — the plan is one period, nothing is
+    multiplied — so it is written as a plain, non-editable-looking 1 with a
+    comment saying so (a blue "adjust me" cell that silently does nothing
+    would mislead)."""
+    if is_full_flight(time_unit):
+        ws["I10"] = 1
+        ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF000000")
+        ws["I10"].comment = Comment(
+            "Full-flight plan: the whole flight is a single period. No total on this sheet is multiplied by this cell.",
+            "Entravision Proposal Builder", width=240, height=70)
+    else:
+        ws["I10"] = total_months
+        ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
+    ws["I10"].alignment = CENTER
 
 
 def _banner_row_height(text: str, width_chars: float) -> float:
@@ -1196,25 +1238,34 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     # blank or non-numeric shows a safe number in both the label and the
     # multiplication below, instead of concatenating raw garbage text into
     # the label or breaking the dollar total's arithmetic.
-    safe_months = f'IF(ISNUMBER({months_cell}),{months_cell},3)'
-    campaign_unit_suffix = f"-{_unit_labels(time_unit)['noun'].upper()} CAMPAIGN"
-    ws[f"C{grand_row}"] = f'="TOTAL DIGITAL — "&{safe_months}&"{campaign_unit_suffix}"'
+    #
+    # Full Flight: the plan is ONE period, so nothing is multiplied — no
+    # months factor in any formula (and the row doesn't read I10 at all):
+    # the campaign row is the TOTAL DIGITAL row plus any paid add-ons.
+    if is_full_flight(time_unit):
+        months_factor = ""
+        ws[f"C{grand_row}"] = _unit_labels(time_unit)["campaign_label"]
+    else:
+        safe_months = f'IF(ISNUMBER({months_cell}),{months_cell},3)'
+        months_factor = f"*{safe_months}"
+        campaign_unit_suffix = f"-{_unit_labels(time_unit)['noun'].upper()} CAMPAIGN"
+        ws[f"C{grand_row}"] = f'="TOTAL DIGITAL — "&{safe_months}&"{campaign_unit_suffix}"'
     ws[f"C{grand_row}"].font = TOTAL_FONT
     ws[f"C{grand_row}"].fill = TOTAL_FILL
     # Impressions grand total — same monthly-figure * months-in-campaign
     # logic as the dollar totals below (no addons term: add-ons don't carry
     # impressions). Previously missing entirely, so the campaign-total row
     # showed a dollar figure with no impressions to back it up.
-    ws[f"I{grand_row}"] = f"=ROUNDDOWN(I{total_row}*{safe_months},0)"
+    ws[f"I{grand_row}"] = f"=ROUNDDOWN(I{total_row}{months_factor},0)"
     _format_imps_cell(ws[f"I{grand_row}"])
     ws[f"I{grand_row}"].font = TOTAL_FONT
     ws[f"I{grand_row}"].fill = TOTAL_FILL
-    ws[f"L{grand_row}"] = f"=ROUNDDOWN(L{total_row}*{safe_months}{addons_sum_term},0)"
+    ws[f"L{grand_row}"] = f"=ROUNDDOWN(L{total_row}{months_factor}{addons_sum_term},0)"
     _format_money_cell(ws[f"L{grand_row}"])
     ws[f"L{grand_row}"].font = TOTAL_FONT
     ws[f"L{grand_row}"].fill = TOTAL_FILL
     if gross:
-        ws[f"N{grand_row}"] = f"=ROUNDDOWN(N{total_row}*{safe_months}{addons_sum_term_gross},0)"
+        ws[f"N{grand_row}"] = f"=ROUNDDOWN(N{total_row}{months_factor}{addons_sum_term_gross},0)"
         _format_money_cell(ws[f"N{grand_row}"])
         ws[f"N{grand_row}"].font = TOTAL_FONT
         ws[f"N{grand_row}"].fill = TOTAL_FILL
@@ -1406,9 +1457,7 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     ws["H10"] = labels["input_label"]
     ws["H10"].alignment = RIGHT
     ws["H10"].font = BODY_BOLD
-    ws["I10"] = total_months
-    ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
-    ws["I10"].alignment = CENTER
+    _write_months_cell(ws, total_months, time_unit)
 
     # Agency fee input (I14)
     ws["C14"] = "Agency Fee:"
@@ -1462,7 +1511,7 @@ def build_proposal_a_gross(wb: Workbook, products: list,
 
     last_data_row = row - 1
     total_row = row + 1
-    ws[f"C{total_row}"] = f"TOTAL DIGITAL {labels['adjective'].upper()}"
+    ws[f"C{total_row}"] = labels.get("total_row_label") or f"TOTAL DIGITAL {labels['adjective'].upper()}"
     ws[f"C{total_row}"].font = TOTAL_FONT
     ws[f"C{total_row}"].fill = TOTAL_FILL
     ws[f"L{total_row}"] = f"=ROUNDDOWN(SUM(L19:L{last_data_row}),0)"
@@ -1498,6 +1547,12 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     # matching comment (NET BUDGET/L) for why.
     ws.print_area = f"A1:N{ws.max_row}"
     return ws
+
+
+def _avails_only_sov_header(time_unit: str) -> str:
+    """The Avails-Only SOV column header: in Full Flight the budget column is the whole-flight budget, and that is
+    what is compared with the (monthly) ceiling."""
+    return "% of Avails Reached with\nFull-Flight Budget" if is_full_flight(time_unit) else "% of Avails Reached with\nMinimum Monthly Budget"
 
 
 def build_avails_only(wb: Workbook, products: list, *,
@@ -1568,11 +1623,11 @@ def build_avails_only(wb: Workbook, products: list, *,
         ("F", "BUY TYPE"),
         ("G", "CPM"),
         ("H", "Est. CPM"),
-        ("I", "Minimum Monthly\nRequired Budget"),
+        ("I", "Full-Flight\nBudget" if is_full_flight(time_unit) else "Minimum Monthly\nRequired Budget"),
         ("J", "Max. Recommended\nMonthly Imps"),
         ("K", "Max. Recommended\nMonthly Spend"),
         ("L", "Est. Monthly Uniques"),
-        ("M", "% of Avails Reached with\nMinimum Monthly Budget"),
+        ("M", _avails_only_sov_header(time_unit)),
         ("O", "Planner Notes"),
     ])
     ws.row_dimensions[10].height = 40
@@ -2115,16 +2170,26 @@ def _mb_cell_text(dollars: Optional[float], total: float) -> str:
 
 
 def write_monthly_breakdown_header(ws: Worksheet, row: int, months: list[dict], start_col: int,
-                                    time_unit: str = "month") -> None:
+                                    time_unit: str = "month", basis: Optional[str] = None) -> None:
     """Period labels, styled exactly like this sheet's own header row (row
     17 on Net/Gross — passing that same row number here just extends it
-    rightward, rather than inventing a second header style)."""
+    rightward, rather than inventing a second header style).
+
+    basis: "GROSS"/"NET" — appended to the banner ("MONTHLY BREAKDOWN
+    (GROSS)") so it's explicit which dollars the block shows. Every billing
+    period passes it; None leaves the bare banner."""
     banner_row = row - 1
     if banner_row >= 1:
-        ws.merge_cells(start_row=banner_row, start_column=start_col, end_row=banner_row,
-                        end_column=start_col + max(len(months) - 1, 0))
+        # A one-column block (Full Flight, a quarterly plan on a short flight, a one-month monthly
+        # plan) must NOT be "merged": a single-cell merge is invalid in Excel and can trigger its
+        # "we found a problem with some content" repair prompt.
+        if len(months) > 1:
+            ws.merge_cells(start_row=banner_row, start_column=start_col, end_row=banner_row,
+                            end_column=start_col + len(months) - 1)
         banner_cell = ws.cell(row=banner_row, column=start_col)
-        banner_cell.value = f"{_unit_labels(time_unit)['adjective'].upper()} BREAKDOWN"
+        labels = _unit_labels(time_unit)
+        banner_text = (labels.get("banner_label") or f"{labels['adjective'].upper()} BREAKDOWN") + (f" ({basis})" if basis else "")
+        banner_cell.value = banner_text
         banner_cell.font = SECTION_FONT
         banner_cell.fill = SECTION_FILL
         banner_cell.alignment = CENTER
@@ -2144,7 +2209,12 @@ def write_monthly_breakdown_header(ws: Worksheet, row: int, months: list[dict], 
         cell.fill = H_HEADER_FILL
         cell.alignment = CENTER
         cell.border = HEADER_BORDER
-        ws.column_dimensions[get_column_letter(col)].width = 15
+        # The Full-Flight label is a whole date span ("NOVEMBER 2026–JANUARY 2027"), far wider than a month name; and a
+        # ONE-column block (it isn't merged) must be wide enough for its own banner, which now carries the basis.
+        width = 26 if is_full_flight(time_unit) else 15
+        if len(months) == 1 and banner_row >= 1:
+            width = max(width, len(banner_text) + 2)
+        ws.column_dimensions[get_column_letter(col)].width = width
 
 
 def write_monthly_breakdown_row(ws: Worksheet, row: int, months: list[dict],
@@ -2176,18 +2246,55 @@ def write_monthly_breakdown_total_row(ws: Worksheet, row: int, months: list[dict
         cell.fill = TOTAL_FILL
 
 
+def write_full_flight_breakdown_row(ws: Worksheet, row: int, start_col: int, budget_col: str) -> None:
+    """Full Flight's single column for one line: the line's WHOLE amount at
+    100% — `$800 (100%)` — as a live formula over that row's own budget cell
+    (GROSS BUDGET on the Gross sheet, NET BUDGET on the Net sheet), so editing
+    the blue budget cell in Excel keeps this column honest instead of leaving
+    stale static text behind."""
+    ref = f"{budget_col}{row}"
+    cell = ws.cell(row=row, column=start_col)
+    cell.value = f'=IFERROR("$"&TEXT({ref},"#,##0")&IF({ref}>0," (100%)"," (0%)"),"—")'
+    cell.font = BODY_FONT
+    cell.alignment = CENTER
+    cell.border = THIN_BORDER
+
+
+def write_full_flight_breakdown_total(ws: Worksheet, total_row: int, start_col: int, budget_col: str) -> None:
+    """The column's total cell: a direct reference to the sheet's own TOTAL
+    DIGITAL cell, so it can never drift from it (no second rounding)."""
+    cell = ws.cell(row=total_row, column=start_col)
+    cell.value = f"={budget_col}{total_row}"
+    _format_money_cell(cell)
+    cell.font = TOTAL_FONT
+    cell.fill = TOTAL_FILL
+
+
+def breakdown_gross_factor(agency_fee: Optional[float]) -> float:
+    """The multiplier from a NET dollar to the GROSS dollar the Gross sheet shows for it: 1 / (1 - agency fee) — the very
+    markup that sheet's own GROSS BUDGET formula applies. 1.0 when no agency fee is selected (gross == net)."""
+    return 1.0 / (1.0 - agency_fee) if (agency_fee and 0 < agency_fee < 1) else 1.0
+
+
 def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
                                  months: list[dict], sheet_name: str = "Monthly Breakdown",
-                                 distribution_mode: str = "even", time_unit: str = "month") -> Worksheet:
+                                 distribution_mode: str = "even", time_unit: str = "month",
+                                 agency_fee: Optional[float] = None) -> Worksheet:
     """
     Standalone tab: one row per (non-Added-Value) line item that has a
     Breakdown, a "TOTAL PLAN SPEND BY {UNIT}" row at the bottom — plain
     grid, independent of the Net/Gross column layout entirely.
+
+    agency_fee: with an agency fee selected the tab is stated in GROSS dollars (each net amount marked up by
+    breakdown_gross_factor, exactly as the Gross sheet does) and titled "(Gross)"; with none it is NET and titled "(Net)".
     """
     labels = _unit_labels(time_unit)
+    factor = breakdown_gross_factor(agency_fee)
+    basis = "Gross" if factor != 1.0 else "Net"
     default_title = f"{labels['adjective']} Breakdown"
+    title = f"{default_title} ({basis})"
     ws = wb.create_sheet(sheet_name[:31])
-    ws["B2"] = f"{default_title} — {sheet_name}" if sheet_name not in ("Monthly Breakdown", default_title) else default_title
+    ws["B2"] = f"{title} — {sheet_name}" if sheet_name not in ("Monthly Breakdown", default_title) else title
     ws["B2"].font = TITLE_FONT
     ws.column_dimensions["A"].width = 2
     ws.column_dimensions["B"].width = 34
@@ -2214,17 +2321,20 @@ def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
     for product, li in zip(products, line_items):
         if getattr(li, "is_added_value", False):
             continue
-        total = li.monthly_budget * li.months
-        allocations = li.monthly_allocations if li.monthly_allocations else None
+        total_net = li.monthly_budget * li.months
+        allocations_net = li.monthly_allocations if li.monthly_allocations else None
         # Every line item contributes to the plan-level total (an estimate,
         # in the planner's chosen distribution_mode, if it was never
         # individually customized) — see
         # monthly_allocation.compute_default_allocation(); mirrors exactly
         # what app.js's _mbEffectiveDistribution shows on-screen, so the
         # export's total always matches what the planner last saw.
-        distribution = allocations or _monthly_allocation.compute_default_allocation(total, months, distribution_mode)
+        distribution = allocations_net or _monthly_allocation.compute_default_allocation(total_net, months, distribution_mode)
         for m in months:
-            per_month_totals[m["key"]] += distribution.get(m["key"], 0.0)
+            per_month_totals[m["key"]] += distribution.get(m["key"], 0.0) * factor
+        # What the cells show is in the tab's basis (gross with an agency fee); the percentages are unchanged by it.
+        total = total_net * factor
+        allocations = {k: v * factor for k, v in allocations_net.items()} if allocations_net else None
 
         name_cell = ws.cell(row=row, column=2, value=product.name)
         name_cell.font = BODY_FONT
