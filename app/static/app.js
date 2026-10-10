@@ -271,6 +271,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // session, which calls this again itself once state.timeUnit is restored.
   _applyTimeUnitLabels();
   await maybeReopenProposal();
+  await maybeLoadPlanningRequest();
   // Runs for the rest of the session regardless of step — _autosaveTick()
   // itself no-ops whenever there's nothing parsed yet to save.
   startAutosave();
@@ -611,7 +612,7 @@ async function maybeReopenProposal() {
     fillForm(state.parsed);
     const digits = (state.parsed.notion_id || "").replace(/^EVC-/, "");
     document.getElementById("notion-id-input").value = digits;
-    document.getElementById("notion-id-pill").textContent = state.parsed.notion_id || "";
+    document.getElementById("notion-id-pill").textContent = state.parsed.request_code || state.parsed.notion_id || "";
     document.getElementById("notion-input").value = state.rawNotionText || "";
     renderMatchedProducts(state.parsed);
 
@@ -650,6 +651,41 @@ async function maybeReopenProposal() {
     }
   } catch (e) {
     alert("Reopen failed: " + e.message);
+  } finally {
+    overlay.classList.add("hidden");
+  }
+}
+
+// Start directly from an approved request record instead of a Notion paste.
+// The imported fields remain editable in Step 02, where the planner confirms
+// them before any proposal is saved or generated.
+async function maybeLoadPlanningRequest() {
+  const requestId = new URLSearchParams(window.location.search).get("request");
+  if (!requestId) return;
+  const overlay = document.getElementById("reopen-loading-overlay");
+  overlay.classList.remove("hidden");
+  try {
+    const response = await fetch(`/api/requests/${encodeURIComponent(requestId)}/builder`);
+    if (!response.ok) throw new Error(`Request lookup failed (${response.status})`);
+    const data = await response.json();
+    state.parsed = data.request;
+    state.suggestedTabs = data.suggested_tabs;
+    state.rawNotionText = null;
+    state.proposalId = null;
+    state.lineItems = [];
+    state.availsData = {};
+    state.tiers = [];
+    state.activeTierLabel = "A";
+    state.activeTierName = null;
+    fillForm(state.parsed);
+    renderWarnings(state.parsed.warnings || []);
+    renderMatchedProducts(state.parsed);
+    renderSuggestedTabs(data.suggested_tabs);
+    document.getElementById("notion-id-input").value = "";
+    document.getElementById("notion-id-pill").textContent = state.parsed.request_code;
+    goToStep(2);
+  } catch (error) {
+    alert(error.message);
   } finally {
     overlay.classList.add("hidden");
   }
@@ -1301,7 +1337,7 @@ function _syncTierOverridePanelOpen() {
 
 function buildProposalNamePreview(parsed) {
   if (!parsed) return "";
-  const shortId = (parsed.notion_id || "").trim() || "----";
+  const shortId = (parsed.request_code || parsed.notion_id || "").trim() || "----";
   // Mirrors ai_enricher.build_proposal_title()'s "{Client Name} - {Order
   // Description}" convention — the client name appears exactly once,
   // never duplicated inside the order-description segment. Pre-Generate,

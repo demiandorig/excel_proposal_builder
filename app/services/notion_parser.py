@@ -38,6 +38,9 @@ class ProductSpecifics:
 
 @dataclass
 class ProposalRequest:
+    # Internal request library identity. Empty for legacy Notion pastes.
+    request_id: str = ""
+    request_code: str = ""
     # Notion tracking ID — planner-entered, e.g. "EVC-4821". Drives the proposal
     # title/filename in place of the app's internal sequential counter.
     notion_id: str = ""
