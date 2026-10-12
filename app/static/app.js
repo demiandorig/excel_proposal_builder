@@ -1198,6 +1198,7 @@ function _clearPerProposalState() {
   _resetStrategyUI();
   _cancelRoadblocksRun();              // a pick still waiting out its debounce, or a check in flight, belongs to the proposal being left
   _resetRoadblocksUI();
+  _rbResultCache.clear();             // paid results belong to the proposal being left
   _gammaReset();                      // the previous proposal's "deck is ready" link / error doesn't carry over
 }
 
@@ -1550,6 +1551,10 @@ function goToStep(n) {
   if (n === 4 && state.step !== 4 && state.lineItems.length) renderLineItems();
   state.step = n;
   state.furthestStep = Math.max(state.furthestStep, n);
+  if (n === 7 && state.parsed) {
+    const chooser = document.getElementById("restricted-verticals");
+    if (chooser && chooser.classList.contains("hidden")) _loadRestrictedVerticals();   // e.g. Back from Step 08
+  }
   // Editing client name/request type/start date is only possible back on
   // Step 02 — once there, the last-generated title (if any) can no longer
   // be trusted as still-accurate, so drop back to the live preview until
@@ -1863,7 +1868,7 @@ function _refreshStep02MonthsField() {
 // by a month count, so the budget figure (and Tier #1-#4) is the flight's budget exactly as typed: the field and the Tiered
 // Budget legend are relabeled to say so (a field still called "Monthly budget" beside a note saying "flight total" would
 // invite a planner to type the wrong thing). Re-run by _applyTimeUnitLabels and fillForm.
-const _STEP02_FF_NOTE = "Billed as one period for the whole flight — the export shows Months: 1 and one total per line. " +
+const _STEP02_FF_NOTE = "Billed as one period for the whole flight — the export shows one total per line and no month count. " +
   "The budget below (and Tier #1–#4) is the flight's total, used exactly as typed — nothing is multiplied by months.";
 function _refreshStep02FlightNote() {
   const ff = _isFullFlight();
@@ -2467,6 +2472,20 @@ let _rbRunToken = 0;             // identifies the one run whose answer may stil
 let _rbAbort = null;             // the in-flight request's AbortController (saves the connection; the token is the guard)
 let _rbInFlight = false;         // a request for the CURRENT token is out there
 let _rvUsingBuiltin = false;     // the picker is showing the built-in snapshot, not an admin-synced sheet
+let _rvLoading = false;          // the category list is being fetched (so a second entry doesn't fetch it again)
+// A finished check, kept for this page session under (pick + plan): clicking back to a pick that already has a paid
+// result shows it instead of paying for the same check again (a mis-click and its correction cost nothing extra).
+// "Regenerate" is the deliberate way to pay for a fresh one. Cleared when the proposal on screen is replaced.
+const _rbResultCache = new Map();
+
+function _rbPlanKey() {
+  const names = [...new Set(allTiersForSubmit().flatMap(t => (t.line_items || []).map(li => li.product_name)))].sort();
+  return `${(state.parsed && state.parsed.client_name) || ""}::${names.join("|")}`;
+}
+
+function _rbCacheKey(categories) {
+  return `${[...categories].sort().join("|")}::${_rbPlanKey()}`;
+}
 let _rvLoadFailed = false;       // the category list could not be loaded (the picker still offers "None")
 
 // Drops a pick still waiting out its debounce and abandons any request in flight. Used when the pick changes and
@@ -2502,9 +2521,21 @@ function _showRoadblocksPending() {
 function onRvPick(name) {
   const next = new Set(name === null ? [] : [name]);
   const cur = state.rvSelected;
-  if (cur && cur.size === next.size && [...next].every(n => cur.has(n))) return;   // the pick that is already showing — "Regenerate" re-runs it
+  const unresolved = (state.roadblocks && state.roadblocks.unresolved_categories) || [];
+  const samePick = !!cur && cur.size === next.size && [...next].every(n => cur.has(n));
+  // The pick that is already showing — "Regenerate" re-runs it. But clicking it again when it has NO answer (a failed
+  // run, or a saved result whose category no longer exists) is a retry, not a no-op.
+  const settled = !!state.roadblocks && !unresolved.length;     // a finished answer for this pick is on screen
+  if (samePick && (_rbBusy() || settled)) return;
   state.rvSelected = next;
   _cancelRoadblocksRun();      // whatever was running or waiting answered the PREVIOUS pick
+  const cached = _rbResultCache.get(_rbCacheKey([...next]));
+  if (cached) {                // already paid for in this session: show it, run nothing
+    _resetRoadblocksUI();
+    _renderRvChips();
+    renderRoadblocks(cached);
+    return;
+  }
   // That answer (if there was one) does not describe this pick: it must not stay on screen, in the saved draft or in
   // the export next to a different category. The new run replaces it; Skip / Continue meanwhile carry no result.
   state.roadblocks = null;
@@ -2601,8 +2632,9 @@ function _roadblockMatrixHtml(matrix) {
 // A saved pick (reopened proposal) is kept as-is.
 async function _loadRestrictedVerticals() {
   const wrap = document.getElementById("restricted-verticals");
-  if (!wrap || !state.parsed) return;
+  if (!wrap || !state.parsed || _rvLoading) return;
   const epoch = _resetEpoch;
+  _rvLoading = true;
   try {
     const names = [...new Set(allTiersForSubmit().flatMap(t => (t.line_items || []).map(li => li.product_name)))];
     const res = await fetch("/api/restrictions/categories", {
@@ -2620,7 +2652,10 @@ async function _loadRestrictedVerticals() {
     if (epoch !== _resetEpoch) return;
     // Optional layer: without the list the chooser still offers "None", so the check can always be run.
     _rvLoadFailed = !state.rvCategories.length;
+  } finally {
+    _rvLoading = false;
   }
+  if (epoch !== _resetEpoch) return;
   _renderRestrictedVerticals();
 }
 
@@ -2640,6 +2675,8 @@ function _renderRvChips() {
   const sel = state.rvSelected;
   const unresolved = (state.roadblocks && state.roadblocks.unresolved_categories) || [];
   const noneOn = !!sel && sel.size === 0 && !unresolved.length;    // an empty saved list with unresolved names is not a "None" run
+  const focused = document.activeElement && chips.contains(document.activeElement) ? document.activeElement : null;
+  const focusKey = focused ? (focused.dataset.rvCategory !== undefined ? "c:" + focused.dataset.rvCategory : "none") : null;
   const chip = (attrs, on, title, label) =>
     `<button type="button" class="rv-chip ${on ? "on" : ""}" role="radio" aria-checked="${on}" ${attrs} title="${escapeHtml(title)}">${label}</button>`;
   chips.innerHTML = state.rvCategories.map(c =>
@@ -2651,6 +2688,23 @@ function _renderRvChips() {
   });
   const noneBtn = chips.querySelector("[data-rv-none]");
   if (noneBtn) noneBtn.addEventListener("click", () => onRvPick(null));
+  if (focusKey) {                               // re-rendering replaced the button the keyboard user was on
+    const again = focusKey === "none" ? noneBtn
+      : [...chips.querySelectorAll("[data-rv-category]")].find(b => "c:" + b.dataset.rvCategory === focusKey);
+    if (again) again.focus();
+  }
+  if (!chips.dataset.keys) {                    // arrows move between the chips, like a radio group
+    chips.dataset.keys = "1";
+    chips.addEventListener("keydown", (ev) => {
+      const keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
+      if (!(ev.key in keys)) return;
+      const all = [...chips.querySelectorAll(".rv-chip")];
+      const at = all.indexOf(document.activeElement);
+      if (at < 0) return;
+      ev.preventDefault();
+      all[(at + keys[ev.key] + all.length) % all.length].focus();
+    });
+  }
 
   // "Suggested: Political" — what the request itself points at, shown until the planner has picked anything.
   const suggested = state.rvCategories.filter(c => c.suggested).map(c => c.name);
@@ -2670,16 +2724,24 @@ function _updateRvNote() {
   if (unresolved.length) {
     text = `Couldn't find ${unresolved.join(", ")} in the restricted-verticals sheet any more — an admin may have renamed it. Pick a category again to re-run the check.`;
   } else if (_rvLoadFailed) {
-    text = "Couldn't load the restricted categories just now — you can still run the check with None, or reopen this step to try again.";
+    text = "Couldn't load the restricted categories just now — you can still run the check with None, or try again.";
   } else if (_rvUsingBuiltin) {
     text = "Showing Entravision's built-in snapshot (Political, Cannabis) — an admin can sync the full sheet under Admin → Restrictions.";
   }
   note.textContent = text;
   note.classList.toggle("hidden", !text);
+  const retry = document.getElementById("rv-retry");           // "Try again" beside the note when the list couldn't load
+  if (retry) {
+    retry.classList.toggle("hidden", !(_rvLoadFailed && !unresolved.length));
+    retry.onclick = () => _loadRestrictedVerticals();
+  }
 }
 
 function renderRoadblocks(data) {
   state.roadblocks = data;
+  if (Array.isArray(data.categories) && !data.unresolved_categories?.length && (data.product_roadblocks || []).length) {
+    _rbResultCache.set(_rbCacheKey(data.categories), data);
+  }
   // A saved result carries the categories it was computed for: that is the planner's pick when a proposal is
   // reopened (an empty list is "None"; several names are a save from the old multi-select).
   if (Array.isArray(data.categories) && state.rvSelected === null) state.rvSelected = new Set(data.categories);
@@ -5680,14 +5742,25 @@ function _mbPlanRedistribution(lines, months) {
     if (li.is_added_value) return;
     const current = li.monthly_allocations;
     if (!current || !Object.keys(current).length) return;
-    const total = li.monthly_budget * li.months;
+    // The line's real total is what its allocations add up to (that is what the server bills): after a hand edit
+    // monthly_budget is only round(sum / months, 2), so budget x months can sit a cent or two away from it. Use
+    // the allocation sum while the two agree to rounding; if they differ by more (the budget moved after the
+    // numbers were typed), the budget is the authority, exactly as the render-time rescale treats it.
+    const budgetTotal = li.monthly_budget * li.months;
+    const allocSum = Object.values(current).reduce((t, v) => t + (Number(v) || 0), 0);
+    const balanced = Math.abs(allocSum - budgetTotal) <= _MB_CENT * (months.length + 1);
+    const total = balanced ? Math.round(allocSum * 100) / 100 : budgetTotal;
     if (!(total > 0)) return;
     const target = _mbDefaultAllocation(total, months);
-    const changes = !_mbAllocationsMatch(current, target);
+    // `exact`: not the default to the cent (Apply tidies those cents up). `changes`: differs by more than a dollar in
+    // some period — a line within a dollar of the default already follows it (a budget rescale can leave a few cents
+    // of residue), so it must not keep the Apply button enabled or be counted as "different".
+    const exact = !_mbAllocationsMatch(current, target);
+    const changes = exact && !_mbAllocationsMatch(current, target, _MB_DEFAULT_SLACK);
     const custom = changes
       && !_mbAllocationsMatch(current, _mbEvenDefaultAllocation(total, months), _MB_DEFAULT_SLACK)
       && !_mbAllocationsMatch(current, _mbProratedDefaultAllocation(total, months), _MB_DEFAULT_SLACK);
-    rows.push({ li, target, changes, custom });
+    rows.push({ li, target, changes, exact, custom });
   });
   return {
     rows,
@@ -5720,7 +5793,7 @@ function onMbApplyAll() {
   const plan = _mbPlanRedistribution(state.lineItems, months);
   if (plan.changeCount) {
     if (plan.customCount && !confirm(_mbRedistributeConfirmText(plan))) return;
-    plan.rows.forEach(r => { if (r.changes) _mbSetAllocation(r.li, r.target); });
+    plan.rows.forEach(r => { if (r.exact) _mbSetAllocation(r.li, r.target); });      // cent residue is tidied along the way
   }
   state.mbModeNotice = false;
   renderMonthlyBreakdown();
@@ -6046,6 +6119,7 @@ function _mbLiveUpdateAfterEdit(li, months, editedInput) {
 
   _mbRenderPlanSummary(months);
   _mbUpdateContinueState(months);
+  _mbRenderApplyControls(months);                  // the master button's state follows the keystrokes too
 }
 
 // --------------------------------------------------------------------------
@@ -7357,10 +7431,15 @@ async function showResult(data) {
     titleEl.classList.add("hidden");
   }
 
+  // Anything the generator had to work around (a skipped product, a DOOH pivot that couldn't be attached, tabs
+  // switched back on...) is shown, not just logged — the planner is about to send this file.
+  const exportWarnings = (data.summary.warnings || []).filter(w => typeof w === "string" && w.trim());
   document.getElementById("result-meta").innerHTML = `
-    Tabs: ${data.summary.tabs_built.join(" · ")}<br>
+    Tabs: ${data.summary.tabs_built.map(escapeHtml).join(" · ")}<br>
     Net: ${money(data.summary.total_net)} · Gross: ${money(data.summary.total_gross)}<br>
     File: ${escapeHtml(data.filename)}
+    ${exportWarnings.length ? `<div class="result-warnings" role="alert"><strong>Check before sending:</strong><ul>${
+      exportWarnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul></div>` : ""}
   `;
 
   const dl = document.getElementById("download-link");

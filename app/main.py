@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 import time
 from collections import Counter
 from dataclasses import asdict
@@ -82,6 +83,8 @@ from app.services import strategy_brief as strategy_brief_svc
 from app.services import ad_presence as ad_presence_svc
 from app.services import roadblocks as roadblocks_svc
 from app.services import restrictions as restrictions_svc
+from app.services import faq_entries as faq_svc
+from app.services import schema_bootstrap
 from app.services import gamma_client
 from app.services import monthly_allocation
 from app.services import notion_client
@@ -228,6 +231,15 @@ async def _on_startup() -> None:
         auth_svc.purge_expired_sessions()
     except Exception as e:
         _logger.warning("Startup auth bootstrap/session-purge skipped: %s: %s", type(e).__name__, e)
+        return          # no database to talk to: nothing below could work either
+    try:
+        # The tables newer features need (products, Drive's shared file copy, FAQ rows): created from schema.sql's own
+        # idempotent statements, so a deploy never waits on someone running SQL by hand. Never fatal.
+        created = await asyncio.to_thread(schema_bootstrap.ensure_tables)
+        if created:
+            _logger.info("schema bootstrap ensured: %s", ", ".join(created))
+    except Exception as e:
+        _logger.warning("Startup schema bootstrap skipped: %s: %s", type(e).__name__, e)
 
 
 def _static_asset_version() -> int:
@@ -1113,6 +1125,8 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
         LineItem(id=li.id, product_name=li.product_name, monthly_budget=li.monthly_budget, months=li.months)
         for li in body.line_items
     ]
+
+    await _refresh_restrictions_best_effort()      # judge against the current sheet, not an old copy
 
     result = await asyncio.to_thread(
         roadblocks_svc.generate_roadblocks, req, line_items,
@@ -2374,6 +2388,7 @@ async def restriction_categories(body: RestrictionCategoriesRequest) -> dict:
     """The restricted verticals a planner can confirm for Roadblocks, with the
     ones the plan's own text suggests flagged `suggested`."""
     from app import disclaimers as disclaimers_svc
+    await _refresh_restrictions_best_effort()
     state = restrictions_svc.load_state()
     req = _reconstruct_proposal_request(body.request)
     plan_text = disclaimers_svc.request_text(req, include_products=True) + "\n" + "\n".join(body.product_names)
@@ -2437,6 +2452,61 @@ def _ingest_restrictions(data: bytes, sheet_url: str, source_title: str, synced_
         restrictions_svc.carry_over_admin_edits(categories, previous["categories"])
     restrictions_svc.replace_all(categories, sheet_url=sheet_url, source_title=source_title, synced_by=synced_by)
     return warnings
+
+
+# Roadblocks should judge against the CURRENT "Restricted Verticals by Platforms" sheet, not against whatever copy an
+# admin last pressed Sync on. So whenever the stored copy is older than this, the sheet is re-read from Google
+# (through the app's Drive connection) before the Step 07 chooser / check uses it. 0 turns it off.
+_RESTRICTIONS_REFRESH_MINUTES = float(os.environ.get("RESTRICTIONS_AUTO_SYNC_MINUTES", "60") or 0)
+_RESTRICTIONS_RETRY_SECONDS = 600           # a failed refresh (Drive not connected, sheet not shared...) isn't retried every request
+_RESTRICTIONS_WAIT_SECONDS = 15             # how long a request waits for a refresh before using the stored copy
+_restrictions_refresh = {"attempted_at": None}
+_restrictions_refresh_lock = threading.Lock()
+
+
+def _refresh_restrictions_if_stale() -> bool:
+    """Re-read the sheet from Google when the stored copy is stale. Best effort and never raises: any failure just
+    leaves the stored copy in place (and is logged). Only refreshes a copy an admin already synced from the sheet -
+    never the built-in snapshot (its curated product mappings would be replaced by a raw parse) and never an
+    uploaded workbook (a deliberate override). Admin edits to keywords and product mappings are carried over, as
+    for a manual sync. Returns True when a refresh happened."""
+    if _RESTRICTIONS_REFRESH_MINUTES <= 0:
+        return False
+    if not _restrictions_refresh_lock.acquire(blocking=False):
+        return False                         # another request is already refreshing
+    try:
+        state = restrictions_svc.load_state()
+        sync = state.get("sync") or {}
+        if state.get("error") or state.get("using_builtin") or not sync.get("synced_at"):
+            return False
+        if str(sync.get("source_title") or "").startswith("Uploaded:"):
+            return False
+        if datetime.now(timezone.utc) - sync["synced_at"] < timedelta(minutes=_RESTRICTIONS_REFRESH_MINUTES):
+            return False
+        last = _restrictions_refresh["attempted_at"]
+        if last is not None and time.monotonic() - last < _RESTRICTIONS_RETRY_SECONDS:
+            return False
+        _restrictions_refresh["attempted_at"] = time.monotonic()
+        sheet_url = sync.get("sheet_url") or restrictions_svc.DEFAULT_SHEET_URL
+        data, title = restrictions_svc.fetch_sheet_xlsx(restrictions_svc.extract_file_id(sheet_url))
+        _ingest_restrictions(data, sheet_url, title or sync.get("source_title") or "Restricted Verticals", "auto-sync")
+        _logger.info("restricted-verticals sheet re-read from Google (stored copy was from %s)", sync["synced_at"])
+        return True
+    except Exception as exc:  # noqa: BLE001 - the stored copy is still a valid answer
+        _logger.warning("couldn't refresh the restricted-verticals sheet; using the stored copy: %s", exc)
+        return False
+    finally:
+        _restrictions_refresh_lock.release()
+
+
+async def _refresh_restrictions_best_effort() -> None:
+    """Run the stale-copy refresh without letting it hold a request up for long: past the wait, the stored copy is
+    used and the refresh finishes in the background for the next request."""
+    try:
+        await asyncio.wait_for(asyncio.shield(asyncio.to_thread(_refresh_restrictions_if_stale)),
+                               timeout=_RESTRICTIONS_WAIT_SECONDS)
+    except Exception:  # noqa: BLE001 - timeouts included
+        pass
 
 
 @app.get("/api/admin/restrictions")
@@ -3213,6 +3283,79 @@ async def admin_bulk_upsert_products(file: UploadFile = File(...)) -> dict:
     errors.extend(result["errors"])
     return {"created": result["created"], "updated": result["updated"], "unchanged": result["unchanged"],
             "errors": errors, "total_rows_processed": rows_processed}
+
+
+# ---------------------------------------------------------------------------
+# Process FAQs — the rows of the exports' "Process FAQs" tab (app/services/faq_entries.py).
+# Admin-only like every /api/admin/* route.
+# ---------------------------------------------------------------------------
+
+class FaqEntryRequest(BaseModel):
+    section: Optional[str] = Field(default=None, max_length=40)
+    services: Optional[str] = Field(default=None, max_length=2000)
+    question: Optional[str] = Field(default=None, max_length=5000)
+    link_title: Optional[str] = Field(default=None, max_length=2000)
+    link_url: Optional[str] = Field(default=None, max_length=4000)
+
+
+class FaqMoveRequest(BaseModel):
+    direction: str = Field(max_length=10)
+
+
+def _faq_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, LookupError):
+        return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=400, detail=str(exc))
+    return HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/api/admin/faq")
+async def admin_list_faq() -> dict:
+    try:
+        entries = await asyncio.to_thread(faq_svc.list_entries)
+    except RuntimeError as e:
+        raise _faq_error(e)
+    return {"entries": entries, "sections": faq_svc.SECTION_LABELS,
+            "guidelines_url": faq_svc.GUIDELINES_URL, "guidelines_title": faq_svc.GUIDELINES_LINK_TITLE}
+
+
+@app.post("/api/admin/faq")
+async def admin_create_faq(body: FaqEntryRequest) -> dict:
+    try:
+        entry = await asyncio.to_thread(faq_svc.create_entry, body.model_dump(exclude_unset=True))
+    except (ValueError, RuntimeError) as e:
+        raise _faq_error(e)
+    return {"added": True, "entry": entry}
+
+
+@app.put("/api/admin/faq/{entry_id}")
+async def admin_update_faq(entry_id: int, body: FaqEntryRequest) -> dict:
+    try:
+        entry = await asyncio.to_thread(faq_svc.update_entry, entry_id, body.model_dump(exclude_unset=True))
+    except (ValueError, LookupError, RuntimeError) as e:
+        raise _faq_error(e)
+    return {"saved": True, "entry": entry}
+
+
+@app.delete("/api/admin/faq/{entry_id}")
+async def admin_delete_faq(entry_id: int) -> dict:
+    try:
+        deleted = await asyncio.to_thread(faq_svc.delete_entry, entry_id)
+    except RuntimeError as e:
+        raise _faq_error(e)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="FAQ entry not found.")
+    return {"deleted": True}
+
+
+@app.post("/api/admin/faq/{entry_id}/move")
+async def admin_move_faq(entry_id: int, body: FaqMoveRequest) -> dict:
+    try:
+        await asyncio.to_thread(faq_svc.move_entry, entry_id, body.direction)
+    except (ValueError, LookupError, RuntimeError) as e:
+        raise _faq_error(e)
+    return {"moved": True}
 
 
 # ---------------------------------------------------------------------------

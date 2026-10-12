@@ -28,6 +28,7 @@
         <button class="admin-tab" data-tab="markets">Markets</button>
         <button class="admin-tab" data-tab="disclaimers">Disclaimers</button>
         <button class="admin-tab" data-tab="restrictions">Restrictions</button>
+        <button class="admin-tab" data-tab="faq">FAQ</button>
         <button class="admin-tab" data-tab="users">Users</button>
       </nav>
       <div id="account-widget" class="account-widget"></div>
@@ -410,6 +411,70 @@
       </div>
 
       <div id="rs-list" class="dz-list"><p class="admin-empty">Loading…</p></div>
+    </section>
+
+    <!-- ================= FAQ TAB ================= -->
+    <section class="panel hidden" id="tab-faq">
+      <div class="panel-head">
+        <div class="kicker">Admin</div>
+        <h1 class="display">FAQ</h1>
+        <p class="lede">The rows of the <strong>Process FAQs</strong> tab in every Excel export: the FAQ table (SERVICES, Frequently Asked Question, Resource Link) and the "Category and product restrictions" block under it. Add, edit, reorder or delete rows; a row's <strong>link title</strong> becomes a clickable link to its <strong>link</strong> in the export (a title with no link stays plain text). The export's header always links to <a id="faq-guidelines-link" href="https://entravision-digital-ad-guidelines.netlify.app/" target="_blank" rel="noopener noreferrer">Entravision's Ad Guidelines</a>.</p>
+      </div>
+
+      <details class="add-product-panel" id="faq-panel">
+        <summary id="faq-panel-title">+ Add an FAQ row</summary>
+        <form id="faq-form">
+          <div class="add-product-grid">
+            <label>Block
+              <select id="faq-section">
+                <option value="faq">Process FAQ</option>
+                <option value="restriction">Category and product restriction</option>
+              </select>
+            </label>
+            <label>SERVICES <span class="req">*</span> <small>(or the category / products)</small>
+              <input type="text" id="faq-services" maxlength="300" required />
+            </label>
+            <label class="span-2">Frequently Asked Question <span class="req">*</span> <small>(or what the restriction relates to)</small>
+              <textarea id="faq-question" rows="2" maxlength="1000" required></textarea>
+            </label>
+            <label>Resource Link Title <small>(the clickable text)</small>
+              <input type="text" id="faq-link-title" maxlength="200" />
+            </label>
+            <label>Resource Link <small>(https://…)</small>
+              <input type="text" id="faq-link-url" maxlength="2000" placeholder="https://" />
+            </label>
+          </div>
+          <div class="add-product-actions">
+            <span id="faq-error" class="add-product-error hidden"></span>
+            <button type="button" class="btn-secondary" id="faq-cancel-btn">Cancel</button>
+            <button type="submit" class="btn-primary" id="faq-submit-btn">Add Row</button>
+          </div>
+        </form>
+      </details>
+
+      <div class="admin-toolbar">
+        <span class="admin-count" id="faq-count"></span>
+        <div class="spacer"></div>
+        <button type="button" class="btn-primary" id="add-faq-btn">+ Add an FAQ row</button>
+      </div>
+
+      <div class="table-scroll">
+        <table class="admin-table" id="faq-table">
+          <thead>
+            <tr>
+              <th>Block</th>
+              <th>SERVICES</th>
+              <th>Frequently Asked Question</th>
+              <th>Resource Link Title</th>
+              <th>Resource Link</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="faq-body">
+            <tr><td colspan="6" class="admin-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- ================= USERS TAB ================= -->

@@ -62,3 +62,15 @@ def _product_list_without_a_database(request, monkeypatch):
 def real_catalog_readers():
     """The real (database-reading) catalog functions, for a test that stubs the database layer itself."""
     return _REAL_CATALOG_READERS
+
+
+@pytest.fixture(autouse=True)
+def _faq_rows_without_a_database(request, monkeypatch):
+    """The Process FAQs tab reads its rows from the `faq_entries` table; offline that is the built-in rows. A test of
+    the table itself patches `app.services.faq_entries.get_connection`; real_db tests keep the real loader."""
+    if request.node.get_closest_marker("real_db"):
+        return
+    from app.services import faq_entries
+    real_load = faq_entries.load_entries
+    monkeypatch.setattr(faq_entries, "load_entries", faq_entries.default_entries)
+    monkeypatch.setattr(faq_entries, "_real_load_entries", real_load, raising=False)

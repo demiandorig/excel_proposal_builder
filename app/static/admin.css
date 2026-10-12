@@ -471,3 +471,10 @@
 
 .pf-advanced { margin: 6px 0 12px; }
 .pf-advanced > summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+
+/* FAQ tab */
+.faq-nolink { color: var(--ink-faint); font-style: italic; font-size: 12px; }
+.faq-link-cell a { word-break: break-all; }
+.faq-actions { white-space: nowrap; }
+.faq-actions button { margin-right: 4px; }
+.faq-actions button:disabled { opacity: 0.4; cursor: default; }

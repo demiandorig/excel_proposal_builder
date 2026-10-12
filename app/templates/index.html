@@ -253,7 +253,7 @@ Client name: ...
           <label>Start date <input data-field="start_date" type="date" /></label>
           <label>End date <input data-field="end_date" type="date" /></label>
           <label>Months
-            <input data-field="total_months" type="number" min="1" readonly title="Computed from the Start/End dates above: the calendar months the flight touches. In Full Flight the export still shows Months: 1." />
+            <input data-field="total_months" type="number" min="1" readonly title="Computed from the Start/End dates above: the calendar months the flight touches. In Full Flight the export shows no month count." />
           </label>
           <div class="months-mismatch-flag hidden" id="total-months-mismatch-flag">
             <span class="months-mismatch-text"></span>
@@ -272,7 +272,7 @@ Client name: ...
               <option value="full_flight">Full Flight</option>
             </select>
           </label>
-          <p class="field-hint hidden" id="step02-billing-period-hint">Billed as one period for the whole flight — the export shows Months: 1 and one total per line. The budget below (and Tier #1–#4) is the flight's total, used exactly as typed — nothing is multiplied by months.</p>
+          <p class="field-hint hidden" id="step02-billing-period-hint">Billed as one period for the whole flight — the export shows one total per line and no month count. The budget below (and Tier #1–#4) is the flight's total, used exactly as typed — nothing is multiplied by months.</p>
           <label><span id="step02-budget-label">Monthly budget</span>
             <input data-field="monthly_budget" type="number" step="0.01" min="0" />
           </label>
@@ -713,7 +713,7 @@ Client name: ...
           <strong>Platform ad guidelines</strong>
           <span>Entravision's platform ad guidelines live in our guidelines repo. Open it to check the rules for each product in this mix alongside this report.</span>
         </div>
-        <a class="btn-secondary rb-guidelines-link" id="rb-guidelines-link" href="https://entravision-digital-ad-guidelines.netlify.app/" target="_blank" rel="noopener noreferrer">Open the guidelines ↗</a>
+        <a class="btn-secondary rb-guidelines-link" id="rb-guidelines-link" href="https://entravision-digital-ad-guidelines.netlify.app/" target="_blank" rel="noopener noreferrer">See latest information about Entravision's Ad Guidelines ↗</a>
       </div>
 
       <!-- Which restricted category applies to this client — asked FIRST: picking one (or "None") starts the
@@ -728,9 +728,10 @@ Client name: ...
         <div class="rv-chips" id="rv-chips" role="radiogroup" aria-labelledby="rv-prompt"></div>
         <p class="rv-suggest hidden" id="rv-suggest"></p>
         <p class="rv-note hidden" id="rv-note"></p>
+        <button type="button" class="btn-secondary hidden" id="rv-retry">Try again</button>
       </div>
 
-      <div id="roadblocks-loading" class="strategy-loading hidden">
+      <div id="roadblocks-loading" class="strategy-loading hidden" role="status" aria-live="polite">
         <div class="strategy-spinner"></div>
         <span id="roadblocks-loading-text">Searching platform policies…</span>
       </div>

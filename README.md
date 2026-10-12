@@ -70,9 +70,31 @@ Products are rows in the `products` table, all equal: an admin adds, edits, dupl
 deletes them in **Admin → Products**, and every other module — the Excel builder, parser, recommender, generator —
 reads that list through `catalog.effective_catalog()`. `CATALOG` in `app/catalog.py` is only the *seed*: the first
 time the app finds the table empty it copies that list in (folding in anything the retired `rate_overrides` /
-`custom_products` tables held), and it is the read-only fallback if the table can't be reached. Apply `schema.sql`
-before first use. A renamed product keeps resolving under its old name (`product_aliases`); a deleted one stays
+`custom_products` tables held), and it is the read-only fallback if the table can't be reached. A renamed product keeps resolving under its old name (`product_aliases`); a deleted one stays
 hidden-but-resolvable so saved proposals still open.
+
+### Tables created at startup
+
+The tables newer features depend on (`products`, `product_aliases`, `proposal_files`, `faq_entries`) are created when
+the app starts, from `schema.sql`'s own idempotent `CREATE TABLE IF NOT EXISTS` statements (`app/services/schema_bootstrap.py`),
+so a deploy never waits on someone pasting SQL into the database console. Best effort: if the database user can't create
+tables, each feature keeps its fail-safe path and the log says so — applying `schema.sql` by hand still works.
+
+### Process FAQs (Admin → FAQ)
+
+The exports' **Process FAQs** tab is built from the rows in the `faq_entries` table, edited in **Admin → FAQ**: the FAQ table
+(SERVICES, Frequently Asked Question, Resource Link Title, Resource Link) and the "Category and product restrictions" block
+under it. A row's title is written as a real hyperlink to its link (plain text when it has none); the tab's header always
+links to Entravision's Ad Guidelines site. The first admin visit seeds the rows the tab has always had; if the table is empty
+or unreachable the export falls back to those built-in rows.
+
+### Restricted Verticals sheet
+
+Roadblocks reads a stored copy of the "Restricted Verticals by Platforms" Google Sheet (`restriction_categories`, filled by
+**Admin → Restrictions → Sync**). So Roadblocks judges against the current sheet, a copy an admin already synced from Google is
+re-read automatically when it is older than `RESTRICTIONS_AUTO_SYNC_MINUTES` (default 60; 0 turns it off) — at the Step 07
+chooser and before each check, through the app's Google Drive connection. A failed refresh keeps the stored copy; an uploaded
+workbook and the built-in snapshot are never replaced automatically.
 
 ### Create in Gamma
 
@@ -157,7 +179,7 @@ Folder layout in Drive becomes:
 
 Files auto-convert to native Google Sheets on upload.
 
-**Reliability.** The generated `.xlsx` is also kept in the `proposal_files` table (see `schema.sql`), because on
+**Reliability.** The generated `.xlsx` is also kept in the `proposal_files` table (created at startup, see `schema.sql`), because on
 Autoscale the file written to `data/proposals/` lives on one instance's disk only and the upload can be served by
 another. Every Google call retries transient failures (429 / 5xx / timeouts / resets) with bounded backoff; failures
 come back as JSON `{detail, retryable, code}` (503 retryable, 404/409/410 regenerate, 424 an admin must fix Drive

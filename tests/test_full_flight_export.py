@@ -72,10 +72,9 @@ def _find(ws, text, col="C"):
 def test_net_sheet_matches_the_reference_layout(tmp_path):
     summary, wb = _export(tmp_path)
     ws = wb["Proposal A"]
-    assert ws["H10"].value == "Months:" and ws["I10"].value == 1
-    assert isinstance(ws["I10"].value, int)
+    assert ws["H10"].value is None and ws["I10"].value is None      # Full Flight shows no "Months:" label or cell at all
 
-    total_row = _find(ws, "TOTAL DIGITAL")                     # plain label — not "TOTAL DIGITAL MONTHLY"
+    total_row = _find(ws, "SUBTOTAL DIGITAL")                  # not "TOTAL DIGITAL MONTHLY": the add-ons + the campaign total follow
     assert ws[f"L{total_row}"].value == "=ROUNDDOWN(SUM(L19:L22),0)"
     assert [ws[f"L{r}"].value for r in range(19, 23)] == list(FLIGHT_NET.values())
 
@@ -106,13 +105,14 @@ def test_gross_sheet_shows_gross_dollars_in_the_single_column(tmp_path):
     _, wb = _export(tmp_path)
     ws = wb["Proposal A (Gross)"]
     assert ws["I14"].value == 0.15
-    assert ws["H10"].value == "Months:" and ws["I10"].value == 1
+    assert ws["H10"].value is None and ws["I10"].value is None
+    assert ws["H14"].value == "Agency Comm:"                        # the legend beside the highlighted % (I14)
     assert ws["U16"].value == "MONTHLY BREAKDOWN (GROSS)"
     assert ws["U17"].value == "NOVEMBER–DECEMBER 2026"
     # live formula over GROSS BUDGET (N) — the reference reads "$800 (100%)" for the email line
     assert ws["U19"].value == '=IFERROR("$"&TEXT(N19,"#,##0")&IF(N19>0," (100%)"," (0%)"),"—")'
     assert ws["N19"].value == "=L19/(1-$I$14)"
-    total_row = _find(ws, "TOTAL DIGITAL")
+    total_row = _find(ws, "SUBTOTAL DIGITAL")
     assert ws[f"U{total_row}"].value == f"=N{total_row}"
     grand_row = _find(ws, "TOTAL DIGITAL — CAMPAIGN")
     assert ws[f"N{grand_row}"].value == f'=ROUNDDOWN(N{total_row} + SUMIF(N27:N28,">0"),0)'
@@ -171,13 +171,13 @@ def test_month_mode_is_untouched_by_the_new_unit(tmp_path):
 def test_single_column_header_follows_the_flight_span(tmp_path, start, end, label):
     _, wb = _export(tmp_path, req=_req(start_date=start, end_date=end))
     assert wb["Proposal A"]["S17"].value == label
-    assert wb["Proposal A"]["I10"].value == 1                            # the calendar span never leaks into Months
+    assert wb["Proposal A"]["I10"].value is None                         # no month count shown, whatever the calendar span
 
 
 def test_flight_without_parseable_dates_still_reads_months_1_and_does_not_crash(tmp_path):
     _, wb = _export(tmp_path, req=_req(start_date="", end_date="", total_months=3))
     ws = wb["Proposal A"]
-    assert ws["I10"].value == 1
+    assert ws["I10"].value is None
     assert ws["S17"].value is None and ws["S16"].value is None            # no dates -> no breakdown column (and no merge)
     assert any(ws[f"C{r}"].value == "TOTAL DIGITAL — CAMPAIGN" for r in range(1, ws.max_row))
 
@@ -193,7 +193,8 @@ def test_a_per_option_date_override_gets_its_own_single_period(tmp_path):
     _, wb = _export(tmp_path, lines=lines_a, tiers=tiers)
     headers = {ws.title: ws["S17"].value for ws in wb.worksheets if ws["S17"].value}
     assert "NOVEMBER–DECEMBER 2026" in headers.values() and "DECEMBER 2026" in headers.values()
-    assert all(ws["I10"].value == 1 for ws in wb.worksheets if ws["H10"].value == "Months:")
+    assert not any(ws["H10"].value == "Months:" or ws["I10"].value is not None
+                   for ws in wb.worksheets if ws["S17"].value)               # no sheet shows a month count
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +208,7 @@ def test_a_legacy_month_payload_is_folded_into_one_period_with_the_total_preserv
                       period_merge_groups=[["2026-11", "2026-12"]])]
     summary, wb = _export(tmp_path, lines=stale, addons=[])
     ws = wb["Proposal A"]
-    assert ws["I10"].value == 1 and ws["L19"].value == 680.0
+    assert ws["I10"].value is None and ws["L19"].value == 680.0
     assert summary["total_net"] == pytest.approx(680.0)
     assert ws["S19"].value.startswith('=IFERROR("$"&TEXT(L19')           # stale month keys are not what's printed
     assert any("folded into one period" in w for w in summary["warnings"])
@@ -237,7 +238,7 @@ def test_added_value_and_addons_are_never_multiplied_or_given_a_period(tmp_path)
     # paid lines occupy rows 19-22; the Added Value line sorts to the bottom (row 23) and gets no breakdown cell
     assert all(ws[f"S{r}"].value for r in range(19, 23))
     assert str(ws["C23"].value).startswith(GEOFENCE) and ws["S23"].value is None
-    total_row = _find(ws, "TOTAL DIGITAL")
+    total_row = _find(ws, "SUBTOTAL DIGITAL")
     assert ws[f"L{total_row}"].value == "=ROUNDDOWN(SUM(L19:L23),0)"
     grand_row = _find(ws, "TOTAL DIGITAL — CAMPAIGN")
     assert "SUMIF(" in ws[f"L{grand_row}"].value and "*" not in ws[f"L{grand_row}"].value   # add-ons added once, not x months
@@ -341,7 +342,7 @@ def test_an_added_value_line_with_a_percent_does_not_poison_the_gross_totals(tmp
         assert str(ws[f"L{av_row}"].value).startswith("Estimated $")
         assert ws[f"N{av_row}"].value == ws[f"L{av_row}"].value, (unit, ws[f"N{av_row}"].value)      # text, not a formula over text
         assert not str(ws[f"N{av_row}"].value).startswith("=")
-        total_row = _find(ws, "TOTAL DIGITAL" if unit == "full_flight" else "TOTAL DIGITAL MONTHLY")
+        total_row = _find(ws, "SUBTOTAL DIGITAL" if unit == "full_flight" else "TOTAL DIGITAL MONTHLY")
         assert ws[f"N{total_row}"].value == f"=ROUNDDOWN(SUM(N19:N{av_row}),0)"
 
 
@@ -376,7 +377,7 @@ def test_the_three_month_commitment_prints_only_when_the_dates_cover_three_month
     _, wb = _export(tmp_path, req=_req(start_date="2026-10-01", end_date="2026-12-31", total_months=3))
     assert wb["Proposal A"]["C14"].value == NET_BASIS + COMMITMENT
     assert wb["Proposal A (Gross)"]["C14"].value == GROSS_BASIS + COMMITMENT
-    assert wb["Proposal A"]["I10"].value == 1
+    assert wb["Proposal A"]["I10"].value is None
     # a partial first/last month counts whole, like Step 02's Months field: Nov 24 - Jan 31 touches three
     _, wb = _export(tmp_path, req=_req(start_date="2026-11-24", end_date="2027-01-31", total_months=3))
     assert wb["Proposal A"]["C14"].value == NET_BASIS + COMMITMENT

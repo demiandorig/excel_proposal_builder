@@ -1081,7 +1081,7 @@ def test_options_without_dates_are_flagged_and_never_silently_multiplied_once_da
 # 12. Step 02's live note, the SOV helper line, the Min tooltip
 # --------------------------------------------------------------------------------------------------------------------
 
-LEAD = "Billed as one period for the whole flight — the export shows Months: 1 and one total per line."
+LEAD = "Billed as one period for the whole flight — the export shows one total per line and no month count."
 
 
 def test_step_02_note_says_the_budget_is_the_flight_total_as_typed_and_relabels_the_fields(js):
@@ -1160,7 +1160,7 @@ def test_step_02_has_a_billing_period_select_that_is_not_a_data_field():
     assert re.findall(r'<option value="([^"]+)"[^>]*>([^<]+)</option>', m.group(2)) == [
         ("week", "Weekly"), ("month", "Monthly"), ("quarter", "Quarterly"), ("full_flight", "Full Flight")]   # same spelling as the pill
     assert 'id="step02-billing-period-hint"' in INDEX_HTML
-    assert "Months: 1" in INDEX_HTML                        # the hint's promise about the export
+    assert "no month count" in INDEX_HTML                   # the hint's promise about the export
     # it lives inside the Flight fieldset
     flight = INDEX_HTML.split("<legend>Flight</legend>")[1].split("</fieldset>")[0]
     assert 'id="step02-billing-period"' in flight

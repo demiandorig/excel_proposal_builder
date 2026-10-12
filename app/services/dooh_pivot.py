@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import posixpath
 import re
 import tempfile
@@ -140,7 +141,7 @@ PIVOT_FIRST_ROW = 6          # sheet row of the pivot's header line (rows 1-5 ar
 PIVOT_FIRST_COL = 2          # column B
 SUMMARY_ROW_HEIGHT = 20      # pt — one height for every row of the sheet, so a grown pivot stays evenly spaced
 SUMMARY_PRESIZED_ROWS = 150  # rows from the pivot's first line that get that height explicitly (Excel autofits otherwise)
-SUMMARY_COLUMN_WIDTHS = (36, 24, 20, 20, 20)     # B..F: Venue Type, Network, Number of Screens, Max. Avails, Max. Spend
+SUMMARY_COLUMN_WIDTHS = (52, 34, 20, 20, 20)     # B..F: Venue Type, Network, Number of Screens, Max. Avails, Max. Spend (wide enough for real venue paths)
 
 # Row fields (outer first): (source column, caption shown on the pivot).
 # The Network caption carries a trailing space ON PURPOSE: Excel refuses a pivot caption that equals the name of a
@@ -312,8 +313,8 @@ def build_pivot_table_xml(cache_id: int, money_fmt_id: int) -> str:
         numfmt = _field_numfmt(name, money_fmt_id)
         if name in row_captions:
             pivot_fields.append(
-                f'<pivotField name={_q(row_captions[name])} axis="axisRow" compact="0" outline="0" showAll="0"'
-                f'{no_subtotal_attr}>{items}</pivotField>')
+                f'<pivotField name={_q(row_captions[name])} axis="axisRow" compact="0" outline="0" showAll="0" '
+                f'sortType="ascending"{no_subtotal_attr}>{items}</pivotField>')   # A-Z, not the pasted order
         else:
             data_attr = ' dataField="1"' if name in data_cols else ""
             fmt = f' numFmtId="{numfmt}"' if numfmt else ""
@@ -630,7 +631,14 @@ def add_dooh_pivot(path: Union[str, Path]) -> bool:
             for name, data in new_parts.items():
                 if name not in parts:
                     zout.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
-        os.replace(tmp_name, path)
+        for attempt in range(5):                  # a momentary lock (antivirus, a sync client) shouldn't lose the pivot
+            try:
+                os.replace(tmp_name, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.25 * (attempt + 1))
     except BaseException:
         try:
             os.unlink(tmp_name)

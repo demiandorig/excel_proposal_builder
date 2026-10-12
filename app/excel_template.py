@@ -914,13 +914,13 @@ _UNIT_LABELS = {
     "week": {"noun": "Week", "noun_plural": "Weeks", "adjective": "Weekly", "input_label": "Weeks:"},
     "month": {"noun": "Month", "noun_plural": "Months", "adjective": "Monthly", "input_label": "Months:"},
     "quarter": {"noun": "Quarter", "noun_plural": "Quarters", "adjective": "Quarterly", "input_label": "Quarters:"},
-    # Full Flight: the whole flight is ONE period — nothing is multiplied by a month count. Mirrors
-    # the reference export a planner edited by hand: "Months: 1", a plain "TOTAL DIGITAL" row and a
-    # plain "TOTAL DIGITAL — CAMPAIGN" grand-total row (no "N-MONTH" suffix).
+    # Full Flight: the whole flight is ONE period — nothing is multiplied by a month count, so the sheet shows no
+    # "Months:" label or cell at all. The first total row is a "SUBTOTAL DIGITAL" (the add-ons block and the plain
+    # "TOTAL DIGITAL — CAMPAIGN" grand-total row, with no "N-MONTH" suffix, follow it).
     # banner_label: the breakdown block's title. The planner's own hand-edited export kept "MONTHLY BREAKDOWN (GROSS)"
     # over the single full-flight column (headed by the flight's date span), so Full Flight says "MONTHLY" too.
-    "full_flight": {"noun": "Flight", "noun_plural": "Flights", "adjective": "Full-Flight", "input_label": "Months:",
-                    "total_row_label": "TOTAL DIGITAL", "campaign_label": "TOTAL DIGITAL — CAMPAIGN",
+    "full_flight": {"noun": "Flight", "noun_plural": "Flights", "adjective": "Full-Flight", "input_label": "",
+                    "total_row_label": "SUBTOTAL DIGITAL", "campaign_label": "TOTAL DIGITAL — CAMPAIGN",
                     "banner_label": "MONTHLY BREAKDOWN"},
 }
 
@@ -1050,11 +1050,8 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
 
     _write_meta_block(ws, "Digital Plan / Avails")
 
-    # Months input cell (I10) — blue = planner can adjust
-    ws["H10"] = labels["input_label"]
-    ws["H10"].alignment = RIGHT
-    ws["H10"].font = BODY_BOLD
-    _write_months_cell(ws, total_months, time_unit)
+    # Months input cell (I10) — blue = planner can adjust (not written at all in Full Flight)
+    _write_months_input(ws, labels, total_months, time_unit)
 
     # Avails section banner — merged across rows 15-16, not just row 16.
     # _write_meta_block knocks both those rows down to a 6pt spacer, which
@@ -1167,22 +1164,23 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     return ws
 
 
-def _write_months_cell(ws: Worksheet, total_months: int, time_unit: str) -> None:
-    """The "Months:" value (I10). Everywhere except Full Flight it is the
-    planner-adjustable multiplier the grand-total formulas read (blue). In
-    Full Flight no formula reads it — the plan is one period, nothing is
-    multiplied — so it is written as a plain, non-editable-looking 1 with a
-    comment saying so (a blue "adjust me" cell that silently does nothing
-    would mislead)."""
+def _write_months_input(ws: Worksheet, labels: dict, total_months: int, time_unit: str) -> None:
+    """The "Months:" label (H10) and value (I10) — the planner-adjustable multiplier the grand-total formulas read
+    (blue). In Full Flight the plan is one period and no formula reads it, so neither the label nor the cell is
+    written: a "Months: 1" that does nothing would only confuse the reader."""
     if is_full_flight(time_unit):
-        ws["I10"] = 1
-        ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF000000")
-        ws["I10"].comment = Comment(
-            "Full-flight plan: the whole flight is a single period. No total on this sheet is multiplied by this cell.",
-            "Entravision Proposal Builder", width=240, height=70)
-    else:
-        ws["I10"] = total_months
-        ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
+        return
+    ws["H10"] = labels["input_label"]
+    ws["H10"].alignment = RIGHT
+    ws["H10"].font = BODY_BOLD
+    _write_months_cell(ws, total_months, time_unit)
+
+
+def _write_months_cell(ws: Worksheet, total_months: int, time_unit: str) -> None:
+    """The "Months:" value (I10): the planner-adjustable multiplier the grand-total formulas read (blue). Not used
+    in Full Flight (see _write_months_input)."""
+    ws["I10"] = total_months
+    ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
     ws["I10"].alignment = CENTER
 
 
@@ -1520,15 +1518,15 @@ def build_proposal_a_gross(wb: Workbook, products: list,
 
     _write_meta_block(ws, "Digital Plan / Avails (Gross)")
 
-    # Months input
-    ws["H10"] = labels["input_label"]
-    ws["H10"].alignment = RIGHT
-    ws["H10"].font = BODY_BOLD
-    _write_months_cell(ws, total_months, time_unit)
+    # Months input (not written at all in Full Flight)
+    _write_months_input(ws, labels, total_months, time_unit)
 
-    # Agency fee input (I14)
-    ws["C14"] = "Agency Fee:"
-    ws["C14"].font = BODY_BOLD
+    # Agency fee input (I14), with its legend right beside it (H14, the same label/value pairing as "Months:" at
+    # H10/I10) so a reader can tell what the highlighted % is. C14 is the rate-basis sentence, written by the
+    # generator's _populate_meta.
+    ws["H14"] = "Agency Comm:"
+    ws["H14"].alignment = RIGHT
+    ws["H14"].font = BODY_BOLD
     ws["I14"] = 0.15
     ws["I14"].number_format = "0%"
     ws["I14"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
@@ -1595,11 +1593,10 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     _format_imps_cell(ws[f"I{total_row}"])
     ws[f"I{total_row}"].font = TOTAL_FONT
     ws[f"I{total_row}"].fill = TOTAL_FILL
-    # eCPM — the Net sheet has always had this; the Gross sheet never did.
-    # Uses the GROSS dollar total (N) since that's this sheet's own primary
-    # billed figure, the same way the Net sheet's eCPM uses its own L.
+    # eCPM — always calculated from the NET budget (L), never the gross one: the agency commission is not media
+    # cost, so the Gross sheet shows the same eCPM as the Net sheet (net budget / impressions x 1000).
     ws[f"J{total_row}"] = '="eCPM:"'
-    ws[f"K{total_row}"] = f"=IFERROR(N{total_row}/I{total_row}*1000,\"\")"
+    ws[f"K{total_row}"] = f"=IFERROR(L{total_row}/I{total_row}*1000,\"\")"
     _format_money_cell(ws[f"K{total_row}"])
     _box_range(ws, total_row, total_row, "C", "N")
     _fill_box_range(ws, total_row, total_row, "C", "N", TOTAL_FILL)
@@ -2069,7 +2066,24 @@ def build_dooh_screenlist(wb: Workbook) -> Worksheet:
     return ws
 
 
-def build_process_faqs(wb: Workbook) -> Worksheet:
+def _faq_row_height(cells: list) -> float:
+    """Height for a wrapped FAQ row: the tallest of its (text, column width) cells, never under 30pt. Merged/wrapped
+    cells don't auto-fit in Excel, so it is estimated (Arial 10 fits ~1.1 characters per column-width unit)."""
+    lines = 1
+    for text, width in cells:
+        per_line = max(12, int(width * 1.1))
+        lines = max(lines, sum(max(1, -(-len(par) // per_line)) for par in str(text or "").split("\n")))
+    return max(30.0, 13.0 * lines + 6)
+
+
+def build_process_faqs(wb: Workbook, entries: Optional[list] = None) -> Worksheet:
+    """The "Process FAQs" tab. `entries` are the Admin -> FAQ rows (app/services/faq_entries.py): dicts with
+    section ("faq" | "restriction"), services, question, link_title and link_url, already in display order; None
+    means the built-in rows. A row's link title is written as a real hyperlink to its URL (plain text when it has
+    none). The header carries a link to Entravision's Ad Guidelines site."""
+    from app.services import faq_entries as _faq
+    if entries is None:
+        entries = _faq.default_entries()
     ws = wb.create_sheet("Process FAQs")
     ws.sheet_view.showGridLines = False  # clean white margins outside the boxed tables
     widths = {"A": 1.5, "B": 2.0, "C": 36, "D": 60, "E": 50}
@@ -2082,85 +2096,65 @@ def build_process_faqs(wb: Workbook) -> Worksheet:
     _write_meta_block(ws, "Process FAQs", include_billing=False,
                       include_campaign_meta=False, include_entravision_address=False)
 
+    # Header link to the live guidelines site (it feeds from the same sheet the Roadblocks step reads).
+    ws["C4"] = _faq.GUIDELINES_LINK_TITLE
+    ws["C4"].hyperlink = _faq.GUIDELINES_URL
+    ws["C4"].font = Font(name="Arial", size=11, bold=True, color="FF0066CC", underline="single")
+    ws["C4"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.merge_cells("C4:E4")
+    ws.row_dimensions[4].height = 22
+
     _set_header(ws, 6, [
         ("C", "SERVICES"),
         ("D", "Frequently Asked Question"),
         ("E", "Resource Link"),
     ])
 
-    faqs = [
-        ("All Products",
-         "Where can I see the specs and best practices needed for my digital product?",
-         "Entravision's Digital Specs and Best Practices"),
-        ("All Products",
-         "Why should I install Entravision's GTM (Google Tag Manager) on my website?",
-         "Entravision's GTM Process"),
-        ("All Products",
-         "How can I install the provided GTM in my CMS?",
-         "Entravision's GTM Process for Most Common CMS Website Providers"),
-        ("Facebook & Instagram Ads on EVC Radio | Noticias Ya Pages",
-         "How do I accept an Entravision Meta Business Account request to initiate a brand partnership or post a co-branded ad?",
-         "How to Meta partnership for co-branded ads guide"),
-        ("TikTok Ads (Client's Handle) or TikTok Ads on EVC Radio | Noticias Ya Pages",
-         "How can I provide access to my TikTok Page to Run Ads?",
-         "How to TikTok Access Guide"),
-        ("TikTok Ads",
-         "How can I authorize Entravision's TikTok Business Center account via QR code?",
-         "How to TikTok Business Center Entravision Account (QR Code Method)"),
-    ]
+    wrap_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    link_font = Font(name="Arial", size=10, color="FF0066CC", underline="single")
+
+    def put_text(cell, text, font) -> None:
+        cell.value = _XML_ILLEGAL.sub("", str(text))
+        cell.data_type = "s"                      # text that starts with "=" must stay text, not become a formula
+        cell.font = font
+        cell.alignment = wrap_left
+
+    def put_row(row: int, entry: dict, *, bordered: bool) -> None:
+        put_text(ws[f"C{row}"], entry.get("services") or "", BODY_BOLD)
+        put_text(ws[f"D{row}"], entry.get("question") or "", BODY_FONT)
+        title = (entry.get("link_title") or "").strip()
+        url = (entry.get("link_url") or "").strip()
+        link_cell = ws[f"E{row}"]
+        if title or url:
+            put_text(link_cell, title or url, link_font if url else BODY_FONT)
+            if url:
+                link_cell.hyperlink = url
+        else:
+            link_cell.alignment = wrap_left
+        if bordered:
+            for col in "CDE":
+                ws[f"{col}{row}"].border = THIN_BORDER
+        ws.row_dimensions[row].height = _faq_row_height([
+            (entry.get("services"), widths["C"]), (entry.get("question"), widths["D"]), (title or url, widths["E"])])
+
+    faqs = [e for e in entries if e.get("section") != "restriction"]
+    restrictions = [e for e in entries if e.get("section") == "restriction"]
     row = 8
-    for svc, q, link in faqs:
-        ws[f"C{row}"] = svc
-        ws[f"C{row}"].font = BODY_BOLD
-        ws[f"C{row}"].alignment = LEFT
-        ws[f"C{row}"].border = THIN_BORDER
-        ws[f"D{row}"] = q
-        ws[f"D{row}"].font = BODY_FONT
-        ws[f"D{row}"].alignment = LEFT
-        ws[f"D{row}"].border = THIN_BORDER
-        ws[f"E{row}"] = link
-        ws[f"E{row}"].font = Font(name="Arial", size=10, color="FF0066CC", underline="single")
-        ws[f"E{row}"].alignment = LEFT
-        ws[f"E{row}"].border = THIN_BORDER
-        ws.row_dimensions[row].height = 30
+    for entry in faqs:
+        put_row(row, entry, bordered=True)
         row += 1
 
-    ws[f"C{row+1}"] = "CATEGORY AND PRODUCT RESTRICTIONS"
-    ws[f"C{row+1}"].font = BODY_BOLD
-    ws[f"C{row+1}"].fill = SUBTOTAL_FILL
-    ws.merge_cells(f"C{row+1}:E{row+1}")
-
-    cats = [
-        ("Healthcare Advertisers — Google Search and YouTube Ads",
-         "Filling out the Google healthcare advertising form is mandatory.",
-         "Apply for healthcare-related advertising"),
-        ("Consumer Finance Advertisers — Google Search and YouTube Ads",
-         "Related to: 36% APR, state licenses for Financial Verification, APR & Repayment disclosures above the fold, and \"Instant\" claims.",
-         "Consumer Finance Google Advertising Guidelines"),
-        ("Government and Advocacy — Google Search and YouTube Ads",
-         "Related to: Official Contracts, State License, SOS Filing, direct URL to government directories.",
-         "Government Google Advertising Guidelines"),
-        ("Alcohol — All products",
-         "Related to: Alcohol or alcohol consumption.",
-         "FTC & TTB Alcohol Advertising Guidelines"),
-        ("Loans — All products",
-         "Related to: Truth-in-lending compliance and disclosure requirements.",
-         "FTC Advertising Compliance Guide - Loan Campaigns"),
-    ]
-    row += 2
-    for svc, desc, link in cats:
-        ws[f"C{row}"] = svc
-        ws[f"C{row}"].font = BODY_BOLD
-        ws[f"C{row}"].alignment = LEFT
-        ws[f"D{row}"] = desc
-        ws[f"D{row}"].alignment = LEFT
-        ws[f"E{row}"] = link
-        ws[f"E{row}"].font = Font(name="Arial", size=10, color="FF0066CC", underline="single")
-        ws.row_dimensions[row].height = 30
-        row += 1
+    if restrictions:
+        ws[f"C{row+1}"] = "CATEGORY AND PRODUCT RESTRICTIONS"
+        ws[f"C{row+1}"].font = BODY_BOLD
+        ws[f"C{row+1}"].fill = SUBTOTAL_FILL
+        ws.merge_cells(f"C{row+1}:E{row+1}")
+        row += 2
+        for entry in restrictions:
+            put_row(row, entry, bordered=False)
+            row += 1
 
     return ws
-
 
 # ---------------------------------------------------------------------------
 # Monthly Breakdown — optional per-line-item distribution of a line item's

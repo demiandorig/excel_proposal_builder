@@ -477,3 +477,25 @@ CREATE TABLE IF NOT EXISTS proposal_files (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (proposal_id, kind)
 );
+
+-- ---------------------------------------------------------------------------
+-- faq_entries — the rows of the exports' "Process FAQs" tab, edited in Admin -> FAQ
+-- (app/services/faq_entries.py). section 'faq' = the FAQ table (SERVICES | Frequently
+-- Asked Question | Resource Link); 'restriction' = the "CATEGORY AND PRODUCT RESTRICTIONS"
+-- block under it. link_title is the clickable text, link_url where it goes ('' = plain
+-- text). An empty table is seeded with the built-in rows by the admin page; the export
+-- falls back to the same built-in rows when the table is empty or missing.
+-- Idempotent.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS faq_entries (
+    id          BIGSERIAL PRIMARY KEY,
+    section     TEXT NOT NULL DEFAULT 'faq' CHECK (section IN ('faq', 'restriction')),
+    services    TEXT NOT NULL,
+    question    TEXT NOT NULL,
+    link_title  TEXT NOT NULL DEFAULT '',
+    link_url    TEXT NOT NULL DEFAULT '',
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS faq_entries_sort_idx ON faq_entries (section, sort_order, id);

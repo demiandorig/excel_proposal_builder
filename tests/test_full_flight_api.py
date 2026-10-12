@@ -174,7 +174,7 @@ def test_generate_exports_a_stale_month_payload_as_one_full_flight_period(monkey
     assert result["summary"]["total_gross"] == pytest.approx(800.0)
     assert any("folded into one period" in w for w in result["summary"]["warnings"])
     ws = openpyxl.load_workbook(tmp_path / result["filename"])["Proposal A"]
-    assert ws["I10"].value == 1 and ws["L19"].value == 680.0
+    assert ws["I10"].value is None and ws["L19"].value == 680.0
     assert ws["S17"].value == "NOVEMBER–DECEMBER 2026"
     # no false below-minimum warnings from stale month keys, and none for the folded line either: the flight is ONE
     # period, so $680 only has to clear ONE $375 monthly minimum (not 2 x)

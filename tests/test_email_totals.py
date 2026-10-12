@@ -305,7 +305,7 @@ def _excel_figures(ws, *, gross: bool) -> dict:
     formula really has the shape this evaluation assumes)."""
     col = "N" if gross else "L"
     total_row = next(r for r in range(19, ws.max_row + 1)
-                     if str(ws[f"C{r}"].value or "").startswith("TOTAL DIGITAL") and str(ws[f"L{r}"].value or "").startswith("=ROUNDDOWN(SUM(L19:L"))
+                     if "TOTAL DIGITAL" in str(ws[f"C{r}"].value or "") and str(ws[f"L{r}"].value or "").startswith("=ROUNDDOWN(SUM(L19:L"))
     grand_row = next(r for r in range(total_row + 1, ws.max_row + 1) if str(ws[f"L{r}"].value or "").startswith(f"=ROUNDDOWN(L{total_row}"))
     fee = ws["I14"].value if gross else None
     factor = 1.0 / (1.0 - fee) if gross else 1.0

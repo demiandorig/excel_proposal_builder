@@ -18,7 +18,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 
 from app.catalog import Product, by_name, families, by_family
 from app.services.notion_parser import ProposalRequest, classify_output_tabs, normalize_tab_keys
-from app.services import dooh_pivot
+from app.services import dooh_pivot, faq_entries
 from app import excel_template as et
 from app.market_config import get_market_address
 from app.services import monthly_allocation as mo
@@ -145,12 +145,14 @@ def _safe_sheet_name(base: str, suffix: str, used: set) -> str:
     """
     base = _SHEET_NAME_FORBIDDEN.sub("-", (base or "").strip()) or "Option"
     full = f"{base} {suffix}".strip() if suffix else base
-    full = full[:31]
+    # Excel also refuses a title that starts or ends with an apostrophe ("Smiths'" would make the workbook
+    # unopenable), including one the 31-character cut exposes — so strip them after truncating.
+    full = full[:31].strip("'").strip() or "Option"
     candidate = full
     n = 2
     while candidate.lower() in used:
         tail = f" ({n})"
-        candidate = full[:31 - len(tail)] + tail
+        candidate = full[:31 - len(tail)].rstrip("'").rstrip() + tail
         n += 1
     used.add(candidate.lower())
     return candidate
@@ -441,7 +443,9 @@ def generate_proposal(
         # history still key off the plain `label` regardless (see
         # TierModel.name's own docstring for why that stays stable).
         tier_display_name = (tier.get("name") or "").strip() or f"Option {label}"
-        tier_title_suffix = f" — {tier_display_name}" if multi_tier else ""
+        # The sheet banner is just a name plus what the sheet is ("ViX Only - Proposal", "Acme - Avails"): the option's
+        # own name for a multi-option proposal, the client's name for a single one.
+        banner_name = tier_display_name if multi_tier else (request.client_name or "TBD")
 
         # Materialize Product objects in the order the planner provided them.
         # Filter products and line_items together so a skipped/unmatched
@@ -480,8 +484,8 @@ def generate_proposal(
                                      sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit,
                                      banners=tier_banners)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=False, mb_width=tier_mb_width)
-            _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
+            _populate_meta(ws, request, gross=False, banner_name=banner_name,
+                           campaign_name=campaign_name, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date, time_unit=time_unit)
             _populate_line_items(ws, products, tier_line_items, gross=False, blurbs=blurbs,
                                  avails_data=tier_avails, request=request, notes_col=notes_col, time_unit=time_unit)
@@ -498,8 +502,8 @@ def generate_proposal(
                                      sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit,
                                      banners=tier_banners)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=False, mb_width=tier_mb_width)
-            _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
+            _populate_meta(ws, request, gross=False, banner_name=banner_name,
+                           campaign_name=campaign_name, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date, time_unit=time_unit)
             _populate_line_items(ws, products, tier_line_items, gross=False, with_sections=True, blurbs=blurbs,
                                  avails_data=tier_avails, request=request, notes_col=notes_col, time_unit=time_unit)
@@ -516,8 +520,8 @@ def generate_proposal(
                                            sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit,
                                            banners=tier_banners)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=True, mb_width=tier_mb_width)
-            _populate_meta(ws, request, gross=True, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
+            _populate_meta(ws, request, gross=True, banner_name=banner_name,
+                           campaign_name=campaign_name, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date, time_unit=time_unit)
             _populate_line_items(ws, products, tier_line_items, gross=True, blurbs=blurbs,
                                  avails_data=tier_avails, request=request, notes_col=notes_col, time_unit=time_unit)
@@ -525,12 +529,11 @@ def generate_proposal(
                 _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=True,
                                                    distribution_mode=monthly_distribution_mode, time_unit=time_unit,
                                                    agency_fee=request.agency_fee)
-            # Set agency fee in I14 (Gross sheet's variable input cell)
+            # Set agency fee in I14 (Gross sheet's variable input cell; its "Agency Comm:" legend is H14). Keeps the
+            # builder's bold-blue-on-yellow look; a whole percent reads "15%", a fractional one "12.50%".
             if request.agency_fee is not None:
                 ws["I14"] = request.agency_fee
-                ws["I14"].number_format = "0.00%"
-                ws["I14"].font = Font(name="Arial", size=10, bold=True, color="FF0000FF")
-                ws["I14"].fill = PatternFill("solid", start_color="FFFFF2CC")
+                ws["I14"].number_format = "0%" if abs(request.agency_fee * 100 - round(request.agency_fee * 100)) < 1e-9 else "0.00%"
             tabs_built.append(f"Proposal {label} (Gross)")
 
         if tabs.get("avails_only"):
@@ -540,8 +543,7 @@ def generate_proposal(
                                       start_date=tier_start_date, end_date=tier_end_date, avails_data=tier_avails,
                                       campaign_name=campaign_name, sheet_name=sheet_title, time_unit=time_unit,
                                       banners=tier_banners)
-            _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
-                           title_suffix=f" (Avails-Only){tier_title_suffix}",
+            _populate_meta(ws, request, gross=False, banner_name=banner_name, banner_kind="Avails",
                            include_billing=False, include_campaign_meta=False, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             tabs_built.append(avails_sheet_name)
@@ -579,8 +581,8 @@ def generate_proposal(
         et.build_dooh_screenlist(wb)
         tabs_built.append(dooh_pivot.DOOH_SCREENLIST_SHEET)
 
-    # Always include Process FAQs as a reference tab
-    et.build_process_faqs(wb)
+    # Always include Process FAQs as a reference tab (the rows an admin keeps in Admin -> FAQ; built-ins if unreadable)
+    et.build_process_faqs(wb, entries=faq_entries.load_entries())
     tabs_built.append("Process FAQs")
 
     # Save
@@ -626,13 +628,23 @@ def _shows_three_month_commitment(request: ProposalRequest, start: Optional[str]
     return bool(s and e) and len(mo.months_between(s, e)) >= 3
 
 
+def _banner_title(name: Optional[str], kind: str) -> str:
+    """The sheet banner: "<name> - Proposal" or "<name> - Avails". A name that already carries the word (a planner
+    who called the option "Proposal A", or "Avails Only") is left exactly as typed, so it never reads
+    "Proposal A - Proposal"."""
+    name = re.sub(r"\s+", " ", (name or "").strip()) or "TBD"
+    if re.search(rf"\b{re.escape(kind)}s?\b", name, re.IGNORECASE):
+        return name
+    return f"{name} - {kind}"
+
+
 def _populate_meta(
     ws,
     request: ProposalRequest,
     *,
     gross: bool,
-    title_suffix: str = "",
-    proposal_title: Optional[str] = None,
+    banner_name: Optional[str] = None,
+    banner_kind: str = "Proposal",
     include_billing: bool = True,
     include_campaign_meta: bool = True,
     campaign_name: str = "",
@@ -667,12 +679,9 @@ def _populate_meta(
     pre-resolved (never None when the caller is the tier loop below) since
     the sheet-builder calls need a concrete string either way.
     """
-    # Title cell (E2 — merged E2:L2)
-    if proposal_title:
-        title = proposal_title + (title_suffix if title_suffix else "")
-    else:
-        title = f"Digital Media Proposal — {request.client_name or 'TBD'}{title_suffix}"
-    ws["E2"] = title
+    # Title cell (E2 — merged E2:L2): "<name> - Proposal" / "<name> - Avails" — the option's name (or the client's
+    # for a single option), not the full proposal title.
+    ws["E2"] = _banner_title(banner_name or request.client_name, banner_kind)
 
     # Customer billing block (F4..F8) — skipped on Avails-Only (not relevant there)
     if include_billing:

@@ -30,6 +30,10 @@ const adminState = {
   disclaimersLoaded: false,
   disclaimerEditingId: null,
   restrictions: null,
+  faq: [],            // the Process FAQs rows: [{id, section, services, question, link_title, link_url}]
+  faqLoaded: false,
+  faqEditingId: null,
+  faqFormToken: null,
   currentUserEmail: null,  // set by loadUsers()'s /api/me call — lets the Users tab hide "disable/delete self" actions
 };
 
@@ -44,6 +48,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireAddUser();
   wireDisclaimers();
   wireRestrictions();
+  wireFaq();
   wireCsvExports();
   loadProposals();
 });
@@ -64,12 +69,14 @@ function wireTabs() {
       document.getElementById("tab-users").classList.toggle("hidden", tab !== "users");
       document.getElementById("tab-disclaimers").classList.toggle("hidden", tab !== "disclaimers");
       document.getElementById("tab-restrictions").classList.toggle("hidden", tab !== "restrictions");
+      document.getElementById("tab-faq").classList.toggle("hidden", tab !== "faq");
       if (tab === "analytics" && !adminState.analyticsLoaded) loadAnalytics();
       if (tab === "rates" && !adminState.ratesLoaded) loadRates();
       if (tab === "markets" && !adminState.marketsLoaded) loadMarketConfig();
       if (tab === "users" && !adminState.usersLoaded) loadUsers();
       if (tab === "disclaimers" && !adminState.disclaimersLoaded) loadDisclaimers();
       if (tab === "restrictions" && !adminState.restrictions) loadRestrictions();
+      if (tab === "faq" && !adminState.faqLoaded) loadFaq();
     });
   });
 }
@@ -1307,6 +1314,182 @@ function wireDisclaimers() {
   });
 }
 
+
+// --------------------------------------------------------------------------
+// FAQ — the rows of the exports' "Process FAQs" tab (app/services/faq_entries.py):
+// the FAQ table and the "Category and product restrictions" block under it.
+// --------------------------------------------------------------------------
+
+const FAQ_BLOCK_LABELS = { faq: "Process FAQ", restriction: "Restriction" };
+
+function isWebLink(url) {
+  return /^https?:\/\//i.test(url || "");
+}
+
+async function loadFaq() {
+  try {
+    const res = await fetch("/api/admin/faq");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    adminState.faq = data.entries || [];
+    adminState.faqLoaded = true;
+    const link = document.getElementById("faq-guidelines-link");
+    if (link && data.guidelines_url && isWebLink(data.guidelines_url)) link.href = data.guidelines_url;
+    renderFaq();
+  } catch (e) {
+    document.getElementById("faq-body").innerHTML =
+      `<tr><td colspan="6" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderFaq() {
+  const body = document.getElementById("faq-body");
+  const entries = adminState.faq;
+  document.getElementById("faq-count").textContent = `${entries.length} row${entries.length === 1 ? "" : "s"}`;
+  if (!entries.length) {
+    body.innerHTML = `<tr><td colspan="6" class="admin-empty">No rows yet.</td></tr>`;
+    return;
+  }
+  // First / last of each block can't move further up / down.
+  const bySection = {};
+  entries.forEach(e => { (bySection[e.section] = bySection[e.section] || []).push(e.id); });
+  body.innerHTML = entries.map(e => {
+    const ids = bySection[e.section];
+    const first = ids[0] === e.id, last = ids[ids.length - 1] === e.id;
+    const linkCell = e.link_url
+      ? (isWebLink(e.link_url)
+          ? `<a href="${escapeAttr(e.link_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.link_url)}</a>`
+          : escapeHtml(e.link_url))
+      : `<span class="faq-nolink" title="Without a link the title is plain text in the export">no link yet</span>`;
+    return `
+      <tr data-faq="${e.id}">
+        <td class="mono">${escapeHtml(FAQ_BLOCK_LABELS[e.section] || e.section)}</td>
+        <td class="wrap"><strong>${escapeHtml(e.services)}</strong></td>
+        <td class="wrap">${escapeHtml(e.question)}</td>
+        <td class="wrap">${escapeHtml(e.link_title)}</td>
+        <td class="wrap faq-link-cell">${linkCell}</td>
+        <td class="faq-actions">
+          <button class="btn-secondary" data-action="up" data-faq="${e.id}" title="Move up" ${first ? "disabled" : ""}>↑</button>
+          <button class="btn-secondary" data-action="down" data-faq="${e.id}" title="Move down" ${last ? "disabled" : ""}>↓</button>
+          <button class="btn-secondary" data-action="edit" data-faq="${e.id}">✎ Edit</button>
+          <button class="btn-delete-row" data-action="delete" data-faq="${e.id}">Delete</button>
+        </td>
+      </tr>`;
+  }).join("");
+  body.querySelectorAll("[data-action]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = parseInt(btn.dataset.faq);
+      if (btn.dataset.action === "edit") openFaqForm(adminState.faq.find(x => x.id === id));
+      else if (btn.dataset.action === "delete") onDeleteFaq(id);
+      else onMoveFaq(id, btn.dataset.action);
+    });
+  });
+}
+
+function wireFaq() {
+  const form = document.getElementById("faq-form");
+  if (!form) return;
+  form.addEventListener("submit", onSubmitFaq);
+  document.getElementById("faq-cancel-btn").addEventListener("click", closeFaqForm);
+  document.getElementById("add-faq-btn").addEventListener("click", () => openFaqForm());
+}
+
+function closeFaqForm() {
+  adminState.faqFormToken = Symbol();
+  adminState.faqEditingId = null;
+  document.getElementById("faq-panel-title").textContent = "+ Add an FAQ row";
+  document.getElementById("faq-submit-btn").textContent = "Add Row";
+  document.getElementById("faq-submit-btn").disabled = false;
+  document.getElementById("faq-panel").open = false;
+  document.getElementById("faq-error").classList.add("hidden");
+}
+
+// No entry = add a new row; an entry = edit it.
+function openFaqForm(entry) {
+  const form = document.getElementById("faq-form");
+  form.reset();
+  adminState.faqFormToken = Symbol();
+  adminState.faqEditingId = entry ? entry.id : null;
+  document.getElementById("faq-section").value = entry ? entry.section : "faq";
+  document.getElementById("faq-services").value = entry ? entry.services : "";
+  document.getElementById("faq-question").value = entry ? entry.question : "";
+  document.getElementById("faq-link-title").value = entry ? entry.link_title : "";
+  document.getElementById("faq-link-url").value = entry ? entry.link_url : "";
+  document.getElementById("faq-panel-title").textContent = entry ? "✎ Edit FAQ row" : "+ Add an FAQ row";
+  document.getElementById("faq-submit-btn").textContent = entry ? "Save Changes" : "Add Row";
+  document.getElementById("faq-submit-btn").disabled = false;
+  document.getElementById("faq-error").classList.add("hidden");
+  const panel = document.getElementById("faq-panel");
+  panel.open = true;
+  panel.scrollIntoView({ behavior: "smooth", block: "center" });
+  document.getElementById("faq-services").focus();
+}
+
+async function onSubmitFaq(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("faq-error");
+  errEl.classList.add("hidden");
+  const editingId = adminState.faqEditingId;
+  const payload = {
+    section: document.getElementById("faq-section").value,
+    services: document.getElementById("faq-services").value.trim(),
+    question: document.getElementById("faq-question").value.trim(),
+    link_title: document.getElementById("faq-link-title").value.trim(),
+    link_url: document.getElementById("faq-link-url").value.trim(),
+  };
+  const submitBtn = document.getElementById("faq-submit-btn");
+  const idleLabel = submitBtn.textContent;
+  const token = adminState.faqFormToken = Symbol();
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Saving…";
+  try {
+    const res = await fetch(editingId ? `/api/admin/faq/${editingId}` : "/api/admin/faq", {
+      method: editingId ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(body.detail, res.statusText));
+    if (adminState.faqFormToken === token) closeFaqForm();        // not if the admin moved on meanwhile
+    await loadFaq();
+  } catch (err) {
+    if (adminState.faqFormToken === token) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("hidden");
+    }
+  } finally {
+    if (adminState.faqFormToken === token) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = idleLabel;
+    }
+  }
+}
+
+async function onDeleteFaq(id) {
+  const entry = adminState.faq.find(x => x.id === id);
+  if (!entry) return;
+  if (!confirm(`Delete this row?\n\n${entry.services}`)) return;
+  try {
+    const res = await fetch(`/api/admin/faq/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+    if (adminState.faqEditingId === id) closeFaqForm();
+    await loadFaq();
+  } catch (err) {
+    alert("Delete failed: " + err.message);
+  }
+}
+
+async function onMoveFaq(id, direction) {
+  try {
+    const res = await fetch(`/api/admin/faq/${id}/move`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ direction }),
+    });
+    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+    await loadFaq();
+  } catch (err) {
+    alert("Move failed: " + err.message);
+  }
+}
 
 // --------------------------------------------------------------------------
 // Restrictions — Entravision's "Restricted Verticals by Platforms" sheet,

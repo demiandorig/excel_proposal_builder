@@ -80,13 +80,14 @@ STEP06_FUNCTIONS = [
     "onMbApplyAll", "_mbRenderApplyControls",
 ]
 
-STEP07_LETS = ["_rbDebounceTimer", "_rbRunToken", "_rbAbort", "_rbInFlight", "_rvUsingBuiltin", "_rvLoadFailed"]
+STEP07_LETS = ["_rbDebounceTimer", "_rbRunToken", "_rbAbort", "_rbInFlight", "_rvUsingBuiltin", "_rvLoadFailed", "_rvLoading"]
 STEP07_FUNCTIONS = [
     "_cancelRoadblocksRun", "_rbBusy", "_resetRoadblocksUI", "_showRoadblocksPending", "onRvPick", "onRoadblocksGenerate",
     "_runRoadblocks", "_loadRestrictedVerticals", "_renderRestrictedVerticals", "_renderRvChips", "_updateRvNote",
     "renderRoadblocks", "_enterRoadblocksStep", "_readJsonResponse", "_roadblockMatrixHtml", "setText", "escapeHtml", "escapeAttr",
     # the read-only per-line notes under each product card (see tests/test_line_note.py) — renderRoadblocks calls them
     "_refreshRoadblockLineNotes", "_lineNotesForProduct", "_lineNote", "_cleanLineModifier", "_LINE_MODIFIER_UNWANTED",
+    "_rbPlanKey", "_rbCacheKey",
 ]
 
 
@@ -95,7 +96,8 @@ def _step06_bundle() -> str:
 
 
 def _step07_bundle() -> str:
-    parts = [_extract_decl(APP_JS, "const", "_RB_DEBOUNCE_MS"), _extract_decl(APP_JS, "const", "LINE_MODIFIER_MAX")]
+    parts = [_extract_decl(APP_JS, "const", "_RB_DEBOUNCE_MS"), _extract_decl(APP_JS, "const", "LINE_MODIFIER_MAX"),
+             _extract_decl(APP_JS, "const", "_rbResultCache")]
     parts += [_extract_decl(APP_JS, "let", n) for n in STEP07_LETS]
     parts += [_fn_source(n) for n in STEP07_FUNCTIONS]
     return "\n".join(parts)
@@ -330,11 +332,12 @@ def mb():
 def test_plan_picks_only_lines_the_per_line_reset_works_on(mb):
     keys = mb["keys"]
     assert keys == ["2026-09", "2026-10", "2026-11"]
-    # Even mode: a already even (no change), b typed (change + custom), f even +/- cents (change, NOT custom), and the
-    # breakdown-off line (c), the Added Value line (d) and the zero-budget line (e) are not eligible at all.
+    # Even mode: a already even (no change), b typed (change + custom), f even +/- cents (already follows the default:
+    # not counted as different, though Apply still tidies its cents), and the breakdown-off line (c), the Added Value
+    # line (d) and the zero-budget line (e) are not eligible at all.
     p = mb["planEven"]
-    assert p["eligible"] == 3 and p["changeCount"] == 2 and p["customCount"] == 1
-    assert p["rows"] == [["a", False, False], ["b", True, True], ["f", True, False]]
+    assert p["eligible"] == 3 and p["changeCount"] == 1 and p["customCount"] == 1
+    assert p["rows"] == [["a", False, False], ["b", True, True], ["f", False, False]]
     # Prorated mode: the plain even lines change too, but only b is "customized".
     q = mb["planProrated"]
     assert q["eligible"] == 3 and q["changeCount"] == 3 and q["customCount"] == 1
@@ -348,7 +351,7 @@ def test_allocation_comparison_is_per_period_to_the_cent(mb):
 
 def test_cancelled_confirm_changes_nothing(mb):
     c = mb["cancel"]
-    assert len(c["confirms"]) == 1 and c["confirms"][0].startswith("Apply the even split to 2 lines? 1 of them has custom numbers that will be overwritten.")
+    assert len(c["confirms"]) == 1 and c["confirms"][0].startswith("Apply the even split to 1 line? Its custom numbers will be overwritten.")
     assert c["renders"] == 0 and c["unchanged"] is True
     assert c["notice"] is True                     # still raised: the planner didn't act on it
 
@@ -427,7 +430,7 @@ def test_button_label_enabled_state_and_hint_follow_the_lines(mb):
     assert mb["ctlProratedNoFlag"]["disabled"] is False and mb["ctlProratedNoFlag"]["noticeHidden"] is True   # no hint unless the toggle was just flipped
 
     custom = mb["ctlCustom"]
-    assert custom["noticeText"] == "The default is now even, but 2 of 3 lines still hold a different split (1 with custom numbers)."
+    assert custom["noticeText"] == "The default is now even, but 1 of 3 lines still hold a different split (1 with custom numbers)."
 
     none = mb["ctlNone"]
     assert none["disabled"] is True and "No line is using the breakdown" in none["title"] and none["noticeHidden"] is True
@@ -514,7 +517,7 @@ function mkState(o) {
 }
 function fresh(o) {
   __timers = []; __now = 0; __fetches = []; __els = {}; __ignoreAbort = false; __catFail = false;
-  _rbDebounceTimer = null; _rbRunToken = 0; _rbAbort = null; _rbInFlight = false; _rvUsingBuiltin = false; _rvLoadFailed = false; _resetEpoch = 0;
+  _rbDebounceTimer = null; _rbRunToken = 0; _rbAbort = null; _rbInFlight = false; _rvUsingBuiltin = false; _rvLoadFailed = false; _rvLoading = false; _rbResultCache.clear(); _resetEpoch = 0;
   state = mkState(o);
 }
 function payload(cats, summary, extra) {
@@ -832,7 +835,7 @@ def test_step_07_markup_callout_first_then_the_category_chooser():
     assert link, "the guidelines link is missing"
     tag = link.group(0)
     assert f'href="{GUIDELINES_URL}"' in tag and 'target="_blank"' in tag and 'rel="noopener noreferrer"' in tag
-    assert "Open the guidelines" in step7
+    assert "See latest information about Entravision's Ad Guidelines" in step7
     assert "guidelines repo" in step7
     assert INDEX_HTML.count(GUIDELINES_URL) == 1
     # the chooser: prompt, radiogroup, suggestion hint line, note
