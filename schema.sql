@@ -457,3 +457,23 @@ CREATE TABLE IF NOT EXISTS products (
     updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS products_sort_idx ON products (sort_order, id);
+
+-- ---------------------------------------------------------------------------
+-- proposal_files — a shared copy of each generated proposal file's bytes
+-- (app/services/proposal_files.py). /api/generate writes the .xlsx to the LOCAL
+-- disk of whichever Autoscale instance served the request; the Google Drive
+-- upload can land on a different (or a freshly started) instance that has no
+-- such file, which used to surface as an intermittent HTTP 500. The bytes are
+-- kept here too so ANY instance can read them. One row per (proposal, kind),
+-- kind = 'xlsx' today. Idempotent, and every reader/writer is fail-safe if the
+-- table doesn't exist yet.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS proposal_files (
+    proposal_id  TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    filename     TEXT NOT NULL,
+    content      BYTEA NOT NULL,
+    size_bytes   INTEGER NOT NULL,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (proposal_id, kind)
+);

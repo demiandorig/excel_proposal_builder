@@ -24,6 +24,7 @@ except ImportError:
 
 from app.services import llm_utils
 from app.services import period_copy
+from app.services import source_rules
 from app.services.text_utils import normalize_newlines as _normalize_newlines
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 from app.catalog import by_name as _catalog_by_name
@@ -313,6 +314,8 @@ turns up nothing specific enough, say so explicitly in that field ("no
 audience-specific data found, using general market benchmark of X") rather
 than presenting an invented-sounding number as if it were verified.
 
+{source_rules.NO_WIKIPEDIA_RULE}
+
 ## CRITICAL RULE — SPECIFICITY OVER JARGON
 Every tactic's rationale and every key insight MUST explicitly name the
 targeting values above (the demo, geo, behavioral segment, or contextual
@@ -325,8 +328,9 @@ GOOD (specific, required style): "For {request.demo or 'this demo'} in
 during appointment-viewing hours when linear reach is declining."
 
 Every "citation" field must name a real, specific, searchable source
-(publisher + year) — never a vague placeholder like "Industry Report,
-2025." If you can't find a specific real source for a claim, don't
+(publisher + year) of a primary source — never Wikipedia, never a vague
+placeholder like "Industry Report, 2025." If you can't find a specific
+real source for a claim, don't
 present the claim as sourced data at all; fold it into the rationale as
 directional context instead.
 
@@ -419,18 +423,51 @@ def _parse(raw: str, used_web_search: bool = False, client=None) -> dict:
         t.setdefault("suggested_budget_pct", 0)
         for key in ("rationale", "data_point", "entravision_advantage"):
             t[key] = _normalize_newlines(str(t.get(key) or ""))
+        _drop_wikipedia_support(t)
+
+    def _clean(text):
+        # Wikipedia is never a citation (source_rules): free-form prose loses it, and a sentence whose statistic
+        # rested on it alone goes with it.
+        return source_rules.strip_wikipedia(_normalize_newlines(text))
+
+    insights = []
+    for item in data.get("key_insights") or []:
+        original = _normalize_newlines(item if isinstance(item, str) else str(item))
+        cleaned = _clean(item if isinstance(item, str) else str(item))
+        if cleaned or not original.strip():        # an insight the scrub emptied goes; one the model left empty stays as before
+            insights.append(cleaned)
 
     return {
-        "client_summary": _normalize_newlines(data.get("client_summary", "")),
-        "market_context": _normalize_newlines(data.get("market_context", "")),
-        "objectives_analysis": _normalize_newlines(data.get("objectives_analysis", "")),
-        "strategy_summary": _normalize_newlines(data.get("strategy_summary", "")),
+        "client_summary": _clean(data.get("client_summary", "")),
+        "market_context": _clean(data.get("market_context", "")),
+        "objectives_analysis": _clean(data.get("objectives_analysis", "")),
+        "strategy_summary": _clean(data.get("strategy_summary", "")),
         "recommended_tactics": tactics,
-        "key_insights": [_normalize_newlines(i if isinstance(i, str) else str(i))
-                         for i in (data.get("key_insights") or [])],
+        "key_insights": insights,
         "used_web_search": used_web_search,
         "error": None,
     }
+
+
+def _drop_wikipedia_support(t: dict) -> None:
+    """One tactic without any Wikipedia citation (see source_rules). A tactic whose citation was Wikipedia alone
+    loses its data point as well — the statistic's only source is gone, and the card must not show a number nobody
+    can check — and a data point with no text left takes its (now orphaned) citation with it. A data point whose
+    separate citation field names a real source keeps its figure even if its own text also mentioned Wikipedia."""
+    cite = t.get("citation")
+    cite_ok = False
+    wiki_only = False
+    if isinstance(cite, str):
+        cleaned = source_rules.strip_wikipedia_source(cite)
+        wiki_only = bool(cite.strip()) and not cleaned.strip()
+        cite_ok = bool(cleaned.strip())
+        cite = cleaned
+    had_data_point = bool((t.get("data_point") or "").strip())
+    data_point = "" if wiki_only else source_rules.strip_wikipedia(t.get("data_point") or "", supported_elsewhere=cite_ok)
+    t["data_point"] = data_point
+    t["citation"] = cite if (data_point.strip() or not had_data_point) else ""
+    for key in ("rationale", "entravision_advantage"):
+        t[key] = source_rules.strip_wikipedia(t.get(key) or "")
 
 
 def _error_brief(msg: str) -> dict:

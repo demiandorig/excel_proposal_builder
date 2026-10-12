@@ -119,7 +119,7 @@ def _run_js(body: str) -> str:
         else:
             script.write_text(f"function run() {{\n return (function () {{\n{body}\n}})();\n}}\n", encoding="utf-8")
             cmd = [path, "-l", "JavaScript", str(script)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=120)
     if proc.returncode != 0:
         raise AssertionError(f"JS engine failed ({kind}):\n{proc.stderr}\n{proc.stdout}")
     return proc.stdout.strip()
@@ -1187,8 +1187,9 @@ def test_request_bodies_carry_the_time_unit():
     assert "time_unit: state.timeUnit" in strategy
     rebuild = APP_JS.split("/rebuild`", 1)[1].split("}, 600)")[0]
     assert "time_unit: state.timeUnit" in rebuild
-    reprompt = _extract_fn(APP_JS, "onEmailReprompt")
-    assert "time_unit: state.timeUnit" in reprompt
+    # the email revision sends the whole current plan (see tests/test_email_totals.py), the billing period included
+    assert "..._emailFiguresPayload()" in _extract_fn(APP_JS, "_submitEmailReprompt")
+    assert "time_unit: p.time_unit" in _extract_fn(APP_JS, "_emailFiguresPayload")
     recommend = _extract_fn(APP_JS, "onRecommend")
     assert "time_unit: state.timeUnit" in recommend
     assert "flight_months" not in APP_JS                               # Full Flight is one period: no month count is sent

@@ -28,12 +28,13 @@ const state = {
   // to let a stale or never-synced set silently drop tabs (see
   // _buildWizardStatePayload).
   tabsTouched: {},
-  // Restricted verticals (sheet tab names) the planner confirmed for Roadblocks;
-  // null until the list has been loaded and the suggested ones pre-ticked.
+  // The restricted vertical (sheet tab name) the planner picked for Roadblocks, as a Set: null until the planner
+  // has chosen (suggestions are only a hint, never pre-picked), an EMPTY set once they chose "None", and one name
+  // for a category. A proposal saved back when the picker was multi-select can hold several names — they all show
+  // as picked until the next click replaces them with that single choice.
   rvSelected: null,
   rvCategories: [],
-  rvUnconfirmed: false,           // true while the pre-ticked suggestions haven't been looked at by the planner
-  generatedProposalId: null,      // the proposal row Generate produced (a later autosave adopts a draft id into proposalId)
+  generatedProposalId: null,     // the proposal row Generate produced (a later autosave adopts a draft id into proposalId)
   // Step 04's staged "Edit mix %" session, or null. See onMixEditStart().
   mixEdit: null,
   strategyBrief: null,      // confirmed AI strategy brief (or null if skipped)
@@ -59,12 +60,18 @@ const state = {
   // flight). Proposal-wide, not per-tier (one control "at the top" of the
   // step, not per-option) — governs what a NEW default gets computed as
   // (checkbox-check, reset button, a newly-added line auto-joining); never
-  // retroactively rewrites a line's already-set allocations, same "don't
-  // silently overwrite a planner's figure" rule Monthly Breakdown already
-  // applies to date changes. Defaults to "even" per explicit instruction
+  // retroactively rewrites a line's already-set allocations (only the
+  // planner's explicit "Apply ... split to all lines" does, after a confirm
+  // when numbers they typed would be lost), same "don't silently overwrite a
+  // planner's figure" rule Monthly Breakdown already applies to date
+  // changes. Defaults to "even" per explicit instruction
   // (day-proration was this app's own earlier default; even is now what
   // the planner actually wants, with day-proration kept as an opt-in).
   mbDistributionMode: "even",
+  // True right after the planner flips the Default split while some line still holds the other split (or custom
+  // numbers): renderMonthlyBreakdown then shows an inline "Apply to all lines" hint under the toggle. Transient UI
+  // state (never saved); cleared by Apply, by dismissing the hint, or once every line already matches.
+  mbModeNotice: false,
   // Step 06's "By Month" (pick one period, see/edit every product's
   // figure for just that period in one table — the default, per explicit
   // instruction) vs. "By Product" (one panel per line item, every period
@@ -103,6 +110,8 @@ const state = {
   proposalId: null,
   proposalSummary: null,
   enrichment: null,         // Step 07 AI email content (subjects/bodies) — reprompt-able in place
+  emailsPlanKey: null,      // _emailPlanKey() when those emails were last written — differs once the plan is edited (see _refreshEmailStaleNote)
+  emailFigures: null,       // the server's per-option dollar figures (equal to the Excel) behind those emails
   // The REAL naming-convention title, once known (from a successful Generate
   // or from reopening a past proposal) — the persistent name bar shows this
   // verbatim instead of the live best-guess preview once it's set. Cleared
@@ -602,9 +611,13 @@ async function maybeReopenProposal() {
     // before Step 08) — those are NOT real choices, so they only seed the
     // display and get replaced by the server's fresh suggestion; newer saves
     // carry just the boxes the planner actually toggled, which stay overrides.
-    const { _v: tabsFormat, ...savedTabs } = data.force_tabs || {};
-    const sixTabKeys = ["net", "wsections", "gross", "avails_only", "dooh_summary", "dooh_screenlist"];
-    const isLegacyFullSet = !tabsFormat && sixTabKeys.every(k => k in savedTabs);
+    // The two DOOH boxes became one ("DOOH Deliverables", key "dooh"): a save from before carries dooh_summary /
+    // dooh_screenlist, folded here (the server folds them on reopen too) so an old draft that had one ticked still
+    // ticks the new box. A "full set" is therefore the five boxes the page has now.
+    const { _v: tabsFormat, ...rawSavedTabs } = data.force_tabs || {};
+    const savedTabs = _normalizeTabKeys(rawSavedTabs);
+    const allTabKeys = ["net", "wsections", "gross", "avails_only", "dooh"];
+    const isLegacyFullSet = !tabsFormat && allTabKeys.every(k => k in savedTabs);
     state.suggestedTabs = isLegacyFullSet ? savedTabs : null;
     state.tabsTouched = isLegacyFullSet ? {} : { ...savedTabs };
 
@@ -623,6 +636,8 @@ async function maybeReopenProposal() {
     // even though the planner hasn't touched anything, just because the
     // restored state naturally differs from the initial null.
     _lastSavedDraftSnapshot = JSON.stringify({ ..._buildWizardStatePayload(), enrichment: state.enrichment });
+    // The saved emails were written against the plan that was just restored: an edit from here on makes them stale.
+    state.emailsPlanKey = state.enrichment ? _emailPlanKey() : null;
     if ((data.status || "generated") === "draft") {
       // A draft only ever has data up through wherever it was saved —
       // resume exactly there, with the nav pills unlocked only that far,
@@ -674,7 +689,7 @@ function _resumeAtStep(step) {
   if (state.roadblocks) renderRoadblocks(state.roadblocks);
   if (s >= 5) renderAvailsGrid();
   if (s >= 6) renderMonthlyBreakdown();
-  if (s === 7) _enterRoadblocksStep(false);     // the picker (and the saved selection) must be visible on resume
+  if (s === 7) _enterRoadblocksStep();     // the picker (and the saved selection) must be visible on resume
   if (s >= 8) renderGenerateSummary();
   state.furthestStep = s;
   goToStep(s);
@@ -838,7 +853,7 @@ function wireEvents() {
       if (target === 4 && state.lineItems.length) renderLineItems();
       if (target === 5) renderAvailsGrid();
       if (target === 6) renderMonthlyBreakdown();
-      if (target === 7) _enterRoadblocksStep(false);
+      if (target === 7) _enterRoadblocksStep();
       if (target === 8) renderGenerateSummary();
       goToStep(target);
     });
@@ -932,8 +947,19 @@ function wireEvents() {
     btn.addEventListener("click", () => {
       if (state.mbDistributionMode === btn.dataset.mode) return;
       state.mbDistributionMode = btn.dataset.mode;
+      // Flipping only changes what NEW defaults mean; ask for the hint so the planner can see that the lines already
+      // on screen kept their numbers (renderMonthlyBreakdown shows it only if some line really differs).
+      state.mbModeNotice = true;
       renderMonthlyBreakdown();
     });
+  });
+  // The MASTER redistribute control beside that toggle (and the same action inside the hint it can raise): applies
+  // the selected default to every line at once. Static elements, wired once like the toggle above.
+  document.getElementById("mb-apply-all-btn").addEventListener("click", onMbApplyAll);
+  document.getElementById("mb-notice-apply-btn").addEventListener("click", onMbApplyAll);
+  document.getElementById("mb-notice-dismiss-btn").addEventListener("click", () => {
+    state.mbModeNotice = false;
+    renderMonthlyBreakdown();
   });
   // By Product / By Month view toggle — same "wired once, static pair of
   // buttons" pattern as the mode tabs just above.
@@ -1048,6 +1074,7 @@ function wireEvents() {
     _resetEmailRepromptScope();
   });
   document.getElementById("email-reprompt-submit-btn").addEventListener("click", onEmailReprompt);
+  document.getElementById("email-refresh-figures-btn").addEventListener("click", onEmailRefreshFigures);
 
   // Gamma outline — same reprompt UI shape as the emails above, but this
   // is the ONLY AI call anywhere in the Gamma-outline feature (building
@@ -1145,27 +1172,34 @@ function _clearPerProposalState() {
   state.roadblocks = null;
   state.rvSelected = null;
   state.rvCategories = [];
-  state.rvUnconfirmed = false;
   state.proposalId = null;
   state.generatedProposalId = null;
   state.proposalSummary = null;
   state.enrichment = null;
+  state.emailsPlanKey = null;
+  state.emailFigures = null;
   state.finalProposalTitle = null;
   _lastSavedDraftSnapshot = null;
   const result = document.getElementById("result");
   if (result) result.classList.add("hidden");
   const drive = document.getElementById("drive-status");
   if (drive) drive.classList.add("hidden");
+  _driveUploading = false;             // an upload still in flight sees the epoch change and leaves the button alone
+  const driveBtn = document.getElementById("drive-upload-btn");
+  if (driveBtn) driveBtn.disabled = false;
   const chips = document.getElementById("rv-chips");
   if (chips) chips.innerHTML = "";
   const picker = document.getElementById("restricted-verticals");
   if (picker) picker.classList.add("hidden");
+  state.mbModeNotice = false;
   _resetStrategyUI();
+  _cancelRoadblocksRun();              // a pick still waiting out its debounce, or a check in flight, belongs to the proposal being left
   _resetRoadblocksUI();
-  _gammaReset();                       // the previous proposal's "deck is ready" link / error doesn't carry over
+  _gammaReset();                      // the previous proposal's "deck is ready" link / error doesn't carry over
 }
 
 let _resetEpoch = 0;   // bumped by every resetAll() and re-parse, so a response that was in flight across it can tell
+let _driveUploading = false;   // a Google Drive upload (with its automatic retries) is running - see onDriveUpload()
 
 function resetAll() {
   _clearPerProposalState();
@@ -1176,7 +1210,6 @@ function resetAll() {
   state.mbDistributionMode = "even";
   state.mbViewMode = "month";
   state.mbActiveMonthKey = null;
-  state.rvUnconfirmed = false;
   state.generatedProposalId = null;
   _applyTimeUnitLabels();
   state.rawNotionText = null;
@@ -1202,6 +1235,8 @@ function resetAll() {
   state.proposalId = null;
   state.proposalSummary = null;
   state.enrichment = null;
+  state.emailsPlanKey = null;
+  state.emailFigures = null;
   state.finalProposalTitle = null;
   state.furthestStep = 1;
   state.addons = {};
@@ -1532,6 +1567,8 @@ function goToStep(n) {
     // itself — clicking it would be a no-op, so it shouldn't look clickable.
     navEl.classList.toggle("clickable", i <= state.furthestStep && i !== n);
   }
+  // Step 08 holds the generated emails: say so if the plan has changed since they were written.
+  if (n === 8) _refreshEmailStaleNote();
   updateProposalNameBar();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -1652,30 +1689,13 @@ function onNext(n) {
   goToStep(n);
 }
 
-// Landing on Step 07 (Continue, a nav pill, or resuming a saved proposal): the vertical picker is always
-// loaded; the check itself runs by itself only when that can't produce a wrong verdict.
-function _enterRoadblocksStep(autoRun = true) {
-  const needsRun = !state.roadblocks;      // an existing result (even a degraded one) stays until Regenerate
-  _loadRestrictedVerticals().then(awaitingConfirmation => {
-    if (!needsRun) return;
-    if (autoRun && state.step !== 7) return;      // the planner already left; don't spend an API call behind their back
-    if (awaitingConfirmation || !autoRun) {
-      // A suggested vertical (say Political) that the planner hasn't confirmed would put hard "not accepted"
-      // verdicts on products it may not even apply to — so wait for them to confirm and press Run. Coming
-      // back by nav pill or by resuming a saved proposal never spends an API call on its own either.
-      _resetRoadblocksUI();
-      if (awaitingConfirmation) {
-        const note = document.getElementById("rv-note");
-        note.textContent = "Tick the verticals that apply to this client, then click ▶ Run check.";
-        note.classList.remove("hidden");
-      }
-      const runBtn = document.getElementById("roadblocks-regenerate-btn");
-      runBtn.textContent = "▶ Run check";
-      runBtn.style.display = "";
-    } else {
-      onRoadblocksGenerate();
-    }
-  });
+// Landing on Step 07 (Continue, a nav pill, or resuming a saved proposal) only SHOWS the restricted-category
+// chooser — it never runs the check, however the planner got here. The planner picks Political / Cannabis / None
+// first and that pick starts the run (onRvPick), so no AI run is spent on a category that was never confirmed
+// (a wrong guess puts hard "not accepted" verdicts on products it may not even apply to). An existing result
+// stays exactly as it is, with its saved pick shown.
+function _enterRoadblocksStep() {
+  _loadRestrictedVerticals();
 }
 
 // Parse a budget number out of renewal_budget field (e.g. "7500 | $5k for LA...")
@@ -1744,7 +1764,7 @@ async function onParse() {
     // Kept verbatim (not re-derived from the DOM later) so it survives a
     // reopen — see reopen_state's raw_notion_text and maybeReopenProposal().
     state.rawNotionText = text;
-    state.suggestedTabs = data.suggested_tabs;
+    state.suggestedTabs = _normalizeTabKeys(data.suggested_tabs);
     state.tabsTouched = {};
     state.lineItems = [];  // reset so step 3 re-populates from fresh parse
     state.availsData = {};
@@ -1954,8 +1974,22 @@ function onAddParsedProduct() {
 }
 
 function renderSuggestedTabs(tabs) {
-  const active = Object.entries(tabs).filter(([_, v]) => v).map(([k]) => prettyTabName(k));
+  const active = Object.entries(_normalizeTabKeys(tabs)).filter(([_, v]) => v).map(([k]) => prettyTabName(k));
   document.getElementById("suggested-tabs").textContent = active.join(" · ") || "(none)";
+}
+
+// The two DOOH sheets (Summary + Screenlist) are ONE export choice, "DOOH Deliverables" (key "dooh"). Older saved
+// drafts and API payloads carry dooh_summary / dooh_screenlist instead; either being on means both sheets. Mirrors
+// notion_parser.normalize_tab_keys on the server. An explicit "dooh" wins over the legacy keys.
+function _normalizeTabKeys(tabs) {
+  const out = { ...(tabs || {}) };
+  const legacy = ["dooh_summary", "dooh_screenlist"].filter(k => k in out);
+  if (legacy.length) {
+    const folded = legacy.some(k => !!out[k]);
+    legacy.forEach(k => delete out[k]);
+    if (!("dooh" in out)) out.dooh = folded;
+  }
+  return out;
 }
 
 function prettyTabName(key) {
@@ -1964,8 +1998,7 @@ function prettyTabName(key) {
     wsections: "Proposal A (wsections)",
     gross: "Proposal A (Gross)",
     avails_only: "Avails-Only",
-    dooh_summary: "DOOH Summary",
-    dooh_screenlist: "DOOH Screenlist",
+    dooh: "DOOH Deliverables",
   }[key] || key;
 }
 
@@ -2122,7 +2155,7 @@ function renderStrategyBrief(brief) {
         <span class="tactic-pct">${pct}%${alloc ? ` · ~${money(alloc)}${_isFullFlight() ? "" : "/mo"}` : ""}</span>
       </div>
       <p class="tactic-rationale">${escapeHtml(t.rationale)}</p>
-      <p class="tactic-data">📊 ${escapeHtml(t.data_point)} <em class="tactic-citation">(${escapeHtml(t.citation)})</em></p>
+      ${t.data_point ? `<p class="tactic-data">📊 ${escapeHtml(t.data_point)}${t.citation ? ` <em class="tactic-citation">(${escapeHtml(t.citation)})</em>` : ""}</p>` : ""}
       <p class="tactic-advantage">⚡ ${escapeHtml(t.entravision_advantage)}</p>
       <p class="tactic-min-note">ⓘ This % is a ceiling for the whole ${escapeHtml(t.product_family)} tactic — if you curate more than one product under it in Step 04, each one still has its own separate minimum spend, not a shared pool.</p>
     `;
@@ -2415,8 +2448,32 @@ async function onAdPresenceCheck() {
 }
 
 // --------------------------------------------------------------------------
-// Step 5: AI Roadblocks / Restrictions Check
+// Step 07: AI Roadblocks / Restrictions Check
+//
+// The planner picks the client's restricted category FIRST (one of the sheet's categories, or "None") and that pick
+// starts the AI run — nothing runs on arrival, and the old "tick, then press Run/Regenerate" round trip is gone.
+// Rapid picks are debounced into ONE run; a pick that lands while a run is in flight abandons it (its answer can
+// never be shown) and starts one fresh run for the new pick. "Regenerate" only re-runs the SAME pick.
 // --------------------------------------------------------------------------
+
+const _RB_DEBOUNCE_MS = 600;     // a burst of picks (Political -> Cannabis -> None) costs one run, for the last one
+let _rbDebounceTimer = null;     // a pick waiting out its debounce
+let _rbRunToken = 0;             // identifies the one run whose answer may still be shown; bumping it abandons the rest
+let _rbAbort = null;             // the in-flight request's AbortController (saves the connection; the token is the guard)
+let _rbInFlight = false;         // a request for the CURRENT token is out there
+let _rvUsingBuiltin = false;     // the picker is showing the built-in snapshot, not an admin-synced sheet
+let _rvLoadFailed = false;       // the category list could not be loaded (the picker still offers "None")
+
+// Drops a pick still waiting out its debounce and abandons any request in flight. Used when the pick changes and
+// when the proposal on screen is replaced (_clearPerProposalState).
+function _cancelRoadblocksRun() {
+  if (_rbDebounceTimer) { clearTimeout(_rbDebounceTimer); _rbDebounceTimer = null; }
+  _rbRunToken++;
+  if (_rbAbort) { try { _rbAbort.abort(); } catch (_) { /* already settled */ } _rbAbort = null; }
+  _rbInFlight = false;
+}
+
+function _rbBusy() { return !!_rbDebounceTimer || _rbInFlight; }
 
 function _resetRoadblocksUI() {
   document.getElementById("roadblocks-loading").classList.add("hidden");
@@ -2425,28 +2482,59 @@ function _resetRoadblocksUI() {
   document.getElementById("roadblocks-regenerate-btn").style.display = "none";
   document.getElementById("roadblocks-download-link").classList.add("hidden");
   document.getElementById("roadblocks-search-note").classList.add("hidden");
-  document.getElementById("rv-note").classList.add("hidden");
 }
 
-let _roadblocksInFlight = false;
-
-async function onRoadblocksGenerate() {
-  if (_roadblocksInFlight) return;      // overlapping entries to Step 07 must not each start a paid check
-  _roadblocksInFlight = true;
-  const epoch = _resetEpoch;
-  try {
-    await _runRoadblocks(epoch);
-  } finally {
-    _roadblocksInFlight = false;
-  }
-}
-
-async function _runRoadblocks(epoch) {
+// The spinner, with the pick it is working for (so a quick re-pick visibly restarts it).
+function _showRoadblocksPending() {
   _resetRoadblocksUI();
-  const loadingEl = document.getElementById("roadblocks-loading");
-  loadingEl.classList.remove("hidden");
+  document.getElementById("roadblocks-loading").classList.remove("hidden");
+  const picked = [...(state.rvSelected || [])];
   document.getElementById("roadblocks-loading-text").textContent =
-    `Searching platform policies for ${state.parsed.client_name || "this client"}…`;
+    `Searching platform policies for ${(state.parsed && state.parsed.client_name) || "this client"}${picked.length ? ` (${picked.join(", ")})` : ""}…`;
+}
+
+// The planner's click on a category chip (name) or on "None" (null).
+function onRvPick(name) {
+  const next = new Set(name === null ? [] : [name]);
+  const cur = state.rvSelected;
+  if (cur && cur.size === next.size && [...next].every(n => cur.has(n))) return;   // the pick that is already showing — "Regenerate" re-runs it
+  state.rvSelected = next;
+  _cancelRoadblocksRun();      // whatever was running or waiting answered the PREVIOUS pick
+  // That answer (if there was one) does not describe this pick: it must not stay on screen, in the saved draft or in
+  // the export next to a different category. The new run replaces it; Skip / Continue meanwhile carry no result.
+  state.roadblocks = null;
+  _renderRvChips();
+  _updateRvNote();
+  _showRoadblocksPending();
+  const epoch = _resetEpoch;
+  _rbDebounceTimer = setTimeout(() => {
+    _rbDebounceTimer = null;
+    if (epoch !== _resetEpoch) return;      // a different proposal is on screen now
+    _runRoadblocks();
+  }, _RB_DEBOUNCE_MS);
+}
+
+// "Regenerate": the same pick again. Ignored while a run (or a pick's debounce) is already under way — one paid
+// check per pick, never two.
+function onRoadblocksGenerate() {
+  if (_rbBusy() || !state.parsed) return;
+  if (state.rvSelected === null) {      // an old result that predates the category list: re-run it as "None" and say so
+    state.rvSelected = new Set();
+    _renderRvChips();
+  }
+  _runRoadblocks();
+}
+
+async function _runRoadblocks() {
+  const token = ++_rbRunToken;
+  const epoch = _resetEpoch;
+  const categories = [...(state.rvSelected || [])];
+  const controller = new AbortController();
+  _rbAbort = controller;
+  _rbInFlight = true;
+  _showRoadblocksPending();
+  const loadingEl = document.getElementById("roadblocks-loading");
+  const superseded = () => epoch !== _resetEpoch || token !== _rbRunToken;   // a different proposal, or a newer pick
 
   try {
     // Covers every product across every budget option — a tier-B-only
@@ -2460,15 +2548,16 @@ async function _runRoadblocks(epoch) {
     const res = await fetch("/api/roadblocks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
       body: JSON.stringify({
         request: state.parsed,
         line_items: [...unionByProduct.values()],
         strategy_brief: _briefWithSelectedTactics(),
-        categories: [...(state.rvSelected || [])],
+        categories,                          // [] = "None"
       }),
     });
     const data = await _readJsonResponse(res);
-    if (epoch !== _resetEpoch) return;      // a different proposal is on screen now
+    if (superseded()) return;               // answers a pick that is no longer the planner's (or another proposal): never shown
     loadingEl.classList.add("hidden");
 
     if (data.error && !data.product_roadblocks?.length) {
@@ -2482,12 +2571,14 @@ async function _runRoadblocks(epoch) {
 
     renderRoadblocks(data);
   } catch (e) {
-    if (epoch !== _resetEpoch) return;
+    if (superseded()) return;               // incl. the AbortError of a request abandoned on purpose
     loadingEl.classList.add("hidden");
     const errEl = document.getElementById("roadblocks-error");
     errEl.classList.remove("hidden");
     errEl.textContent = "Request failed: " + e.message;
     document.getElementById("roadblocks-regenerate-btn").style.display = "";
+  } finally {
+    if (token === _rbRunToken) { _rbInFlight = false; _rbAbort = null; }     // a superseded run must not clear the newer run's flags
   }
 }
 
@@ -2499,13 +2590,13 @@ function _roadblockMatrixHtml(matrix) {
     <p class="matrix-line matrix-${escapeAttr(c.status)}"><strong>${escapeHtml(c.category)}:</strong> ${escapeHtml(icon[c.status] || c.status)}${c.note ? ` <span class="matrix-note">— ${escapeHtml(c.note)}</span>` : ""}</p>`).join("")}</div>`;
 }
 
-// Step 07's vertical picker. Loads the sheet's verticals, pre-ticks the ones the
-// plan's own text suggests (client, goal, targeting, products), then leaves the
-// choice to the planner — a saved selection (reopened proposal) is kept as-is.
-// Resolves to true when the picker is showing suggestions the planner has not confirmed yet.
+// Step 07's restricted-category chooser: one of the categories the sheet defines (whatever the backend lists —
+// today Political and Cannabis) or "None". Loads the list, flags the ones the plan's own text suggests (client, goal,
+// targeting, products) as a HINT only — nothing is ever picked for the planner and nothing runs until they click.
+// A saved pick (reopened proposal) is kept as-is.
 async function _loadRestrictedVerticals() {
   const wrap = document.getElementById("restricted-verticals");
-  if (!wrap || !state.parsed) return false;
+  if (!wrap || !state.parsed) return;
   const epoch = _resetEpoch;
   try {
     const names = [...new Set(allTiersForSubmit().flatMap(t => (t.line_items || []).map(li => li.product_name)))];
@@ -2516,79 +2607,79 @@ async function _loadRestrictedVerticals() {
     });
     if (!res.ok) throw new Error(res.statusText);
     const data = await res.json();
-    if (epoch !== _resetEpoch) return false;
+    if (epoch !== _resetEpoch) return;
     state.rvCategories = data.categories || [];
-    if (state.rvSelected === null) {
-      state.rvSelected = new Set(state.rvCategories.filter(c => c.suggested).map(c => c.name));
-      state.rvUnconfirmed = state.rvSelected.size > 0;     // pre-ticked by us, not yet confirmed by the planner
-    } else {
-      // A vertical the sheet no longer lists has no chip to untick; drop it so it isn't re-sent forever.
-      const known = new Set(state.rvCategories.map(c => c.name));
-      state.rvSelected = new Set([...state.rvSelected].filter(n => known.has(n)));
-    }
-    _renderRestrictedVerticals(data);
-    return !!state.rvUnconfirmed;
+    _rvUsingBuiltin = !!data.using_builtin;
+    _rvLoadFailed = false;
   } catch (e) {
-    wrap.classList.add("hidden");   // optional layer — Roadblocks still runs without it
-    return false;
+    if (epoch !== _resetEpoch) return;
+    // Optional layer: without the list the chooser still offers "None", so the check can always be run.
+    _rvLoadFailed = !state.rvCategories.length;
+  }
+  _renderRestrictedVerticals();
+}
+
+function _renderRestrictedVerticals() {
+  document.getElementById("restricted-verticals").classList.remove("hidden");
+  _renderRvChips();
+  _updateRvNote();
+}
+
+// The chips, from state: a radio-style group (one choice), the sheet's categories first and "None" last. A pick
+// is "on" while it is in state.rvSelected — several can be on for a proposal saved by the old multi-select; the
+// next click replaces them all with the one clicked.
+function _renderRvChips() {
+  const chips = document.getElementById("rv-chips");
+  const hint = document.getElementById("rv-suggest");
+  if (!chips) return;
+  const sel = state.rvSelected;
+  const unresolved = (state.roadblocks && state.roadblocks.unresolved_categories) || [];
+  const noneOn = !!sel && sel.size === 0 && !unresolved.length;    // an empty saved list with unresolved names is not a "None" run
+  const chip = (attrs, on, title, label) =>
+    `<button type="button" class="rv-chip ${on ? "on" : ""}" role="radio" aria-checked="${on}" ${attrs} title="${escapeHtml(title)}">${label}</button>`;
+  chips.innerHTML = state.rvCategories.map(c =>
+    chip(`data-rv-category="${escapeHtml(c.name)}"`, !!sel && sel.has(c.name), c.summary || "",
+         `${escapeHtml(c.name)}${c.suggested ? ' <span class="rv-suggested">suggested</span>' : ""}`)
+  ).join("") + chip(`data-rv-none="1"`, noneOn, "This client isn't in a restricted category — run the check without one", "None");
+  chips.querySelectorAll("[data-rv-category]").forEach((btn, i) => {
+    btn.addEventListener("click", () => onRvPick(state.rvCategories[i].name));
+  });
+  const noneBtn = chips.querySelector("[data-rv-none]");
+  if (noneBtn) noneBtn.addEventListener("click", () => onRvPick(null));
+
+  // "Suggested: Political" — what the request itself points at, shown until the planner has picked anything.
+  const suggested = state.rvCategories.filter(c => c.suggested).map(c => c.name);
+  if (hint) {
+    hint.textContent = suggested.length ? `Suggested from this request: ${suggested.join(", ")}. Nothing runs until you pick.` : "";
+    hint.classList.toggle("hidden", !suggested.length || sel !== null);
   }
 }
 
-function _renderRestrictedVerticals(data) {
-  const wrap = document.getElementById("restricted-verticals");
-  const chips = document.getElementById("rv-chips");
-  if (!state.rvCategories.length) { wrap.classList.add("hidden"); return; }
-  wrap.classList.remove("hidden");
-  chips.innerHTML = state.rvCategories.map(c => `
-    <label class="rv-chip ${state.rvSelected.has(c.name) ? "on" : ""}" title="${escapeHtml(c.summary || "")}">
-      <input type="checkbox" data-rv-category="${escapeHtml(c.name)}" ${state.rvSelected.has(c.name) ? "checked" : ""} />
-      ${escapeHtml(c.name)}${c.suggested ? ' <span class="rv-suggested">suggested</span>' : ""}
-    </label>`).join("");
-  chips.querySelectorAll("[data-rv-category]").forEach(cb => {
-    cb.addEventListener("change", () => {
-      if (!state.rvSelected) state.rvSelected = new Set();
-      if (cb.checked) state.rvSelected.add(cb.dataset.rvCategory); else state.rvSelected.delete(cb.dataset.rvCategory);
-      state.rvUnconfirmed = false;     // the planner has now looked at the selection
-      cb.closest(".rv-chip").classList.toggle("on", cb.checked);
-      const note = document.getElementById("rv-note");
-      note.textContent = "Selection changed — click ↺ Regenerate to re-run the check with it.";
-      note.classList.remove("hidden");
-    });
-  });
+// The one small note under the chips, recomputed from state (never left over from an earlier run): the saved
+// result names a category the sheet no longer has, the list could not be loaded, or the built-in snapshot is in use.
+function _updateRvNote() {
   const note = document.getElementById("rv-note");
+  if (!note) return;
   const unresolved = (state.roadblocks && state.roadblocks.unresolved_categories) || [];
+  let text = "";
   if (unresolved.length) {
-    note.textContent = `Couldn't find ${unresolved.join(", ")} in the restricted-verticals sheet any more — an admin may have renamed it. Re-tick the verticals and regenerate.`;
-    note.classList.remove("hidden");
-  } else if (data && data.using_builtin) {
-    note.textContent = "Showing Entravision's built-in snapshot (Political, Cannabis) — an admin can sync the full sheet under Admin → Restrictions.";
-    note.classList.remove("hidden");
-  } else {
-    note.classList.add("hidden");
+    text = `Couldn't find ${unresolved.join(", ")} in the restricted-verticals sheet any more — an admin may have renamed it. Pick a category again to re-run the check.`;
+  } else if (_rvLoadFailed) {
+    text = "Couldn't load the restricted categories just now — you can still run the check with None, or reopen this step to try again.";
+  } else if (_rvUsingBuiltin) {
+    text = "Showing Entravision's built-in snapshot (Political, Cannabis) — an admin can sync the full sheet under Admin → Restrictions.";
   }
+  note.textContent = text;
+  note.classList.toggle("hidden", !text);
 }
 
 function renderRoadblocks(data) {
   state.roadblocks = data;
+  // A saved result carries the categories it was computed for: that is the planner's pick when a proposal is
+  // reopened (an empty list is "None"; several names are a save from the old multi-select).
   if (Array.isArray(data.categories) && state.rvSelected === null) state.rvSelected = new Set(data.categories);
-  const covered = new Set(data.categories || []);
-  const stale = [...(state.rvSelected || [])].some(n => !covered.has(n)) || [...covered].some(n => !(state.rvSelected || new Set()).has(n));
-  const noteEl0 = document.getElementById("rv-note");
-  if (stale && Array.isArray(data.categories) && state.rvSelected !== null) {
-    // The planner changed the ticks while this check was running: it doesn't answer them.
-    noteEl0.textContent = "Selection changed — click ↺ Regenerate to re-run the check with it.";
-    noteEl0.classList.remove("hidden");
-  } else {
-    state.rvUnconfirmed = false;                                         // a completed run means the selection was confirmed
-    noteEl0.classList.add("hidden");                                     // "Selection changed…" is answered by this result
-  }
+  _updateRvNote();
   document.getElementById("roadblocks-regenerate-btn").textContent = "↺ Regenerate";
-  const unresolved = data.unresolved_categories || [];
-  if (unresolved.length) {
-    const note = document.getElementById("rv-note");
-    note.textContent = `Couldn't find ${unresolved.join(", ")} in the restricted-verticals sheet any more — an admin may have renamed it. Re-tick the verticals and regenerate.`;
-    note.classList.remove("hidden");
-  }
 
   setText("roadblocks-summary", data.overall_summary || "");
 
@@ -5482,6 +5573,114 @@ function _mbEffectiveDistribution(li, months) {
   return _mbDefaultAllocation(li.monthly_budget * li.months, months);
 }
 
+// --------------------------------------------------------------------------
+// Step 06's MASTER "Apply the default split to all lines".
+//
+// The Default split toggle only decides what a NEW default means; the one thing that ever redistributed a line was
+// the small per-line reset inside each product panel (By Product view only). This is that same reset, for every
+// line at once, reachable from both views. It deliberately re-derives nothing: each line's new split is
+// _mbDefaultAllocation(monthly_budget x months, months) — exactly what the per-line button writes — so a line's
+// total is kept to the cent, merged periods (the `months` list is the post-merge one) and the billing unit are
+// honoured for free, and it is written through _mbSetAllocation (which re-stamps the baseline the Curate-total
+// rescale compares against). Only the ACTIVE option's lines are touched: Step 06 is entered per option.
+// --------------------------------------------------------------------------
+
+// A line within this many dollars of a default (in every period) counts as simply holding that default when we ask
+// "did the planner customize this?": rescaling a line after its budget moved can leave a few cents of rounding
+// residue, and that must not read as hand-typed numbers (it would raise a pointless "overwrite?" confirm).
+const _MB_DEFAULT_SLACK = 1;
+
+// Two allocations (period key -> $) are the same split when every period agrees within `tolerance`.
+function _mbAllocationsMatch(a, b, tolerance = _MB_CENT) {
+  const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
+  for (const k of keys) {
+    if (Math.abs((Number(a && a[k]) || 0) - (Number(b && b[k]) || 0)) > tolerance) return false;
+  }
+  return true;
+}
+
+// What applying the selected default to every line would do, without doing it. Eligible = the lines the per-line
+// reset button works on: not Added Value, the breakdown is ON for them (they carry allocations; mb_off lines have
+// none), and they have a budget to split. For each: `target` (the new split), `changes` (it is not already that),
+// `custom` (it also matches NEITHER the even nor the day-prorated default, i.e. numbers the planner typed — a line
+// that merely holds the OTHER default loses nothing when it is switched).
+function _mbPlanRedistribution(lines, months) {
+  const rows = [];
+  (lines || []).forEach(li => {
+    if (li.is_added_value) return;
+    const current = li.monthly_allocations;
+    if (!current || !Object.keys(current).length) return;
+    const total = li.monthly_budget * li.months;
+    if (!(total > 0)) return;
+    const target = _mbDefaultAllocation(total, months);
+    const changes = !_mbAllocationsMatch(current, target);
+    const custom = changes
+      && !_mbAllocationsMatch(current, _mbEvenDefaultAllocation(total, months), _MB_DEFAULT_SLACK)
+      && !_mbAllocationsMatch(current, _mbProratedDefaultAllocation(total, months), _MB_DEFAULT_SLACK);
+    rows.push({ li, target, changes, custom });
+  });
+  return {
+    rows,
+    eligible: rows.length,
+    changeCount: rows.filter(r => r.changes).length,
+    customCount: rows.filter(r => r.custom).length,
+  };
+}
+
+function _mbModeWord() { return state.mbDistributionMode === "prorated" ? "day-prorated" : "even"; }
+
+// The confirm shown before custom numbers are overwritten: how many lines will change and how many of those were
+// customized. (Never shown when nothing is customized.)
+function _mbRedistributeConfirmText(plan) {
+  const n = plan.changeCount, k = plan.customCount;
+  const scope = state.tiers.length ? " in this option" : "";
+  const overwritten = k === n
+    ? `${n === 1 ? "Its" : "Their"} custom numbers will be overwritten.`
+    : `${k} of them ${k === 1 ? "has" : "have"} custom numbers that will be overwritten.`;
+  return `Apply the ${_mbModeWord()} split to ${n} line${n === 1 ? "" : "s"}${scope}? ${overwritten} Each line's total stays the same. Continue?`;
+}
+
+// The button's click (and the hint's): confirm only when custom numbers would be lost, then rewrite every changing
+// line and re-render — the same re-render the per-line reset triggers, so the plan summary, every status badge and the
+// totals follow; the draft autosave picks the new allocations up from state on its next tick like any other edit.
+function onMbApplyAll() {
+  if (_isFullFlight()) return;                     // no breakdown in Full Flight (Step 06 is a read-only note)
+  const months = _mbEffectiveMonths();
+  if (!months || !months.length) return;
+  const plan = _mbPlanRedistribution(state.lineItems, months);
+  if (plan.changeCount) {
+    if (plan.customCount && !confirm(_mbRedistributeConfirmText(plan))) return;
+    plan.rows.forEach(r => { if (r.changes) _mbSetAllocation(r.li, r.target); });
+  }
+  state.mbModeNotice = false;
+  renderMonthlyBreakdown();
+}
+
+// Keeps the master button and the "you flipped the toggle" hint in step with the lines on screen. Runs on every
+// render of the step (both views), so the button's enabled state and the hint's counts never go stale.
+function _mbRenderApplyControls(months) {
+  const btn = document.getElementById("mb-apply-all-btn");
+  const notice = document.getElementById("mb-mode-notice");
+  if (!btn) return;
+  const plan = _mbPlanRedistribution(state.lineItems, months);
+  const word = _mbModeWord();
+  const scope = state.tiers.length ? " in this option" : "";
+  btn.textContent = `↺ Apply ${word} split to all lines`;
+  btn.disabled = plan.changeCount === 0;
+  btn.title = plan.changeCount
+    ? `Redistribute ${plan.changeCount} line${plan.changeCount === 1 ? "" : "s"}${scope} across the ${_mbUnitNounPlural().toLowerCase()} with the ${word} split. Each line's total stays the same.`
+    : (plan.eligible ? `Every line${scope} already follows the ${word} split.` : "No line is using the breakdown yet.");
+
+  if (state.mbModeNotice && !plan.changeCount) state.mbModeNotice = false;   // nothing left to offer
+  if (!notice) return;
+  notice.classList.toggle("hidden", !state.mbModeNotice);
+  if (state.mbModeNotice) {
+    const custom = plan.customCount ? ` (${plan.customCount} with custom numbers)` : "";
+    document.getElementById("mb-notice-text").textContent =
+      `The default is now ${word}, but ${plan.changeCount} of ${plan.eligible} line${plan.eligible === 1 ? "" : "s"}${scope} still hold a different split${custom}.`;
+  }
+}
+
 function renderMonthlyBreakdown() {
   _resyncAllTierMonths();
   const emptyState = document.getElementById("mb-no-dates");
@@ -5586,6 +5785,7 @@ function renderMonthlyBreakdown() {
       || `<p class="mb-empty-hint">No line items yet — add products in Step 04 first.</p>`;
     _mbWireLineItemBlocks(months);
   }
+  _mbRenderApplyControls(months);
   _mbRenderPlanSummary(months);
   _mbUpdateContinueState(months);
 }
@@ -6489,7 +6689,7 @@ async function _refreshSuggestedTabs() {
       body: JSON.stringify({ request: state.parsed, product_names: names }),
     });
     if (!res.ok) return;
-    state.suggestedTabs = (await res.json()).tabs;
+    state.suggestedTabs = _normalizeTabKeys((await res.json()).tabs);
     _applyTabCheckboxes();
   } catch (e) {
     // keep whatever suggestion we already had — the server re-derives tabs
@@ -6603,6 +6803,7 @@ function _wizardStateKey() {
 async function onGenerate() {
   const epoch = _resetEpoch;
   const sentStateKey = _wizardStateKey();
+  const sentPlanKey = _emailPlanKey();       // what the emails below are about to be written against
   const payload = {
     ..._buildWizardStatePayload(),
     // Echoes back an id from an earlier draft save (or a reopened
@@ -6652,6 +6853,8 @@ async function onGenerate() {
     state.proposalId = data.proposal_id;
     state.generatedProposalId = data.proposal_id;
     state.proposalSummary = data.summary;
+    state.emailsPlanKey = sentPlanKey;
+    state.emailFigures = data.email_figures || null;
     showResult(data);
     // The result itself changes state.enrichment, which would otherwise make the very next autosave /
     // "New proposal" file the just-generated proposal again as a stray draft. Only when nothing was edited
@@ -6722,16 +6925,30 @@ function buildGammaOutline() {
   tiers.forEach(t => {
     if (tiers.length > 1) lines.push(`${_tierDisplayName(t.label)}:`);
     let tierTotal = 0;
+    // "mo" in a monthly plan (the original wording), "wk" / "qtr" in a weekly / quarterly one — a $500 week is not "/mo".
+    const unitAbbr = { week: "wk", quarter: "qtr" }[state.timeUnit] || "mo";
     (t.line_items || []).forEach(li => {
       const p = state.productIndex[li.product_name] || {};
       tierTotal += (li.monthly_budget || 0) * (li.months || 1);
       const target = li.target_override || targeting || "(campaign default)";
       const amountText = _isFullFlight()
         ? `${money(li.monthly_budget)} flat for the full flight`
-        : `${money(li.monthly_budget)}/mo × ${li.months}mo`;
+        : `${money(li.monthly_budget)}/${unitAbbr} × ${li.months}${unitAbbr}`;
       lines.push(`  - ${li.product_name}${p.family ? ` (${p.family})` : ""} — ${amountText} — Target: ${target}`);
     });
-    lines.push(`  Option total: ${money(tierTotal)}`);
+    // Right after a Generate the server's own figures (the ones in the Excel and the emails) are on hand: use them, so
+    // the outline's option total includes the one-time add-ons and honors customised per-period amounts exactly like
+    // the workbook. Without them (older state) the plain sum of the lines is the fallback.
+    const fig = ((state.emailFigures && state.emailFigures.options) || []).find(o => o.label === t.label);
+    if (fig) {
+      lines.push(`  Option total: ${money(fig.total_net)}` +
+        (fig.addons_net ? ` (${money(fig.media_net)} media + ${money(fig.addons_net)} one-time add-ons)` : ""));
+      if (fig.periods && fig.periods.length && !_isFullFlight()) {
+        lines.push(`  By ${_mbUnitNoun().toLowerCase()}: ` + fig.periods.map(pp => `${pp.label} ${money(pp.net)}`).join(" · "));
+      }
+    } else {
+      lines.push(`  Option total: ${money(tierTotal)}`);
+    }
     lines.push("");
   });
 
@@ -7072,6 +7289,8 @@ async function showResult(data) {
   const aiError = document.getElementById("ai-error");
   const enrichment = data.enrichment || {};
   state.enrichment = enrichment;
+  // Dollar amounts the automatic check couldn't match to the plan's figures (empty when everything matched).
+  _showEmailFigureWarnings(enrichment.figure_warnings);
 
   aiContent.classList.add("hidden");
   aiError.classList.add("hidden");
@@ -7113,6 +7332,7 @@ async function showResult(data) {
     }
   }
 
+  _refreshEmailStaleNote();
   await buildInternalEmailMailtoLink();
 
   result.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -7127,25 +7347,116 @@ function _resetEmailRepromptScope() {
   if (bothRadio) bothRadio.checked = true;
 }
 
+// What the emails' dollar figures are worked out from, sent with every revision: the plan AS IT IS NOW — every option
+// (not just the active one that state.lineItems holds), the add-ons, any customised per-period amounts and the billing
+// period — so a revision can never re-price the proposal from a stale or partial picture. The server rebuilds the same
+// figures the Excel shows from exactly this (see main.py's _email_figures_for_tiers). Option avails are left out: they
+// don't change a dollar figure and can be large.
+function _emailFiguresPayload() {
+  const p = _buildWizardStatePayload();
+  return {
+    request: p.request,
+    line_items: p.line_items,
+    tiers: (p.tiers || []).map(({ avails_data, ...tier }) => tier),
+    addons: p.addons,
+    monthly_distribution_mode: p.monthly_distribution_mode,
+    time_unit: p.time_unit,
+  };
+}
+
+// Everything that can change a dollar figure in the emails (the billing period, every option's lines, per-period
+// amounts, dates and merged periods, the add-ons and the agency fee) and nothing else — editing product text or
+// targeting must not make the emails look stale. Compared with the key stored when they were last written.
+function _emailPlanKey() {
+  const p = _buildWizardStatePayload();
+  const req = p.request || {};
+  return JSON.stringify({
+    unit: p.time_unit,
+    mode: p.monthly_distribution_mode,
+    fee: req.agency_fee == null ? null : req.agency_fee,
+    start: req.start_date || "",
+    end: req.end_date || "",
+    months: req.total_months == null ? null : req.total_months,
+    addons: p.addons || [],
+    tiers: (p.tiers || []).map(t => ({
+      label: t.label, name: t.name || "", start: t.start_date || "", end: t.end_date || "",
+      merge: t.period_merge_groups || [],
+      lines: (t.line_items || []).map(li => [
+        li.product_name, Number(li.monthly_budget) || 0, Number(li.months) || 0, !!li.is_added_value,
+        li.monthly_allocations || null,
+      ]),
+    })),
+  });
+}
+
+// Emails already on screen when the planner later edits the plan: kept as they are (rewriting copy the planner may
+// have refined by hand would be the more surprising thing), but flagged, with one click to re-price them.
+function _refreshEmailStaleNote() {
+  const note = document.getElementById("email-stale-note");
+  if (!note) return;
+  let stale = false;
+  try {
+    stale = !!(state.enrichment && state.emailsPlanKey && state.parsed && _emailPlanKey() !== state.emailsPlanKey);
+  } catch (e) {
+    stale = false;      // a note must never break navigation
+  }
+  note.classList.toggle("hidden", !stale);
+}
+
+// Dollar amounts the server's automatic check couldn't match to the plan's figures (the Excel totals), even after its
+// one corrective pass — listed rather than shipped silently. Built with textContent: the text is model output.
+function _showEmailFigureWarnings(list) {
+  const el = document.getElementById("email-figures-warning");
+  if (!el) return;
+  const items = Array.isArray(list) ? list.filter(Boolean) : [];
+  el.textContent = "";
+  el.classList.toggle("hidden", !items.length);
+  if (!items.length) return;
+  const head = document.createElement("strong");
+  head.textContent = "⚠ Check these dollar amounts before sending — they don't match the plan's figures (the Excel totals):";
+  el.appendChild(head);
+  const ul = document.createElement("ul");
+  items.forEach(t => {
+    const li = document.createElement("li");
+    li.textContent = t;
+    ul.appendChild(li);
+  });
+  el.appendChild(ul);
+}
+
 async function onEmailReprompt() {
   const text = document.getElementById("email-reprompt-input").value.trim();
   if (!text) { alert("Enter what you'd like to change first."); return; }
-  const deliverableId = state.generatedProposalId || state.proposalId;
-  if (!deliverableId || !state.enrichment) return;
   const scopeInput = document.querySelector('input[name="email-reprompt-scope"]:checked');
   const scope = scopeInput ? scopeInput.value : "both";
+  await _submitEmailReprompt({
+    text, scope, btn: document.getElementById("email-reprompt-submit-btn"), idleLabel: "↺ Regenerate Emails",
+  });
+}
 
-  const btn = document.getElementById("email-reprompt-submit-btn");
+// The stale-emails note's button: the same revision call, asked only to bring the dollar figures up to the current plan.
+async function onEmailRefreshFigures() {
+  await _submitEmailReprompt({
+    text: "Update every dollar figure in the emails to the current plan's figures. Change nothing else: keep the wording, structure and tone exactly as they are.",
+    scope: "both", btn: document.getElementById("email-refresh-figures-btn"), idleLabel: "↺ Update the figures in the emails",
+  });
+}
+
+async function _submitEmailReprompt({ text, scope, btn, idleLabel }) {
+  const deliverableId = state.generatedProposalId || state.proposalId;
+  if (!deliverableId || !state.enrichment) return;
+  const epoch = _resetEpoch;
   btn.disabled = true;
   btn.textContent = "Regenerating…";
 
   try {
+    // The figures key is taken WITH the payload, so an edit made while the revision runs still reads as stale after it.
+    const sentPlanKey = _emailPlanKey();
     const res = await fetch(`/api/proposal/${deliverableId}/reprompt-emails`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        request: state.parsed,
-        line_items: state.lineItems,
+        ..._emailFiguresPayload(),
         campaign_name: state.enrichment.campaign_name || "",
         current_internal_subject: state.enrichment.internal_email_subject || "",
         current_internal_body: state.enrichment.internal_email_body || "",
@@ -7153,10 +7464,10 @@ async function onEmailReprompt() {
         current_client_body: state.enrichment.client_email_body || "",
         reprompt: text,
         scope,
-        time_unit: state.timeUnit,
       }),
     });
     const data = await res.json();
+    if (epoch !== _resetEpoch) return;     // another proposal is on screen now — this revision isn't its business
     if (!res.ok) {
       alert("Reprompt failed: " + (data.detail || res.statusText));
       return;
@@ -7164,6 +7475,12 @@ async function onEmailReprompt() {
     if (data.error) {
       alert("Reprompt didn't fully succeed: " + data.error);
     }
+    // Both emails were just re-priced against the plan that was sent; a one-sided revision leaves the other email
+    // as it was, so the "plan changed" note stays until that one is refreshed too.
+    if (!data.error && scope === "both") state.emailsPlanKey = sentPlanKey;
+    if (data.email_figures) state.emailFigures = data.email_figures;
+    // A failed revision left the emails as they were, so whatever was flagged on them still stands.
+    if (!data.error) _showEmailFigureWarnings(data.figure_warnings);
 
     state.enrichment.internal_email_subject = data.internal_email_subject;
     state.enrichment.internal_email_body = data.internal_email_body;
@@ -7184,6 +7501,7 @@ async function onEmailReprompt() {
     document.getElementById("email-reprompt-input").value = "";
     _resetEmailRepromptScope();
 
+    _refreshEmailStaleNote();
     // The mailto link's subject/body are frozen at the moment they were
     // built — refresh it now so "Open in Email" reflects the just-revised text.
     await buildInternalEmailMailtoLink();
@@ -7191,7 +7509,7 @@ async function onEmailReprompt() {
     alert("Request failed: " + e.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = "↺ Regenerate Emails";
+    btn.textContent = idleLabel;
   }
 }
 
@@ -7200,10 +7518,56 @@ function setText(id, text) {
   if (el) el.textContent = text;
 }
 
+// A Drive upload is the one step that depends on Google, so it rides out the hiccups itself: a failure the server
+// marks retryable (503 / `retryable: true` - Google or the database blinked, already retried server-side), a
+// bare gateway/5xx with no JSON, or a dropped connection is retried twice more with a short backoff and a visible
+// "Retrying upload…" before any error is shown. Permanent failures (not generated, file gone, Google refused)
+// are shown straight away with the server's plain-language reason.
+const DRIVE_MAX_ATTEMPTS = 3;                       // the first try plus two automatic retries
+const DRIVE_RETRY_BACKOFF_MS = [1500, 3500];        // waits before retry 1 and retry 2 (plus up to 0.5s jitter)
+const DRIVE_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
+
+function _driveSleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function _showDriveResult(status, data) {
+  if (data.uploaded) {
+    status.classList.add("ok");
+    const note = data.link_shared === false
+      ? " (Drive wouldn't switch on link sharing - open it and share it from there.)" : "";
+    status.innerHTML = data.shareable_link
+      ? `✓ Uploaded — <a href="${escapeHtml(data.shareable_link)}" target="_blank" rel="noopener">Open in Drive</a>${escapeHtml(note)}`
+      : `✓ Uploaded to Drive.${escapeHtml(note)}`;
+  } else if (data.auth_url) {
+    // Need OAuth authorization — opened as a real popup (not a plain
+    // target="_blank" link) so the opener side can detect when it closes
+    // and automatically retry the upload, instead of leaving the planner
+    // to remember to click Upload again themselves.
+    status.classList.add("warn");
+    status.innerHTML = `Drive not authorized. <a href="#" id="drive-auth-link">Click here to authorize Google Drive</a> — it will retry automatically once you approve.`;
+    document.getElementById("drive-auth-link").addEventListener("click", (e) => {
+      e.preventDefault();
+      openDriveAuthPopup(data.auth_url);
+    });
+  } else {
+    status.classList.add("warn");
+    status.textContent = "⚠ " + (data.reason || "Upload not configured");
+  }
+}
+
 async function onDriveUpload() {
   const deliverableId = state.generatedProposalId || state.proposalId;
-  if (!deliverableId) return;
+  if (!deliverableId || _driveUploading) return;      // a second click / the auth popup closing mid-upload is ignored
+  const epoch = _resetEpoch;
+  const btn = document.getElementById("drive-upload-btn");
   const status = document.getElementById("drive-status");
+  const payload = JSON.stringify({
+    proposal_id: deliverableId,
+    seller_email: (state.parsed && state.parsed.salesperson_email) || "",
+  });
+  _driveUploading = true;
+  if (btn) btn.disabled = true;
   status.classList.remove("hidden", "ok", "warn");
   status.innerHTML = '<span class="btn-inline-spinner"></span>Uploading to Drive…';
   // Everything below is awaited inside a try/catch on purpose — without it,
@@ -7211,37 +7575,53 @@ async function onDriveUpload() {
   // left the status text frozen on "Uploading to Drive…" forever with no
   // feedback at all, which is exactly the "stuck loading" symptom reported.
   try {
-    const res = await fetch("/api/drive/upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        proposal_id: deliverableId,
-        seller_email: state.parsed.salesperson_email || "",
-      }),
-    });
-    if (!res.ok) throw new Error(`Server returned ${res.status}`);
-    const data = await res.json();
-    if (data.uploaded) {
-      status.classList.add("ok");
-      status.innerHTML = `✓ Uploaded — <a href="${data.shareable_link}" target="_blank" rel="noopener">Open in Drive</a>`;
-    } else if (data.auth_url) {
-      // Need OAuth authorization — opened as a real popup (not a plain
-      // target="_blank" link) so the opener side can detect when it closes
-      // and automatically retry the upload, instead of leaving the planner
-      // to remember to click Upload again themselves.
+    for (let attempt = 1; attempt <= DRIVE_MAX_ATTEMPTS; attempt++) {
+      let res = null, data = null, networkError = null;
+      try {
+        res = await fetch("/api/drive/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+        });
+        data = await res.json().catch(() => null);
+      } catch (e) {
+        networkError = e;
+      }
+      if (epoch !== _resetEpoch) return;     // New Proposal while this was in flight — nothing here is its business
+      if (res && res.ok && data) {
+        _showDriveResult(status, data);
+        return;
+      }
+      const message = (data && data.detail)
+        || (networkError ? "couldn't reach the server" : (res && res.ok ? "unexpected response from the server" : `server returned ${res.status}`));
+      const retryable = data && typeof data.retryable === "boolean"
+        ? data.retryable
+        : (!!networkError || DRIVE_RETRYABLE_STATUSES.includes(res.status));
+      if (retryable && attempt < DRIVE_MAX_ATTEMPTS) {
+        status.classList.remove("ok", "warn");
+        status.innerHTML = `<span class="btn-inline-spinner"></span>Retrying upload… (attempt ${attempt + 1} of ${DRIVE_MAX_ATTEMPTS})`;
+        await _driveSleep(DRIVE_RETRY_BACKOFF_MS[attempt - 1] + Math.random() * 500);
+        if (epoch !== _resetEpoch) return;
+        continue;
+      }
       status.classList.add("warn");
-      status.innerHTML = `Drive not authorized. <a href="#" id="drive-auth-link">Click here to authorize Google Drive</a> — it will retry automatically once you approve.`;
-      document.getElementById("drive-auth-link").addEventListener("click", (e) => {
-        e.preventDefault();
-        openDriveAuthPopup(data.auth_url);
-      });
-    } else {
-      status.classList.add("warn");
-      status.textContent = "⚠ " + (data.reason || "Upload not configured");
+      status.textContent = "⚠ Upload failed: " + message
+        + (retryable ? ` (tried ${attempt} times)` : "")
+        + ((data && data.detail) ? "" : " — click Upload to try again.");
+      return;
     }
   } catch (e) {
-    status.classList.add("warn");
-    status.textContent = "⚠ Upload failed: " + e.message + " — try again.";
+    // Only a bug in this page's own handling can land here (the fetch failures are handled above).
+    if (epoch === _resetEpoch) {
+      status.classList.remove("ok");
+      status.classList.add("warn");
+      status.textContent = "⚠ Upload failed: " + e.message + " — click Upload to try again.";
+    }
+  } finally {
+    if (epoch === _resetEpoch) {          // after a reset, _clearPerProposalState() already freed the button
+      _driveUploading = false;
+      if (btn) btn.disabled = false;
+    }
   }
 }
 
@@ -7261,12 +7641,15 @@ function openDriveAuthPopup(authUrl) {
     return;
   }
   const status = document.getElementById("drive-status");
+  const epoch = _resetEpoch;
   const startedAt = Date.now();
   const giveUpAfterMs = 3 * 60 * 1000; // stop polling if it's left open unattended
   const poll = setInterval(() => {
-    if (popup.closed) {
+    if (epoch !== _resetEpoch) {
+      clearInterval(poll);               // New Proposal while the popup was open — don't upload the NEW proposal
+    } else if (popup.closed) {
       clearInterval(poll);
-      status.textContent = "Authorized — retrying upload…";
+      if (!_driveUploading) status.textContent = "Authorized — retrying upload…";
       onDriveUpload();
     } else if (Date.now() - startedAt > giveUpAfterMs) {
       clearInterval(poll);

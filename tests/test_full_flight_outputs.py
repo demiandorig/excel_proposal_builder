@@ -475,11 +475,18 @@ def test_ai_prompt_full_flight_keeps_the_json_exemplar_valid_and_the_placeholder
         assert "{{PROPOSAL_LINE}}" in exemplar["internal_email_body"] and "{{PLANNER_SIGNATURE}}" in exemplar["internal_email_body"]
 
 
+def _without_figures_block(prompt: str) -> list[str]:
+    """The prompt minus its AUTHORITATIVE FIGURES section (that block is covered by tests/test_email_totals.py and is
+    expected to read differently per billing period)."""
+    start = prompt.index("## AUTHORITATIVE FIGURES")
+    return (prompt[:start] + prompt[prompt.index("## PRODUCTS IN THIS PROPOSAL"):]).splitlines()
+
+
 def test_ai_prompt_full_flight_only_changes_the_period_sensitive_lines():
     items = _ai_items()
     for tiers in (None, _tier_context(items)):
-        month = ai_enricher._build_prompt(_ai_request(), items, tiers=tiers).splitlines()
-        flat = ai_enricher._build_prompt(_ai_request(), items, tiers=tiers, time_unit="full_flight").splitlines()
+        month = _without_figures_block(ai_enricher._build_prompt(_ai_request(), items, tiers=tiers))
+        flat = _without_figures_block(ai_enricher._build_prompt(_ai_request(), items, tiers=tiers, time_unit="full_flight"))
         changed = [line for line in flat if line not in set(month)]
         allowed = ("- Flight:", "- Total Net Investment:", "  - Display Alpha:", "  - Search Beta:", "  - Independent:",
                    "  - Option B:", "given (no planner name set). The total flight impressions", "- Billing period:")
@@ -510,11 +517,20 @@ def test_ai_prompt_no_longer_prints_a_double_tilde_or_1_months():
     assert "1 months" not in prompt
 
 
-def test_ai_prompt_week_and_quarter_keep_the_original_wording():
-    # Pre-existing behavior, pinned so any change to it is deliberate: only Full Flight has its own period wording.
-    items = _ai_items(months=3)
+def test_ai_prompt_week_and_quarter_get_their_own_period_wording():
+    # Used to be pinned as "identical to month" — which is exactly the bug: a weekly plan was described as
+    # "$2,000/month x 3 months". Weekly / quarterly now read per week / per quarter, and "month" stays as it was.
+    items = _ai_items(months=3, display=2000.0, search=1500.0)
+    request = _ai_request(total_months=3, start_date="2026-10-01", end_date="2026-12-31")
+    for unit, noun, plural in (("week", "week", "weeks"), ("quarter", "quarter", "quarters")):
+        prompt = ai_enricher._build_prompt(request, items, time_unit=unit)
+        assert f"  - Display Alpha: $2,000/{noun} × 3 {plural} = $6,000 total" in prompt
+        assert f"{noun}ly impressions" in prompt and "monthly impressions" not in prompt
+        assert f"- Billing period: this proposal is priced PER {noun.upper()}" in prompt
+        assert f"(3 months, priced as 3 {plural})" in prompt
+        assert "/month" not in "\n".join(line for line in prompt.splitlines() if line.startswith("  - "))
     month = ai_enricher._build_prompt(_ai_request(), items, tiers=_tier_context(items))
-    for unit in ("week", "quarter", None, ""):
+    for unit in (None, "", "month"):
         assert ai_enricher._build_prompt(_ai_request(), items, tiers=_tier_context(items), time_unit=unit) == month
 
 
@@ -705,11 +721,19 @@ def test_the_revision_prompt_carries_the_full_flight_rule_and_nothing_else_chang
     assert "give the flat flight total instead" in flat
     # the rule sits in the instructions, before (never inside) the JSON structure the model must return
     assert flat.index("CRITICAL — BILLING PERIOD") < flat.index("Respond with this exact JSON structure")
-    # every other unit — and the default call — is the original prompt, byte for byte (verified against the pre-feature module)
-    for unit in ("month", "week", "quarter"):
-        assert _revision_prompt(monkeypatch, time_unit=unit) == month
+    # the default call and an explicit "month" are the same prompt, and it carries no billing-period rule
+    assert _revision_prompt(monkeypatch, time_unit="month") == month
     assert "BILLING PERIOD" not in month
-    assert flat.replace(flat[flat.index("CRITICAL — BILLING PERIOD"):flat.index("Respond with this exact JSON structure")], "") == month
+    # weekly / quarterly revisions carry their own per-week / per-quarter rule (never the monthly wording)
+    for unit in ("week", "quarter"):
+        prompt = _revision_prompt(monkeypatch, time_unit=unit)
+        assert f"CRITICAL — BILLING PERIOD: this proposal is priced PER {unit.upper()}" in prompt
+        assert f"give the per-{unit} figure from the AUTHORITATIVE FIGURES instead" in prompt
+    # outside the figures block and the rules (which are unit-specific, and tested in tests/test_email_totals.py) the
+    # full-flight prompt is the month prompt
+    def _skeleton(prompt):
+        return (prompt[:prompt.index("## AUTHORITATIVE FIGURES")] + prompt[prompt.index("## CURRENT INTERNAL EMAIL"):prompt.index("CRITICAL — DOLLAR FIGURES")])
+    assert _skeleton(flat) == _skeleton(month)
 
 
 def test_the_email_prompt_and_the_revision_prompt_share_one_billing_rule(monkeypatch):

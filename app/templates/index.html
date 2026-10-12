@@ -622,7 +622,16 @@ Client name: ...
             <button type="button" class="tier-tab" data-mode="even" id="mb-mode-even-btn">Even across months</button>
             <button type="button" class="tier-tab" data-mode="prorated">Prorated by days</button>
           </div>
-          <span class="tier-switcher-hint">Only affects NEW defaults (checkbox, reset, a newly-added line) — never rewrites a line you've already customized.</span>
+          <!-- MASTER redistribute: applies the selected default to every line (both views). Label/enabled state are
+               kept by _mbRenderApplyControls(); the click is onMbApplyAll(). -->
+          <button type="button" class="btn-secondary mb-apply-all-btn" id="mb-apply-all-btn">↺ Apply even split to all lines</button>
+          <span class="tier-switcher-hint" id="mb-mode-hint">Switching the split sets the default for new lines and per-line resets. Use Apply to redistribute every line you already have — each line's total stays the same.</span>
+          <!-- Raised by flipping the toggle while some line still holds the other split (or custom numbers). -->
+          <div class="mb-mode-notice hidden" id="mb-mode-notice" role="status">
+            <span id="mb-notice-text"></span>
+            <button type="button" class="mb-notice-link" id="mb-notice-apply-btn">Apply to all lines</button>
+            <button type="button" class="mb-notice-dismiss" id="mb-notice-dismiss-btn" aria-label="Dismiss this hint" title="Dismiss">✕</button>
+          </div>
         </div>
         <div class="mb-plan-summary" id="mb-plan-summary">
           <!-- plan-level "total spend by month" bar — rendered by renderMonthlyBreakdown() -->
@@ -698,15 +707,26 @@ Client name: ...
         <p class="lede">Entravision Intelligence searches the web for current platform ad policies — targeting restrictions, common rejection reasons, category requirements — for each product in this mix, grounded in the client context from Steps 02–03. Download the report to keep on hand for launch.</p>
       </div>
 
-      <!-- Which of Entravision's restricted verticals apply to this client. The
-           "Restricted Verticals by Platforms" sheet decides what's allowed on
-           each product; the planner (not the AI) confirms which verticals apply. -->
+      <!-- Where Entravision's platform ad guidelines live: a callout at the very top of the step. -->
+      <div class="rb-guidelines" id="rb-guidelines">
+        <div class="rb-guidelines-text">
+          <strong>Platform ad guidelines</strong>
+          <span>Entravision's platform ad guidelines live in our guidelines repo. Open it to check the rules for each product in this mix alongside this report.</span>
+        </div>
+        <a class="btn-secondary rb-guidelines-link" id="rb-guidelines-link" href="https://entravision-digital-ad-guidelines.netlify.app/" target="_blank" rel="noopener noreferrer">Open the guidelines ↗</a>
+      </div>
+
+      <!-- Which restricted category applies to this client — asked FIRST: picking one (or "None") starts the
+           check, so no AI run is spent before it is known. The "Restricted Verticals by Platforms" sheet decides
+           what's allowed on each product; the planner (not the AI) confirms which category applies. The chips are
+           built from the sheet's own category list (see _renderRvChips), "None" last. -->
       <div class="restricted-verticals hidden" id="restricted-verticals">
         <div class="rv-head">
-          <strong>Restricted verticals for this client</strong>
-          <small>Entravision's "Restricted Verticals by Platforms" sheet decides what's allowed on each product — tick any that apply.</small>
+          <strong id="rv-prompt">Does this client fall in a restricted category?</strong>
+          <small>Pick one to run the check. Entravision's "Restricted Verticals by Platforms" sheet decides what's allowed on each product.</small>
         </div>
-        <div class="rv-chips" id="rv-chips"></div>
+        <div class="rv-chips" id="rv-chips" role="radiogroup" aria-labelledby="rv-prompt"></div>
+        <p class="rv-suggest hidden" id="rv-suggest"></p>
         <p class="rv-note hidden" id="rv-note"></p>
       </div>
 
@@ -759,8 +779,7 @@ Client name: ...
         <label><input type="checkbox" data-tab="wsections" /> Proposal A (wsections)</label>
         <label><input type="checkbox" data-tab="gross" /> Proposal A (Gross)</label>
         <label><input type="checkbox" data-tab="avails_only" /> Avails-Only</label>
-        <label><input type="checkbox" data-tab="dooh_summary" /> DOOH Summary</label>
-        <label><input type="checkbox" data-tab="dooh_screenlist" /> DOOH Screenlist</label>
+        <label><input type="checkbox" data-tab="dooh" /> DOOH Deliverables <small>(DOOH Summary pivot + DOOH Screenlist)</small></label>
       </fieldset>
 
       <div class="panel-actions">
@@ -795,6 +814,16 @@ Client name: ...
         <div id="ai-content" class="ai-content hidden">
 
           <div id="enrichment-search-note" class="search-note hidden"></div>
+
+          <!-- The plan was edited after these emails were written (shown by app.js's _refreshEmailStaleNote) -->
+          <div id="email-stale-note" class="search-note email-figures-note hidden">
+            ⚠ The plan has changed since these emails were written, so the dollar figures in them (and in the files above) may be out of date.
+            Update the emails' figures here, or click Generate again to rebuild the files too.
+            <button class="btn-secondary" id="email-refresh-figures-btn" type="button">↺ Update the figures in the emails</button>
+          </div>
+
+          <!-- Dollar amounts the automatic check couldn't match to the plan's figures (filled in by app.js) -->
+          <div id="email-figures-warning" class="search-note email-figures-note hidden"></div>
 
           <div class="ai-section">
             <div class="ai-section-head">

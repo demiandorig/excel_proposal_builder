@@ -1,7 +1,8 @@
 # Entravision Proposal Builder
 
 Web app that turns a Notion request paste-in into a fully-built AdFlo
-proposal workbook (Net + With-Sections + Gross + DOOH + Avails tabs).
+proposal workbook (Net + With-Sections + Gross + Avails tabs, plus the DOOH Deliverables
+when a DOOH product is in the plan).
 
 Stage 2 deliverable of the TapClicks / AdFlo proposal pipeline. The
 catalog, pricing rules, and Excel template are shared with the Stage 1
@@ -50,6 +51,7 @@ webapp/
 │   ├── main.py                    # FastAPI app + JSON endpoints
 │   ├── services/
 │   │   ├── notion_parser.py       # text → ProposalRequest dataclass
+│   │   ├── dooh_pivot.py          # DOOH Deliverables: Screenlist table columns + the Summary pivot table injector
 │   │   ├── proposal_generator.py  # ProposalRequest + line items → xlsx
 │   │   ├── recommender.py         # rule-based product mix suggester
 │   │   └── drive_uploader.py      # optional Google Drive sink
@@ -97,7 +99,7 @@ The Fillout/Notion paste has 5 request types — Renewal, Proposal to Sign,
 Proposal with Avails, Full Presentation, Avails / Estimates Only — and
 the parser routes each to the right set of tabs:
 
-| Request type            | Net | wsections | Gross | Avails-Only | DOOH tabs |
+| Request type            | Net | wsections | Gross | Avails-Only | DOOH Deliverables |
 |-------------------------|:---:|:---------:|:-----:|:-----------:|:---------:|
 | Renewal Proposal        |  ✓  |     ✓     |   ✓   |             |  if DOOH  |
 | Proposal page to sign   |  ✓  |     ✓     |   ✓   |             |  if DOOH  |
@@ -105,7 +107,25 @@ the parser routes each to the right set of tabs:
 | Full Presentation       |  ✓  |     ✓     |   ✓   |             |  if DOOH  |
 | Avails / Estimates Only |     |           |       |      ✓      |  if DOOH  |
 
-DOOH is detected from the `Products selected` line.
+DOOH is detected from the products in the plan: a product whose family is DOOH (today
+"Digital Out of Home") switches **DOOH Deliverables** on; Step 08 can override it.
+
+### DOOH Deliverables
+
+One export choice builds two sheets, always together:
+
+- **DOOH Screenlist** — an Excel table (`DOOHScreenlist`) with the platform export's 40 columns in a fixed
+  order plus two calculated columns, `max_avails` (`four_week_impressions * 0.4`) and `max_spend`
+  (`(four_week_impressions * 0.4) * cpm / 100`), and one sample row. The planner pastes the real inventory
+  over the sample row; the table (and its calculated columns) grows with it.
+- **DOOH Summary** — a real Excel pivot table over that table: Venue Type > Network with Number of Screens,
+  Max. Avails and Max. Spend. It refreshes when the workbook opens (or Data > Refresh All).
+
+openpyxl cannot write pivot tables, so `app/services/dooh_pivot.py` attaches the pivot to the saved file
+(`add_dooh_pivot`); it has to be the last thing that touches the workbook. The `/100` in `max_spend` is the
+constant `DOOH_SPEND_DIVISOR` in that module (CPM is normally per thousand — confirm before changing it).
+The old `dooh_summary` / `dooh_screenlist` tab keys are still accepted (either one means both sheets); the
+canonical key is `dooh`.
 
 ---
 
@@ -136,6 +156,12 @@ Folder layout in Drive becomes:
 ```
 
 Files auto-convert to native Google Sheets on upload.
+
+**Reliability.** The generated `.xlsx` is also kept in the `proposal_files` table (see `schema.sql`), because on
+Autoscale the file written to `data/proposals/` lives on one instance's disk only and the upload can be served by
+another. Every Google call retries transient failures (429 / 5xx / timeouts / resets) with bounded backoff; failures
+come back as JSON `{detail, retryable, code}` (503 retryable, 404/409/410 regenerate, 424 an admin must fix Drive
+access or quota, 500 with a `ref` that is also in the server log) and the page retries retryable ones twice.
 
 ---
 

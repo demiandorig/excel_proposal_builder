@@ -6,8 +6,13 @@ Generates 6 worksheets:
   - Proposal A (Gross)     (Net + Gross, used when has_agency=True)
   - Proposal A (wsections) (sectionable variant for complex proposals)
   - Avails-Only            (potential reach without a billable plan)
-  - DOOH Summary           (DOOH-specific rollup)
-  - DOOH Screenlist        (DOOH-specific screen-level detail)
+  - DOOH Summary           ("DOOH Deliverables", always built together with the
+                            Screenlist: a pre-made PIVOT TABLE over the Screenlist
+                            table — Venue Type > Network, screens / max avails /
+                            max spend; the pivot parts are injected after the save,
+                            see dooh_pivot.add_dooh_pivot)
+  - DOOH Screenlist        (the other half of "DOOH Deliverables": the 40-column
+                            inventory table the planner pastes into, one sample row)
   - Process FAQs           (resource links)
 """
 
@@ -29,6 +34,7 @@ from openpyxl.comments import Comment
 from app.catalog import Product, effective_catalog, families, by_family
 from app.services.notion_parser import compose_target_fallback
 from app.services import monthly_allocation as _monthly_allocation
+from app.services import dooh_pivot as _dooh
 from app.services.text_utils import strip_variant_pricing
 
 # Try to import Image support for logo embedding (optional)
@@ -1860,109 +1866,139 @@ def build_avails_only(wb: Workbook, products: list, *,
     return ws
 
 
+DOOH_SUMMARY_INSTRUCTION = (
+    "Paste the inventory export into the DOOH Screenlist tab, then Data > Refresh All. "
+    "Minimum of 20 screens required."
+)
+
+# Column number formats of the DOOH Screenlist (everything not listed stays General).
+_DOOH_COUNT_FORMAT = "#,##0"
+_DOOH_MONEY_FORMAT = '"$"#,##0.00'
+_DOOH_COLUMN_FORMATS = {
+    "cpm": "#,##0.00",
+    "latitude": "0.000000", "longitude": "0.000000",
+    "four_week_impressions": _DOOH_COUNT_FORMAT, "bidstream_impressions": _DOOH_COUNT_FORMAT,
+    "bidstream_inferred_impressions": _DOOH_COUNT_FORMAT,
+    "impression_multiplier": "0.0000",
+    _dooh.MAX_AVAILS_COLUMN: _DOOH_COUNT_FORMAT,
+    _dooh.MAX_SPEND_COLUMN: _DOOH_MONEY_FORMAT,
+}
+# Columns whose sample value is short but whose real values are not (a column is otherwise sized from the header and
+# the sample cell): addresses, venue names and URLs are the long ones in a real export.
+_DOOH_COLUMN_MIN_WIDTH = {"address": 34, "venue_type": 28, "venue_name": 26, "asset_image_url": 30, "county": 20,
+                          "dma": 16, "adunit_id": 38, "adunit_name": 26, "network": 16, "publisher": 14}
+
+
+def _dooh_column_width(name: str, sample) -> float:
+    shown = f"{sample:,}" if isinstance(sample, (int, float)) and not isinstance(sample, bool) else str(sample)
+    wanted = max(len(name) * 1.15 + 4,            # bold header text + the filter button
+                 min(len(shown), 40) + 3)         # the sample's own text, capped (an image URL is not a column of its own)
+    return round(max(wanted, _DOOH_COLUMN_MIN_WIDTH.get(name, 0)), 1)
+
+
 def build_dooh_summary(wb: Workbook, client_name: str = "") -> Worksheet:
-    """DOOH Summary — clean header + placeholder pivot table referencing the Screenlist tab."""
-    ws = wb.create_sheet("DOOH Summary")
-    ws.sheet_view.showGridLines = False  # clean white margins outside the boxed tables
+    """DOOH Summary — a clean title, one instruction line and the pre-made pivot table over the Screenlist.
 
-    widths = {"A": 1.5, "B": 32, "C": 24, "D": 14, "E": 22, "F": 22}
-    _apply_col_widths(ws, widths)
+    No proposal/meta header (no Entravision contact block, no client address) and no CPM assumption: the CPM lives
+    per row on the Screenlist. The pivot itself cannot be written by openpyxl; this function writes the CELLS a pivot
+    with the one sample row renders to (so the sheet is right in a viewer that never refreshes it — Protected View, a
+    preview pane), and dooh_pivot.add_dooh_pivot() attaches the real pivot table to them after the workbook is saved.
+    """
+    ws = wb.create_sheet(_dooh.DOOH_SUMMARY_SHEET)
+    ws.sheet_view.showGridLines = False  # clean white margins around the pivot
+    # One generous row height for the whole sheet, so the pivot's rows are evenly spaced however many it grows to.
+    ws.sheet_format.defaultRowHeight = _dooh.SUMMARY_ROW_HEIGHT
+    ws.sheet_format.customHeight = True
 
-    _write_meta_block(ws, f"DOOH Summary{' — ' + client_name if client_name else ''}")
+    _apply_col_widths(ws, {"A": 2.5, **dict(zip("BCDEF", _dooh.SUMMARY_COLUMN_WIDTHS))})
+    for r in range(_dooh.PIVOT_FIRST_ROW, _dooh.PIVOT_FIRST_ROW + _dooh.SUMMARY_PRESIZED_ROWS):
+        # Excel autofits a row it renders pivot lines into; a set height keeps them evenly spaced as the pivot grows.
+        ws.row_dimensions[r].height = _dooh.SUMMARY_ROW_HEIGHT
 
-    ws["B4"] = "DOOH Screen Summary"
-    ws["B4"].font = BODY_BOLD
+    # Title bar across the pivot's width (the same purple bar the proposal sheets carry, minus the contact block).
+    ws.row_dimensions[1].height = 10
+    ws.row_dimensions[2].height = 36
+    for col in "BCDEF":
+        ws[f"{col}2"].fill = TITLE_FILL
+    ws["B2"] = f"DOOH Summary{' — ' + client_name if client_name else ''}"
+    ws["B2"].font = TITLE_FONT
+    ws["B2"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
 
-    ws["B6"] = "Screens are sourced from the DOOH Screenlist tab."
-    ws["B6"].font = NOTE_FONT
+    ws.row_dimensions[3].height = 8
+    ws["B4"] = DOOH_SUMMARY_INSTRUCTION
+    ws["B4"].font = NOTE_FONT
+    ws["B4"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    ws.merge_cells("B4:F4")
+    ws.row_dimensions[4].height = 20
+    ws.row_dimensions[5].height = 10
 
-    ws["B7"] = "Minimum of 20 screens required."
-    ws["B7"].font = BODY_BOLD
-
-    # DOOH CPM assumption (planner input)
-    ws["E9"] = "DOOH CPM Assumption:"
-    ws["E9"].font = BODY_BOLD
-    ws["E9"].alignment = RIGHT
-    ws["F9"] = 25.0
-    _format_money_cell(ws["F9"], blue_input=True)
-
-    _set_header(ws, 11, [
-        ("B", "Venue Type"),
-        ("C", "City"),
-        ("D", "# Screens"),
-        ("E", "Est. Monthly Max. Avails"),
-        ("F", "Est. Monthly Max. Spend"),
-    ])
-
-    # Two placeholder rows (planner replaces with pivot data from Screenlist)
-    for r in (12, 13):
-        ws[f"B{r}"] = "—"
-        ws[f"C{r}"] = "—"
-        ws[f"D{r}"] = 0
-        ws[f"E{r}"] = 0
-        ws[f"F{r}"] = f"=IFERROR(E{r}*F$9/1000,0)"
-        for col in ("B", "C", "D", "E", "F"):
-            ws[f"{col}{r}"].border = THIN_BORDER
-        _format_imps_cell(ws[f"D{r}"])
-        _format_imps_cell(ws[f"E{r}"])
-        _format_money_cell(ws[f"F{r}"])
-
-    # Grand total
-    gt_row = 15
-    ws[f"B{gt_row}"] = "Grand Total"
-    ws[f"B{gt_row}"].font = TOTAL_FONT
-    ws[f"B{gt_row}"].fill = TOTAL_FILL
-    ws[f"D{gt_row}"] = "=SUM(D12:D14)"
-    ws[f"E{gt_row}"] = "=SUM(E12:E14)"
-    ws[f"F{gt_row}"] = "=SUM(F12:F14)"
-    for col in ("D", "E", "F"):
-        ws[f"{col}{gt_row}"].fill = TOTAL_FILL
-        ws[f"{col}{gt_row}"].font = TOTAL_FONT
-    _format_imps_cell(ws[f"D{gt_row}"])
-    _format_imps_cell(ws[f"E{gt_row}"])
-    _format_money_cell(ws[f"F{gt_row}"])
-
-    ws[f"B{gt_row + 2}"] = (
-        "Paste inventory export from TTD/DOOH platform into the DOOH Screenlist tab. "
-        "Update rows 12–14 above with rolled-up venue counts and avails."
-    )
-    ws[f"B{gt_row + 2}"].font = NOTE_FONT
-    ws.merge_cells(f"B{gt_row + 2}:F{gt_row + 2}")
-
+    # The pivot's own cells (what Excel shows once it has rendered the sample row). Values only, plus the number
+    # formats: the look comes from the pivot style once Excel renders the pivot, and any direct fill/border left
+    # behind here would stay put under the pivot when it grows or shrinks.
+    value_formats = {2: _DOOH_COUNT_FORMAT, 3: _DOOH_COUNT_FORMAT, 4: _DOOH_MONEY_FORMAT}   # by position: screens, avails, spend
+    for r, (kind, values) in enumerate(_dooh.pivot_preview_rows(), start=_dooh.PIVOT_FIRST_ROW):
+        for pos, value in enumerate(values):
+            if value is None:
+                continue
+            cell = ws.cell(row=r, column=_dooh.PIVOT_FIRST_COL + pos, value=value)
+            if kind != "header":
+                cell.number_format = value_formats.get(pos, "General")
     return ws
 
 
 def build_dooh_screenlist(wb: Workbook) -> Worksheet:
-    """DOOH Screenlist — pasted in by Ad Ops from the inventory platform."""
-    ws = wb.create_sheet("DOOH Screenlist")
-    ws.sheet_view.showGridLines = False  # clean white margins outside the boxed tables
-    headers = [
-        "id", "name", "asset_name", "publisher_code", "status", "integration_type",
-        "publisher", "network", "media_type", "venue_type", "venue_name", "city",
-        "postal_code", "county", "state", "dma", "country", "latitude", "longitude",
-        "address", "four_week_impressions", "impression_multiplier", "bidstream_impressions",
-        "screen_count", "min_duration", "max_duration", "supports_video", "supports_banner",
-        "supports_audio", "slot_dimensions", "preferred_ad_format", "ad_formats",
-        "restrictions", "languages", "asset_image_url", "programmatic_platform_key",
-        "programmatic_platform_industry_key",
-    ]
-    for i, h in enumerate(headers, start=1):
-        c = ws.cell(row=1, column=i)
-        c.value = h
-        c.font = H_HEADER
-        c.fill = H_HEADER_FILL
-        c.alignment = CENTER
-        c.border = HEADER_BORDER
-    for i in range(1, len(headers) + 1):
-        ws.column_dimensions[get_column_letter(i)].width = 18
-    ws.row_dimensions[1].height = 26
+    """DOOH Screenlist — the inventory table the planner pastes the platform export into.
+
+    Row 1 is the fixed 40-column header (dooh_pivot.DOOH_SCREENLIST_COLUMNS) plus two calculated helper columns
+    (max_avails, max_spend) to their right; row 2 is one sample screen. Everything is ONE Excel table named
+    DOOHScreenlist, so rows pasted or added below extend the table and fill the helper columns down by themselves,
+    and the DOOH Summary pivot (which reads the table) picks them up on refresh."""
+    from openpyxl.worksheet.filters import AutoFilter
+    from openpyxl.worksheet.table import Table, TableColumn, TableFormula, TableStyleInfo
+
+    ws = wb.create_sheet(_dooh.DOOH_SCREENLIST_SHEET)
+    columns = _dooh.DOOH_ALL_COLUMNS
+    n_inventory = len(_dooh.DOOH_SCREENLIST_COLUMNS)
+    last_col = get_column_letter(len(columns))
+    sample = dict(zip(_dooh.DOOH_SCREENLIST_COLUMNS, _dooh.DOOH_SAMPLE_ROW))
+
+    for i, name in enumerate(columns, start=1):
+        header = ws.cell(row=1, column=i, value=name)
+        header.font = H_HEADER
+        # The two calculated columns get the brand colour so they read as "don't paste over these".
+        header.fill = H_HEADER_FILL if i <= n_inventory else HEADER_PURPLE_FILL
+        header.alignment = CENTER
+        header.border = HEADER_BORDER
+
+        body = ws.cell(row=2, column=i)
+        if i <= n_inventory:
+            value = sample[name]
+            if value != "":                      # "" = an empty cell, not an empty string
+                body.value = value
+        else:
+            body.value = "=" + _dooh.table_formula(name)
+        body.font = BODY_FONT
+        body.alignment = Alignment(horizontal="center" if isinstance(body.value, bool) else None, vertical="center")
+        body.number_format = _DOOH_COLUMN_FORMATS.get(name, "General")
+        column = ws.column_dimensions[get_column_letter(i)]
+        column.width = _dooh_column_width(
+            name, sample.get(name, _dooh.SAMPLE_MAX_SPEND if name == _dooh.MAX_SPEND_COLUMN else _dooh.SAMPLE_MAX_AVAILS))
+        # The column's own format too, so a row typed or pasted below the table gets the same number format and font.
+        column.number_format = body.number_format
+        column.font = BODY_FONT
+    ws.row_dimensions[1].height = 28
+    ws.row_dimensions[2].height = 18
     ws.freeze_panes = "A2"
 
-    ws["B3"] = (
-        "Paste the inventory export from TTD / your DOOH platform below row 1. "
-        "The Summary tab will roll up by Venue Type + City."
+    ref = f"A1:{last_col}2"
+    table = Table(
+        displayName=_dooh.DOOH_TABLE_NAME, name=_dooh.DOOH_TABLE_NAME, ref=ref, autoFilter=AutoFilter(ref=ref),
+        tableColumns=[TableColumn(id=i, name=name) for i, name in enumerate(columns, start=1)],
+        tableStyleInfo=TableStyleInfo(name="TableStyleLight1", showRowStripes=True),
     )
-    ws["B3"].font = NOTE_FONT
+    for col in table.tableColumns[n_inventory:]:
+        col.calculatedColumnFormula = TableFormula(attr_text=_dooh.table_formula(col.name))
+    ws.add_table(table)
 
     return ws
 
@@ -2374,6 +2410,7 @@ def build_workbook(output_path: Path, families_to_include=None) -> None:
     build_process_faqs(wb)
 
     wb.save(output_path)
+    _dooh.add_dooh_pivot(output_path)     # the DOOH Summary's pivot table (openpyxl cannot write one) — after the last save
 
 
 if __name__ == "__main__":

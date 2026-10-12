@@ -37,7 +37,7 @@ except ImportError:
 
 import re
 
-from app.services import llm_utils, restrictions
+from app.services import llm_utils, restrictions, source_rules
 from app.services.text_utils import normalize_newlines as _normalize_newlines, split_sentences
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 
@@ -206,6 +206,10 @@ page), or a second risk with its own source on the same product. Do not
 let every risk across every product cite the same single source — that
 means you searched once and stopped; go back and search again per platform.
 
+{source_rules.NO_WIKIPEDIA_RULE} For a roadblock the primary source is the
+platform's or network's own published policy page (or the regulator's rule
+text) — never a Wikipedia summary of it.
+
 Respond ONLY with valid JSON — no markdown fences, no preamble:
 
 {{
@@ -223,7 +227,7 @@ Respond ONLY with valid JSON — no markdown fences, no preamble:
 }}
 
 RULES:
-- Every "source" must name a real, specific policy page/document, with a year — not a vague "platform guidelines"
+- Every "source" must name a real, specific policy page/document, with a year — not a vague "platform guidelines", and never Wikipedia (cite the platform's own page it points to)
 - Across ALL products combined, use at least 5 distinct sources — do not cite the same source for every product
 - Search each distinct platform separately; don't rely on one search result to cover multiple products
 - If you cannot find a specific policy relevant to this client's category, say so explicitly in that risk's detail rather than fabricating one
@@ -532,6 +536,25 @@ def _apply_matrix(result: dict, matrix: dict, line_items) -> None:
     result["removed_claims"] = removed_claims
 
 
+_NO_PRIMARY_SOURCE = "No primary source found — check the platform's own policy page"
+
+
+def _drop_wikipedia_support(risk: dict) -> None:
+    """One risk without any Wikipedia citation (see source_rules). A source that was Wikipedia alone is replaced by a
+    plain "no primary source found" note rather than left blank, so the planner can see the risk is unverified; the
+    risk text itself loses any Wikipedia mention (a figure that rested on it goes with its sentence)."""
+    src = risk.get("source")
+    cite_ok = False
+    if isinstance(src, str) and source_rules.mentions_wikipedia(src):
+        cleaned = source_rules.strip_wikipedia_source(src)
+        risk["source"] = cleaned if cleaned.strip() else _NO_PRIMARY_SOURCE
+        cite_ok = bool(cleaned.strip())
+    elif isinstance(src, str) and src.strip():
+        cite_ok = True
+    risk["issue"] = source_rules.strip_wikipedia(risk.get("issue") or "")
+    risk["detail"] = source_rules.strip_wikipedia(risk.get("detail") or "", supported_elsewhere=cite_ok)
+
+
 def _parse(raw: str, used_web_search: bool, client=None, matrix: Optional[dict] = None, line_items=None) -> dict:
     try:
         data = llm_utils.parse_json_object(raw, expect_any=_ROADBLOCKS_KEYS, client=client)
@@ -542,16 +565,18 @@ def _parse(raw: str, used_web_search: bool, client=None, matrix: Optional[dict] 
     for r in roadblocks:
         r.setdefault("product_name", "")
         r["risk_level"] = _level(r.get("risk_level"))
-        r["recommended_mitigation"] = _normalize_newlines(str(r.get("recommended_mitigation") or ""))
+        r["recommended_mitigation"] = source_rules.strip_wikipedia(
+            _normalize_newlines(str(r.get("recommended_mitigation") or "")))
         risks = [risk for risk in (r.get("risks") or []) if isinstance(risk, dict)]
         for risk in risks:
             risk.setdefault("issue", "")
             risk["detail"] = _normalize_newlines(str(risk.get("detail") or ""))
             risk.setdefault("source", "")
+            _drop_wikipedia_support(risk)
         r["risks"] = risks
 
     result = {
-        "overall_summary": _normalize_newlines(data.get("overall_summary", "")),
+        "overall_summary": source_rules.strip_wikipedia(_normalize_newlines(data.get("overall_summary", ""))),
         "product_roadblocks": roadblocks,
         "categories": [],
         "used_web_search": used_web_search,

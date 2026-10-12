@@ -63,6 +63,7 @@ from app.services.notion_parser import (
     ProductSpecifics,
     parse_notion,
     classify_output_tabs,
+    normalize_tab_keys,
 )
 from app.services.proposal_generator import LineItem, AddonItem, generate_proposal, normalize_full_flight_lines
 from app.services.recommender import recommend_line_items
@@ -72,7 +73,9 @@ from app.market_config import (
     T1_CCS_KEY, get_t1_ccs, set_t1_ccs, T1_SPEND_THRESHOLD,
 )
 from app.services import drive_uploader
+from app.services import proposal_files as proposal_files_svc
 from app.services import ai_enricher
+from app.services import email_totals as email_totals_svc
 from app.services import docx_builder
 from app.services import pptx_builder
 from app.services import strategy_brief as strategy_brief_svc
@@ -326,7 +329,7 @@ def _build_reopen_state(
         "tiers": [t.model_dump() for t in tiers] if tiers else None,
         "strategy_brief": strategy_brief,
         "roadblocks": roadblocks,
-        "force_tabs": force_tabs,
+        "force_tabs": normalize_tab_keys(force_tabs) if force_tabs else force_tabs,   # dooh_summary/dooh_screenlist -> dooh
         "addons": [a.model_dump() for a in (addons or [])],
         "raw_notion_text": raw_notion_text,
         "enrichment": enrichment,
@@ -799,7 +802,7 @@ class RoadblocksRequest(BaseModel):
 
 class DriveUploadRequest(BaseModel):
     proposal_id: str
-    seller_email: str
+    seller_email: str = ""
 
 
 class RepromptEmailsRequest(BaseModel):
@@ -816,6 +819,12 @@ class RepromptEmailsRequest(BaseModel):
     # own docstring for the guardrail that enforces this server-side.
     scope: str = "both"
     time_unit: str = "month"
+    # The plan AS IT IS NOW, so the dollar figures in the revision are worked out from the current state and not from
+    # whatever was true when the emails were first written (the SPA sends what /api/generate would). `tiers` wins over
+    # `line_items`, which on a multi-option proposal only holds the ACTIVE option's lines.
+    tiers: Optional[list[TierModel]] = None
+    addons: list[AddonItemModel] = []
+    monthly_distribution_mode: str = "even"
 
     @field_validator("time_unit", mode="before")
     @classmethod
@@ -1248,6 +1257,55 @@ def _validate_monthly_breakdown(
     return balance_errors, minimum_warnings
 
 
+def _email_figures_for_tiers(req: ProposalRequest, tiers: list[dict], addons, time_unit: str,
+                             distribution_mode: str = "even"):
+    """The deterministic dollar figures the emails are written from — per option: per-period amounts in the plan's own
+    unit (or the one flight total in Full Flight), media total, add-ons and the grand total, net and gross. Worked out
+    from the same normalized tiers the workbook is built from, so they equal the Excel (see
+    app/services/email_totals.py). Optional extra: any failure is logged and returns None (the prompts then derive
+    the figures themselves) — it must never fail a Generate or a revision."""
+    try:
+        return email_totals_svc.compute_email_totals(
+            req, tiers, addons, time_unit, distribution_mode,
+            known_product=lambda name: by_name(name) is not None)
+    except Exception:
+        logging.getLogger(__name__).exception("email figures failed; the emails use the legacy figures")
+        return None
+
+
+def _email_tiers_from_models(tier_models, legacy_line_items, time_unit: str) -> list[dict]:
+    """The tiers list /api/generate builds, from the request models of an email revision: the CURRENT options (or the
+    legacy flat line list as one option), normalized the way Generate normalizes them — Full Flight folded into one
+    period, and a customised Step 06 breakdown deciding each line's real total."""
+    full_flight = monthly_allocation.is_full_flight(time_unit)
+
+    def convert(models) -> list[LineItem]:
+        return [
+            LineItem(
+                id=li.id, product_name=li.product_name, monthly_budget=li.monthly_budget,
+                # see generate(): a Full Flight line whose `months` was never sent is ONE period, not the model default 3
+                months=li.months if (not full_flight or "months" in li.model_fields_set) else 1,
+                is_added_value=li.is_added_value, added_value_pct=li.added_value_pct,
+                monthly_allocations=li.monthly_allocations,
+            )
+            for li in models
+        ]
+
+    if tier_models:
+        tiers = [{"label": t.label, "name": t.name, "start_date": t.start_date, "end_date": t.end_date,
+                  "line_items": convert(t.line_items), "period_merge_groups": t.period_merge_groups}
+                 for t in tier_models]
+    else:
+        tiers = [{"label": "A", "name": None, "start_date": None, "end_date": None,
+                  "line_items": convert(legacy_line_items), "period_merge_groups": None}]
+    if full_flight:
+        for t in tiers:
+            normalize_full_flight_lines(t["line_items"])
+            t["period_merge_groups"] = None
+    _sync_monthly_budgets_to_allocations(tiers)
+    return tiers
+
+
 @app.post("/api/generate")
 async def generate(body: GenerateRequest, request: Request) -> dict:
     """
@@ -1369,10 +1427,14 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     tier_context = [
         {"label": t["label"], "name": t.get("name"), "line_items": t["line_items"]} for t in tiers
     ] if multi_tier else None
+    # Every dollar figure the emails may state, computed here from the FULL option list (not the product-deduplicated
+    # union above, which would drop a second line for the same product), the add-ons and any customised per-period
+    # amounts — the same normalized state the workbook below is built from.
+    email_figures = _email_figures_for_tiers(req, tiers, body.addons, body.time_unit, body.monthly_distribution_mode)
     enrichment = await asyncio.to_thread(
         ai_enricher.enrich_proposal,
         req, union_line_items, short_id, strategy_brief=body.strategy_brief, tiers=tier_context,
-        time_unit=body.time_unit,
+        time_unit=body.time_unit, totals=email_figures,
     )
     # A planner-set name override wins over whatever the AI itself guessed
     # — used verbatim (not re-run through the AI) so it can't drift from
@@ -1564,6 +1626,9 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         "has_email_doc": email_doc_filename is not None,
         "used_web_search": enrichment.used_web_search,
         "error": enrichment.error,
+        # dollar amounts in the emails that match none of the plan's computed figures even after the automatic
+        # correction pass — shown to the planner rather than shipped silently
+        "figure_warnings": list(getattr(enrichment, "figure_warnings", None) or []),
     }
 
     # 11. Store metadata in PostgreSQL. The generated files remain on disk;
@@ -1613,12 +1678,20 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         reopen_state=reopen_state,
     )
 
+    # Keep a shared copy of the workbook. The file above lives on THIS Autoscale instance's local disk only, and
+    # the Google Drive upload (a separate request) may be served by an instance that never saw it - see
+    # app/services/proposal_files.py. Fail-safe: a database hiccup here must never fail Generate.
+    await asyncio.to_thread(proposal_files_svc.save_file, proposal_id, "xlsx", output_path)
+
     return {
         "proposal_id": proposal_id,
         "filename": filename,
         "proposal_title": proposal_title,
         "summary": summary,
         "enrichment": enrichment_out,
+        # The per-option dollar figures the emails were written from (equal to the Excel's totals) — the SPA's Gamma
+        # outline uses them for its option totals, so it can't disagree with the workbook either.
+        "email_figures": email_figures.to_dict() if email_figures is not None else None,
         "has_pptx_net": pptx_net_filename is not None,
         "has_pptx_gross": pptx_gross_filename is not None,
         # Below-minimum-monthly-spend flags — never blocks generation (the
@@ -1710,6 +1783,9 @@ async def reopen_proposal(proposal_id: str) -> dict:
     if not reopen_state:
         raise HTTPException(status_code=410, detail="This proposal was generated before reopening was supported.")
     reopen_state = _with_current_product_names(reopen_state)
+    if isinstance(reopen_state.get("force_tabs"), dict):
+        # A draft saved before "DOOH Deliverables" carries the two old DOOH tab keys; the wizard only knows "dooh".
+        reopen_state["force_tabs"] = normalize_tab_keys(reopen_state["force_tabs"])
     return {
         "proposal_title": meta.get("proposal_title", ""),
         "status": meta.get("status") or "generated",
@@ -1824,13 +1900,27 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
         for li in body.line_items
     ]
 
+    # Re-price the plan from the state the SPA sends NOW (every option, add-on and customised per-period amount) —
+    # never from whatever the emails were first written against — so a revision also refreshes figures the planner has
+    # since changed. A client that only sends the legacy flat `line_items` still gets one option's figures.
+    try:
+        email_tiers = _email_tiers_from_models(body.tiers, body.line_items, body.time_unit)
+    except Exception:
+        logging.getLogger(__name__).exception("couldn't rebuild the plan for the email revision; using the legacy figures")
+        email_tiers = None
+    email_figures = (
+        _email_figures_for_tiers(req, email_tiers, body.addons, body.time_unit, body.monthly_distribution_mode)
+        if email_tiers is not None else None)
+
     result = await asyncio.to_thread(
         ai_enricher.reprompt_emails,
         req, line_items, body.campaign_name,
         body.current_internal_subject, body.current_internal_body,
         body.current_client_subject, body.current_client_body,
-        body.reprompt, scope=body.scope, time_unit=body.time_unit,
+        body.reprompt, scope=body.scope, time_unit=body.time_unit, totals=email_figures,
     )
+    if email_figures is not None:
+        result = {**result, "email_figures": email_figures.to_dict()}
 
     # scope="internal" guarantees client_email_body is unchanged (see the
     # guardrail in ai_enricher.reprompt_emails()) — skip rebuilding the
@@ -1978,37 +2068,109 @@ async def download_pptx_gross(proposal_id: str) -> FileResponse:
     return FileResponse(path=str(pptx_path), filename=pptx_filename, media_type=_PPTX_MEDIA_TYPE)
 
 
+def _drive_upload_blocking(proposal_id: str, seller_email: str, redirect_uri: str) -> dict:
+    """Everything /api/drive/upload does that waits on the database or Google (several sequential network calls,
+    seconds in total). Runs in a worker thread - done inline in the async handler it froze the whole instance's
+    event loop, stalling every other planner's request for as long as Google took. Raises drive_uploader.DriveError
+    for anything the caller should translate into a status code."""
+    DriveError = drive_uploader.DriveError
+    with drive_uploader.upload_slot(proposal_id):
+        meta = drive_uploader.call_with_retries(lambda: _get_proposal_metadata(proposal_id), "load proposal")
+        if meta is None:
+            raise DriveError("That proposal wasn't found. Generate it again, then upload.",
+                             status_code=404, retryable=False, code="proposal_not_found")
+        filename = meta.get("filename")
+        if not filename or (meta.get("status") or "generated") == "draft":
+            # A saved draft has no workbook yet - this used to be a KeyError('path') and a bare 500.
+            raise DriveError("This proposal hasn't been generated yet - click Generate Proposal first.",
+                             status_code=409, retryable=False, code="not_generated")
+        path = PROPOSALS_DIR / filename
+        # The shared copy first: the local file only exists on the instance that generated it (and a same-named
+        # local file there can belong to an earlier proposal). The local disk is the fallback for proposals
+        # generated before the shared copy existed.
+        content = drive_uploader.call_with_retries(
+            lambda: proposal_files_svc.load_bytes(proposal_id, "xlsx"), "load stored workbook"
+        )
+        if content is None:
+            try:
+                content = path.read_bytes()
+            except FileNotFoundError:
+                logging.getLogger(__name__).warning(
+                    "Drive upload: workbook for proposal %s is on no disk and not in the database", proposal_id
+                )
+                raise DriveError(
+                    "This proposal's .xlsx is no longer on the server (it was created on a server instance that "
+                    "has since restarted). Click Generate Proposal again, then upload.",
+                    status_code=410, retryable=False, code="file_unavailable",
+                ) from None
+        try:
+            result = drive_uploader.upload_proposal(
+                local_path=path,
+                seller_email=seller_email or meta.get("seller_email") or "",
+                as_google_sheet=True,
+                redirect_uri=redirect_uri,
+                content=content,
+                proposal_id=proposal_id,
+            )
+        except drive_uploader.DriveAuthRequired:
+            # Never an HTTP 401: session-guard.js treats ANY 401 as "your login expired" and bounces to /login.
+            # Re-authorizing Drive is the 200 {needs_auth, auth_url} contract the page already handles.
+            result = {"uploaded": False, "needs_auth": True, "reason": "Google Drive authorization required."}
+        if result.get("needs_auth"):
+            result["auth_url"] = drive_uploader.get_auth_url(redirect_uri)
+        return result
+
+
+def _drive_failure_response(err: "drive_uploader.DriveError") -> JSONResponse:
+    """A Drive failure as a JSON answer the page can act on: `detail` is a plain-language reason (same key every
+    other endpoint uses), `retryable` tells it whether trying again is worthwhile."""
+    headers = {"Retry-After": "3"} if err.retryable else None
+    return JSONResponse(status_code=err.status_code, content=err.payload(), headers=headers)
+
+
 @app.post("/api/drive/upload")
-async def drive_upload(body: DriveUploadRequest, request: Request) -> dict:
+async def drive_upload(body: DriveUploadRequest, request: Request):
     """
     Upload a generated proposal to Google Drive.
     Folder structure: <DRIVE_ROOT>/<seller_email>/<filename>
     Returns {needs_auth: true, auth_url: ...} when OAuth2 authorization is required.
     Returns a graceful no-op when Drive credentials aren't configured.
-    """
-    meta = _get_proposal_metadata(body.proposal_id)
-    if meta is None:
-        raise HTTPException(status_code=404, detail="Proposal not found")
-    path = Path(meta["path"])
 
+    Failures never surface as a bare 500: every one is a JSON {detail, retryable, code} -
+      503 retryable=true   Google / the network / the database didn't answer (already retried with backoff here)
+      404 / 409 / 410      unknown proposal / not generated yet / its file is gone (and not stored) - regenerate
+      424                  Google refused for good (permissions, quota, missing folder) - an admin has to fix it
+      500 (with `ref`)     a genuine bug, logged with the same reference
+    """
+    proposal_id = (body.proposal_id or "").strip()
     redirect_uri = str(request.base_url).rstrip("/") + "/api/drive/callback"
-    result = drive_uploader.upload_proposal(
-        local_path=path,
-        seller_email=body.seller_email or meta.get("seller_email", ""),
-        as_google_sheet=True,
-        redirect_uri=redirect_uri,
-    )
-    if result.get("needs_auth"):
-        result["auth_url"] = drive_uploader.get_auth_url(redirect_uri)
-    return result
+    try:
+        return await asyncio.to_thread(
+            _drive_upload_blocking, proposal_id, body.seller_email or "", redirect_uri
+        )
+    except drive_uploader.DriveError as err:
+        return _drive_failure_response(err)
+    except Exception as exc:  # noqa: BLE001 - last line of defence: never a bare 500
+        return _drive_failure_response(
+            drive_uploader.to_drive_error(exc, stage="endpoint", proposal_id=proposal_id)
+        )
 
 
 @app.get("/api/drive/callback")
-async def drive_callback(code: str, request: Request) -> HTMLResponse:
+async def drive_callback(request: Request, code: Optional[str] = None, error: Optional[str] = None) -> HTMLResponse:
     """Handle the OAuth2 redirect from Google after the user authorizes Drive access."""
+    from html import escape as _escape_html
     redirect_uri = str(request.base_url).rstrip("/") + "/api/drive/callback"
+    if not code:
+        # Google sends ?error=access_denied (no code) when the consent screen is cancelled - a plain page, not a 422.
+        return HTMLResponse(content=(
+            "<!doctype html><html><body>"
+            f"<p>Google Drive was not authorized ({_escape_html(error or 'no authorization code received')}).</p>"
+            "<p>Close this tab and try again.</p></body></html>"
+        ))
     try:
-        drive_uploader.exchange_code(code, redirect_uri)
+        # Token exchange + database write: blocking, so off the event loop like the upload itself.
+        await asyncio.to_thread(drive_uploader.exchange_code, code, redirect_uri)
         html = (
             "<!doctype html><html><head><title>Drive Authorized</title></head><body>"
             "<script>"
@@ -2023,9 +2185,10 @@ async def drive_callback(code: str, request: Request) -> HTMLResponse:
             "</body></html>"
         )
     except Exception as e:
+        logging.getLogger(__name__).warning("Drive authorization callback failed (%s)", type(e).__name__)
         html = (
             f"<!doctype html><html><body>"
-            f"<p>Authorization failed: {e}</p>"
+            f"<p>Authorization failed: {_escape_html(str(e))}</p>"
             f"<p>Close this tab and try again.</p>"
             f"</body></html>"
         )

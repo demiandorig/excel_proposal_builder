@@ -17,7 +17,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
 from app.catalog import Product, by_name, families, by_family
-from app.services.notion_parser import ProposalRequest, classify_output_tabs
+from app.services.notion_parser import ProposalRequest, classify_output_tabs, normalize_tab_keys
+from app.services import dooh_pivot
 from app import excel_template as et
 from app.market_config import get_market_address
 from app.services import monthly_allocation as mo
@@ -296,14 +297,15 @@ def generate_proposal(
     )
     forced_tabs_ignored = False
     if force_tabs:
-        tabs.update({k: bool(v) for k, v in force_tabs.items() if k in tabs})
+        # A draft saved before "DOOH Deliverables" still carries dooh_summary / dooh_screenlist — folded into "dooh".
+        tabs.update({k: bool(v) for k, v in normalize_tab_keys(force_tabs).items() if k in tabs})
         # A tab override that switches EVERY deliverable off can only be a
         # stale/unsynced set of checkboxes (the Generate step's tab boxes used
         # to start unchecked and were only filled in when that step rendered)
         # — never a real request, since it would build an empty workbook, or
         # worse, silently drop the avails-bearing tabs. Fall back to the
         # classification instead and say so.
-        if not any(tabs.get(k) for k in ("net", "wsections", "gross", "avails_only", "dooh_summary", "dooh_screenlist")):
+        if not any(tabs.get(k) for k in ("net", "wsections", "gross", "avails_only", "dooh")):
             tabs = classify_output_tabs(
                 request.request_type,
                 all_product_names,
@@ -337,6 +339,9 @@ def generate_proposal(
     # Shared across every tier/tab-type below so two tiers can't collide
     # with EACH OTHER's sheet titles, not just their own — see _safe_sheet_name.
     used_sheet_titles: set = set()
+    if tabs.get("dooh"):
+        # The DOOH sheets keep their fixed names (the pivot is attached to them by name), so no tier may take one.
+        used_sheet_titles.update({dooh_pivot.DOOH_SUMMARY_SHEET.lower(), dooh_pivot.DOOH_SCREENLIST_SHEET.lower()})
 
     for tier in tiers:
         label = (tier.get("label") or "A").strip() or "A"
@@ -556,16 +561,13 @@ def generate_proposal(
             "total_gross": tier_total_net / (1 - fee) if fee else tier_total_net,
         })
 
-    # DOOH / Process FAQs — shared, single instance regardless of tier count
-    if tabs.get("dooh_summary"):
-        ws = et.build_dooh_summary(wb)
-        # DOOH summary has its own structure; just stamp the client name in title
-        ws["A1"] = f"DOOH Summary — {request.client_name or 'TBD'}"
-        tabs_built.append("DOOH Summary")
-
-    if tabs.get("dooh_screenlist"):
+    # DOOH Deliverables / Process FAQs — shared, single instance regardless of tier count. The two DOOH sheets are
+    # always built together: the Summary is a pivot table over the Screenlist table.
+    if tabs.get("dooh"):
+        et.build_dooh_summary(wb, client_name=request.client_name or "")
+        tabs_built.append(dooh_pivot.DOOH_SUMMARY_SHEET)
         et.build_dooh_screenlist(wb)
-        tabs_built.append("DOOH Screenlist")
+        tabs_built.append(dooh_pivot.DOOH_SCREENLIST_SHEET)
 
     # Always include Process FAQs as a reference tab
     et.build_process_faqs(wb)
@@ -575,6 +577,14 @@ def generate_proposal(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
+    if tabs.get("dooh"):
+        # openpyxl cannot write a pivot table: attach the Summary's to the saved file. This must stay the LAST thing
+        # that touches the workbook (an openpyxl load + save afterwards would drop it). A failure keeps the workbook
+        # as saved — the Screenlist table is there, the Summary just has no pivot — and says so.
+        try:
+            dooh_pivot.add_dooh_pivot(output_path)
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"The DOOH Summary pivot table could not be added ({e}); the DOOH Screenlist is complete.")
 
     base = tier_summaries[0] if tier_summaries else {"total_net": 0.0, "total_gross": 0.0}
     return {
