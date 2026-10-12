@@ -713,6 +713,9 @@ function _migrateReopenedTier(t) {
       }
       item.id = newId;
     }
+    // The line note (Step 04): kept as saved, cleaned the way a typed one is; "" for a proposal saved before the
+    // field existed (the server sends null / nothing there).
+    item.line_modifier = _cleanLineModifier(item.line_modifier);
     return item;
   });
   return {
@@ -1633,6 +1636,7 @@ function onNext(n) {
           _monthsReconciled: true,
           rate_override: null,
           notes_override: null,
+          line_modifier: "",      // the optional "line note" shown under the product name (see _cleanLineModifier)
           target_override: null,
           target_secondary: null,
           estimated_cpm_override: null,
@@ -1696,6 +1700,7 @@ function onNext(n) {
 // stays exactly as it is, with its saved pick shown.
 function _enterRoadblocksStep() {
   _loadRestrictedVerticals();
+  _refreshRoadblockLineNotes();     // an existing result's cards show the plan's CURRENT line notes
 }
 
 // Parse a budget number out of renewal_budget field (e.g. "7500 | $5k for LA...")
@@ -2706,6 +2711,7 @@ function renderRoadblocks(data) {
         <span class="roadblock-product">${escapeHtml(item.product_name)}</span>
         <span class="risk-badge risk-${escapeAttr(item.risk_level || "low")}">${escapeHtml((item.risk_level || "low").toUpperCase())} RISK</span>
       </div>
+      <div class="roadblock-line-notes hidden" data-lines-for="${escapeHtml(item.product_name)}"></div>
       ${_roadblockMatrixHtml(item.matrix)}
       ${(item.risks || []).map(r => `
         <div class="roadblock-risk">
@@ -2728,6 +2734,31 @@ function renderRoadblocks(data) {
   } else {
     dlLink.classList.add("hidden");
   }
+  _refreshRoadblockLineNotes();
+}
+
+// The line notes of the plan's lines for each roadblock card's product, as read-only purple reference under the
+// product name. Recomputed from the CURRENT plan every time Step 07 is shown, so a note edited in Step 04 after the
+// check ran is never stale here. Built with textContent (the note is planner-typed text).
+function _refreshRoadblockLineNotes() {
+  const cards = document.getElementById("roadblocks-cards");
+  if (!cards) return;
+  cards.querySelectorAll("[data-lines-for]").forEach(box => {
+    const notes = _lineNotesForProduct(box.dataset.linesFor);
+    box.textContent = "";
+    box.classList.toggle("hidden", !notes.length);
+    if (!notes.length) return;
+    const prefix = document.createElement("span");
+    prefix.className = "line-note-prefix";
+    prefix.textContent = notes.length === 1 ? "Line note:" : "Line notes:";
+    box.appendChild(prefix);
+    notes.forEach(note => {
+      const chip = document.createElement("span");
+      chip.className = "line-note";
+      chip.textContent = note;
+      box.appendChild(chip);
+    });
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -3309,6 +3340,13 @@ function renderLineItems() {
       <td class="product">
         ${escapeHtml(li.product_name)}
         <span class="family-tag">${escapeHtml(p.family || "")}</span>
+        <label class="line-note-field">
+          <span class="line-note-field-label">Line note (optional) <em>— shown under the product name in the export</em></span>
+          <input type="text" class="line-note-input" maxlength="${LINE_MODIFIER_MAX}" autocomplete="off"
+                 placeholder="e.g. Hispanic, Phoenix only"
+                 value="${escapeHtml(_lineNote(li))}"
+                 data-idx="${idx}" data-key="line_modifier" data-line-note-input />
+        </label>
       </td>
       <td class="model">
         <select class="model-override-select ${li.buying_model_override != null ? "overridden" : ""}"
@@ -3721,6 +3759,10 @@ function onLineItemEdit(e) {
     // to the backend always stays a valid number.
     const isOptionalOverride = key === "rate_override" || key === "estimated_cpm_override";
     v = v === "" ? (isOptionalOverride ? null : 0) : parseFloat(v);
+  } else if (key === "line_modifier") {
+    // The line note is a plain-text label: stored cleaned (control characters out, trimmed, capped) while the box
+    // keeps what the planner is typing — no re-render here, so focus and the cursor stay put.
+    v = _cleanLineModifier(v);
   }
   if (key === "monthly_budget" || key === "months") _mbStampBaseline(state.lineItems[idx]);
   state.lineItems[idx][key] = v;
@@ -4562,6 +4604,7 @@ function onAddProduct() {
     _monthsReconciled: true,
     rate_override: null,
     notes_override: null,
+    line_modifier: "",
     target_override: null,
     target_secondary: null,
     estimated_cpm_override: null,
@@ -4644,6 +4687,8 @@ function onDuplicateLineItem(idx) {
   if (_mixEditBlocks()) return;
   const original = state.lineItems[idx];
   if (!original) return;
+  // The spread carries the line note along with every other per-line field (the planner then edits it to say how this
+  // copy differs — that is what the note is for).
   const copy = {
     ...original,
     id: newLineItemId(),
@@ -4661,6 +4706,21 @@ function onDuplicateLineItem(idx) {
   state.rateOverrideOpen.clear();  // indices shift — avoid pointing at the wrong row
   state.objectiveOtherOpen.clear();
   renderLineItems();
+}
+
+// Where the line notes of the CURRENT lines go when they are replaced by a freshly recommended mix: each note moves to
+// the next new line for the SAME product (in order, one note per line). Returns { notes, lost }: `notes` is aligned to
+// `newLines` ("" where nothing carries over), `lost` lists "Product — note" for every note with no line to go to.
+function _carryLineNotes(oldLines, newLines) {
+  const queued = {};       // product_name -> notes of the current lines, in order
+  (oldLines || []).forEach(old => {
+    const note = _lineNote(old);
+    if (note) (queued[old.product_name] = queued[old.product_name] || []).push(note);
+  });
+  const notes = (newLines || []).map(li => (queued[li.product_name] && queued[li.product_name].length) ? queued[li.product_name].shift() : "");
+  const lost = [];
+  Object.keys(queued).forEach(name => queued[name].forEach(note => lost.push(`${name} — ${note}`)));
+  return { notes, lost };
 }
 
 // "Generate new product mix" (the "recommend-btn" element id/handler
@@ -4714,8 +4774,18 @@ async function onRecommend() {
     // Monthly Breakdown's _mbFindLineItem(), where every row resolved to
     // the very first one regardless of which row was actually edited.
     // Matches the same spread order onDuplicateLineItem already uses.
-    state.lineItems = data.line_items.map(li => ({
+    //
+    // A line note the planner typed on an existing line is theirs, not the recommender's to wipe: the new mix is a
+    // fresh set of lines, so each note moves to the new line for the SAME product (in order, one note per new line).
+    // A note whose product isn't in the new mix has no line to go to — the planner is asked before it is dropped.
+    const carry = _carryLineNotes(state.lineItems, data.line_items);
+    if (carry.lost.length && !confirm(
+      `The new mix has no line to keep ${carry.lost.length === 1 ? "this line note" : "these line notes"} on, so ${carry.lost.length === 1 ? "it" : "they"} will be dropped:\n\n${carry.lost.join("\n")}\n\nContinue?`)) {
+      return;
+    }
+    state.lineItems = data.line_items.map((li, i) => ({
       ...li, id: newLineItemId(),
+      line_modifier: carry.notes[i],
       months: _curateDerivedMonths() || li.months,     // the server stamps the campaign-wide count; this option's own dates win
       _monthsReconciled: true,
     }));
@@ -5866,6 +5936,7 @@ function _mbLineItemBlockHtml(li, months) {
       <summary>
         <span class="mb-line-name-wrap">
           <span class="mb-line-name">${escapeHtml(product ? product.name : li.product_name)}</span>
+          ${_lineNoteHtml(li)}
           ${_mbTargetingSnippet(li) ? `<span class="mb-line-targeting">${escapeHtml(_mbTargetingSnippet(li))}</span>` : ""}
         </span>
         <span class="mb-line-total">Total: ${money(total)}</span>
@@ -6044,7 +6115,7 @@ function _mbRenderByMonthView(eligibleLines, months) {
     const unitsRef = enabled ? _mbUnitsRefText(li, product, dollars) : "";
     return `
       <tr data-line="${li.id}" class="${belowMin ? "mb-row-warn" : ""}">
-        <td class="mb-month-product-cell">${escapeHtml(product ? product.name : li.product_name)}${_mbTargetingSnippet(li) ? `<span class="mb-line-targeting">${escapeHtml(_mbTargetingSnippet(li))}</span>` : ""}<span class="mb-month-line-total">Line total: ${money(total)}</span></td>
+        <td class="mb-month-product-cell">${escapeHtml(product ? product.name : li.product_name)}${_lineNoteHtml(li)}${_mbTargetingSnippet(li) ?`<span class="mb-line-targeting">${escapeHtml(_mbTargetingSnippet(li))}</span>` : ""}<span class="mb-month-line-total">Line total: ${money(total)}</span></td>
         <td><input type="number" step="5" min="0" max="100" class="mb-pct-input" data-line="${li.id}" data-month="${monthKey}" value="${enabled ? Math.round(pct * 100) / 100 : ""}" ${enabled ? "" : "disabled"} /></td>
         <td><input type="number" step="50" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${monthKey}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
         <td class="mb-units-ref mono">${escapeHtml(unitsRef)}</td>
@@ -6324,7 +6395,7 @@ function renderAvailsGrid() {
     card.className = "avails-card";
     card.innerHTML = `
       <div class="avails-card-head">
-        <h3>${escapeHtml(li.product_name)}${escapeHtml(subtitle)}</h3>
+        <h3>${escapeHtml(li.product_name)}${escapeHtml(subtitle)}${_lineNoteHtml(li, "line-note-block")}</h3>
         <span class="sov-badge" id="sov-badge-${escapeAttr(li.id)}"></span>
       </div>
       <p class="avails-targeting-reminder">
@@ -6656,6 +6727,7 @@ function renderGenerateSummary() {
       const m = (t.line_items || []).reduce((s, li) => s + (li.monthly_budget || 0), 0);
       return `${escapeHtml(_tierDisplayName(t.label))}: ${money(m)}${ff ? "" : "/mo"} · ${(t.line_items || []).length} products`;
     }).join(" &nbsp;·&nbsp; ")}</span></div>` : ""}
+    ${_generateSummaryLineNotesHtml(allTiers, multiTier)}
   `;
   // Show the best suggestion we have right now, then replace it with a fresh
   // one from the server (the parse-time suggestion goes stale the moment the
@@ -6663,6 +6735,22 @@ function renderGenerateSummary() {
   _applyTabCheckboxes();
   _refreshSuggestedTabs();
   _refreshDisclaimersPreview();
+}
+
+// "Line notes" row of the Step 08 summary: every line that carries a Step 04 line note, as product + purple note
+// (per option when there are several), so the planner sees what will print under each product name before generating.
+// "" when no line has one — the summary is then exactly what it always was.
+function _generateSummaryLineNotesHtml(allTiers, multiTier) {
+  const groups = (allTiers || []).map(t => {
+    const items = (t.line_items || []).filter(li => _lineNote(li)).map(li =>
+      `<li><span class="sum-line-note-name">${escapeHtml(li.product_name)}</span>${_lineNoteHtml(li)}</li>`);
+    return items.length ? { label: _tierDisplayName(t.label), items } : null;
+  }).filter(Boolean);
+  if (!groups.length) return "";
+  const body = groups.map(g => `
+      ${multiTier ? `<div class="sum-line-notes-option">${escapeHtml(g.label)}</div>` : ""}
+      <ul class="sum-line-notes">${g.items.join("")}</ul>`).join("");
+  return `<div class="sum-row sum-notes-row"><span class="lbl">Line notes</span>${body}</div>`;
 }
 
 // Checkbox state = the planner's own override where they made one, otherwise
@@ -6934,7 +7022,10 @@ function buildGammaOutline() {
       const amountText = _isFullFlight()
         ? `${money(li.monthly_budget)} flat for the full flight`
         : `${money(li.monthly_budget)}/${unitAbbr} × ${li.months}${unitAbbr}`;
-      lines.push(`  - ${li.product_name}${p.family ? ` (${p.family})` : ""} — ${amountText} — Target: ${target}`);
+      // A line the planner gave a Step 04 line note reads "… — Note: Hispanic, Phoenix only — …", so two lines of
+      // one product stay distinguishable in the deck.
+      const lineNote = _lineNote(li);
+      lines.push(`  - ${li.product_name}${p.family ? ` (${p.family})` : ""}${lineNote ? ` — Note: ${lineNote}` : ""} — ${amountText} — Target: ${target}`);
     });
     // Right after a Generate the server's own figures (the ones in the Excel and the emails) are on hand: use them, so
     // the outline's option total includes the one-time add-ons and honors customised per-period amounts exactly like
@@ -7690,4 +7781,54 @@ function escapeHtml(s) {
 function escapeAttr(s) {
   // For use in HTML attribute values — also strip characters that break querySelector
   return String(s || "").replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+// --------------------------------------------------------------------------
+// The per-line "line note" (field: line_modifier) — a short plain-text label a planner types on a Step 04 line
+// ("Hispanic, Phoenix only") so two lines of the SAME product can be told apart. The export shows it in purple under
+// the product name + objective; every other step shows it read-only, small and purple, under the product name. It is
+// a label only (never a number) and NOT the "Planner note" (notes_override), which goes to the export's Planner Notes
+// column. Same rules as app/services/line_modifier.py: control characters become a space, whitespace collapses,
+// trimmed, capped (LINE_MODIFIER_MAX). Always HTML-escaped where it is rendered (_lineNoteHtml / escapeHtml).
+// --------------------------------------------------------------------------
+
+const LINE_MODIFIER_MAX = 100;
+
+// Control characters (incl. newline / tab), line + paragraph separators, zero-width and bidi marks, the BOM — the same
+// set the server strips. Built as a string so the escapes stay escapes in the source file.
+function _LINE_MODIFIER_UNWANTED() {
+  return new RegExp("[\\x00-\\x1f\\x7f-\\x9f\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2064\\ufeff]+", "g");
+}
+
+function _cleanLineModifier(v) {
+  if (v == null || typeof v === "boolean") return "";
+  const text = String(v)
+    .replace(_LINE_MODIFIER_UNWANTED(), " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return Array.from(text).slice(0, LINE_MODIFIER_MAX).join("").trimEnd();
+}
+
+// The cleaned note of a line ("" when it has none — also for a line from a proposal saved before the field existed).
+function _lineNote(li) {
+  return li ? _cleanLineModifier(li.line_modifier) : "";
+}
+
+// Read-only reference markup for the other steps; "" when the line has no note.
+function _lineNoteHtml(li, extraClass) {
+  const note = _lineNote(li);
+  return note ? `<span class="line-note ${extraClass || ""}" title="Line note (set in Step 04)">${escapeHtml(note)}</span>` : "";
+}
+
+// Every distinct line note on lines of one product, across ALL options ([] when none) — for the places that list a
+// PRODUCT rather than a line (Step 07's roadblocks are per product: the platform's rules don't depend on the line).
+function _lineNotesForProduct(productName) {
+  const want = String(productName || "").trim().toLowerCase();
+  const seen = [];
+  allTiersForSubmit().forEach(t => (t.line_items || []).forEach(li => {
+    if (String(li.product_name || "").trim().toLowerCase() !== want) return;
+    const note = _lineNote(li);
+    if (note && !seen.includes(note)) seen.push(note);
+  }));
+  return seen;
 }

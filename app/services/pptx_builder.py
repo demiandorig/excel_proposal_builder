@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 
 from app.services import period_copy
+from app.services.line_modifier import line_modifier_of
 
 try:
     from pptx import Presentation
@@ -296,18 +297,34 @@ def _product_cell_text(product, li, unit_suffix: str = "/mo") -> str:
     """Product name, plus an "Est. N impressions<suffix>" sub-line when the
     product supports an estimate. unit_suffix is the layout's per-period
     marker ("/mo", "/wk", "/qtr"; empty in Full Flight, where the figure is
-    the whole-flight total and needs no qualifier)."""
+    the whole-flight total and needs no qualifier).
+
+    A line the planner gave a Step 04 "line note" ("Hispanic, Phoenix only") shows it as the line directly under the
+    product name (drawn in the brand purple by _add_table — see _NOTE_LINE_INDEX), above the impressions sub-line, so
+    two lines of the same product read as different. A line without one is exactly what it always was."""
+    lines = [product.name]
+    if line_modifier_of(li):
+        lines.append(line_modifier_of(li))
     imps = _line_item_impressions(product, li)
-    if imps is None:
-        return product.name
-    return f"{product.name}\nEst. {imps:,} impressions{unit_suffix}"
+    if imps is not None:
+        lines.append(f"Est. {imps:,} impressions{unit_suffix}")
+    return "\n".join(lines)
+
+
+# Where the line note sits inside a product cell's text (see _product_cell_text): paragraph 1, right under the name.
+_NOTE_LINE_INDEX = 1
+# The note is set at 8.5pt in the product column — about a third more characters per line than the 10-11pt body copy
+# the row-height estimate is calibrated on, so a deliberately conservative figure.
+_NOTE_CHARS_PER_CELL_LINE = 44
 
 
 def _row_height_in(product_name: str, target_text: str, *, header: bool = False,
-                   has_impressions: bool = False) -> float:
+                   has_impressions: bool = False, line_note: str = "") -> float:
     if header:
         return 0.34
     name_lines = _estimate_wrapped_lines(product_name) + (1 if has_impressions else 0)
+    if line_note:
+        name_lines += _estimate_wrapped_lines(line_note, chars_per_line=_NOTE_CHARS_PER_CELL_LINE)
     lines = max(name_lines, _estimate_wrapped_lines(target_text))
     return 0.19 * lines + 0.1  # per-line height + fixed cell padding (top+bottom margins)
 
@@ -359,7 +376,8 @@ def _build_items(tiers: list, *, gross: bool, agency_fee: Optional[float],
             items.append({
                 "kind": "row", "product": product, "line_item": li,
                 "monthly": monthly, "line_total": line_total, "target": target,
-                "height": _row_height_in(product.name, target, has_impressions=has_imps),
+                "height": _row_height_in(product.name, target, has_impressions=has_imps,
+                                         line_note=line_modifier_of(li)),
             })
         items.append({
             "kind": "subtotal", "label": tier["name"] if show_tier_bars else "TOTAL",
@@ -485,7 +503,7 @@ def _add_table(slide, *, top_in: float, chunk: list, gross: bool, time_unit: str
         table.rows[i].height = Inches(h)
 
     def _cell(r, c, text, *, bold=False, color=None, align=None, size=11,
-              font=None, fill=None):
+              font=None, fill=None, accent_lines=()):
         color = color if color is not None else INK
         align = align if align is not None else PP_ALIGN.LEFT
         font = font or FONT_BODY
@@ -510,7 +528,7 @@ def _add_table(slide, *, top_in: float, chunk: list, gross: bool, time_unit: str
         run.font.size = Pt(size)
         run.font.bold = bold
         run.font.color.rgb = color
-        for extra in lines[1:]:
+        for n, extra in enumerate(lines[1:], start=1):
             sub_p = tf.add_paragraph()
             sub_p.alignment = align
             sub_run = sub_p.add_run()
@@ -518,7 +536,8 @@ def _add_table(slide, *, top_in: float, chunk: list, gross: bool, time_unit: str
             sub_run.font.name = FONT_BODY
             sub_run.font.size = Pt(8.5)
             sub_run.font.bold = False
-            sub_run.font.color.rgb = INK_SOFT
+            # an accent line is the planner's line note: brand purple, like the Excel export
+            sub_run.font.color.rgb = PRIMARY if n in accent_lines else INK_SOFT
 
     def _merged_banner(r, text, *, fill):
         table.cell(r, 0).merge(table.cell(r, len(columns) - 1))
@@ -545,7 +564,8 @@ def _add_table(slide, *, top_in: float, chunk: list, gross: bool, time_unit: str
             data_row_i += 1
             for c, role in enumerate(roles):
                 if role == _ROLE_PRODUCT:
-                    _cell(r, c, _product_cell_text(product, li, unit_suffix), fill=fill)
+                    _cell(r, c, _product_cell_text(product, li, unit_suffix), fill=fill,
+                          accent_lines=(_NOTE_LINE_INDEX,) if line_modifier_of(li) else ())
                 elif role == _ROLE_TARGET:
                     _cell(r, c, item["target"], color=INK_SOFT, size=10, fill=fill)
                 elif role == _ROLE_PERIODS:

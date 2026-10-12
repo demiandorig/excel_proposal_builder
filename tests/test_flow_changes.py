@@ -85,6 +85,8 @@ STEP07_FUNCTIONS = [
     "_cancelRoadblocksRun", "_rbBusy", "_resetRoadblocksUI", "_showRoadblocksPending", "onRvPick", "onRoadblocksGenerate",
     "_runRoadblocks", "_loadRestrictedVerticals", "_renderRestrictedVerticals", "_renderRvChips", "_updateRvNote",
     "renderRoadblocks", "_enterRoadblocksStep", "_readJsonResponse", "_roadblockMatrixHtml", "setText", "escapeHtml", "escapeAttr",
+    # the read-only per-line notes under each product card (see tests/test_line_note.py) — renderRoadblocks calls them
+    "_refreshRoadblockLineNotes", "_lineNotesForProduct", "_lineNote", "_cleanLineModifier", "_LINE_MODIFIER_UNWANTED",
 ]
 
 
@@ -93,7 +95,7 @@ def _step06_bundle() -> str:
 
 
 def _step07_bundle() -> str:
-    parts = [_extract_decl(APP_JS, "const", "_RB_DEBOUNCE_MS")]
+    parts = [_extract_decl(APP_JS, "const", "_RB_DEBOUNCE_MS"), _extract_decl(APP_JS, "const", "LINE_MODIFIER_MAX")]
     parts += [_extract_decl(APP_JS, "let", n) for n in STEP07_LETS]
     parts += [_fn_source(n) for n in STEP07_FUNCTIONS]
     return "\n".join(parts)

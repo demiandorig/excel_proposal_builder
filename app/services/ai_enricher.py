@@ -31,6 +31,7 @@ from app.services import claim_rules
 from app.services import llm_utils
 from app.services import period_copy
 from app.services import source_rules
+from app.services.line_modifier import line_modifier_of
 from app.services.text_utils import normalize_newlines as _normalize_newlines, split_sentences, strip_variant_pricing
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 
@@ -692,6 +693,7 @@ The INTERNAL email's final two lines (a "{{Name}}, part of your digital strategy
                                   max_completion_tokens=_REVISE_MAX_COMPLETION_TOKENS)
         data = llm_utils.parse_json_object(
             raw, expect_any=("internal_email_body", "client_email_body"), client=client)
+        source_rules.scrub_model_output(data)       # Wikipedia is never a citation (see source_rules)
         result = {
             "internal_email_subject": data.get("internal_email_subject") or current_internal_subject,
             "internal_email_body": _normalize_newlines(data.get("internal_email_body") or current_internal_body),
@@ -918,7 +920,9 @@ def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
             t_items = t.get("line_items") or []
             t_imps = _estimate_monthly_impressions(t_items)
             imps_str = f", {_format_impressions(t_imps)} {imps_label}" if t_imps else ""
-            products_str = ", ".join(li.product_name for li in t_items) or "(no products)"
+            # a line the planner gave a note reads "Display [line note: Hispanic]" — so two lines of one product differ
+            products_str = ", ".join(
+                email_totals.label_for(li.product_name, line_modifier_of(li)) for li in t_items) or "(no products)"
             # the option's own headline figures come from email_totals (add-ons, per-period amounts and the unit's
             # wording included), never from arithmetic done here
             option_lines.append(f"{email_totals.option_summary_line(opt, imps_str)} — {products_str}")

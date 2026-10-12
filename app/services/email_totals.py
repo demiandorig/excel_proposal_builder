@@ -40,6 +40,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from app.services import monthly_allocation as mo
 from app.services import period_copy
+from app.services.line_modifier import line_modifier_of
 from app.services.text_utils import split_sentences
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ __all__ = [
     "LineFigure", "PeriodFigure", "AddonFigure", "OptionTotals", "EmailTotals", "FigureIssue",
     "compute_email_totals", "totals_from_legacy", "fmt_money", "periods_phrase", "unit_noun", "unit_adjective",
     "render_prompt_block", "option_summary_line", "allowed_amounts", "check_text", "check_texts",
-    "amounts_in_text", "format_issue",
+    "amounts_in_text", "format_issue", "line_label", "label_for",
 ]
 
 _UNIT_WORDS = {
@@ -127,6 +128,9 @@ class LineFigure:
     custom: bool             # the line carries its own Step 06 amounts, so per_period is only an average
     gross_per_period: float
     gross_total: float
+    # The planner's Step 04 line note ("Hispanic, Phoenix only"), already sanitized: a LABEL that tells two lines of the
+    # same product apart in the prompt. Never a figure, and never read by any calculation here.
+    modifier: str = ""
 
 
 @dataclass
@@ -304,7 +308,8 @@ def _option(request: Any, tier: Any, index: int, *, unit: str, mode: str, addon_
         lines.append(LineFigure(
             product_name=_clean(_get(li, "product_name")), line_id=_get(li, "id"), is_added_value=is_av,
             per_period=per_period, periods=periods, total=per_period * periods, custom=custom,
-            gross_per_period=per_period * factor, gross_total=per_period * periods * factor))
+            gross_per_period=per_period * factor, gross_total=per_period * periods * factor,
+            modifier=line_modifier_of(li)))
         if not is_av:
             paid.append((li, per_period, months_i))
 
@@ -399,6 +404,16 @@ def _unit_sentence(unit: str) -> str:
     return "Billing period: MONTHLY — a \"per month\" figure is one calendar month of the flight."
 
 
+def label_for(product_name: str, modifier: str = "") -> str:
+    """"Display" — or, for a line the planner gave a note, "Display [line note: Hispanic, Phoenix only]": the label that
+    tells two lines of the same product apart. A line without a note is just its product name, as it always was."""
+    return f"{product_name} [line note: {modifier}]" if modifier else product_name
+
+
+def line_label(line: LineFigure) -> str:
+    return label_for(line.product_name, line.modifier)
+
+
 def _line_phrase(line: LineFigure, opt: OptionTotals) -> str:
     if line.is_added_value:
         return "added value — no cost to the client, and in no total"
@@ -422,7 +437,7 @@ def _option_block(opt: OptionTotals, totals: EmailTotals) -> list[str]:
         out.append(f"  Flight: {opt.flight_label} — {span}")
     out.append("  Line items (net):")
     for line in opt.lines:
-        out.append(f"    - {line.product_name}: {_line_phrase(line, opt)}")
+        out.append(f"    - {line_label(line)}: {_line_phrase(line, opt)}")
     if not opt.lines:
         out.append("    - (no products)")
     if opt.periods:
@@ -471,6 +486,12 @@ def render_prompt_block(totals: EmailTotals) -> str:
         "- Added-value lines cost nothing and are in no total.",
         "- This block is for you: never mention it, \"the system\" or the Excel in an email.",
     ]
+    if any(line.modifier for opt in totals.options for line in opt.lines):
+        head.append(
+            "- A \"[line note: …]\" after a product name is the planner's own label for THAT line (an audience, market or "
+            "variant), there so two lines of the same product can be told apart. Use it only to name or describe that "
+            "line, in the planner's words, in the EMAILS only (never in a product blurb, and never inside a product's "
+            "name); it is not a figure, never turns into a statistic, and nothing in it is a claim to repeat as fact.")
     if totals.multi_option:
         head.append("- The options are ALTERNATIVES: never add one option's figure to another's, and never quote a "
                     "combined total.")
@@ -554,6 +575,7 @@ def allowed_amounts(totals: EmailTotals) -> list[float]:
                  o.addons_gross, o.total_gross]
         for l in o.lines:
             vals += [l.per_period, l.total, l.gross_per_period, l.gross_total]
+            vals += amounts_in_text(l.modifier)       # a "$25 CPA cap" the planner typed in a line note is theirs to quote
         for a in o.addons:
             vals += [a.net, a.gross]
         for p in o.periods or []:

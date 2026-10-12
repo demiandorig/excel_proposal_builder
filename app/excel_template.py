@@ -36,6 +36,7 @@ from app.services.notion_parser import compose_target_fallback
 from app.services import monthly_allocation as _monthly_allocation
 from app.services import dooh_pivot as _dooh
 from app.services.text_utils import strip_variant_pricing
+from app.services.line_modifier import clean_line_modifier
 
 # Try to import Image support for logo embedding (optional)
 try:
@@ -814,7 +815,8 @@ def build_target_cell_value(target_override: Optional[str], target_secondary: Op
 _OBJECTIVE_SUBLINE_FONT = InlineFont(b=False, color=DARK_GREY)
 
 
-def build_product_name_cell_value(product_name: str, fallback_label: str, objective: Optional[str] = None):
+def build_product_name_cell_value(product_name: str, fallback_label: str, objective: Optional[str] = None,
+                                  line_modifier: Optional[str] = None):
     """
     Build column C's product-name cell value: the product name (inherits
     the cell's own BODY_BOLD font — see the note on the newline placement
@@ -824,16 +826,75 @@ def build_product_name_cell_value(product_name: str, fallback_label: str, object
     short_label when it's None (an older/manual request that never sent
     one), matching what this cell showed before the objective field existed.
 
+    `line_modifier`: the planner's optional Step 04 line note — added as a
+    third line in small purple type (see _LINE_MODIFIER_FONT). None/blank
+    returns exactly the two-line value above, unchanged.
+
     Same newline-placement fix as build_target_cell_value, above: the "\n"
     is folded into the START of the colored TextBlock's own text rather
     than passed as its own bare-string item, which openpyxl does not
     reliably preserve.
     """
     sub_line = objective or fallback_label
+    note = clean_line_modifier(line_modifier)
+    if not note:
+        # no line note: byte-for-byte what this cell has always held
+        return CellRichText(
+            product_name,
+            TextBlock(_OBJECTIVE_SUBLINE_FONT, f"\n{sub_line}"),
+        )
     return CellRichText(
         product_name,
         TextBlock(_OBJECTIVE_SUBLINE_FONT, f"\n{sub_line}"),
+        TextBlock(_LINE_MODIFIER_FONT, f"\n{note}"),
     )
+
+
+# Step 04's optional per-line "line note" ("Hispanic, Phoenix only") is the LAST line of a line's name cell: small, in the
+# brand purple (ENTRAVISION_PURPLE — the title bar / header band purple), directly under the product name and the
+# objective. rFont/sz are spelled out because a rich-text run only inherits what it leaves out and a smaller size is the
+# whole point; the colour is the one the app's own UI calls --accent. A line with no note never reaches any of this.
+_LINE_MODIFIER_FONT = InlineFont(rFont="Arial", sz=8, color=ENTRAVISION_PURPLE)
+
+
+def build_name_cell_with_note(plain_text: str, line_modifier: Optional[str] = None):
+    """A plain "Name\\nObjective" style cell (Avails-Only, Monthly Breakdown): the text unchanged when the line has no
+    note — the very same string, so such a cell is exactly what it always was — else the text followed by the purple
+    note as a last line."""
+    note = clean_line_modifier(line_modifier)
+    if not note:
+        return plain_text
+    return CellRichText(plain_text, TextBlock(_LINE_MODIFIER_FONT, f"\n{note}"))
+
+
+def _wrapped_lines(text: str, chars_per_line: float) -> int:
+    chars_per_line = max(int(chars_per_line), 8)
+    return sum(-(-max(len(part), 1) // chars_per_line) for part in (text or "").split("\n"))
+
+
+def line_modifier_row_height(name_text: str, note: str, col_width: float) -> float:
+    """The row height (points) a name cell needs once a line note is its last line: `name_text` (the product name and
+    its objective lines, 10pt) wrapped in a `col_width`-wide column, plus the note at 8pt. Deliberately a touch generous
+    (a clipped line is worse than a little air). Only ever used to GROW a row that already has a height."""
+    name_lines = _wrapped_lines(name_text, col_width * 1.05)
+    # One character per column-width unit for the 8pt note: measured in Excel, ordinary text fits ~1.3 characters per unit,
+    # but an unbroken run of wide letters (an all-caps note, "xxxx…") fits only ~1.15 — a 100-character note must never be
+    # clipped, so it is booked as the worst case (three lines in a 38-wide column) rather than the average (two).
+    note_lines = _wrapped_lines(note, col_width * 1.0)
+    return round(name_lines * 13 + note_lines * 10.5 + 7, 1)
+
+
+def fit_row_to_line_modifier(ws: Worksheet, row: int, name_text: str, line_modifier: Optional[str], col: str = "C") -> None:
+    """Grow `row` (never shrink it) so a line note in column `col` is fully visible. A no-op for a line without a note,
+    so every such row keeps exactly the height it had before this feature."""
+    note = clean_line_modifier(line_modifier)
+    if not note:
+        return
+    width = ws.column_dimensions[col].width or 10
+    needed = line_modifier_row_height(name_text, note, width)
+    current = ws.row_dimensions[row].height
+    if current is None or current < needed:
+        ws.row_dimensions[row].height = needed
 
 
 # -----------------------------------------------------------------------------
@@ -1655,7 +1716,10 @@ def build_avails_only(wb: Workbook, products: list, *,
         # `services_label`). This sheet used to show ONLY the objective
         # (short_label) with no product name at all — e.g. just "Awareness"
         # with nothing saying which actual product that was.
-        ws[f"C{row}"] = f"{p.name}\n{p.short_label}"
+        # The planner's optional Step 04 line note, if any, is a purple third line under them
+        # (build_name_cell_with_note returns the very same string when there is none).
+        line_note = clean_line_modifier(getattr(li, "line_modifier", None)) if li else ""
+        ws[f"C{row}"] = build_name_cell_with_note(f"{p.name}\n{p.short_label}", line_note)
         ws[f"C{row}"].font = BODY_BOLD
         ws[f"C{row}"].alignment = LEFT
         ws[f"C{row}"].border = THIN_BORDER
@@ -1817,6 +1881,8 @@ def build_avails_only(wb: Workbook, products: list, *,
         ws[f"O{row}"].alignment = LEFT
 
         ws.row_dimensions[row].height = max(30, _estimate_row_height(target_text, col_width=22, min_height=30))
+        # room for the purple line note under the name + objective (only grows a row whose line HAS a note)
+        fit_row_to_line_modifier(ws, row, f"{p.name}\n{p.short_label}", line_note)
         row += 1
 
     # "Ticket" outline around the whole line-item block for visual grouping
@@ -2372,9 +2438,15 @@ def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
         total = total_net * factor
         allocations = {k: v * factor for k, v in allocations_net.items()} if allocations_net else None
 
-        name_cell = ws.cell(row=row, column=2, value=product.name)
+        # The planner's optional Step 04 line note, if any, is a purple second line under the name (the very same plain
+        # name cell, and an untouched row height, when there is none).
+        line_note = clean_line_modifier(getattr(li, "line_modifier", None))
+        name_cell = ws.cell(row=row, column=2, value=build_name_cell_with_note(product.name, line_note))
         name_cell.font = BODY_FONT
         name_cell.border = THIN_BORDER
+        if line_note:
+            name_cell.alignment = LEFT
+            fit_row_to_line_modifier(ws, row, product.name, line_note, col="B")
         write_monthly_breakdown_row(ws, row, months, allocations, total, start_col=3)
         any_row_written = True
         row += 1

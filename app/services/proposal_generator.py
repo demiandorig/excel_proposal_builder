@@ -23,6 +23,7 @@ from app import excel_template as et
 from app.market_config import get_market_address
 from app.services import monthly_allocation as mo
 from app.services.text_utils import strip_variant_pricing
+from app.services.line_modifier import clean_line_modifier_or_none
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +98,15 @@ class LineItem:
     # period keys (in this SAME line's own granularity) to merge into one
     # combined period before allocation/reconciliation/minimum-checking.
     period_merge_groups: Optional[list[list[str]]] = None
+    # Step 04's optional per-line "line note" — a short plain-text label ("Hispanic, Phoenix only") written in purple,
+    # in a small font, directly under the product name + objective in the export's line cells so two lines of the same
+    # product can be told apart. A label only: it never feeds a number. NOT notes_override above (that one goes into the
+    # Planner Notes COLUMN). Always held already sanitized (see app/services/line_modifier.py); None = no note, and a
+    # line without one is exported exactly as it was before this field existed.
+    line_modifier: Optional[str] = None
+
+    def __post_init__(self):
+        self.line_modifier = clean_line_modifier_or_none(self.line_modifier)
 
     def total_budget(self) -> float:
         return self.monthly_budget * self.months
@@ -916,7 +926,10 @@ def _populate_line_items(
         # color so it doesn't read as a second product name. Falls back to
         # short_label when no objective was set (an older/manual request),
         # matching this cell's original text exactly in that case.
-        ws[f"C{row}"] = et.build_product_name_cell_value(product.name, product.short_label, li.objective_override)
+        # The planner's optional Step 04 line note ("Hispanic, Phoenix only") follows as a third line in small purple
+        # type, so two lines of the same product read as different; nothing changes for a line without one.
+        ws[f"C{row}"] = et.build_product_name_cell_value(product.name, product.short_label, li.objective_override,
+                                                         li.line_modifier)
 
         # DETAILS (E) — the catalog's real proposal_description is already
         # the template default here (written by _write_product_row before
@@ -932,6 +945,11 @@ def _populate_line_items(
             ws[f"E{row}"] = combined_details
             # Re-estimate row height for the (usually longer) combined text
             ws.row_dimensions[row].height = et._estimate_row_height(combined_details, col_width=50)
+
+        # Whatever height the row ended up with, make room for the purple line note under the name + objective — grows
+        # a row only when it HAS a note (a no-op otherwise, so every other row keeps its height).
+        et.fit_row_to_line_modifier(ws, row, f"{product.name}\n{li.objective_override or product.short_label}",
+                                    li.line_modifier)
 
         # Notes column — caller-computed (reposition_notes_adops), falling
         # back to the original fixed T (net) / W (gross) for any caller

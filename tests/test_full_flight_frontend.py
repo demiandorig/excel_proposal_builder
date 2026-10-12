@@ -61,6 +61,7 @@ def _extract_const(src: str, name: str) -> str:
 _APP_CONSTS = [
     "_STEP02_FF_NOTE", "FULL_FLIGHT", "FULL_FLIGHT_KEY", "TIME_UNITS", "_MB_CENT", "_MB_GRANULARITY_MIN_SCALE",
     "_SOV_MONTHLY_EQUIVALENT_SCALE", "_MB_UNIT_NOUN", "_MB_UNIT_NOUN_PLURAL", "_MB_UNIT_ADJECTIVE", "_TIME_UNIT_DISPLAY",
+    "LINE_MODIFIER_MAX",        # buildGammaOutline prints a line's Step 04 line note (tests/test_line_note.py)
 ]
 _APP_FUNCTIONS = [
     "_isFullFlight", "_round2", "_normalizeTimeUnit", "_mbUnitWord", "_mbUnitNoun", "_mbUnitNounPlural",
@@ -76,6 +77,7 @@ _APP_FUNCTIONS = [
     "_tierDisplayName", "money", "buildGammaOutline",
     "_foldLineIntoOnePeriod", "_refreshStep02FlightNote", "_refreshMinHeaderTitle",
     "sovTier", "applySovDisplay", "escapeAttr", "escapeHtml",
+    "_lineNote", "_cleanLineModifier", "_LINE_MODIFIER_UNWANTED",
 ]
 
 

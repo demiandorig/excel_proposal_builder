@@ -85,6 +85,7 @@ from app.services import restrictions as restrictions_svc
 from app.services import gamma_client
 from app.services import monthly_allocation
 from app.services import notion_client
+from app.services.line_modifier import clean_line_modifier_or_none
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +536,18 @@ class LineItemModel(BaseModel):
     # (see monthly_allocation.periods_between) — always whatever the
     # PROPOSAL-wide granularity toggle currently is, never mixed.
     monthly_allocations: Optional[dict[str, float]] = None
+    # Step 04's optional per-line "line note" ("Hispanic, Phoenix only"): a short plain-text label that tells two lines
+    # of the same product apart. Shown in purple under the product name + objective in the export (and in the other
+    # steps / decks / outline for reference). A LABEL only — it never touches a number. Distinct from `notes_override`
+    # above, which goes into the export's Planner Notes COLUMN. Sanitized here (trimmed, control characters stripped,
+    # capped — see app/services/line_modifier.py) so every consumer sees the same clean text; None for a line that has
+    # none, and for every proposal saved before this field existed.
+    line_modifier: Optional[str] = None
+
+    @field_validator("line_modifier", mode="before")
+    @classmethod
+    def _clean_line_modifier(cls, v):
+        return clean_line_modifier_or_none(v)
 
 
 class AvailsEntry(BaseModel):
@@ -1287,6 +1300,7 @@ def _email_tiers_from_models(tier_models, legacy_line_items, time_unit: str) -> 
                 months=li.months if (not full_flight or "months" in li.model_fields_set) else 1,
                 is_added_value=li.is_added_value, added_value_pct=li.added_value_pct,
                 monthly_allocations=li.monthly_allocations,
+                line_modifier=li.line_modifier,      # a label for the email prompts only (never a figure)
             )
             for li in models
         ]
@@ -1336,6 +1350,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
                 added_value_pct=li.added_value_pct,
                 objective_override=li.objective_override,
                 monthly_allocations=li.monthly_allocations,
+                line_modifier=li.line_modifier,
             )
             for li in models
         ]
@@ -1896,7 +1911,8 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
     req = _reconstruct_proposal_request(body.request)
 
     line_items = [
-        LineItem(id=li.id, product_name=li.product_name, monthly_budget=li.monthly_budget, months=li.months)
+        LineItem(id=li.id, product_name=li.product_name, monthly_budget=li.monthly_budget, months=li.months,
+                 line_modifier=li.line_modifier)
         for li in body.line_items
     ]
 
