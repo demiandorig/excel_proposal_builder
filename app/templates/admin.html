@@ -24,7 +24,7 @@
       <nav class="admin-tabs" aria-label="Admin sections">
         <button class="admin-tab active" data-tab="proposals">Proposal History</button>
         <button class="admin-tab" data-tab="analytics">Analytics</button>
-        <button class="admin-tab" data-tab="rates">Products</button>
+        <button class="admin-tab" data-tab="rates">Product Catalog</button>
         <button class="admin-tab" data-tab="markets">Markets</button>
         <button class="admin-tab" data-tab="disclaimers">Disclaimers</button>
         <button class="admin-tab" data-tab="restrictions">Restrictions</button>
@@ -145,7 +145,7 @@
     <section class="panel hidden" id="tab-rates">
       <div class="panel-head">
         <div class="kicker">Admin</div>
-        <h1 class="display">Products</h1>
+        <h1 class="display">Product Catalog</h1>
         <p class="lede">Every product the app can sell, in one list you can change freely: edit any field, rename it, <strong>duplicate</strong> it to make a variant, add a new one, or delete it. Changes apply immediately across the app; a renamed product is still recognized under its old name in saved proposals and pasted requests.</p>
       </div>
 
@@ -287,7 +287,7 @@
       <div class="panel-head">
         <div class="kicker">Admin</div>
         <h1 class="display">Market Config</h1>
-        <p class="lede">Each market's Entravision office address (shown on every proposal export's meta block), its DSC (assistant) and DSM contacts, and the CC list for the Step 07 seller email. <strong>Default</strong> is what every market uses until it has its own row below.</p>
+        <p class="lede">Each market's Entravision office address (shown on every proposal export's meta block), its DSC (assistant) and DSM contacts, its research assignees, and the CC list for the Step 07 seller email. The DSC, DSM and research assignees are CC'd on that email along with the market's CC list. <strong>Default</strong> is what every market uses until it has its own row below.</p>
       </div>
 
       <div class="admin-toolbar base-ccs-toolbar">
@@ -319,12 +319,13 @@
               <th>Address Line 2</th>
               <th>DSC <small>(assistant)</small></th>
               <th>DSM</th>
+              <th>Research Assignees <small>(comma-separated)</small></th>
               <th>CC Emails <small>(comma-separated)</small></th>
               <th></th>
             </tr>
           </thead>
           <tbody id="markets-body">
-            <tr><td colspan="7" class="admin-empty">Loading…</td></tr>
+            <tr><td colspan="8" class="admin-empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -388,7 +389,7 @@
       <div class="panel-head">
         <div class="kicker">Admin</div>
         <h1 class="display">Restrictions</h1>
-        <p class="lede">Entravision's "Restricted Verticals by Platforms" Google Sheet is the source of truth for whether a client vertical (Political, Cannabis, Casino/Gambling…) is allowed on each product. The Roadblocks step reads it, computes a verdict per product, and the AI isn't allowed to contradict it. Sync it here whenever the sheet changes.</p>
+        <p class="lede">Entravision's "Restricted Verticals by Platforms" Google Sheet is the source of truth for whether a client vertical (Political, Cannabis, Casino/Gambling…) is allowed on each product. The Roadblocks step reads it, computes a verdict per product, and the AI isn't allowed to contradict it. Sync it here whenever the sheet changes. You can also <strong>add your own categories and extra rules</strong> below: Step 07 offers them as choices and the AI reads them exactly like a sheet tab.</p>
       </div>
 
       <div class="dz-card" id="rs-source">
@@ -405,10 +406,49 @@
           <input type="file" id="rs-file" accept=".xlsx" />
           <button type="button" class="btn-secondary" id="rs-upload-btn">Upload .xlsx</button>
         </div>
-        <p class="rs-hint">Sync uses the app's connected Google Drive account, so that account needs access to the sheet. If it doesn't, download the sheet from Google (File → Download → Microsoft Excel) and upload it here instead. Syncing replaces what's below with what's in the sheet; keyword and product-mapping edits you made are kept for every tab and sheet entry that is still there.</p>
+        <p class="rs-hint">Sync uses the app's connected Google Drive account, so that account needs access to the sheet. If it doesn't, download the sheet from Google (File → Download → Microsoft Excel) and upload it here instead. Syncing replaces the sheet's tabs with what's in the sheet; the categories you added by hand, your extra notes, and the keyword and product-mapping edits you made are kept.</p>
         <span id="rs-error" class="add-product-error hidden"></span>
         <div class="rs-warnings hidden" id="rs-warnings"></div>
       </div>
+
+      <details class="add-product-panel" id="rs-add-panel">
+        <summary id="rs-add-title">+ Add a category</summary>
+        <form id="rs-add-form">
+          <p class="rs-hint">Add a restricted vertical, or any restriction, directly here — no sheet needed. Step 07 offers it as a choice, plan text that mentions its keywords suggests it, and the Roadblocks AI reads what you write below like a sheet tab. A sync never deletes it.</p>
+          <div class="add-product-grid">
+            <label>Name <span class="req">*</span>
+              <input type="text" id="rs-add-name" maxlength="80" required placeholder="Alcohol" />
+            </label>
+            <label>Type
+              <select id="rs-add-kind">
+                <option value="guidance">Guidance — rules the AI should apply</option>
+                <option value="blanket_hold">Not accepted on any product</option>
+                <option value="allowlist">Approved products only</option>
+              </select>
+            </label>
+            <label class="span-2">Suggested when the plan mentions <small>(comma separated — whole words, case-insensitive; leave blank to use the name)</small>
+              <input type="text" id="rs-add-keywords" placeholder="alcohol, beer, wine, spirits" />
+            </label>
+            <label class="span-2">One-line summary <small>(shown beside each product's verdict; optional)</small>
+              <input type="text" id="rs-add-summary" maxlength="500" />
+            </label>
+            <label class="span-2" id="rs-add-body-wrap">Details / rules for the AI <span class="req" id="rs-add-body-req">*</span> <small>(what's restricted, what's required, approvals, creative rules…)</small>
+              <textarea id="rs-add-body" rows="5" maxlength="20000"></textarea>
+            </label>
+            <label class="span-2 hidden" id="rs-add-items-wrap">Approved products <span class="req">*</span> <small>(one per line — name them as you like; you can map each to catalog products after saving)</small>
+              <textarea id="rs-add-items" rows="5"></textarea>
+            </label>
+            <label class="span-2">Extra notes <small>(optional — more rules for the AI to keep in mind)</small>
+              <textarea id="rs-add-notes" rows="2" maxlength="6000"></textarea>
+            </label>
+          </div>
+          <div class="add-product-actions">
+            <span id="rs-add-error" class="add-product-error hidden"></span>
+            <button type="button" class="btn-secondary" id="rs-add-cancel">Cancel</button>
+            <button type="submit" class="btn-primary" id="rs-add-submit">Add Category</button>
+          </div>
+        </form>
+      </details>
 
       <div id="rs-list" class="dz-list"><p class="admin-empty">Loading…</p></div>
     </section>

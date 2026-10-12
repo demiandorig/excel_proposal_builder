@@ -103,7 +103,7 @@ def test_the_screenlist_sheet_has_the_header_one_sample_row_and_the_calculated_c
     assert ws.max_row == 2                                                          # one sample row, nothing else
     assert ws["AO2"].value == "=IFERROR(DOOHScreenlist[[#This Row],[four_week_impressions]]*0.4,0)"
     assert ws["AP2"].value == ("=IFERROR((DOOHScreenlist[[#This Row],[four_week_impressions]]*0.4)"
-                               "*DOOHScreenlist[[#This Row],[cpm]]/100,0)")
+                               "*DOOHScreenlist[[#This Row],[cpm]]/1000,0)")
     assert ws.freeze_panes == "A2"
     assert ws["V2"].number_format == "General" and ws["W2"].number_format == "#,##0"
     assert ws.column_dimensions["W"].width >= 22                                    # the header text fits
@@ -126,14 +126,14 @@ def test_the_screenlist_is_an_excel_table_covering_header_and_sample_with_calcul
 
 def test_max_avails_and_max_spend_follow_the_requested_formulas_and_one_named_divisor(monkeypatch):
     assert dp.max_avails_for(2353) == pytest.approx(941.2)
-    assert dp.max_spend_for(2353, 32.5) == pytest.approx(2353 * 0.4 * 32.5 / 100) == pytest.approx(305.89)
-    assert dp.SAMPLE_MAX_AVAILS == pytest.approx(941.2) and dp.SAMPLE_MAX_SPEND == pytest.approx(305.89)
-    assert dp.DOOH_SPEND_DIVISOR == 100 and dp.DOOH_MAX_AVAILS_SHARE == 0.4
-    assert "/100" in dp.table_formula("max_spend") and "*0.4" in dp.table_formula("max_avails")
+    assert dp.max_spend_for(2353, 32.5) == pytest.approx(2353 * 0.4 * 32.5 / 1000) == pytest.approx(30.589)    # CPM is per thousand
+    assert dp.SAMPLE_MAX_AVAILS == pytest.approx(941.2) and dp.SAMPLE_MAX_SPEND == pytest.approx(30.589)
+    assert dp.DOOH_SPEND_DIVISOR == 1000 and dp.DOOH_MAX_AVAILS_SHARE == 0.4
+    assert "/1000" in dp.table_formula("max_spend") and "*0.4" in dp.table_formula("max_avails")
     # the divisor is the single knob: change it and the formula text follows
-    monkeypatch.setattr(dp, "DOOH_SPEND_DIVISOR", 1000)
-    assert "/1000" in dp.table_formula("max_spend")
-    assert dp.max_spend_for(2353, 32.5) == pytest.approx(30.589)
+    monkeypatch.setattr(dp, "DOOH_SPEND_DIVISOR", 100)
+    assert "/100," in dp.table_formula("max_spend") and "/1000" not in dp.table_formula("max_spend")
+    assert dp.max_spend_for(2353, 32.5) == pytest.approx(305.89)
 
 
 # --- the Summary sheet: no header block, no CPM assumption --------------------------------------------------------
@@ -165,7 +165,7 @@ def test_the_summary_cells_hold_the_pivot_rendering_of_the_sample_row(tmp_path):
     ws = openpyxl.load_workbook(_dooh_workbook(tmp_path / "d.xlsx"))[dp.DOOH_SUMMARY_SHEET]
     r = dp.PIVOT_FIRST_ROW
     assert [c.value for c in ws[r]][1:6] == ["Venue Type", "Network ", "Number of Screens", "Max. Avails", "Max. Spend"]
-    assert [c.value for c in ws[r + 1]][1:6] == ["Retail|Gas Stations|Pump", "GSTV", 1, pytest.approx(941.2), pytest.approx(305.89)]
+    assert [c.value for c in ws[r + 1]][1:6] == ["Retail|Gas Stations|Pump", "GSTV", 1, pytest.approx(941.2), pytest.approx(30.589)]
     assert ws.cell(row=r + 1, column=6).number_format == '"$"#,##0.00'
     assert ws.cell(row=r + len(dp.pivot_preview_rows()) - 1, column=2).value == "Grand Total"
     # one row height for the whole sheet — evenly spaced rows however far the pivot grows
@@ -313,7 +313,7 @@ def test_the_cache_reads_the_screenlist_table_by_name_refreshes_on_load_and_desc
     assert len(rows) == 1 and len(rows[0]) == 42 and records.get("count") == "1"
     row = list(rows[0])
     assert row[dp.DOOH_ALL_COLUMNS.index("max_avails")].get("v") == "941.2"
-    assert row[dp.DOOH_ALL_COLUMNS.index("max_spend")].get("v") == "305.89"
+    assert row[dp.DOOH_ALL_COLUMNS.index("max_spend")].get("v") == "30.589"
     assert row[dp.DOOH_ALL_COLUMNS.index("supports_dynamic_creative")].tag == M + "b"
     assert row[dp.DOOH_ALL_COLUMNS.index("restrictions")].tag == M + "m"            # blank cell
 
@@ -357,13 +357,13 @@ def test_the_helper_formulas_carry_their_cached_values_and_number_stored_as_text
     _, parts = _pivot_package(tmp_path)
     sheet = parts["xl/worksheets/sheet2.xml"].decode("utf-8")
     assert re.search(r'<c r="AO2"[^>]*><f>[^<]*</f><v>941\.2</v></c>', sheet)
-    assert re.search(r'<c r="AP2"[^>]*><f>[^<]*</f><v>305\.89</v></c>', sheet)
+    assert re.search(r'<c r="AP2"[^>]*><f>[^<]*</f><v>30\.589</v></c>', sheet)
     assert '<ignoredError sqref="A2:AP1048576" numberStoredAsText="1"/>' in sheet
     root = ET.fromstring(sheet)
     order = [c.tag.replace(M, "") for c in root]
     assert order.index("ignoredErrors") < order.index("tableParts")                  # schema order
     cached = openpyxl.load_workbook(tmp_path / "d.xlsx", data_only=True)[dp.DOOH_SCREENLIST_SHEET]
-    assert cached["AO2"].value == pytest.approx(941.2) and cached["AP2"].value == pytest.approx(305.89)
+    assert cached["AO2"].value == pytest.approx(941.2) and cached["AP2"].value == pytest.approx(30.589)
 
 
 def test_openpyxl_can_still_read_the_injected_workbook_including_its_pivot(tmp_path):

@@ -856,7 +856,7 @@ function renderMarketConfig() {
     `${list.length} market${list.length === 1 ? "" : ""}`.trim();
 
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="7" class="admin-empty">No markets configured yet.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="8" class="admin-empty">No markets configured yet.</td></tr>`;
     return;
   }
 
@@ -867,6 +867,7 @@ function renderMarketConfig() {
       <td><input type="text" data-field="address_line2" value="${escapeAttr(m.address_line2)}" placeholder="City, State ZIP" /></td>
       <td><input type="text" data-field="dsc_email" value="${escapeAttr(m.dsc_email)}" placeholder="dsc@entravision.com" /></td>
       <td><input type="text" data-field="dsm_email" value="${escapeAttr(m.dsm_email)}" placeholder="dsm@entravision.com" /></td>
+      <td><input type="text" data-field="research_emails" value="${escapeAttr((m.research_emails || []).join(", "))}" placeholder="research@entravision.com, …" /></td>
       <td><input type="text" data-field="ccs" value="${escapeAttr((m.ccs || []).join(", "))}" placeholder="name@entravision.com, …" /></td>
       <td>
         <button class="btn-save-row" data-action="save-market" data-market="${escapeAttr(m.market_key)}">Save</button>
@@ -892,8 +893,8 @@ async function onSaveMarket(marketKey) {
 
   const payload = { market_key: marketKey };
   row.querySelectorAll("input[data-field]").forEach(inp => {
-    if (inp.dataset.field === "ccs") {
-      payload.ccs = inp.value.split(",").map(s => s.trim()).filter(Boolean);
+    if (inp.dataset.field === "ccs" || inp.dataset.field === "research_emails") {
+      payload[inp.dataset.field] = inp.value.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
     } else {
       payload[inp.dataset.field] = inp.value.trim();
     }
@@ -1513,11 +1514,11 @@ async function loadRestrictions() {
 function applyRestrictionsPayload(data) {
   adminState.restrictions = data;
   // Parser warnings only come back from a sync/upload; later saves keep showing the last ones.
-  if (data.synced) adminState.restrictionWarnings = data.warnings || [];
+  if (data.synced || data.created) adminState.restrictionWarnings = data.warnings || [];
   const warnEl = document.getElementById("rs-warnings");
   const warnings = adminState.restrictionWarnings || [];
   warnEl.innerHTML = warnings.length
-    ? `<strong>Worth a look after this sync</strong><ul>${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>`
+    ? `<strong>Worth a look</strong><ul>${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>`
     : "";
   warnEl.classList.toggle("hidden", !warnings.length);
   document.getElementById("rs-url").value = data.sheet_url || "";
@@ -1543,22 +1544,45 @@ function renderRestrictions() {
             <textarea rows="2" data-rs-item="${escapeHtml(item)}" placeholder="No catalog product matched — type product names, comma separated">${escapeHtml((c.product_map[item] || []).join(", "))}</textarea>
           </label>`).join("")}
       </div>` : "";
-    const body = `<details class="rs-body"><summary>Sheet text (what the AI reads)</summary><pre>${escapeHtml(c.body)}</pre></details>`;
+    // A category added by hand has its own editable text; a sheet tab shows the sheet's text read-only.
+    const body = c.is_manual
+      ? `<div class="rs-own">
+           <label class="rs-field">Type
+             <select data-rs-kind>
+               ${Object.entries(RS_KIND_LABEL).map(([k, label]) => `<option value="${k}" ${k === c.kind ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+             </select>
+           </label>
+           <label class="rs-field">One-line summary
+             <input type="text" data-rs-summary maxlength="500" value="${escapeHtml(c.summary)}" />
+           </label>
+           <label class="rs-field">Details / rules for the AI
+             <textarea rows="5" data-rs-body maxlength="20000">${escapeHtml(c.body)}</textarea>
+           </label>
+           ${c.kind === "allowlist" ? `<label class="rs-field">Approved products <small>(one per line)</small>
+             <textarea rows="4" data-rs-items>${escapeHtml(c.items.join("\n"))}</textarea>
+           </label>` : ""}
+         </div>`
+      : `<details class="rs-body"><summary>Sheet text (what the AI reads)</summary><pre>${escapeHtml(c.body)}</pre></details>`;
+    const notes = `<label class="rs-field">Extra notes for the AI <small>(rules you add on top${c.is_manual ? "" : " of the sheet text"} — the Roadblocks AI reads them too; kept when the sheet is synced)</small>
+        <textarea rows="3" data-rs-notes maxlength="6000" placeholder="e.g. Ads must carry the TTB responsible-drinking line; no creative aimed at under-21s.">${escapeHtml(c.extra_notes || "")}</textarea>
+      </label>`;
     return `
-    <article class="dz-card" data-rs-category="${escapeHtml(c.name)}">
+    <article class="dz-card" data-rs-category="${escapeHtml(c.name)}" ${c.is_manual ? 'data-rs-manual="1"' : ""}>
       <header class="dz-card-head">
         <h3>${escapeHtml(c.name)}</h3>
-        <span class="dz-meta">${escapeHtml(RS_KIND_LABEL[c.kind] || c.kind)}</span>
+        <span class="dz-meta">${c.is_manual ? "Added by hand · " : ""}${escapeHtml(RS_KIND_LABEL[c.kind] || c.kind)}</span>
       </header>
-      <p class="rs-summary">${escapeHtml(c.summary)}</p>
+      ${c.is_manual ? "" : `<p class="rs-summary">${escapeHtml(c.summary)}</p>`}
       <label class="rs-field">Suggested when the plan mentions <small>(comma separated — whole words, case-insensitive)</small>
         <input type="text" data-rs-keywords value="${escapeHtml(c.keywords.join(", "))}" />
       </label>
       ${mapping}
       ${body}
+      ${notes}
       <div class="dz-actions">
         <span class="add-product-error hidden" data-rs-card-error></span>
         <span class="rs-unknown hidden" data-rs-unknown></span>
+        ${c.is_manual ? `<button type="button" class="btn-delete-row" data-rs-delete>Delete category</button>` : ""}
         <button type="button" class="btn-secondary" data-rs-save>Save changes</button>
       </div>
     </article>`;
@@ -1566,6 +1590,9 @@ function renderRestrictions() {
 
   list.querySelectorAll("[data-rs-save]").forEach(btn => {
     btn.addEventListener("click", () => saveRestriction(btn.closest("[data-rs-category]"), known));
+  });
+  list.querySelectorAll("[data-rs-delete]").forEach(btn => {
+    btn.addEventListener("click", () => deleteRestriction(btn.closest("[data-rs-category]")));
   });
 }
 
@@ -1599,11 +1626,28 @@ async function saveRestriction(card, known) {
   });
   unknownEl.classList.toggle("hidden", !unknown.length);
   unknownEl.textContent = unknown.length ? `Not catalog products: ${unknown.join(", ")}` : "";
+  const payload = {
+    keywords: card.querySelector("[data-rs-keywords]").value,
+    product_map: productMap,
+    extra_notes: card.querySelector("[data-rs-notes]").value,
+  };
+  if (card.dataset.rsManual) {                       // a hand-added category: its own text is editable too
+    payload.kind = card.querySelector("[data-rs-kind]").value;
+    payload.summary = card.querySelector("[data-rs-summary]").value;
+    payload.body = card.querySelector("[data-rs-body]").value;
+    const itemsEl = card.querySelector("[data-rs-items]");
+    payload.items = itemsEl ? itemsEl.value.split("\n").map(x => x.trim()).filter(Boolean) : [];
+    if (payload.kind === "allowlist" && !itemsEl) {  // switched to "approved products" just now: ask for the list first
+      errEl.textContent = "Save once to switch the type, then list the approved products.";
+      errEl.classList.remove("hidden");
+      payload.items = null;
+    }
+  }
   try {
     const res = await fetch(`/api/admin/restrictions/${encodeURIComponent(name)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ keywords: card.querySelector("[data-rs-keywords]").value, product_map: productMap }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
@@ -1622,7 +1666,79 @@ async function saveRestriction(card, known) {
   }
 }
 
+async function deleteRestriction(card) {
+  const name = card.dataset.rsCategory;
+  if (!confirm(`Delete the category "${name}"? Step 07 will no longer offer it and the AI won't read its rules.`)) return;
+  const errEl = card.querySelector("[data-rs-card-error]");
+  try {
+    const res = await fetch(`/api/admin/restrictions/${encodeURIComponent(name)}`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    applyRestrictionsPayload(data);
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove("hidden");
+  }
+}
+
+// The "Add a category" form: type decides whether the rules text or the approved-products list is asked for.
+function wireAddRestriction() {
+  const form = document.getElementById("rs-add-form");
+  if (!form) return;
+  const kindEl = document.getElementById("rs-add-kind");
+  const errEl = document.getElementById("rs-add-error");
+  const syncType = () => {
+    const allow = kindEl.value === "allowlist";
+    document.getElementById("rs-add-items-wrap").classList.toggle("hidden", !allow);
+    document.getElementById("rs-add-body-req").classList.toggle("hidden", kindEl.value !== "guidance");
+  };
+  kindEl.addEventListener("change", syncType);
+  syncType();
+  document.getElementById("rs-add-cancel").addEventListener("click", () => {
+    form.reset();
+    syncType();
+    errEl.classList.add("hidden");
+    document.getElementById("rs-add-panel").open = false;
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errEl.classList.add("hidden");
+    const btn = document.getElementById("rs-add-submit");
+    const idle = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Adding…";
+    try {
+      const res = await fetch("/api/admin/restrictions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: document.getElementById("rs-add-name").value,
+          kind: kindEl.value,
+          keywords: document.getElementById("rs-add-keywords").value,
+          summary: document.getElementById("rs-add-summary").value,
+          body: document.getElementById("rs-add-body").value,
+          items: kindEl.value === "allowlist" ? document.getElementById("rs-add-items").value : "",
+          extra_notes: document.getElementById("rs-add-notes").value,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+      form.reset();
+      syncType();
+      document.getElementById("rs-add-panel").open = false;
+      applyRestrictionsPayload(data);
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("hidden");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = idle;
+    }
+  });
+}
+
 function wireRestrictions() {
+  wireAddRestriction();
   const syncBtn = document.getElementById("rs-sync-btn");
   if (!syncBtn) return;
   const errEl = document.getElementById("rs-error");

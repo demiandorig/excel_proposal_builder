@@ -69,7 +69,7 @@ from app.services.notion_parser import (
 from app.services.proposal_generator import LineItem, AddonItem, generate_proposal, normalize_full_flight_lines
 from app.services.recommender import recommend_line_items
 from app.market_config import (
-    load_market_config, set_market_entry, delete_market_entry, DEFAULT_KEY,
+    load_market_config, set_market_entry, delete_market_entry, normalize_emails, DEFAULT_KEY,
     BASE_CCS_KEY, get_base_ccs, set_base_ccs, get_all_ccs_for_market,
     T1_CCS_KEY, get_t1_ccs, set_t1_ccs, T1_SPEND_THRESHOLD,
 )
@@ -925,7 +925,7 @@ async def me(request: Request) -> dict:
 
 @app.get("/api/catalog")
 async def get_catalog() -> dict:
-    """Return the product list (as the admin has it in Admin -> Products), grouped by family."""
+    """Return the product list (as the admin has it in Admin -> Product Catalog), grouped by family."""
     grouped: dict[str, list] = {}
     for p in effective_catalog():
         grouped.setdefault(p.family, []).append({
@@ -2239,7 +2239,7 @@ async def health() -> dict:
 # ---------------------------------------------------------------------------
 
 class ProductRequest(BaseModel):
-    """One product, as the Admin -> Products form sends it. Every field is optional: a key that is ABSENT keeps
+    """One product, as the Admin -> Product Catalog form sends it. Every field is optional: a key that is ABSENT keeps
     the product's current value, and a nullable key sent as null (rate, est. CPM, SLA days) clears it."""
     name: Optional[str] = Field(default=None, max_length=200)
     family: Optional[str] = Field(default=None, max_length=120)
@@ -2274,6 +2274,7 @@ class MarketConfigRequest(BaseModel):
     address_line2: Optional[str] = None
     dsc_email: Optional[str] = None  # Digital Sales Coordinator (assistant) — CC'd on the internal seller email
     dsm_email: Optional[str] = None  # Digital Sales Manager — CC'd on the internal seller email
+    research_emails: Optional[list[str]] = Field(default=None, max_length=50)  # the market's research assignees — CC'd on the internal seller email too
     ccs: Optional[list[str]] = None
 
 
@@ -2396,7 +2397,7 @@ async def restriction_categories(body: RestrictionCategoriesRequest) -> dict:
     sync = state["sync"] or {}
     return {
         "categories": [
-            {"name": c.name, "kind": c.kind, "summary": c.summary, "suggested": c.name in suggested}
+            {"name": c.name, "kind": c.kind, "summary": c.summary, "suggested": c.name in suggested, "manual": c.is_manual}
             for c in state["categories"]
         ],
         "using_builtin": state["using_builtin"],
@@ -2416,6 +2417,23 @@ class RestrictionUploadRequest(BaseModel):
 class RestrictionUpdateRequest(BaseModel):
     keywords: Annotated[str, Field(max_length=5000)] | Annotated[list[str], Field(max_length=200)] = []
     product_map: dict[str, list[str]] = Field(default={}, max_length=300)
+    # rules the AI reads on top of the sheet text (any category), and - only for a category added by hand - its own fields
+    extra_notes: Optional[str] = Field(default=None, max_length=20000)
+    kind: Optional[str] = Field(default=None, max_length=20)
+    summary: Optional[str] = Field(default=None, max_length=2000)
+    body: Optional[str] = Field(default=None, max_length=40000)
+    items: Optional[list[str]] = Field(default=None, max_length=300)
+
+
+class RestrictionCreateRequest(BaseModel):
+    """A category an admin adds by hand (not a tab of the sheet)."""
+    name: str = Field(max_length=200)
+    kind: str = Field(default="guidance", max_length=20)
+    keywords: Annotated[str, Field(max_length=5000)] | Annotated[list[str], Field(max_length=200)] = []
+    summary: str = Field(default="", max_length=2000)
+    body: str = Field(default="", max_length=40000)
+    items: Annotated[str, Field(max_length=40000)] | Annotated[list[str], Field(max_length=300)] = []
+    extra_notes: str = Field(default="", max_length=20000)
 
 
 def _restriction_admin_payload(warnings: Optional[list[str]] = None) -> dict:
@@ -2448,9 +2466,14 @@ def _ingest_restrictions(data: bytes, sheet_url: str, source_title: str, synced_
     if previous.get("error"):
         # The read FAILED: replacing now would throw away the keyword / mapping edits an admin made.
         raise _restrictions_read_failed(previous)
-    if not previous["using_builtin"]:
-        restrictions_svc.carry_over_admin_edits(categories, previous["categories"])
-    restrictions_svc.replace_all(categories, sheet_url=sheet_url, source_title=source_title, synced_by=synced_by)
+    # Edits to carry over: everything stored when a real sync was there before; only the hand-added categories (their
+    # notes and keywords) when the built-in snapshot was all there was.
+    carried = previous["categories"] if not previous["using_builtin"] else [c for c in previous["categories"] if c.is_manual]
+    restrictions_svc.carry_over_admin_edits(categories, carried)
+    clashes = restrictions_svc.replace_all(categories, sheet_url=sheet_url, source_title=source_title, synced_by=synced_by) or []
+    warnings = list(warnings) + [
+        f"The sheet now has a tab called \"{name}\", so it replaced the category of that name you had added by hand "
+        "(its extra notes and keywords were kept)." for name in clashes]
     return warnings
 
 
@@ -2546,15 +2569,45 @@ async def admin_update_restriction(name: str, body: RestrictionUpdateRequest, re
         if state.get("error"):
             # The read FAILED (not "no rows yet"): seeding now would wipe whatever is really stored.
             raise _restrictions_read_failed(state)
-        if state["using_builtin"]:
+        stored_names = {c.name for c in state["categories"] if c.is_manual}
+        if state["using_builtin"] and name not in stored_names:
             # Editing the built-in snapshot: persist it first so there are rows to edit.
             restrictions_svc.seed_builtin_into_db(request.state.user["email"])
-        updated = restrictions_svc.update_category(name, keywords=body.keywords, product_map=body.product_map)
+        updated = restrictions_svc.update_category(
+            name, keywords=body.keywords, product_map=body.product_map, extra_notes=body.extra_notes,
+            kind=body.kind, summary=body.summary, body=body.body, items=body.items)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if updated is None:
         raise HTTPException(status_code=404, detail="Category not found.")
-    return {"saved": True, **_restriction_admin_payload()}
+    return {"saved": True, **_restriction_admin_payload(restrictions_svc.mapping_warnings([updated]) if updated.is_manual else None)}
+
+
+@app.post("/api/admin/restrictions")
+async def admin_create_restriction(body: RestrictionCreateRequest) -> dict:
+    """Add a category (a restricted vertical with its rules) directly in the app: Step 07 offers it, and the
+    Roadblocks AI reads it like a sheet tab."""
+    try:
+        category, warnings = await asyncio.to_thread(
+            restrictions_svc.create_manual_category, name=body.name, kind=body.kind, keywords=body.keywords,
+            summary=body.summary, body=body.body, items=body.items, extra_notes=body.extra_notes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"created": category.name, **_restriction_admin_payload(warnings)}
+
+
+@app.delete("/api/admin/restrictions/{name}")
+async def admin_delete_restriction(name: str) -> dict:
+    """Delete a category added by hand (a sheet tab can only go away by being removed from the sheet)."""
+    try:
+        deleted = await asyncio.to_thread(restrictions_svc.delete_manual_category, name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Category not found.")
+    return {"deleted": True, **_restriction_admin_payload()}
 
 
 class SuggestTabsRequest(BaseModel):
@@ -2629,7 +2682,7 @@ async def admin_list_users() -> dict:
 @app.get("/api/admin/users/export")
 async def admin_export_users() -> Response:
     """Download the user list as a CSV — same "at least see what's there
-    at a glance, outside the app" audit use as the Products tab's export.
+    at a glance, outside the app" audit use as the Product Catalog tab's export.
     Never includes password hashes/salts — list_users() itself never
     returns those (see auth_svc._public_user)."""
     buf = io.StringIO()
@@ -3382,6 +3435,7 @@ async def admin_get_market_config() -> dict:
             "address_line2": entry.get("address_line2", ""),
             "dsc_email": entry.get("dsc_email") or "",
             "dsm_email": entry.get("dsm_email") or "",
+            "research_emails": entry.get("research_emails", []),
             "ccs": entry.get("ccs", []),
         })
     markets.sort(key=lambda m: (not m["is_default"], m["market_key"].lower()))
@@ -3396,7 +3450,7 @@ async def admin_export_market_config() -> Response:
     than left out of the export entirely."""
     config = load_market_config()
     buf = io.StringIO()
-    fieldnames = ["market_key", "is_default", "address_line1", "address_line2", "dsc_email", "dsm_email", "ccs"]
+    fieldnames = ["market_key", "is_default", "address_line1", "address_line2", "dsc_email", "dsm_email", "research_emails", "ccs"]
     writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     writer.writerow({"market_key": "(base CCs — every proposal, every market)", "ccs": "; ".join(config.get(BASE_CCS_KEY, []))})
@@ -3411,6 +3465,7 @@ async def admin_export_market_config() -> Response:
             "address_line2": entry.get("address_line2", ""),
             "dsc_email": entry.get("dsc_email") or "",
             "dsm_email": entry.get("dsm_email") or "",
+            "research_emails": "; ".join(entry.get("research_emails", [])),
             "ccs": "; ".join(entry.get("ccs", [])),
         })
     return Response(
@@ -3467,10 +3522,16 @@ async def admin_save_market_config(body: MarketConfigRequest) -> dict:
             "address_line2": body.address_line2,
             "dsc_email": body.dsc_email,
             "dsm_email": body.dsm_email,
+            "research_emails": body.research_emails,
             "ccs": body.ccs,
         }.items() if v is not None
     }
-    entry = set_market_entry(market_key, fields)
+    try:
+        if "research_emails" in fields:
+            fields["research_emails"] = normalize_emails(fields["research_emails"])
+        entry = set_market_entry(market_key, fields)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"saved": True, "market_key": market_key, "entry": entry}
 
 

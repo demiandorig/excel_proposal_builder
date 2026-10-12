@@ -1,5 +1,5 @@
 """
-Admin -> Products: ONE freeform product list (no built-in / custom split, no "original" list), with duplicate-to-
+Admin -> Product Catalog: ONE freeform product list (no built-in / custom split, no "original" list), with duplicate-to-
 make-a-variant, plus the YouTube split into Skippable / Non-Skippable. The database layer is replaced by a small
 in-memory fake that understands the handful of statements app/catalog.py issues.
 """

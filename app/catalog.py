@@ -66,7 +66,7 @@ Fixed-model products with no dollar figure at all (pure "See Sales
 Planning" lines) before relying on them for margin-sensitive approvals.
 THIS LIST IS ONLY THE SEED. Once the app has run, the `products` table is
 the one and only product list — edit, add, duplicate and delete products in
-Admin -> Products; nothing here is consulted again except to fill an empty
+Admin -> Product Catalog; nothing here is consulted again except to fill an empty
 table and as the fail-safe when the database can't be read.
 """
 

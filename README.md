@@ -6,7 +6,7 @@ when a DOOH product is in the plan).
 
 Stage 2 deliverable of the TapClicks / AdFlo proposal pipeline. The
 catalog, pricing rules, and Excel template are shared with the Stage 1
-business-logic spec. The product list lives in the database and is edited in **Admin → Products**
+business-logic spec. The product list lives in the database and is edited in **Admin → Product Catalog**
 (`app/catalog.py` only holds the starting list that seeds an empty table).
 
 ---
@@ -67,7 +67,7 @@ webapp/
 ### The product list is one freeform list
 
 Products are rows in the `products` table, all equal: an admin adds, edits, duplicates (to make a variant) and
-deletes them in **Admin → Products**, and every other module — the Excel builder, parser, recommender, generator —
+deletes them in **Admin → Product Catalog**, and every other module — the Excel builder, parser, recommender, generator —
 reads that list through `catalog.effective_catalog()`. `CATALOG` in `app/catalog.py` is only the *seed*: the first
 time the app finds the table empty it copies that list in (folding in anything the retired `rate_overrides` /
 `custom_products` tables held), and it is the read-only fallback if the table can't be reached. A renamed product keeps resolving under its old name (`product_aliases`); a deleted one stays
@@ -75,10 +75,12 @@ hidden-but-resolvable so saved proposals still open.
 
 ### Tables created at startup
 
-The tables newer features depend on (`products`, `product_aliases`, `proposal_files`, `faq_entries`) are created when
-the app starts, from `schema.sql`'s own idempotent `CREATE TABLE IF NOT EXISTS` statements (`app/services/schema_bootstrap.py`),
-so a deploy never waits on someone pasting SQL into the database console. Best effort: if the database user can't create
-tables, each feature keeps its fail-safe path and the log says so — applying `schema.sql` by hand still works.
+Every statement in `schema.sql` that is safe to re-run (`CREATE TABLE/INDEX IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`) is applied
+when the app starts (`app/services/schema_bootstrap.py`). That is what creates the tables and columns newer features depend on
+(disclaimers, the product list, Drive's shared file copy, FAQ rows, hand-added restriction categories), so a deploy never waits on
+someone pasting SQL into the database console. Each statement runs in its own savepoint with a short lock timeout; best effort:
+if the database user can't create tables, each feature keeps its fail-safe path and the log says so — applying `schema.sql` by
+hand still works.
 
 ### Process FAQs (Admin → FAQ)
 
@@ -95,6 +97,12 @@ Roadblocks reads a stored copy of the "Restricted Verticals by Platforms" Google
 re-read automatically when it is older than `RESTRICTIONS_AUTO_SYNC_MINUTES` (default 60; 0 turns it off) — at the Step 07
 chooser and before each check, through the app's Google Drive connection. A failed refresh keeps the stored copy; an uploaded
 workbook and the built-in snapshot are never replaced automatically.
+
+Admins can also add to it directly in **Admin → Restrictions**: **+ Add a category** creates a restricted vertical with its
+own rules (guidance the AI should apply, "not accepted on any product", or an approved-products list) and **Extra notes** adds
+rules to any category. Step 07 offers hand-added categories as choices, their keywords suggest them, and the Roadblocks AI
+reads them like a sheet tab (marked "added in the app"). A sync never deletes them (`restriction_categories.is_manual` /
+`extra_notes`); if the sheet later gains a tab of the same name, the sheet's version wins and the notes are carried over.
 
 ### Create in Gamma
 
@@ -138,14 +146,14 @@ One export choice builds two sheets, always together:
 
 - **DOOH Screenlist** — an Excel table (`DOOHScreenlist`) with the platform export's 40 columns in a fixed
   order plus two calculated columns, `max_avails` (`four_week_impressions * 0.4`) and `max_spend`
-  (`(four_week_impressions * 0.4) * cpm / 100`), and one sample row. The planner pastes the real inventory
+  (`(four_week_impressions * 0.4) * cpm / 1000` — CPM is per thousand impressions), and one sample row. The planner pastes the real inventory
   over the sample row; the table (and its calculated columns) grows with it.
 - **DOOH Summary** — a real Excel pivot table over that table: Venue Type > Network with Number of Screens,
   Max. Avails and Max. Spend. It refreshes when the workbook opens (or Data > Refresh All).
 
 openpyxl cannot write pivot tables, so `app/services/dooh_pivot.py` attaches the pivot to the saved file
-(`add_dooh_pivot`); it has to be the last thing that touches the workbook. The `/100` in `max_spend` is the
-constant `DOOH_SPEND_DIVISOR` in that module (CPM is normally per thousand — confirm before changing it).
+(`add_dooh_pivot`); it has to be the last thing that touches the workbook. The `/1000` in `max_spend` is the
+constant `DOOH_SPEND_DIVISOR` in that module.
 The old `dooh_summary` / `dooh_screenlist` tab keys are still accepted (either one means both sheets); the
 canonical key is `dooh`.
 

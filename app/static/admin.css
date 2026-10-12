@@ -478,3 +478,10 @@
 .faq-actions { white-space: nowrap; }
 .faq-actions button { margin-right: 4px; }
 .faq-actions button:disabled { opacity: 0.4; cursor: default; }
+
+/* Restrictions: a category added by hand has its own editable text */
+.rs-own { display: flex; flex-direction: column; gap: 10px; margin: 10px 0; }
+.rs-own select, .rs-own input[type="text"], .rs-own textarea { width: 100%; box-sizing: border-box; }
+
+/* Markets: eight columns now (research assignees added) - slightly narrower inputs so the table still fits without scrolling */
+#markets-table input[type="text"] { min-width: 116px; }

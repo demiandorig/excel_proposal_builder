@@ -77,12 +77,11 @@ DOOH_ALL_COLUMNS: list[str] = DOOH_SCREENLIST_COLUMNS + DOOH_HELPER_COLUMNS
 # as available to a campaign).
 DOOH_MAX_AVAILS_SHARE = 0.4
 
-# Max. Spend = Max. Avails * cpm / DOOH_SPEND_DIVISOR.
-# This is EXACTLY the formula the planner asked for: ((four_week_impressions * 0.4) * cpm / 100). CPM is normally a
-# price per THOUSAND impressions, which would make the divisor 1000 — the 100 is kept as written until the planner
-# confirms it, and this constant is the one place to change it (the table's calculated-column formula, the cell
-# formulas and the cached sample values are all generated from it).
-DOOH_SPEND_DIVISOR = 100
+# Max. Spend = Max. Avails * cpm / DOOH_SPEND_DIVISOR = ((four_week_impressions * 0.4) * cpm / 1000): CPM is the
+# price per THOUSAND impressions. (The planner first wrote /100, then confirmed /1000.) This constant is the one place
+# the divisor lives: the table's calculated-column formula, the cell formulas and the cached sample values are all
+# generated from it.
+DOOH_SPEND_DIVISOR = 1000
 
 # The sample row (same order as DOOH_SCREENLIST_COLUMNS). Numbers are numbers, TRUE/FALSE real booleans, "" an empty
 # cell. postal_code and the identifier columns (id, *_id, names that are hex codes) stay TEXT so leading zeros and

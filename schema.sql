@@ -141,6 +141,9 @@ ON CONFLICT (market_key) DO NOTHING;
 -- ---------------------------------------------------------------------------
 ALTER TABLE market_config ADD COLUMN IF NOT EXISTS dsc_email TEXT;
 ALTER TABLE market_config ADD COLUMN IF NOT EXISTS dsm_email TEXT;
+-- research_emails: the market's research assignees (Admin -> Markets). They are CC'd on the Step 07 seller email for
+-- the market, like the DSC / DSM and the market's CC list. Several addresses, so a list like ccs.
+ALTER TABLE market_config ADD COLUMN IF NOT EXISTS research_emails TEXT[] NOT NULL DEFAULT '{}';
 
 -- ---------------------------------------------------------------------------
 -- Migration for an ALREADY-created rate_overrides table: adds rename +
@@ -394,8 +397,15 @@ CREATE TABLE IF NOT EXISTS restriction_categories (
     summary      TEXT NOT NULL DEFAULT '',
     body         TEXT NOT NULL DEFAULT '',
     product_map  JSONB NOT NULL DEFAULT '{}'::jsonb,
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    is_manual    BOOLEAN NOT NULL DEFAULT FALSE,
+    extra_notes  TEXT NOT NULL DEFAULT ''
 );
+-- is_manual: a category an admin added by hand in Admin -> Restrictions (not a sheet tab): a sheet sync never deletes
+-- it. extra_notes: rules an admin added to ANY category (sheet or hand-made); the Roadblocks AI reads them alongside
+-- the sheet text, and they survive a sync. For a table created before these columns existed:
+ALTER TABLE restriction_categories ADD COLUMN IF NOT EXISTS is_manual BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE restriction_categories ADD COLUMN IF NOT EXISTS extra_notes TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS restriction_sync (
     id            TEXT PRIMARY KEY DEFAULT 'default',

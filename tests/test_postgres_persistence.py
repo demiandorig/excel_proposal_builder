@@ -178,6 +178,7 @@ def test_postgres_persistence_survives_fresh_process_and_cleans_up(
                 "address_line2": "Testville, CA 90000",
                 "dsc_email": None,
                 "dsm_email": None,
+                "research_emails": [],
                 "ccs": [{"market-" + suffix + "@example.test"!r}],
             }}
 

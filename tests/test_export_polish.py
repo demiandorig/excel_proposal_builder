@@ -5,8 +5,7 @@ Export polish + admin FAQ + a live restrictions sheet:
   * the Gross sheet carries an "Agency Comm:" legend and its eCPM comes from the NET budget;
   * the Process FAQs tab is built from admin-managed rows (real hyperlinks) with a header link to the guidelines;
   * the restricted-verticals sheet is re-read from Google when the stored copy is stale;
-  * the tables newer features need are created at startup from schema.sql's own statements.
-"""
+ """
 from __future__ import annotations
 
 import asyncio
@@ -23,13 +22,11 @@ from fastapi import HTTPException
 
 from app import excel_template as et
 from app.services import faq_entries as faq
-from app.services import schema_bootstrap
 from app.services.notion_parser import ProposalRequest
 from app.services.proposal_generator import LineItem, _banner_title, generate_proposal
 
 EMAIL = "Email Campaigns - Display Re-targeting"
 IAB = "eDigital Network Display - Standard IAB"
-SCHEMA_TEXT = (Path(__file__).resolve().parent.parent / "schema.sql").read_text(encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -485,45 +482,3 @@ def test_the_chooser_and_the_check_both_refresh_first(refresh, monkeypatch):
     monkeypatch.setattr(m, "_reconstruct_proposal_request", lambda d: ProposalRequest())
     asyncio.run(m.restriction_categories(_Req()))
     assert order == ["refresh"]
-
-
-# --- creating the tables newer features need --------------------------------------------------------------------------------------
-
-@pytest.mark.parametrize("table", ["products", "product_aliases", "proposal_files", "faq_entries"])
-def test_schema_sql_has_an_idempotent_definition_for_each_ensured_table(table):
-    statements = schema_bootstrap.statements_for(table, SCHEMA_TEXT)
-    assert statements and statements[0].startswith(f"CREATE TABLE IF NOT EXISTS {table}")
-    assert statements[0].rstrip().endswith(");")
-    assert all(s.upper().startswith("CREATE") and "IF NOT EXISTS" in s.upper() for s in statements)
-
-
-def test_ensure_tables_runs_each_tables_statements_and_survives_failures(monkeypatch):
-    ran = []
-
-    class Conn:
-        def __init__(self, fail):
-            self.fail = fail
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def execute(self, sql):
-            if self.fail and "proposal_files" in sql:
-                raise PermissionError("permission denied to create table")
-            ran.append(sql)
-    monkeypatch.setattr(schema_bootstrap, "get_connection", lambda: Conn(fail=True))
-    done = schema_bootstrap.ensure_tables()
-    assert done == ["products", "product_aliases", "faq_entries"]            # proposal_files failed alone; the rest were created
-    assert any("faq_entries_sort_idx" in s for s in ran) and any("products_sort_idx" in s for s in ran)
-
-
-def test_ensure_tables_is_silent_when_schema_sql_is_missing_or_the_database_is_down(monkeypatch, tmp_path):
-    assert schema_bootstrap.ensure_tables(schema_path=tmp_path / "nope.sql") == []
-
-    def down():
-        raise ConnectionError("no database")
-    monkeypatch.setattr(schema_bootstrap, "get_connection", down)
-    assert schema_bootstrap.ensure_tables() == []

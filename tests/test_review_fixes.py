@@ -143,7 +143,7 @@ def test_confirmed_verticals_missing_from_the_sheet_are_reported(builtin_state):
 # --- Restrictions: renamed / custom products ---------------------------------------------------------
 
 def test_a_renamed_product_keeps_its_sheet_verdict(monkeypatch, builtin_state):
-    # A rename in Admin -> Products changes the name and records the old one as an alias.
+    # A rename in Admin -> Product Catalog changes the name and records the old one as an alias.
     monkeypatch.setattr("app.catalog.load_rate_overrides",
                         lambda: {"Video - Pre-roll (OLV)": {"name": "Pre-Roll Video (OLV)"}})
     monkeypatch.setattr("app.catalog.all_product_aliases", lambda: {"Video - Pre-roll (OLV)": "Pre-Roll Video (OLV)"})

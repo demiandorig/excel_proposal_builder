@@ -4699,7 +4699,7 @@ function renderAddonsModule() {
     .filter(p => p.is_addon);
 
   if (!addonProducts.length) {
-    list.innerHTML = `<p class="addons-empty">No add-ons configured yet — an admin can add some from the Products tab.</p>`;
+    list.innerHTML = `<p class="addons-empty">No add-ons configured yet — an admin can add some from the Product Catalog tab.</p>`;
     return;
   }
 
