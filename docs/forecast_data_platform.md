@@ -257,6 +257,23 @@ A connection the server dropped while idle is replaced, not lent. When the datab
 and further calls fail instantly for 5 seconds, so every fail-open path (offline product list, forecast defaults) stays
 quick. A busy pool is *not* treated as an outage.
 
+## The Constanza front end
+
+* **Launcher + dock** (`app/static/constanza.js`, `constanza.css`): a round character bottom-right opens the dock. The script
+  builds its own markup, so the page only links the two files. It reads the product list from `/api/catalog` (every product
+  whose Admin → Forecast setting is on, grouped by data channel, with the data basis, unit and - for live sports - the season
+  period), resolves the geography as the planner types (`POST /api/constanza/resolve`, debounced), and pulls with
+  `POST /api/constanza/estimate`. A pick on a suggestion edits only the item it replaces; "use X only" removes exactly the
+  typed items it drops.
+* **Step 05 cards** keep the per-line "Auto-calculate avails" button (still in `app.js`, because it needs the plan's state) and
+  render through the same `Constanza.renderCard`, so both places read alike. A geography the planner picks for a line lives
+  only in the session (`state.constanzaGeoOverride`), never in the saved proposal.
+* **Live-sports period** is listed on the Step 04 row, the Step 05 card and in the dock; the flight dates are never checked
+  against it (the estimate says so).
+* **Layout.** The masthead is a two-row grid below 1560px; the canvas grows to 1600px with fluid padding; the Curate table
+  turns into wrapped cards at 1400px and below (labels come from CSS, the two that follow the billing period from variables
+  `_applyTimeUnitLabels` sets). `tests/test_constanza_frontend.py` pins these contracts and runs the pure helpers in JavaScript.
+
 ## Operating notes (Replit)
 
 * Pull → the post-merge hook installs `requirements.txt` (adds `psycopg-pool`), runs the tests and the import. On app start the

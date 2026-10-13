@@ -285,6 +285,8 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
   .cz-bubble-tip { display: none; }
 }
 
+@media print { .constanza-bubble, .constanza-dock { display: none !important; } }
+
 @media (prefers-reduced-motion: reduce) {
   .cz-char *, .cz-bubble-tip, .constanza-bubble, .constanza-dock, .cz-details > summary::after { animation: none !important; transition: none !important; }
   .cz-signal path { opacity: 0.7; }
