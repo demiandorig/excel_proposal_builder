@@ -52,6 +52,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from app.data.constanza import read_json_maybe_gz
+from app.services import audience_taxonomy
 from app.services.constanza_engine import AreaEstimate, AvailsEstimate
 
 try:
@@ -92,11 +93,20 @@ class AudienceSpec:
 @dataclass
 class InterestResolution:
     input_text: str
-    category: str | None          # matched interest_incidence.json category key, or None
-    supported: bool
+    category: str | None          # the matched taxonomy segment id (audience_taxonomy.py), or None
+    supported: bool               # True only when the segment has a SOURCED rate that is applied
     rate_by_gender: dict | None = None
     source: str | None = None
     source_date: str | None = None
+    label: str | None = None
+    group: str | None = None
+    status: str | None = None     # sourced | derived | no_public_rate; None when nothing matched at all
+    confidence: str | None = None
+    definition: str | None = None
+    source_url: str | None = None
+    caveats: str | None = None
+    how: str | None = None        # how it was matched: name | keyword | partial | words | fuzzy | llm
+    suggestions: list = field(default_factory=list)   # the closest OTHER segments, [{id, label, supported}]
 
 
 @dataclass
@@ -128,17 +138,9 @@ class AudienceEstimate:
     notes: list[str] = field(default_factory=list)
 
 
-@lru_cache(maxsize=1)
 def load_interest_taxonomy() -> list[dict]:
-    return json.loads((_DATA_DIR / "interest_incidence.json").read_text())["categories"]
-
-
-def _keyword_match_interest(text: str) -> dict | None:
-    text_lower = text.lower()
-    for cat in load_interest_taxonomy():
-        if any(kw in text_lower for kw in cat["keywords"]):
-            return cat
-    return None
+    """The segments that have a sourced rate, one dict each (id as `category`, label, keywords, rate_by_gender, source...)."""
+    return audience_taxonomy.load_taxonomy().categories()
 
 
 def _openai_client():
@@ -150,44 +152,51 @@ def _openai_client():
     return _OpenAI(api_key=api_key)
 
 
+def _suggestions(tax, text: str, exclude: str | None = None, limit: int = 3) -> list[dict]:
+    return [{"id": h.segment.id, "label": h.segment.label, "supported": h.segment.supported}
+            for h in tax.search(text, limit=limit + 1) if h.segment.id != exclude][:limit]
+
+
+def _resolution(text: str, seg: "audience_taxonomy.Segment", how: str, tax) -> InterestResolution:
+    rates = None
+    if seg.supported:
+        rates = {"all": seg.rate_all, "male": seg.rate_male if seg.rate_male is not None else seg.rate_all,
+                 "female": seg.rate_female if seg.rate_female is not None else seg.rate_all}
+    return InterestResolution(
+        input_text=text, category=seg.id, supported=seg.supported, rate_by_gender=rates, source=seg.source_line() or None,
+        source_date=seg.source_date, label=seg.label, group=seg.group_key, status=seg.status, confidence=seg.confidence,
+        definition=seg.definition or None, source_url=seg.source_url, caveats=seg.caveats or None, how=how,
+        suggestions=_suggestions(tax, text, exclude=seg.id))
+
+
 def resolve_interest(text: str) -> InterestResolution:
-    """Maps free text to a taxonomy category via keyword match first (fast,
-    deterministic, no API call); if that fails and an LLM is configured,
-    asks it to pick the nearest category from the known list — NEVER to
-    invent a rate. Unmatched either way comes back unsupported, per the
-    stats research's own recommendation: treat any trait without a
-    sourced rate as unsupported rather than having the model guess."""
-    direct = _keyword_match_interest(text)
-    if direct:
-        return InterestResolution(
-            input_text=text, category=direct["category"], supported=True,
-            rate_by_gender=direct["rate_by_gender"], source=direct["source"], source_date=direct["source_date"],
-        )
+    """Maps free text to a taxonomy segment: its id or name, an alias, a phrase inside the text ("likes sports"), a near
+    spelling — all deterministic, no API call. Only when none of that is close enough, and an LLM is configured, it is asked to
+    pick the nearest segment from the known list — NEVER to invent a rate. A segment that is known but has no sourced rate
+    comes back as not supported, with its status, so the planner is told why nothing was applied; text that matches
+    nothing comes back unsupported with the closest segments to choose from."""
+    tax = audience_taxonomy.load_taxonomy()
+    hit = tax.best_match(text)
+    if hit is not None:
+        return _resolution(text, hit.segment, hit.how, tax)
 
     client = _openai_client()
-    if client is None:
-        return InterestResolution(input_text=text, category=None, supported=False)
-
-    categories = load_interest_taxonomy()
-    options = "\n".join(f"- {c['category']}: {c['label']}" for c in categories)
-    prompt = (
-        f"A media planner described a target audience interest as: {text!r}\n\n"
-        f"Which ONE of these known categories, if any, does it most closely match? "
-        f"Reply with ONLY the category key (e.g. \"sports_fan\") or the single word \"none\" "
-        f"if it doesn't confidently match any of them. Do not invent a new category.\n\n{options}"
-    )
-    try:
-        raw = llm_utils.chat_text(client, model=_MODEL, prompt=prompt, max_completion_tokens=20).strip().lower()
-    except Exception:
-        return InterestResolution(input_text=text, category=None, supported=False)
-
-    match = next((c for c in categories if c["category"].lower() == raw), None)
-    if match is None:
-        return InterestResolution(input_text=text, category=None, supported=False)
-    return InterestResolution(
-        input_text=text, category=match["category"], supported=True,
-        rate_by_gender=match["rate_by_gender"], source=match["source"], source_date=match["source_date"],
-    )
+    if client is not None:
+        options = "\n".join(f"- {s.id}: {s.label}" for s in tax.ordered())
+        prompt = (
+            f"A media planner described a target audience interest as: {text!r}\n\n"
+            f"Which ONE of these known audience segments, if any, does it most closely match? "
+            f"Reply with ONLY the segment id (e.g. \"sports_fan\") or the single word \"none\" "
+            f"if it doesn't confidently match any of them. Do not invent a new segment.\n\n{options}"
+        )
+        try:
+            raw = llm_utils.chat_text(client, model=_MODEL, prompt=prompt, max_completion_tokens=20).strip().lower()
+        except Exception:
+            raw = "none"
+        seg = tax.segments.get(raw)
+        if seg is not None:
+            return _resolution(text, seg, "llm", tax)
+    return InterestResolution(input_text=text, category=None, supported=False, suggestions=_suggestions(tax, text, limit=4))
 
 
 def parse_audience_text(text: str) -> AudienceSpec:
@@ -309,12 +318,23 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
 
     cvs = []
     notes = list(base.notes)
-    if unsupported:
+    known_without_rate = [i for i in unsupported if i.status == "no_public_rate"]
+    unmatched = [i for i in unsupported if i.status is None]
+    if known_without_rate:
         notes.append(
-            f"No sourced incidence rate for: {', '.join(i.input_text for i in unsupported)} — "
-            "excluded from the estimate rather than guessed. Ask the planner to confirm the "
-            "nearest supported interest, or drop this targeting dimension."
+            "No sourced incidence rate exists for: " + ", ".join(f"{i.label or i.input_text}" for i in known_without_rate) +
+            " — it is a known audience, but no defensible public number was found, so it was NOT applied (the estimate is "
+            "wider than that audience). Ask the platform for its own segment size, or drop this targeting dimension."
         )
+    if unmatched:
+        close = {s_["label"] for i in unmatched for s_ in i.suggestions[:2]}
+        notes.append(
+            f"No sourced incidence rate for: {', '.join(i.input_text for i in unmatched)} — excluded from the estimate rather "
+            "than guessed." + (f" Closest known audiences: {', '.join(sorted(close))}." if close else "")
+        )
+    for i in supported_interests:
+        if i.confidence == "low":
+            notes.append(f"'{i.label or i.input_text}' uses a low-confidence rate ({i.source or 'derived estimate'}); treat the result as directional.")
 
     if duplicates:
         notes.append(f"{', '.join(duplicates)} map to an interest already counted — applied once, not stacked.")
@@ -341,7 +361,9 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
         area_mid = area_est.imps_mid * share * interest_multiplier
         area_low = area_est.imps_low * share * interest_multiplier
         area_high = area_est.imps_high * share * interest_multiplier
-        area_pop = area_est.area_population * share
+        # The audience's own size includes the interest cut: a segment that is 0.1% of adults is a tiny audience however
+        # large the geography, and the reliability warning has to see that.
+        area_pop = area_est.area_population * share * interest_multiplier
 
         total_underlying_pop += area_pop
         imps_mid_total += area_mid
