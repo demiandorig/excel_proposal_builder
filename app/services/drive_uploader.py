@@ -300,6 +300,9 @@ def _permanent_message(failure: Failure) -> str:
     if failure.reason == "invalid_client":
         return ("Google rejected this app's Drive credentials (DRIVE_CLIENT_ID / DRIVE_CLIENT_SECRET). "
                 "An admin needs to check them.")
+    if reason == "generatedidnotsupported":
+        return ("Google Drive rejected the pre-generated file ID for this Google Sheets upload. "
+                "An app admin needs to check the upload configuration.")
     if reason in {"storagequotaexceeded", "dailylimitexceeded", "quotaexceeded"}:
         return ("The Google Drive account this app uploads with is out of storage or quota. "
                 "An admin needs to free up space or wait for the quota to reset.")
@@ -671,7 +674,8 @@ def _create_file(service, *, name: str, folder_id: str, content: bytes, as_googl
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaIoBaseUpload
 
-    file_id = _new_file_id(service)
+    # Drive does not accept pre-generated IDs for Docs Editors formats such as converted Google Sheets.
+    file_id = None if as_google_sheet else _new_file_id(service)
     body: dict = {"name": name, "parents": [folder_id]}
     if file_id:
         body["id"] = file_id

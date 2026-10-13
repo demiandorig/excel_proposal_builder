@@ -203,6 +203,10 @@ class FakeDrive:
 
     def do_create_file(self, body, media, **kw):
         self._before("create_file", body)
+        if body.get("mimeType") == "application/vnd.google-apps.spreadsheet" and body.get("id"):
+            raise http_error(
+                403, "generatedIdNotSupported", "Generated IDs are not supported for Docs Editors formats."
+            )
         with self.lock:
             fid = body.get("id") or f"file-{self._next()}"
             if fid in self.items:
@@ -237,7 +241,7 @@ class FakeDrive:
         return [it for it in self.items.values() if it["mimeType"] == "application/vnd.google-apps.folder"]
 
     def files_only(self):
-        return [it for it in self.items.values() if it["mimeType"] != "application/vnd.google-apps.folder"]
+        return [it for it in self.items.values() if it.get("mimeType") != "application/vnd.google-apps.folder"]
 
     def count(self, op):
         return sum(1 for o, _ in self.calls if o == op)
@@ -542,8 +546,17 @@ def test_upload_success_shape(drive):
     assert f["content"] == b"xlsx-bytes"
     assert f["mimeType"] == "application/vnd.google-apps.spreadsheet"
     assert f["parents"] == [out["folder_id"]]
-    assert f["id"].startswith("gen-")                              # created under a pre-generated id (idempotency key)
+    assert f["id"].startswith("file-")                              # Drive assigns IDs to native Sheets files
+    assert drive.count("generate_ids") == 0
     assert drive.shared == [(out["file_id"], {"type": "anyone", "role": "writer"})]
+
+
+def test_regular_drive_file_still_uses_a_pre_generated_id(drive):
+    out = _upload(as_google_sheet=False)
+    assert out["uploaded"] is True
+    (f,) = drive.files_only()
+    assert f["id"].startswith("gen-")
+    assert drive.count("generate_ids") == 1
 
 
 def test_upload_retries_a_transient_503_on_the_folder_lookup(drive, sleeps):
@@ -561,7 +574,7 @@ def test_upload_retries_a_transient_failure_of_the_file_create_itself(drive, sle
 
 def test_lost_reply_on_file_create_does_not_leave_a_duplicate(drive):
     drive.fail_after("create_file", ConnectionResetError())        # the file landed, the reply was lost
-    out = _upload()
+    out = _upload(as_google_sheet=False)
     assert out["uploaded"] is True
     assert len(drive.files_only()) == 1                            # 409 on the retry -> fetched, not re-created
     assert out["file_id"] == drive.files_only()[0]["id"]
@@ -569,7 +582,7 @@ def test_lost_reply_on_file_create_does_not_leave_a_duplicate(drive):
 
 def test_upload_still_works_when_pre_generating_an_id_fails(drive):
     drive.fail("generate_ids", http_error(500), http_error(500), http_error(500), http_error(500))
-    out = _upload()
+    out = _upload(as_google_sheet=False)
     assert out["uploaded"] is True
     assert "id" not in drive.calls[[o for o, _ in drive.calls].index("create_file")][1]
 
@@ -787,7 +800,7 @@ def protocol_drive(monkeypatch):
 def test_real_client_survives_503s_on_the_lookup_and_mid_upload(protocol_drive):
     protocol_drive.fail_list = 1
     protocol_drive.fail_put = 1
-    out = _upload(content=b"PK\x03\x04-workbook", seller="o'brien@x.com")
+    out = _upload(content=b"PK\x03\x04-workbook", seller="o'brien@x.com", as_google_sheet=False)
     assert out["uploaded"] is True and out["link_shared"] is True
     assert [f["name"] for f in protocol_drive.folders] == ["o'brien@x.com"]
     (stored,) = protocol_drive.files.values()
@@ -798,7 +811,7 @@ def test_real_client_survives_503s_on_the_lookup_and_mid_upload(protocol_drive):
 
 def test_real_client_lost_reply_leaves_one_file_not_two(protocol_drive):
     protocol_drive.drop_reply = 1                       # the upload landed; the client never heard back
-    out = _upload(content=b"PK-workbook")
+    out = _upload(content=b"PK-workbook", as_google_sheet=False)
     assert out["uploaded"] is True and out["file_id"] == "gen-1"
     assert len(protocol_drive.files) == 1
     assert [e for e in protocol_drive.log if e[0] == "POST" and e[2] == "upload"].__len__() == 1   # one session, resumed
@@ -831,6 +844,7 @@ def test_transient_failures_that_outlast_the_retries_become_a_retryable_503(driv
 @pytest.mark.parametrize("status,reason,needle", [
     (403, "storageQuotaExceeded", "out of storage"),
     (403, "forbidden", "refused the upload"),
+    (403, "generatedIdNotSupported", "pre-generated file ID"),
     (404, "notFound", "DRIVE_ROOT_FOLDER_ID"),
     (400, "invalid", "rejected the upload"),
 ])
