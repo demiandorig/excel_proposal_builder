@@ -18,5 +18,15 @@ python -m pip install --disable-pip-version-check --no-input --break-system-pack
 # already provides that half, so only the browser binary itself is missing.
 python -m playwright install chromium
 
+# Forecast data: apply the SQL migrations (migrations/*.sql), then load any avails source a pull request added or changed
+# (app/data/forecast/). Both are idempotent and neither may fail the hook: the app also applies the migrations and loads
+# series that were never imported at startup, and `python -m app.services.forecast_import plan` shows what is wrong.
+if ! python -m app.services.migrations apply; then
+  echo "warning: the migrations did not apply here; the app retries when it starts"
+fi
+if ! python -m app.services.forecast_import import --by post-merge; then
+  echo "warning: the forecast import reported problems - run: python -m app.services.forecast_import plan"
+fi
+
 python -m compileall -q app tests
 python -m pytest -q

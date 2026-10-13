@@ -31,6 +31,28 @@ _RETRY_AFTER_FAILURE = 15.0
 _STATEMENT_TIMEOUT = "4s"
 _LEVELS = ("dma", "state", "cd", "zip")
 
+# The queries the forecast API runs, by name. scripts/explain_forecast_queries.py runs EXPLAIN (ANALYZE, BUFFERS) on these
+# exact strings, so the measured plans are the real ones.
+SQL_CURRENT_SERIES = (
+    "SELECT v.series_id, v.series_key, v.version, v.data_basis, v.period_label, v.period_start, v.period_end, "
+    "v.band_low, v.band_high, v.row_counts, v.published_at, v.exported_on, v.validation, "
+    "d.title, d.channel, d.avails_unit, d.targeting_key "
+    "FROM forecast_series_version v JOIN forecast_series_def d ON d.series_key = v.series_key "
+    "WHERE v.status = 'current'")
+SQL_PRODUCT_LINKS = (
+    "SELECT p.name, sp.series_key, sp.relation, sp.note FROM forecast_series_product sp "
+    "JOIN products p ON p.product_key = sp.product_key WHERE p.is_deleted = FALSE")
+SQL_DMA_TABLE = ("SELECT dma_key, avails, avails_low, avails_high, reach_universe, est_reach, unique_hh, reach_pct, basis "
+                 "FROM forecast_avail_dma WHERE series_id = %s")
+SQL_UNKNOWN = "SELECT level, avails FROM forecast_avail_unknown WHERE series_id = %s"
+LEVEL_TABLES = {"zip": ("forecast_avail_zip", "zip"), "cd": ("forecast_avail_cd", "cd_key"), "state": ("forecast_avail_state", "state_code")}
+
+
+def sql_rows(level: str) -> str:
+    """The lookup of specific keys in one series: `series_id = X AND key = ANY(keys)`."""
+    table, col = LEVEL_TABLES[level]
+    return f"SELECT {col} AS k, avails, reach_universe, est_reach FROM {table} WHERE series_id = %s AND {col} = ANY(%s)"
+
 
 @dataclass(frozen=True)
 class SeriesRef:
@@ -88,15 +110,8 @@ def _fetch_catalog() -> Optional[tuple[dict[str, SeriesRef], dict[str, tuple[str
     """({series_key: SeriesRef}, {product name: (series_key, relation, note)}) from the database, or None."""
     try:
         with get_connection() as conn:
-            rows = conn.execute(
-                "SELECT v.series_id, v.series_key, v.version, v.data_basis, v.period_label, v.period_start, v.period_end, "
-                "v.band_low, v.band_high, v.row_counts, v.published_at, v.exported_on, v.validation, "
-                "d.title, d.channel, d.avails_unit, d.targeting_key "
-                "FROM forecast_series_version v JOIN forecast_series_def d ON d.series_key = v.series_key "
-                "WHERE v.status = 'current'").fetchall()
-            links = conn.execute(
-                "SELECT p.name, sp.series_key, sp.relation, sp.note FROM forecast_series_product sp "
-                "JOIN products p ON p.product_key = sp.product_key WHERE p.is_deleted = FALSE").fetchall()
+            rows = conn.execute(SQL_CURRENT_SERIES).fetchall()
+            links = conn.execute(SQL_PRODUCT_LINKS).fetchall()
     except Exception as exc:  # noqa: BLE001 - no database / tables not created yet
         log.warning("forecast series unavailable (the bundled data and the population-share estimate stay in use): %s", exc)
         return None
@@ -188,36 +203,34 @@ def _query(sql: str, params: tuple) -> list[dict]:
 def dma_table(series_id: int) -> dict[str, Row]:
     """Every DMA row of a series, keyed by dma_key. A published version never changes, so this is cached by series_id
     (about 210 small rows each); a failure is not cached."""
-    rows = _query("SELECT dma_key, avails, avails_low, avails_high, reach_universe, est_reach, unique_hh, reach_pct, basis "
-                  "FROM forecast_avail_dma WHERE series_id = %s", (series_id,))
+    rows = _query(SQL_DMA_TABLE, (series_id,))
     return {r["dma_key"]: Row(r["dma_key"], r["avails"], r["avails_low"], r["avails_high"], r["reach_universe"],
                               r["est_reach"], r["unique_hh"], r["reach_pct"], r["basis"]) for r in rows}
 
 
-def _rows(table: str, key_col: str, series_id: int, keys: Iterable[str]) -> dict[str, Row]:
+def _rows(level: str, series_id: int, keys: Iterable[str]) -> dict[str, Row]:
     wanted = sorted({k for k in keys if k})
     if not wanted:
         return {}
-    rows = _query(f"SELECT {key_col} AS k, avails, reach_universe, est_reach FROM {table} WHERE series_id = %s AND {key_col} = ANY(%s)",
-                  (series_id, wanted))
+    rows = _query(sql_rows(level), (series_id, wanted))
     return {r["k"]: Row(r["k"], r["avails"], reach_universe=r["reach_universe"], est_reach=r["est_reach"]) for r in rows}
 
 
 def zip_rows(series_id: int, zips: Iterable[str]) -> dict[str, Row]:
-    return _rows("forecast_avail_zip", "zip", series_id, zips)
+    return _rows("zip", series_id, zips)
 
 
 def cd_rows(series_id: int, cd_keys: Iterable[str]) -> dict[str, Row]:
-    return _rows("forecast_avail_cd", "cd_key", series_id, cd_keys)
+    return _rows("cd", series_id, cd_keys)
 
 
 def state_rows(series_id: int, states: Iterable[str]) -> dict[str, Row]:
-    return _rows("forecast_avail_state", "state_code", series_id, states)
+    return _rows("state", series_id, states)
 
 
 def unknown_share(series_id: int) -> dict[str, float]:
     """Share of each level's avails the source could not place geographically (informational)."""
-    rows = _query("SELECT level, avails FROM forecast_avail_unknown WHERE series_id = %s", (series_id,))
+    rows = _query(SQL_UNKNOWN, (series_id,))
     return {r["level"]: r["avails"] for r in rows}
 
 
