@@ -141,9 +141,9 @@ def test_suggest_categories_reads_the_plan_text():
 # --- sheet entry -> catalog product matching ------------------------------------------------
 
 @pytest.mark.parametrize("item,expected", [
-    ("eDigital Display", ["eDigital Network Display - Standard IAB"]),
+    ("eDigital Display", ["eDigital Network Display - Standard IAB", "eDigital Display"]),
     ("eDigital Display Geo Fence", ["Display - Geo Fence"]),
-    ("eDigital OLV", ["Video - Pre-roll (OLV)"]),
+    ("eDigital OLV", ["Video - Pre-roll (OLV)", "eDigital OLV"]),
     ("Entravision O&O Audio Streaming", ["Audio - EVC Audio Streaming"]),
     ("Audio Engage", ["AudioEngage"]),
     ("Email Marketing Campaigns", ["Email Campaigns and/or Email Campaigns - Re-Drop"]),

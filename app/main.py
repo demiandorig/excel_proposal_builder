@@ -85,12 +85,14 @@ from app.services import ad_presence as ad_presence_svc
 from app.services import roadblocks as roadblocks_svc
 from app.services import restrictions as restrictions_svc
 from app.services import faq_entries as faq_svc
+from app.services import migrations as schema_migrations
 from app.services import schema_bootstrap
 from app.services import gamma_client
 from app.services import monthly_allocation
 from app.services import notion_client
 from app.services import constanza_geo
 from app.services import constanza_forecast_map as forecast_map_svc
+from app.services import forecast_store
 from app.services.constanza_engine import estimate_avails
 from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, parse_audience_text
 from app.services.line_modifier import clean_line_modifier_or_none
@@ -245,6 +247,29 @@ async def _on_startup() -> None:
             _logger.info("schema bootstrap ensured: %s", ", ".join(created))
     except Exception as e:
         _logger.warning("Startup schema bootstrap skipped: %s: %s", type(e).__name__, e)
+    # Versioned migrations (migrations/*.sql), then the forecast reference data: the 30 forecast products and any series
+    # that has never been imported. Runs in a background thread so a first-time load (about 15 s) never delays serving;
+    # an advisory lock keeps two Autoscale instances from loading at once. Never fatal.
+    threading.Thread(target=_bootstrap_forecast_data, name="forecast-bootstrap", daemon=True).start()
+
+
+def _bootstrap_forecast_data() -> None:
+    try:
+        from app.services.forecast_import import service as forecast_import_service
+        result = forecast_import_service.bootstrap()
+        if result.get("migrations") or result.get("products") or result.get("series"):
+            _logger.info("forecast data bootstrap: %s", result)
+        forecast_store.invalidate()
+        forecast_map_svc.invalidate()
+    except Exception as e:  # noqa: BLE001
+        _logger.warning("Forecast data bootstrap skipped: %s: %s", type(e).__name__, e)
+
+
+@app.on_event("shutdown")
+def _on_shutdown() -> None:
+    """Return the database connections cleanly."""
+    from app import db as _db
+    _db.close_pool()
 
 
 def _static_asset_version() -> int:
@@ -860,6 +885,9 @@ class ConstanzaEstimateRequest(BaseModel):
     geo_text: str
     geo_type_hint: Optional[str] = None
     months: int = 1
+    # The line's real length in days. Only weekly series (live sports) use it - they multiply a WEEKLY estimate by
+    # flight_days / 7 instead of months x 4.35 - and it is optional.
+    flight_days: Optional[float] = None
     # Only used for products with no workbook-modeled platform (VIX 360,
     # Netflix — see constanza_forecast_map.DEFAULT_PLATFORM_PRODUCTS and Admin -> Forecast): the
     # planner's own national monthly total, apportioned by DMA population
@@ -1296,6 +1324,8 @@ def _check_constanza_estimate_input(body: "ConstanzaEstimateRequest") -> None:
     _check_constanza_text("Geography", body.geo_text)
     if not (1 <= body.months <= _CONSTANZA_MAX_MONTHS):
         raise HTTPException(status_code=422, detail=f"Months must be between 1 and {_CONSTANZA_MAX_MONTHS}.")
+    if body.flight_days is not None and not (math.isfinite(body.flight_days) and 0 < body.flight_days <= 3660):
+        raise HTTPException(status_code=422, detail="Flight days must be between 1 and 3,660.")
     total = body.national_monthly_total
     if total is not None and not (math.isfinite(total) and 0 <= total <= 1e13):
         raise HTTPException(status_code=422, detail="The monthly impressions total must be a number between 0 and 10 trillion.")
@@ -1358,6 +1388,8 @@ def _serialize_avails_estimate(estimate, resolution) -> dict:
         "imps_mid": estimate.imps_mid,
         "imps_high": estimate.imps_high,
         "est_uniques": estimate.est_uniques,
+        "series": estimate.series,
+        "weeks": estimate.weeks,
         "notes": _geo_warning_notes(resolution) + list(estimate.notes),
         "unmatched_geo_tokens": resolution.unmatched_tokens,
         "unmatched_geo_details": resolution.unmatched_details,
@@ -1388,7 +1420,7 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
         raise HTTPException(status_code=422, detail=_geo_failure_detail(body.geo_text, resolution))
     estimate = estimate_avails(
         body.product_name, resolution, months=body.months,
-        national_monthly_total=body.national_monthly_total,
+        national_monthly_total=body.national_monthly_total, flight_days=body.flight_days,
     )
     if estimate is None:
         if resolution.geo_confidence == "low_confidence_international":
@@ -1399,7 +1431,7 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
             )
         else:
             detail = (
-                f"{body.product_name!r} has no modeled CTV platform and no "
+                f"There are no forecast avails loaded for {body.product_name!r} (or they couldn't be read just now) and no "
                 "national_monthly_total was given to apportion by population share."
             )
         raise HTTPException(status_code=422, detail=detail)
@@ -3567,6 +3599,49 @@ async def admin_add_forecast_platform_product(body: ForecastMapProductRequest) -
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return {"added": True, "product": created, **forecast_map_svc.admin_payload()}
+
+
+class ForecastRollbackRequest(BaseModel):
+    series_key: str
+    to_version: Optional[int] = None
+
+
+@app.get("/api/forecast/series")
+def forecast_series_list() -> dict:
+    """The forecast data series currently published (Postgres): what each one is, how it was produced, its unit and
+    period, which geography levels it covers, and the catalog products that default to it."""
+    series = forecast_store.current_series()
+    links = forecast_store.products_for_series()
+    return {
+        "series": [
+            {**ref.to_public(), "row_counts": ref.row_counts, "products": [{"name": n, "relation": r} for n, r in sorted(links.get(key, []))]}
+            for key, ref in sorted(series.items(), key=lambda kv: (kv[1].channel, kv[0]))
+        ],
+    }
+
+
+@app.get("/api/admin/forecast/data")
+def admin_forecast_data() -> dict:
+    """Admin -> Forecast -> Data: every series with its versions and validation result, and the latest imports."""
+    try:
+        return forecast_store.data_overview()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"The forecast data tables can't be read: {type(e).__name__}")
+
+
+@app.post("/api/admin/forecast/rollback")
+def admin_forecast_rollback(body: ForecastRollbackRequest, request: Request) -> dict:
+    """Make a series' previous (or a chosen) version the current one again. Nothing is deleted or edited."""
+    from app.services.forecast_import import service as forecast_import_service
+    try:
+        version = forecast_import_service.rollback_series(body.series_key, body.to_version, request.state.user["email"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Couldn't roll back: {type(e).__name__}")
+    forecast_store.invalidate()
+    forecast_map_svc.invalidate()
+    return {"series_key": body.series_key, "version": version, **forecast_store.data_overview()}
 
 
 # CSV columns shared by the export and the bulk upload, so a planner can export -> edit in Excel -> re-upload.

@@ -28,6 +28,7 @@ from typing import Any, Iterable, Optional
 from app import catalog
 from app.data.constanza import load_platform_dma
 from app.db import get_connection
+from app.services import forecast_store
 
 log = logging.getLogger(__name__)
 
@@ -77,10 +78,11 @@ class ForecastConfig:
     platform: Optional[str]        # a platform key when method == "platform"
     hispanic_weighted: bool        # only meaningful for method == "platform"
     source: str                    # "default" | "admin"
+    relation: str = "primary"      # "baseline_proxy": the series is another product's avails used as this one's baseline
 
     def to_public(self) -> dict:
         return {"enabled": self.enabled, "method": self.method, "platform": self.platform,
-                "hispanic_weighted": self.hispanic_weighted, "source": self.source}
+                "hispanic_weighted": self.hispanic_weighted, "source": self.source, "relation": self.relation}
 
     def same_behavior(self, other: "ForecastConfig") -> bool:
         return (self.enabled, self.method, self.platform, self.hispanic_weighted) == \
@@ -92,17 +94,26 @@ class ForecastConfig:
 # ---------------------------------------------------------------------------
 
 def platform_keys() -> list[str]:
-    """Every platform series the bundled data actually has (display order first, any extras after)."""
+    """Every data series a product can be forecast from: the bundled model workbook's platforms (display order first),
+    then every current series in the database (ordered by channel, then key)."""
     try:
         present = list(load_platform_dma().keys())
     except Exception:  # noqa: BLE001 — a missing bundle must not take the admin page down
         present = []
     ordered = [k for k in PLATFORM_LABELS if k in present]
-    return ordered + [k for k in present if k not in PLATFORM_LABELS]
+    ordered += [k for k in present if k not in PLATFORM_LABELS]
+    try:
+        db = sorted(forecast_store.current_series().values(), key=lambda r: (r.channel, r.series_key))
+    except Exception:  # noqa: BLE001
+        db = []
+    return ordered + [r.series_key for r in db if r.series_key not in ordered]
 
 
 def platform_label(key: str) -> str:
-    return PLATFORM_LABELS.get(key, key)
+    if key in PLATFORM_LABELS:
+        return PLATFORM_LABELS[key]
+    ref = forecast_store.series_by_key(key)
+    return ref.title if ref else key
 
 
 # ---------------------------------------------------------------------------
@@ -125,13 +136,18 @@ def _name_variants(product_name: str) -> set[str]:
 
 
 def default_config(product_name: str, family: Optional[str] = None, variants: Optional[set[str]] = None) -> ForecastConfig:
-    """What a product does with no admin row — Phase 1's behavior, found through every name the product has answered to
-    (so a renamed 'Entravision Plus - Hulu' keeps its platform)."""
+    """What a product does with no admin row. A product linked to a series in the database (forecast_series_product) is
+    enabled and forecast from that series; otherwise Phase 1's behavior, found through every name the product has
+    answered to (so a renamed 'Entravision Plus - Hulu' keeps its platform)."""
     variants = variants if variants is not None else _name_variants(product_name)
     platform = DEFAULT_PLATFORM_PRODUCTS.get(product_name)
     if platform is None:
         platform = next((DEFAULT_PLATFORM_PRODUCTS[v] for v in sorted(variants) if v in DEFAULT_PLATFORM_PRODUCTS), None)
     hispanic = bool(product_name in DEFAULT_HISPANIC_PRODUCTS or variants & DEFAULT_HISPANIC_PRODUCTS)
+    linked = forecast_store.series_for_product([product_name] + sorted(variants - {product_name}))
+    if linked is not None:
+        return ForecastConfig(enabled=True, method="platform", platform=linked.series_key,
+                              hispanic_weighted=hispanic and linked.series_key == platform, source="default", relation=linked.relation)
     if family is None:
         family = _family_of(product_name)
     return ForecastConfig(
@@ -212,17 +228,31 @@ def resolve_forecast(product_name: str, family: Optional[str] = None, *, overrid
     if row is None:
         row = next((overrides[v] for v in sorted(variants) if v in overrides), None)
     if row is not None:
+        platform = row.get("platform") if row["method"] == "platform" else None
+        base = default_config(product_name, family, variants)
         return ForecastConfig(
-            enabled=bool(row["enabled"]), method=row["method"], platform=row.get("platform") if row["method"] == "platform" else None,
+            enabled=bool(row["enabled"]), method=row["method"], platform=platform,
             hispanic_weighted=bool(row.get("hispanic_weighted")) and row["method"] == "platform", source="admin",
+            relation=base.relation if platform and platform == base.platform else "primary",
         )
     return default_config(product_name, family, variants)
 
 
 def forecast_for_products(products: Iterable) -> dict[str, dict]:
-    """{product name: public config} for the catalog payload — one table read for the whole list."""
+    """{product name: public config} for the catalog payload — one table read for the whole list. A platform-modeled
+    product also carries its series' public metadata (data basis, unit, version and, for live sports, the period)."""
     overrides = load_overrides()
-    return {p.name: resolve_forecast(p.name, p.family, overrides=overrides).to_public() for p in products}
+    out: dict[str, dict] = {}
+    for p in products:
+        cfg = resolve_forecast(p.name, p.family, overrides=overrides)
+        public = cfg.to_public()
+        ref = forecast_store.series_by_key(cfg.platform) if cfg.method == "platform" and cfg.platform else None
+        if ref is not None:
+            data = ref.to_public()
+            data["relation"] = cfg.relation
+            public["series"] = data
+        out[p.name] = public
+    return out
 
 
 def live_platform_products() -> dict[str, str]:
@@ -383,18 +413,28 @@ def admin_payload() -> dict:
         data = load_platform_dma()
     except Exception:  # noqa: BLE001
         data = {}
+    platforms = []
     for key in platform_keys():
         using = [r["name"] for r in rows if r["enabled"] and r["method"] == "platform" and r["platform"] == key]
         parked = [r["name"] for r in rows if not r["enabled"] and r["method"] == "platform" and r["platform"] == key]
-        coverage.append({
-            "key": key, "label": platform_label(key), "dmas": len(data.get(key, {})),
+        ref = forecast_store.series_by_key(key)
+        entry = {
+            "key": key, "label": platform_label(key), "dmas": (ref.row_counts.get("dma") if ref else None) or len(data.get(key, {})),
             "products": using, "disabled_products": parked, "missing_product": missing.get(key),
-        })
+        }
+        pub = {"key": key, "label": platform_label(key)}
+        if ref is not None:
+            info = ref.to_public()
+            entry["series"] = info
+            entry["row_counts"] = ref.row_counts
+            pub.update(channel=ref.channel, unit=ref.avails_unit, data_basis=ref.data_basis, period_label=ref.period_label)
+        coverage.append(entry)
+        platforms.append(pub)
     enabled = [r for r in rows if r["enabled"]]
     return {
         "products": rows,
         "families": sorted({r["family"] for r in rows}),
-        "platforms": [{"key": k, "label": platform_label(k)} for k in platform_keys()],
+        "platforms": platforms,
         "coverage": coverage,
         "summary": {
             "total": len(rows), "enabled": len(enabled),

@@ -41,6 +41,19 @@ for _name, _fn in _offline_readers().items():
     setattr(_catalog, _name, _fn)
 
 
+# The forecast data (series in Postgres) and the Admin -> Forecast override rows are read through these two functions. Like
+# the product list above, they are pinned OFFLINE at import time: several test modules assert at import (the script-style
+# Constanza tests), i.e. during collection, and their numbers must not depend on what the machine's database happens to
+# hold (on Replit it holds the real series). real_db tests get the real readers back.
+import app.services.constanza_forecast_map as _forecast_map  # noqa: E402
+import app.services.forecast_store as _forecast_store  # noqa: E402
+
+_REAL_FORECAST_READERS = {"store_fetch": _forecast_store._fetch_catalog, "map_read_rows": _forecast_map._read_rows}
+_REAL_DMA_TABLE = _forecast_store.dma_table          # the cached function; a test may replace the module attribute
+_forecast_store._fetch_catalog = lambda: None
+_forecast_map._read_rows = lambda: []
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_db: the test talks to the real DATABASE_URL (no offline product list)")
 
@@ -78,15 +91,20 @@ def _faq_rows_without_a_database(request, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _forecast_map_without_a_database(request, monkeypatch):
-    """Admin -> Forecast reads its overrides from the `forecast_product_map` table; offline there are none, so every
-    product keeps its built-in default (what the app did before the mapping existed). A test of the table or of
-    overrides patches `app.services.constanza_forecast_map._read_rows` (and _write/_delete) itself; real_db tests keep
-    the real reader."""
-    from app.services import constanza_forecast_map
-    if not request.node.get_closest_marker("real_db"):
-        monkeypatch.setattr(constanza_forecast_map, "_read_rows", lambda: [])
+    """Admin -> Forecast reads its overrides from the `forecast_product_map` table and the forecast series from the
+    forecast_* tables; offline there are none, so every product keeps its built-in default (what the app did before the
+    mapping existed). A test of the table or of overrides patches `app.services.constanza_forecast_map._read_rows` (and
+    _write/_delete) itself, a test of the series patches `app.services.forecast_store._fetch_catalog`; real_db tests keep
+    the real readers."""
+    real = bool(request.node.get_closest_marker("real_db"))
+    monkeypatch.setattr(_forecast_map, "_read_rows", _REAL_FORECAST_READERS["map_read_rows"] if real else (lambda: []))
+    monkeypatch.setattr(_forecast_store, "_fetch_catalog", _REAL_FORECAST_READERS["store_fetch"] if real else (lambda: None))
     # A generator fixture must always reach its yield: returning before it makes pytest raise "did not yield a value"
     # for real_db tests (which is how this failed the post-merge run on a machine that has a database).
-    constanza_forecast_map.invalidate()
+    _forecast_map.invalidate()
+    _forecast_store.invalidate()
+    _REAL_DMA_TABLE.cache_clear()
     yield
-    constanza_forecast_map.invalidate()
+    _forecast_map.invalidate()
+    _forecast_store.invalidate()
+    _REAL_DMA_TABLE.cache_clear()
