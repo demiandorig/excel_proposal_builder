@@ -18,6 +18,7 @@ import csv
 import io
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -1279,13 +1280,47 @@ def _serialize_geo_resolution(resolution) -> dict:
     }
 
 
+_CONSTANZA_MAX_TEXT = 2000        # characters of geography / audience text
+_CONSTANZA_MAX_MONTHS = 120
+_CONSTANZA_MAX_INTERESTS = 10
+
+
+def _check_constanza_text(label: str, text: str) -> None:
+    if len(text or "") > _CONSTANZA_MAX_TEXT:
+        raise HTTPException(status_code=422, detail=f"{label} is too long (at most {_CONSTANZA_MAX_TEXT:,} characters).")
+
+
+def _check_constanza_estimate_input(body: "ConstanzaEstimateRequest") -> None:
+    """Plain-language 422s for input no real line can have — an absurd month count or total used to reach the math (and a
+    month count of 10**400 raised a 500); text is capped because the geography matcher runs regexes over it."""
+    _check_constanza_text("Geography", body.geo_text)
+    if not (1 <= body.months <= _CONSTANZA_MAX_MONTHS):
+        raise HTTPException(status_code=422, detail=f"Months must be between 1 and {_CONSTANZA_MAX_MONTHS}.")
+    total = body.national_monthly_total
+    if total is not None and not (math.isfinite(total) and 0 <= total <= 1e13):
+        raise HTTPException(status_code=422, detail="The monthly impressions total must be a number between 0 and 10 trillion.")
+    a = body.audience
+    if a is not None:
+        for name, value in (("Minimum age", a.age_min), ("Maximum age", a.age_max)):
+            if value is not None and not (0 <= value <= 120):
+                raise HTTPException(status_code=422, detail=f"{name} must be between 0 and 120.")
+        if a.age_min is not None and a.age_max is not None and a.age_min > a.age_max:
+            raise HTTPException(status_code=422, detail="Minimum age can't be above maximum age.")
+        if len(a.interest_terms) > _CONSTANZA_MAX_INTERESTS or any(len(t) > 100 for t in a.interest_terms):
+            raise HTTPException(status_code=422, detail=f"Give at most {_CONSTANZA_MAX_INTERESTS} interests, each under 100 characters.")
+
+
+# These handlers are plain `def` on purpose: they do blocking work (loading the large bundled data files, regex geography
+# matching, and a model call per interest phrase), so FastAPI runs them in its thread pool instead of freezing the event
+# loop — and with it every other request and login — for the duration.
 @app.post("/api/constanza/resolve")
-async def constanza_resolve(body: ConstanzaResolveRequest) -> dict:
+def constanza_resolve(body: ConstanzaResolveRequest) -> dict:
     """Resolve a campaign's free-text geo (ProposalRequest.geo / TierModel.geo)
     into a structured, area-weighted geography — DMA/state (default),
     or ZIP/county/congressional-district/city/country when
     `geo_type_hint` says so — for the planner to confirm/edit before any
     avails math runs against it. See app/services/constanza_geo.py."""
+    _check_constanza_text("Geography", body.geo_text)
     resolution = constanza_geo.resolve_geo(body.geo_text, geo_type_hint=body.geo_type_hint)
     return _serialize_geo_resolution(resolution)
 
@@ -1339,7 +1374,7 @@ def _serialize_avails_estimate(estimate, resolution) -> dict:
 
 
 @app.post("/api/constanza/estimate")
-async def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
+def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
     """DMA-weighted avails estimate for one product over a resolved geo —
     Project Constanza's "Stanza" engine (app/services/constanza_engine.py).
     A fast starting point pre-filled from bundled CTV-avails-by-DMA data,
@@ -1347,6 +1382,7 @@ async def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
     against Roku Ads Manager / Amazon DSP / Madhive / The Trade Desk. When
     `audience` is given, routes through constanza_audience.py's age/
     gender/interest layer on top of this same geo/platform estimate."""
+    _check_constanza_estimate_input(body)
     resolution = constanza_geo.resolve_geo(body.geo_text, geo_type_hint=body.geo_type_hint)
     if resolution.ambiguous or not resolution.resolved:
         raise HTTPException(status_code=422, detail=_geo_failure_detail(body.geo_text, resolution))
@@ -1407,12 +1443,13 @@ async def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
 
 
 @app.post("/api/constanza/parse-audience")
-async def constanza_parse_audience(body: ConstanzaParseAudienceRequest) -> dict:
+def constanza_parse_audience(body: ConstanzaParseAudienceRequest) -> dict:
     """Free text -> structured AudienceSpec (the LLM step — see
     constanza_audience.py's module docstring for the hard rule that the
     LLM only classifies/extracts here, never generates a number). Kept
     separate from /estimate so the UI can show the parsed structure for
     the planner to confirm/edit before any estimate runs."""
+    _check_constanza_text("The description", body.text)
     spec = parse_audience_text(body.text)
     return {
         "age_min": spec.age_min, "age_max": spec.age_max, "gender": spec.gender,

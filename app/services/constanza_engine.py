@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.data.constanza import PlatformFigures, load_platform_dma, load_hispanic_pct_by_state
+from app.data.constanza import PlatformFigures, load_dma_reference, load_platform_dma, load_hispanic_pct_by_state
 from app.services.constanza_forecast_map import (
     DEFAULT_HISPANIC_PRODUCTS, DEFAULT_PLATFORM_PRODUCTS, ForecastConfig, resolve_forecast,
 )
@@ -109,14 +109,20 @@ def _area_weights(areas: list[ResolvedArea], trait: str | None = None) -> list[f
     never the parent DMA's full population. See module docstring.
     """
     pct_by_state = load_hispanic_pct_by_state() if trait == "hispanic" else None
+    home_state = {d.key: d.state for d in load_dma_reference()} if trait == "hispanic" else {}
     raw: list[float] = []
     for area in areas:
         if trait == "hispanic":
-            pct = pct_by_state.get(area.state, 0.0) if area.state else 0.0
+            # A ZIP / county / city area has no state of its own here: use its parent DMA's home state (an
+            # approximation, but better than a 0% weight for every such area).
+            state = area.state or (home_state.get(area.dma.strip().lower()) if area.dma else None)
+            pct = pct_by_state.get(state, 0.0) if state else 0.0
             raw.append(area.area_population * pct)
         else:
             raw.append(area.area_population)
     total = sum(raw)
+    if not total and trait == "hispanic":
+        return _area_weights(areas, None)       # no state is known for any area: population shares, not all zeros
     if not total:
         return [0.0] * len(areas)
     return [v / total for v in raw]
@@ -132,8 +138,9 @@ def estimate_platform_modeled(
     use_hispanic_weights = hispanic_weighted if hispanic_weighted is not None else product_name in HISPANIC_TARGETED_PRODUCTS
     if use_hispanic_weights:
         notes.append(
-            "Weighted by state-level Hispanic population % (proxy — the source "
-            "workbook has no DMA-level demographic breakout) instead of general population share."
+            "The by-area share column is weighted by state-level Hispanic population % (a proxy — the source "
+            "workbook has no DMA-level demographic breakout) instead of general population share. The "
+            "impressions themselves come from the same blended Madhive pool as the general CTV/OTT products."
         )
     weights = _area_weights(geo.areas, trait="hispanic" if use_hispanic_weights else None)
 

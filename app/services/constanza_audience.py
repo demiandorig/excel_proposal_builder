@@ -221,9 +221,11 @@ def parse_audience_text(text: str) -> AudienceSpec:
     )
 
 
-@lru_cache(maxsize=None)  # 5 distinct ACS bundles are cycled through per request — maxsize=4 would thrash
 def _acs_bundle(name: str) -> dict:
-    return read_json_maybe_gz(_DATA_DIR / name)
+    # The geo resolver already caches these (large) ACS bundles; reading them through the same cache keeps ONE parsed
+    # copy per file in memory instead of one for the resolver and another for this layer.
+    from app.services.constanza_geo_crosswalk import _load_acs
+    return _load_acs(name)
 
 
 _ACS_FILE_BY_SOURCE_TYPE = {
@@ -290,7 +292,19 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     state) forward, so this never needs to re-resolve geo text or assume
     a positional match against a separate GeoResolution."""
     interests = [resolve_interest(t) for t in spec.interest_terms]
-    supported_interests = [i for i in interests if i.supported]
+    # Two phrases that map to the same category ("sports" and "football") are ONE interest — multiplying its incidence
+    # rate in twice would shrink the audience by the rate squared for no reason.
+    supported_interests = []
+    seen_categories: set = set()
+    duplicates: list[str] = []
+    for i in interests:
+        if not i.supported:
+            continue
+        if i.category in seen_categories:
+            duplicates.append(i.input_text)
+            continue
+        seen_categories.add(i.category)
+        supported_interests.append(i)
     unsupported = [i for i in interests if not i.supported]
 
     cvs = []
@@ -302,16 +316,22 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
             "nearest supported interest, or drop this targeting dimension."
         )
 
+    if duplicates:
+        notes.append(f"{', '.join(duplicates)} map to an interest already counted — applied once, not stacked.")
+
     age_gender_requested = spec.age_min is not None or spec.age_max is not None or (spec.gender not in (None, "all"))
     any_age_gender_applied = False
 
     total_underlying_pop = 0.0
     imps_mid_total = 0.0
     by_area: list[AudienceAreaEstimate] = []
+    not_narrowed: list[str] = []
 
     for area_est in base.by_area:
         share, applied = _age_gender_share(area_est, spec.age_min, spec.age_max, spec.gender)
         any_age_gender_applied = any_age_gender_applied or applied
+        if age_gender_requested and not applied:
+            not_narrowed.append(area_est.area_label)
 
         interest_multiplier = 1.0
         for interest in supported_interests:
@@ -330,6 +350,11 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
             imps_low=area_low, imps_mid=area_mid, imps_high=area_high, underlying_population=area_pop,
         ))
 
+    if age_gender_requested and any_age_gender_applied and not_narrowed:
+        notes.append(
+            f"The age/gender cut was NOT applied to {', '.join(not_narrowed)} (no ACS data for it) — "
+            "those areas are counted at full size, so the total reads high."
+        )
     if age_gender_requested and not any_age_gender_applied:
         notes.append(
             "Age/gender narrowing was requested but this geography has no ACS data of its own "
@@ -346,8 +371,9 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     cvs.append(max(geo_cvs) if geo_cvs else 0.05)
     if age_gender_requested and any_age_gender_applied:
         cvs.append(_CV_AGE_GENDER)
-    if supported_interests:
-        cvs.append(_CV_INTEREST)
+    # One factor per distinct interest: each is its own curated, independence-assumed cut, so stacking them must widen
+    # the band (they are the least-independent pair in practice — sports and gaming overlap).
+    cvs.extend(_CV_INTEREST for _ in supported_interests)
     # constanza_search.py's geo_interest_multiplier() is ready to call here
     # once two things exist: real Google Ads credentials, AND a ZIP/county/
     # city -> Google Ads geo-target-criteria-ID crosswalk (not yet built —
@@ -359,7 +385,12 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     if search_multiplier_applied:
         cvs.append(_CV_SEARCH_APPLIED)
 
-    cv_total = math.sqrt(sum(c * c for c in cvs))
+    # The band starts from the BASE estimate's own range (the platform data's planning range, or +/-30% for the generic
+    # fallback) and every active factor widens it; it is never narrower than the estimate it narrows.
+    base_rel = 0.0
+    if base.imps_mid > 0:
+        base_rel = max(0.0, 1 - base.imps_low / base.imps_mid, base.imps_high / base.imps_mid - 1)
+    cv_total = math.sqrt(base_rel * base_rel + sum(c * c for c in cvs))
     imps_low_total = imps_mid_total * max(0.0, 1 - cv_total)
     imps_high_total = imps_mid_total * (1 + cv_total)
 

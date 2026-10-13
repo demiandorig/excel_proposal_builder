@@ -123,7 +123,7 @@ def _clean_token(token: str) -> str:
 # typically types just the one city they mean ("Fresno", not
 # "Fresno-Visalia"), so match candidates include both the full name and
 # each of its component segments, not the full name alone.
-_NAME_SPLIT_RE = re.compile(r"[-/,()]")
+_NAME_SPLIT_RE = re.compile(r"[-/,()&]")
 
 # Common abbreviation variants ("Ft. Worth" / "Fort Worth", "St. Louis" /
 # "Saint Louis") — expanded to the same full word on BOTH sides before
@@ -199,6 +199,12 @@ def _all_dma_matches(token: str, dmas: tuple[DMA, ...]) -> list[DMA]:
         if _normalize(d.dma) == normalized_token
         or any(_normalize(seg) == normalized_token for seg in _dma_segments(d))
     ]
+
+
+def _state_display_name(abbr: str) -> str:
+    """"NJ" -> "New Jersey" (the longest spelling the name table has for it)."""
+    names = [n for n, a in _STATE_NAMES_TO_ABBR.items() if a == abbr]
+    return max(names, key=len).title() if names else abbr
 
 
 def _match_state(token: str) -> str | None:
@@ -316,15 +322,32 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
             continue
         state = _match_state(token)
         if state and units and units[-1]["state"] is None:
-            if any(_dma_in_state(d, state) for d in _all_dma_matches(units[-1]["token"], dmas)):
+            prev_matches = _all_dma_matches(units[-1]["token"], dmas)
+            if any(_dma_in_state(d, state) for d in prev_matches):
+                # Also when the place is itself a state's name: "New York, NY" is the New York market, as it always was.
                 units[-1]["state"] = state
+                continue
+            if not prev_matches and not units[-1]["is_state"] and "unqualified_state" not in units[-1]:
+                # "Santa Monica, CA": a place that is no DMA's name, with the state that qualifies IT. That is a city
+                # (or county / ZIP) — never "the place plus every DMA in the state", which is what a bare state token
+                # means. It is left unmatched here so the city/county resolvers get the whole string.
+                units[-1]["unqualified_state"] = state
                 continue
         units.append({"token": token, "raw": raw_token.strip(), "state": None, "is_state": state is not None})
 
+    unmatched_details: list[dict] = []
     for unit in units:
         token, raw = unit["token"], unit["raw"]
         if unit["state"] is None and unit["is_state"]:
             matched_states.add(_match_state(token))
+            continue
+        if unit.get("unqualified_state"):
+            place_and_state = f"{raw}, {unit['unqualified_state']}"
+            unmatched.append(place_and_state)
+            unmatched_details.append({
+                "input": place_and_state,
+                "reason": f"'{place_and_state}' isn't a DMA name — choose Geography type = City (or County / ZIP) to use it.",
+            })
             continue
         if unit["state"] is not None:
             candidates = [d for d in _all_dma_matches(token, dmas) if _dma_in_state(d, unit["state"])]
@@ -346,6 +369,17 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
         unmatched.append(raw)
 
     state_dmas = [d for d in dmas if d.state in matched_states]
+    # A few states (DC, DE, NH, NJ) have no DMA headquartered in them — their counties belong to markets based in a
+    # neighbouring state. Saying nothing would drop them from a list and let a lone "DE" fall through to Germany.
+    empty_states = sorted(a for a in matched_states if not any(d.state == a for d in dmas))
+    for abbr in empty_states:
+        name = _state_display_name(abbr)
+        unmatched.append(abbr)
+        unmatched_details.append({
+            "input": abbr,
+            "reason": f"{name} has no TV market (DMA) headquartered in it — its counties belong to DMAs based in neighboring "
+                      "states. Enter those DMAs, or choose Geography type = County, ZIP or City.",
+        })
 
     # Stable de-dupe (a state list and a named DMA in the same string could
     # both resolve to the same market).
@@ -357,6 +391,13 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
             deduped.append(d)
 
     if not deduped:
+        if empty_states and not ambiguous and all(u in empty_states for u in unmatched):
+            # Only no-DMA states were named: report exactly that rather than letting another resolver reinterpret
+            # them ("DE" is not Germany; "New Hampshire" is not a village in Ohio).
+            return GeoResolution(
+                input_text=text, method="unresolved", areas=[], unmatched_tokens=unmatched,
+                geo_confidence="unresolved", unmatched_details=unmatched_details,
+            )
         if ambiguous:
             # Nothing resolved outright, but we know exactly why — surface
             # the candidates instead of falling through to the sub-DMA/
@@ -365,6 +406,7 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
             return GeoResolution(
                 input_text=text, method="unresolved", areas=[],
                 unmatched_tokens=unmatched, geo_confidence="unresolved", ambiguous=ambiguous,
+                unmatched_details=unmatched_details,
             )
         return None  # nothing DMA/state-shaped matched — let the caller try sub-DMA/international
 
@@ -379,12 +421,14 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
         notes.append(
             "A state is covered as the whole DMAs headquartered in it — all of each market, including its "
             "out-of-state counties, and none of another state's DMA that reaches in — so the population can "
-            "differ from the state's own by a few percent. Use counties for an exact state boundary."
+            "differ from the state's own, by a lot where a market spans several states. Use counties for an "
+            "exact state boundary."
         )
     return GeoResolution(
         input_text=text, method=method,
         areas=[_dma_area(d) for d in deduped],
         unmatched_tokens=unmatched, geo_confidence="high", ambiguous=ambiguous, notes=notes,
+        unmatched_details=unmatched_details,
     )
 
 
@@ -403,15 +447,17 @@ _ZIP_TOKEN = r"\d{5}(?:-\d{4})?"
 _ZIP_SPACE_LIST_RE = re.compile(rf"^{_ZIP_TOKEN}(?:\s+{_ZIP_TOKEN})+$")
 
 
-def _pair_states(pieces: list[str]) -> list[str]:
+def _pair_states(pieces: list[str], places_only: bool = False) -> list[str]:
     """Re-attaches a state piece to the place before it: ["Sacramento County",
     "CA", "Placer County", "CA"] -> ["Sacramento County, CA", "Placer County, CA"].
     A state following another state (or leading the list) stays its own item
-    ("CA, NV, AZ" -> three states)."""
+    ("CA, NV, AZ" -> three states). `places_only` is for a list the planner
+    typed as cities / counties: every item is a PLACE there, so "Washington, DC"
+    or "New York, NY" pairs even though the first word is also a state's name."""
     items: list[list] = []  # [text, has_state]
     for piece in pieces:
         is_state = _match_state(piece) is not None
-        if items and is_state and not items[-1][1] and _match_state(items[-1][0]) is None:
+        if items and is_state and not items[-1][1] and (places_only or _match_state(items[-1][0]) is None):
             items[-1][0] = f"{items[-1][0]}, {piece}"
             items[-1][1] = True
         else:
@@ -435,7 +481,7 @@ def _split_items(text: str, hint: str | None) -> list[str]:
             continue
         pieces = [p.strip() for p in chunk.split(",") if p.strip()]
         if len(pieces) > 1 and (hint is not None or any(has_strong_signal(p) for p in pieces)):
-            items.extend(pieces if hint in ("zip", "congressional_district", "country") else _pair_states(pieces))
+            items.extend(pieces if hint in ("zip", "congressional_district", "country") else _pair_states(pieces, places_only=hint in ("city", "county")))
         else:
             items.append(chunk)
     return items
@@ -491,7 +537,15 @@ def _unresolved(text: str, hint: str | None) -> GeoResolution:
     return res
 
 
+_MAX_ITEM_CHARS = 200     # no real place name is longer; bounds the regex work any single item can cause
+_MAX_ITEMS = 300
+
+
 def _resolve_single(text: str, hint: str | None) -> GeoResolution:
+    if len(text) > _MAX_ITEM_CHARS:
+        res = GeoResolution(input_text=text[:60] + "…", method="unresolved", areas=[], unmatched_tokens=[text[:60] + "…"], geo_confidence="unresolved")
+        res.unmatched_details = [{"input": res.unmatched_tokens[0], "reason": f"That entry is too long to be a place name (over {_MAX_ITEM_CHARS} characters)."}]
+        return res
     # Imported lazily to avoid a hard import-time dependency for callers
     # that only ever pass DMA/state text (and to dodge any circular-import
     # risk, since these modules don't need anything from here beyond
@@ -561,6 +615,11 @@ def resolve_geo(geo_text: str | None, geo_type_hint: str | None = None) -> GeoRe
     text = (geo_text or "").strip()
     hint = geo_type_hint if geo_type_hint in _TYPED_HINTS else None
     items = _split_items(text, hint)
+    if len(items) > _MAX_ITEMS:
+        return GeoResolution(
+            input_text=text[:60] + "…", method="unresolved", areas=[], unmatched_tokens=[], geo_confidence="unresolved",
+            unmatched_details=[{"input": "list", "reason": f"That list has {len(items):,} entries — at most {_MAX_ITEMS} places at a time."}],
+        )
     if len(items) > 1:
         return _merge_resolutions(text, [_resolve_single(item, hint) for item in items])
     return _resolve_single(items[0], hint)

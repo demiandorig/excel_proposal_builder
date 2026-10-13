@@ -6804,6 +6804,28 @@ function _forecastEnabled(p) {
   return p.forecast ? !!p.forecast.enabled : p.family === "Entravision Plus";
 }
 
+// How many CALENDAR months the active option's flight touches — what the estimate's "months" and its "Total over N mo
+// flight" row mean. li.months is NOT that outside Monthly billing: it is the number of weeks / quarters, or 1 in Full
+// Flight. With no readable dates, Monthly keeps the line's own count and every other period falls back to 1.
+function _constanzaFlightMonths(li) {
+  const start = _mbParseDate(_effectiveStartDate(state.activeTierLabel));
+  const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
+  if (start && end) {
+    const n = _mbMonthsBetween(start, end).length;
+    if (n > 0) return Math.min(n, 120);
+  }
+  return state.timeUnit === "month" ? Math.min(Math.max(1, li.months || 1), 120) : 1;
+}
+
+// The line's budget as dollars PER MONTH, for the generic (population-share) estimate, which apportions a monthly
+// impressions total. Weekly x4 and Quarterly / 3 are the app's own monthly-equivalent factors; in Full Flight the line
+// budget is the WHOLE flight, so it is spread over the flight's calendar months.
+function _constanzaMonthlyBudget(li, flightMonths) {
+  const budget = li.monthly_budget || 0;
+  if (_isFullFlight()) return budget / Math.max(1, flightMonths);
+  return budget * (_SOV_MONTHLY_EQUIVALENT_SCALE[state.timeUnit] ?? 1);
+}
+
 async function onConstanzaAutoCalc(lid) {
   const li = state.lineItems.find(x => x.id === lid);
   const btn = document.querySelector(`.constanza-autocalc-btn[data-lid="${escapeAttr(lid)}"]`);
@@ -6817,9 +6839,11 @@ async function onConstanzaAutoCalc(lid) {
   // planner's own curated monthly budget, converted to impressions via
   // the catalog rate, becomes the "national total" Constanza apportions
   // by DMA population share. Platform-modeled products ignore this.
+  const flightMonths = _constanzaFlightMonths(li);
   let nationalMonthlyImpsTotal = null;
-  if (li.monthly_budget) {
-    const impsResult = calcMaxImpsFromSpend(_effectiveProduct(li, p), li.monthly_budget);
+  const monthlyBudget = _constanzaMonthlyBudget(li, flightMonths);
+  if (monthlyBudget) {
+    const impsResult = calcMaxImpsFromSpend(_effectiveProduct(li, p), monthlyBudget);
     if (impsResult) nationalMonthlyImpsTotal = impsResult.value;
   }
 
@@ -6834,14 +6858,14 @@ async function onConstanzaAutoCalc(lid) {
       body: JSON.stringify({
         product_name: li.product_name,
         geo_text: geoText,
-        months: li.months || 1,
+        months: flightMonths,
         national_monthly_total: nationalMonthlyImpsTotal,
       }),
     });
     const data = await res.json();
     if (!res.ok) {
       resultEl.style.display = "block";
-      resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(data.detail || res.statusText)}</p>`;
+      resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(_constanzaErrorText(data, res.statusText))}</p>`;
       return;
     }
     renderConstanzaResult(lid, data);
@@ -6852,6 +6876,14 @@ async function onConstanzaAutoCalc(lid) {
     btn.disabled = false;
     btn.innerHTML = originalLabel;
   }
+}
+
+// A readable message from an error response: our own handlers send a string `detail`; framework validation errors send a list.
+function _constanzaErrorText(data, fallback) {
+  const d = data && data.detail;
+  if (typeof d === "string" && d) return d;
+  if (Array.isArray(d) && d.length) return d.map(x => (x && (x.msg || x.message)) || String(x)).join("; ");
+  return fallback || "Request failed.";
 }
 
 function renderConstanzaResult(lid, data) {
@@ -7046,7 +7078,7 @@ async function onConstanzaModalCalculate() {
     });
     const data = await res.json();
     if (!res.ok) {
-      resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(data.detail || res.statusText)}</p>`;
+      resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(_constanzaErrorText(data, res.statusText))}</p>`;
       return;
     }
     renderConstanzaModalResult(option, data);

@@ -7,6 +7,11 @@ this script checks carries a "_meta": {"vintage": ..., "refresh_cadence_days": .
 key (see the various scripts/extract_constanza_*.py + scripts/
 aggregate_constanza_acs_dma_state.py that produce them).
 
+Age is measured from the bundle file's modification time, which a fresh git checkout
+(a deploy) resets to "now" — so on a deployed copy it can't tell you how old the DATA is.
+Read the printed vintage (the data's own stamp) there, and run this on the machine that
+refreshes the data for the time-based STALE check.
+
 Usage:
     python scripts/check_constanza_data_freshness.py
 """
@@ -58,14 +63,14 @@ def main():
             print(f"  ERROR    {rel_path}: {e}")
             continue
 
-        age_days = _file_mtime_days(path)
+        age_days = _file_mtime_days(path)           # file timestamp, not the data's age — see the module docstring
         cadence = meta.get("refresh_cadence_days")
         vintage = meta.get("vintage", "(no _meta.vintage stamped)")
         if cadence and age_days > cadence:
-            print(f"  STALE    {rel_path} — {age_days}d old, expected refresh every {cadence}d (vintage: {vintage})")
+            print(f"  STALE    {rel_path} — file is {age_days}d old, expected refresh every {cadence}d (vintage: {vintage})")
         else:
             cadence_note = f"cadence {cadence}d" if cadence else "no stated cadence"
-            print(f"  OK       {rel_path} — {age_days}d old ({cadence_note}, vintage: {vintage})")
+            print(f"  OK       {rel_path} — file is {age_days}d old ({cadence_note}, vintage: {vintage})")
 
     print()
     print("Reminder: the Census congressional-district relationship file specifically")

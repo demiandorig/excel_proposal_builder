@@ -165,7 +165,9 @@ def _areas_from_dma_shares(dma_shares: list[dict], area_population: float, sourc
         area_pop_in_dma = area_population * entry["share"]
         dma = dmas.get(entry["dma"].strip().lower())
         dma_total_pop = dma.population if dma else 0.0
-        pop_share_of_dma = (area_pop_in_dma / dma_total_pop) if dma_total_pop else 0.0
+        # The bundled DMA populations are a different (polygon-derived) basis than the workbook's own, so an area that
+        # fills nearly all of a small DMA can come out a few percent over 100% — never scale a market above itself.
+        pop_share_of_dma = min(1.0, area_pop_in_dma / dma_total_pop) if dma_total_pop else 0.0
         areas.append(ResolvedArea(
             dma=entry["dma"], area_population=area_pop_in_dma,
             dma_share=pop_share_of_dma, source_type=source_type, apportionment=apportionment,
@@ -193,7 +195,8 @@ def _resolve_zip(token: str) -> GeoResolution | None:
     pop = _population_for(acs)
     method = "exact" if len(dma_shares) == 1 else "hud_ratio"
     areas = _areas_from_dma_shares(dma_shares, pop, "zip", method, state=None, label=f"ZIP {zip5}", geo_id=zip5)
-    return GeoResolution(input_text=token.strip(), method="zip", areas=areas, geo_confidence="high")
+    notes = [f"ZIP {zip5} has no residents in the Census data (a PO-box, business or campus ZIP) — its estimate is zero."] if pop <= 0 else []
+    return GeoResolution(input_text=token.strip(), method="zip", areas=areas, geo_confidence="high" if pop > 0 else "medium", notes=notes)
 
 
 @lru_cache(maxsize=1)
@@ -341,7 +344,9 @@ def _resolve_congressional_district(token: str) -> GeoResolution | None:
     return GeoResolution(input_text=token.strip(), method="congressional_district", areas=areas, geo_confidence="medium")
 
 
-_PLACE_TYPE_WORDS_RE = re.compile(r"\b(city|town|village|cdp|municipality|borough)\b\.?", re.IGNORECASE)
+# A Census LSAD type word trailing the name — lower case ("city", "town", ...) or the upper-case "CDP". Deliberately
+# case-sensitive: "Kansas City" is a name, "Indianapolis city" is a name plus its LSAD.
+_LSAD_TRAILING_RE = re.compile(r"\s+(?:city|town|village|borough|municipality|CDP)$")
 # Census names consolidated city-county governments in full
 # ("Nashville-Davidson metropolitan government (balance)") — nobody types that.
 _CONSOLIDATED_RE = re.compile(
@@ -356,19 +361,23 @@ _EXTRA_PLACE_ALIASES = {"Lexington-Fayette": "Lexington", "Macon-Bibb County": "
 
 def _place_aliases(census_name: str) -> list[str]:
     """Every name a planner might type for one Census place; the first is
-    the display name."""
-    base = _PLACE_TYPE_WORDS_RE.sub("", census_name).strip()
-    names = [base]
+    the display name. Only a Census LSAD word that trails the name in lower case
+    ("Indianapolis city (balance)", "Foo town", "Bar CDP") is dropped — a REAL
+    name that contains "City" ("Kansas City", "Jersey City", "Salt Lake City",
+    "Daly City") is kept whole; stripping it made those cities unmatchable by
+    their own names and matched the bare "Kansas" / "Jersey" instead."""
+    base = census_name.strip()
     consolidated = _CONSOLIDATED_RE.sub("", base).strip()
+    core = _LSAD_TRAILING_RE.sub("", consolidated).strip() or consolidated or base
+    names = [core]
     if consolidated != base:
-        names = [consolidated]
         # "Nashville-Davidson" / "Louisville/Jefferson County" -> "Nashville" / "Louisville"
-        names.append(re.split(r"[-/]", consolidated)[0].strip())
+        names.append(re.split(r"[-/]", core)[0].strip())
     if names[0] in _EXTRA_PLACE_ALIASES:
         names.append(_EXTRA_PLACE_ALIASES[names[0]])
     if names[0].lower().startswith("urban "):  # Census calls it "Urban Honolulu"
         names.append(names[0][6:].strip())
-    return names
+    return list(dict.fromkeys(names))
 
 
 @lru_cache(maxsize=1)
@@ -435,7 +444,9 @@ def _resolve_city(token: str, relaxed: bool = False) -> GeoResolution | None:
     pop = _population_for(acs)
     method = "exact" if len(dma_shares) == 1 else "single_county_place"
     areas = _areas_from_dma_shares(dma_shares, pop, "city", method, state=state_abbr, label=f"{display}, {state_abbr}", geo_id=geoid)
-    return GeoResolution(input_text=token, method="city", areas=areas, geo_confidence="high", notes=notes)
+    if pop <= 0:
+        notes.append(f"{display}, {state_abbr} has no residents in the Census data — its estimate is zero.")
+    return GeoResolution(input_text=token, method="city", areas=areas, geo_confidence="high" if pop > 0 else "medium", notes=notes)
 
 
 def has_strong_signal(piece: str) -> bool:

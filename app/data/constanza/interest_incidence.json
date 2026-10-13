@@ -7,23 +7,47 @@
     {
       "category": "sports_fan",
       "label": "Sports fan (general)",
-      "keywords": ["sports", "sports fan", "follows sports", "watches sports", "likes sports", "football", "basketball", "baseball", "soccer fan"],
-      "rate_by_gender": {"all": 0.68, "male": 0.68, "female": 0.68},
-      "source": "Gallup, 'As Industry Grows, Percentage of U.S. Sports Fans Steady' + Gallup Sports historical trend (68% of Americans self-identify as a fan of at least one sport, stable 2023-2026)",
+      "keywords": [
+        "sports",
+        "sports fan",
+        "follows sports",
+        "watches sports",
+        "likes sports",
+        "football",
+        "basketball",
+        "baseball",
+        "soccer fan"
+      ],
+      "rate_by_gender": {
+        "all": 0.59,
+        "male": 0.66,
+        "female": 0.51
+      },
+      "source": "Gallup, 'As Industry Grows, Percentage of U.S. Sports Fans Steady' (June 2015 poll): 59% of Americans say they are sports fans — one point below Gallup's average since 2000; 66% of men and 51% of women",
       "source_url": "https://news.gallup.com/poll/183689/industry-grows-percentage-sports-fans-steady.aspx",
-      "source_date": "2026-04",
-      "sample_scope": "US adults, general population. Gallup reports men as more likely to be fans than women, but did not publish an exact gender split in the sources checked — the same 68% rate is applied to all genders here rather than inventing a split percentage; a confirmed gender-specific split would tighten this.",
-      "confidence": "moderate"
+      "source_date": "2015-06",
+      "sample_scope": "US adults, general population. This is a 2015 poll — older than the other rate here; Gallup describes the share as steady over time, so it is used as published. Upper-income households run higher (68%); that subgroup is not modeled.",
+      "confidence": "low-moderate"
     },
     {
       "category": "video_gamer",
-      "label": "Plays video games (weekly)",
-      "keywords": ["gaming", "video games", "gamer", "plays video games", "plays games"],
-      "rate_by_gender": {"all": 0.60, "male": 0.52, "female": 0.47},
-      "source": "Entertainment Software Association (ESA) 2025 Essential Facts report, conducted with YouGov — 60% of US adults play video games weekly; 52% of male / 47% of female adults play weekly",
+      "label": "Plays video games",
+      "keywords": [
+        "gaming",
+        "video games",
+        "gamer",
+        "plays video games",
+        "plays games"
+      ],
+      "rate_by_gender": {
+        "all": 0.49,
+        "male": 0.53,
+        "female": 0.46
+      },
+      "source": "Entertainment Software Association (ESA), 'Essential Facts About the U.S. Video Game Industry' 2026 (released June 2026): 53% of men and 46% of women actively playing video games. 'all' is the population-weighted mean of those two (~49%); the report's 67% headline covers ages 5-90 and is not comparable",
       "source_url": "https://www.theesa.com/two-thirds-of-americans-play-video-games-every-week-according-tonew-report-from-the-entertainment-software-association/",
-      "source_date": "2025",
-      "sample_scope": "US adults 18+, general population. Age-band-specific rates aren't modeled in v1 (ESA's report shows the gender skew reverses for older cohorts — boomer women play more than boomer men — but that nuance isn't encoded here yet); the flat gender rate is applied across all ages.",
+      "source_date": "2026-06",
+      "sample_scope": "Share of men / of women who play (the report's headline is 67% of Americans ages 5-90 playing weekly, which includes children). Age-band rates aren't modeled in v1 — ESA reports the gender skew reverses for older cohorts (Boomer women 52% vs men 47%) — so the flat gender rate is applied across all ages.",
       "confidence": "moderate"
     }
   ]

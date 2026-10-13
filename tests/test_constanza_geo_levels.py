@@ -112,8 +112,11 @@ assert any(c_.startswith("Springfield, MO") for c_ in cands) and len(cands) == l
 assert cands[0].startswith("Springfield, MO"), "biggest first"
 mixed_amb = resolve_geo("Springfield, Sacramento, CA", "city")
 assert labels(mixed_amb) == ["Sacramento, CA"] and mixed_amb.ambiguous, "an ambiguous item must not block or vanish"
-goodyear = resolve_geo("Goodyear, AZ", "city")
-assert goodyear.resolved and goodyear.notes
+# Two places with the SAME name in one state (OH has two Lafayettes): the largest is used and the planner is told.
+# ("Goodyear Village, AZ" used to collide with "Goodyear, AZ" only because its type word was stripped from the name.)
+lafayette = resolve_geo("Lafayette, OH", "city")
+assert lafayette.resolved and lafayette.notes and "largest" in lafayette.notes[0]
+assert [a.label for a in resolve_geo("Goodyear, AZ", "city").areas] == ["Goodyear, AZ"]
 print("City (state forms, lists, saint/st, consolidated governments, ambiguity, same-name dedupe): OK")
 
 # --- DMA, state, national, US-as-country --------------------------------------

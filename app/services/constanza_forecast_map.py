@@ -187,8 +187,8 @@ def load_overrides() -> dict[str, dict]:
         rows, at, retry_at = _cache["rows"], _cache["at"], _cache["retry_at"]
     if rows is not None and now - at < _CACHE_TTL:
         return rows
-    if rows is None and now < retry_at:
-        return {}
+    if now < retry_at:                    # a refresh failed a moment ago: keep serving what we have, don't hit the DB again
+        return rows or {}
     fresh = _read_rows()
     with _lock:
         if fresh is None:
