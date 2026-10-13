@@ -70,11 +70,13 @@ Admin -> Product Catalog; nothing here is consulted again except to fill an empt
 table and as the fail-safe when the database can't be read.
 """
 
+import json
 import logging
 import math
 import re
 import time
 from dataclasses import dataclass, field, asdict, replace
+from pathlib import Path
 from typing import Optional, Union
 
 from app.db import get_connection
@@ -1925,6 +1927,42 @@ CATALOG: list[Product] = [
         is_addon=True,
     ),
 ]
+
+# ---------------------------------------------------------------------------
+# Products added with the forecast data platform (30: the Entravision+ Connect / Hispanic Connect tiers, Pause Ads,
+# VIX Select, eDigital Display and OLV, and one per Live Sports tab). They live in app/data/forecast/products.json so
+# the same records seed a fresh database (below), are inserted into an already-seeded one without touching any row an
+# admin has edited or deleted (app/services/forecast_import/product_seed.py), and are reviewed as data.
+# ---------------------------------------------------------------------------
+_FORECAST_SEED_PATH = Path(__file__).resolve().parent / "data" / "forecast" / "products.json"
+
+
+def _load_forecast_seed_products() -> list[tuple["Product", Optional[str]]]:
+    """[(product, name of the product it is listed after)], from products.json. A missing or malformed file yields no
+    extra products (the app runs exactly as before it existed)."""
+    try:
+        data = json.loads(_FORECAST_SEED_PATH.read_text(encoding="utf-8"))
+        out = []
+        for record in data.get("products", []):
+            record = dict(record)
+            after = record.pop("after", None)
+            record["minimum_flight_days"] = tuple(record["minimum_flight_days"])
+            out.append((Product(**record), after))
+        return out
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        logging.getLogger(__name__).warning("forecast seed products not loaded: %s", exc)
+        return []
+
+
+def _place_seed_products(products: list, additions: list) -> None:
+    for product, after in additions:
+        if any(p.name == product.name for p in products):
+            continue
+        at = next((i for i, p in enumerate(products) if p.name == after), None)
+        products.insert(len(products) if at is None else at + 1, product)
+
+
+_place_seed_products(CATALOG, _load_forecast_seed_products())
 
 # ===========================================================================
 # THE PRODUCT LIST

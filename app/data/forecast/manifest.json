@@ -1,0 +1,956 @@
+{
+ "manifest_version": 1,
+ "source_dir": "sources/2026-10",
+ "series": [
+  {
+   "series_key": "connect-default",
+   "title": "Entravision+ Connect - (Default)",
+   "channel": "ctv",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "Entravision+ Connect, all-content tier (cross-device streaming inventory).",
+   "reader": "madhive_zip",
+   "source": "Entravision+ Connect - (Default).zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision+ Connect - (Default)",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "connect-reach",
+   "title": "Entravision+ Connect - Reach",
+   "channel": "ctv",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "Entravision+ Connect, reach tier (FAST-weighted scale).",
+   "reader": "madhive_zip",
+   "source": "Entravision+ Connect - Reach.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision+ Connect - Reach",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "connect-family",
+   "title": "Entravision+ Connect - Family",
+   "channel": "ctv",
+   "targeting_key": "kids_family",
+   "avails_unit": "monthly",
+   "description": "Entravision+ Connect, family tier (kids and family content).",
+   "reader": "madhive_zip",
+   "source": "Entravision+ Connect - Family.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision+ Connect - Family",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "connect-premier",
+   "title": "Entravision+ Connect - Premier",
+   "channel": "ctv",
+   "targeting_key": "premium_subscription",
+   "avails_unit": "monthly",
+   "description": "Entravision+ Connect, premier tier (subscription and live-TV streaming).",
+   "reader": "madhive_zip",
+   "source": "Entravision+ Connect - Premier.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision+ Connect - Premier",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "hispanic-connect-default",
+   "title": "Entravision+ Hispanic Connect - (Default)",
+   "channel": "ctv",
+   "targeting_key": "hispanic",
+   "avails_unit": "monthly",
+   "description": "Entravision+ Hispanic Connect, all-content tier (Hispanic audience targeting).",
+   "reader": "madhive_zip",
+   "source": "Entravision+ Hispanic Connect - (Default).zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision+ Hispanic Connect - (Default)",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "hispanic-connect-reach",
+   "title": "Entravision+ Hispanic Connect - Reach",
+   "channel": "ctv",
+   "targeting_key": "hispanic",
+   "avails_unit": "monthly",
+   "description": "Entravision+ Hispanic Connect, reach tier.",
+   "reader": "madhive_zip",
+   "source": "Entravision+ Hispanic Connect - Reach.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision+ Hispanic Connect - Reach",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "hispanic-connect-family",
+   "title": "Entravision+ Hispanic Connect - Family",
+   "channel": "ctv",
+   "targeting_key": "hispanic_kids_family",
+   "avails_unit": "monthly",
+   "description": "Entravision+ Hispanic Connect, family tier.",
+   "reader": "madhive_zip",
+   "source": "Entravision+ Hispanic Connect - Family.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision+ Hispanic Connect - Family",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "hispanic-connect-premier",
+   "title": "Entravision+ Hispanic Connect - Premier",
+   "channel": "ctv",
+   "targeting_key": "hispanic_premium_subscription",
+   "avails_unit": "monthly",
+   "description": "Entravision+ Hispanic Connect, premier tier.",
+   "reader": "madhive_zip",
+   "source": "Entravision+ Hispanic Connect - Premier.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision+ Hispanic Connect - Premier",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "hispanic-connect-spanish-only",
+   "title": "Entravision+ Hispanic Connect - Spanish Only",
+   "channel": "ctv",
+   "targeting_key": "spanish_language",
+   "avails_unit": "monthly",
+   "description": "Entravision+ Hispanic Connect, Spanish-language content only.",
+   "reader": "madhive_zip",
+   "source": "Entravision+ Hispanic Connect - Spanish Only.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision+ Hispanic Connect - Spanish Only",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "pause-ads",
+   "title": "Entravision+ Pause Ads",
+   "channel": "pause_ads",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "Pause-screen ads on connected TV.",
+   "reader": "madhive_zip",
+   "source": "Entravision+ Pause Ads.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision+ Pause Ads",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "vix-select",
+   "title": "Entravision Plus - VIX Select",
+   "channel": "ctv",
+   "targeting_key": "spanish_language",
+   "avails_unit": "monthly",
+   "description": "ViX (TelevisaUnivision) only.",
+   "reader": "madhive_zip",
+   "source": "Entravision Plus - VIX Select.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Entravision Plus - VIX Select",
+     "relation": "primary"
+    },
+    {
+     "name": "Entravision Plus - VIX 360 (Includes VIX + UnivisionNow + Univision.com / Univision Apps)",
+     "relation": "baseline_proxy",
+     "note": "VIX Select covers ViX only; VIX 360 also includes UnivisionNOW and the Univision apps, so these avails are a floor."
+    }
+   ]
+  },
+  {
+   "series_key": "edigital-olv",
+   "title": "eDigital OLV",
+   "channel": "olv",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "Online video on the eDigital network.",
+   "reader": "madhive_zip",
+   "source": "eDigital OLV.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "eDigital OLV",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "edigital-display",
+   "title": "eDigital Display",
+   "channel": "display",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "Display on the eDigital network.",
+   "reader": "madhive_zip",
+   "source": "eDigital Display.zip",
+   "data_basis": "platform_reported",
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "eDigital Display",
+     "relation": "primary"
+    },
+    {
+     "name": "eDigital Network Display - Standard IAB",
+     "relation": "baseline_proxy",
+     "note": "The eDigital network's display avails; the older product's own rate and targeting layers still apply."
+    }
+   ]
+  },
+  {
+   "series_key": "netflix-15s",
+   "title": "Netflix - :15s baseline (Adult 18+, run of network)",
+   "channel": "netflix",
+   "targeting_key": "a18_plus",
+   "avails_unit": "monthly",
+   "description": "Netflix Direct :15s run-of-network baseline. The source lists 17 markets; the other DMAs are extended from the Entravision+ Connect market distribution.",
+   "reader": "netflix_baseline_csv",
+   "source": "Netflix Baseline Avails.csv",
+   "params": {
+    "length": 15,
+    "extrapolate_from": "connect-default"
+   },
+   "data_basis": "extrapolated",
+   "band_low": 0.7,
+   "band_high": 1.3,
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Netflix - Run Of Network Untargeted :15s Ads",
+     "relation": "primary"
+    },
+    {
+     "name": "Netflix - Age Targeted :15s Ads",
+     "relation": "baseline_proxy",
+     "note": "Run-of-network A18+ baseline; this targeted variant will deliver fewer impressions."
+    },
+    {
+     "name": "Netflix - Gender Targeted :15s Ads",
+     "relation": "baseline_proxy",
+     "note": "Run-of-network A18+ baseline; this targeted variant will deliver fewer impressions."
+    },
+    {
+     "name": "Netflix - Content Genre Targeted :15s Ads",
+     "relation": "baseline_proxy",
+     "note": "Run-of-network A18+ baseline; this targeted variant will deliver fewer impressions."
+    },
+    {
+     "name": "Netflix - Spanish Content :15s Ads",
+     "relation": "baseline_proxy",
+     "note": "Run-of-network A18+ baseline; this targeted variant will deliver fewer impressions."
+    }
+   ]
+  },
+  {
+   "series_key": "netflix-30s",
+   "title": "Netflix - :30s baseline (Adult 18+, run of network)",
+   "channel": "netflix",
+   "targeting_key": "a18_plus",
+   "avails_unit": "monthly",
+   "description": "Netflix Direct :30s run-of-network baseline. The source lists 17 markets; the other DMAs are extended from the Entravision+ Connect market distribution.",
+   "reader": "netflix_baseline_csv",
+   "source": "Netflix Baseline Avails.csv",
+   "params": {
+    "length": 30,
+    "extrapolate_from": "connect-default"
+   },
+   "data_basis": "extrapolated",
+   "band_low": 0.7,
+   "band_high": 1.3,
+   "exported_on": "2026-10-13",
+   "products": [
+    {
+     "name": "Netflix - Run Of Network Untargeted :30s Ads",
+     "relation": "primary"
+    },
+    {
+     "name": "Netflix - Age Targeted :30s Ads",
+     "relation": "baseline_proxy",
+     "note": "Run-of-network A18+ baseline; this targeted variant will deliver fewer impressions."
+    },
+    {
+     "name": "Netflix - Gender Targeted :30s Ads",
+     "relation": "baseline_proxy",
+     "note": "Run-of-network A18+ baseline; this targeted variant will deliver fewer impressions."
+    },
+    {
+     "name": "Netflix - Content Genre Targeted :30s Ads",
+     "relation": "baseline_proxy",
+     "note": "Run-of-network A18+ baseline; this targeted variant will deliver fewer impressions."
+    },
+    {
+     "name": "Netflix - Spanish Content :30s Ads",
+     "relation": "baseline_proxy",
+     "note": "Run-of-network A18+ baseline; this targeted variant will deliver fewer impressions."
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-all",
+   "title": "Entravision Plus - Live Sports (All Sports)",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: Live Sports (ALL). Weekly estimates; period: All live sports; no season window stated.",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "Live Sports (ALL)"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "All live sports; no season window stated",
+    "start": null,
+    "end": null,
+    "source_note": ""
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports (All Sports)",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-mlb",
+   "title": "Entravision Plus - Live Sports - MLB",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: MLB. Weekly estimates; period: Regular season, ends Sep 27, 2026.",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "MLB"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Regular season, ends Sep 27, 2026",
+    "start": null,
+    "end": "2026-09-27",
+    "source_note": "Regular Season Ends on 9/27"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - MLB",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-mlb-playoffs",
+   "title": "Entravision Plus - Live Sports - MLB (Playoffs)",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: MLB (Playoffs). Weekly estimates; period: Playoffs, Sep 30 - Oct 21, 2026 (3 weeks).",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "MLB (Playoffs)"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Playoffs, Sep 30 - Oct 21, 2026 (3 weeks)",
+    "start": "2026-09-30",
+    "end": "2026-10-21",
+    "source_note": "MLB Playoffs (9/30 –10/21) 3 weeks"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - MLB (Playoffs)",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-nba",
+   "title": "Entravision Plus - Live Sports - NBA",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: NBA. Weekly estimates; period: Regular season, Oct 2025 - Apr 2026 (6 months).",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "NBA"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Regular season, Oct 2025 - Apr 2026 (6 months)",
+    "start": "2025-10-01",
+    "end": "2026-04-30",
+    "source_note": "NBA Regular Season (Oct 2025–Apr 2026, 6 months)"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - NBA",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-nba-playoffs",
+   "title": "Entravision Plus - Live Sports - NBA (Playoffs)",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: NBA (Playoffs). Weekly estimates; period: Playoffs, Apr - May 2026 (2 months, excl. Finals).",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "NBA (Playoffs)"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Playoffs, Apr - May 2026 (2 months, excl. Finals)",
+    "start": "2026-04-01",
+    "end": "2026-05-31",
+    "source_note": "NBA Playoffs (Apr–May 2026, 2 months, excl. Finals)"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - NBA (Playoffs)",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-wnba",
+   "title": "Entravision Plus - Live Sports - WNBA",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: WNBA. Weekly estimates; period: Season, May 8 - Sep 24, 2026.",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "WNBA"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Season, May 8 - Sep 24, 2026",
+    "start": "2026-05-08",
+    "end": "2026-09-24",
+    "source_note": "Season Dates: May 8, 2026 to September 24, 2026"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - WNBA",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-ncaab",
+   "title": "Entravision Plus - Live Sports - NCAA Basketball",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: NCAAB. Weekly estimates; period: Regular season, Nov 2025 - Mar 2026 (5 months).",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "NCAAB"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Regular season, Nov 2025 - Mar 2026 (5 months)",
+    "start": "2025-11-01",
+    "end": "2026-03-31",
+    "source_note": "NCAA Basketball Regular Season (Nov 2025–Mar 2026, 5 months"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - NCAA Basketball",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-ncaab-march-madness",
+   "title": "Entravision Plus - Live Sports - NCAA Basketball (March Madness)",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: NCAAB - March Mania. Weekly estimates; period: March Madness, Mar 17 - Apr 6, 2026.",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "NCAAB - March Mania"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "March Madness, Mar 17 - Apr 6, 2026",
+    "start": "2026-03-17",
+    "end": "2026-04-06",
+    "source_note": "NCAA Basketball March Mania (Mar 17, 2026 - April 6, 2026)"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - NCAA Basketball (March Madness)",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-nhl",
+   "title": "Entravision Plus - Live Sports - NHL",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: NHL. Weekly estimates; period: Regular season, Oct 2025 - Apr 2026 (6 months).",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "NHL"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Regular season, Oct 2025 - Apr 2026 (6 months)",
+    "start": "2025-10-01",
+    "end": "2026-04-30",
+    "source_note": "Oct 2025–Apr 2026, 6 months"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - NHL",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-nhl-playoffs",
+   "title": "Entravision Plus - Live Sports - NHL (Playoffs)",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: NHL (Playoffs). Weekly estimates; period: Playoffs, Apr - May 2026 (2 months, excl. Final).",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "NHL (Playoffs)"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Playoffs, Apr - May 2026 (2 months, excl. Final)",
+    "start": "2026-04-01",
+    "end": "2026-05-31",
+    "source_note": "Apr–May 2026, 2 months, excl. Final"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - NHL (Playoffs)",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-soccer",
+   "title": "Entravision Plus - Live Sports - Soccer",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: Soccer. Weekly estimates; period: Period not stated in the source file.",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "Soccer"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Period not stated in the source file",
+    "start": null,
+    "end": null,
+    "source_note": ""
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - Soccer",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-fifa-world-cup-26",
+   "title": "Entravision Plus - Live Sports - FIFA World Cup 2026",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: FIFA World Cup 26. Weekly estimates; period: FIFA World Cup 2026, Jun 11 - Jul 19, 2026.",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "FIFA World Cup 26"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "FIFA World Cup 2026, Jun 11 - Jul 19, 2026",
+    "start": "2026-06-11",
+    "end": "2026-07-19",
+    "source_note": "FIFA Tournament Dates (Jun 11, 2026 – Jul 19, 2026)"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - FIFA World Cup 2026",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-motorsports",
+   "title": "Entravision Plus - Live Sports - Motorsports",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: MotorSports. Weekly estimates; period: Weekly events through the year (no season dates stated).",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "MotorSports"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Weekly events through the year (no season dates stated)",
+    "start": null,
+    "end": null,
+    "source_note": "Weekly - Varied Events through the Year"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - Motorsports",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-tennis",
+   "title": "Entravision Plus - Live Sports - Tennis",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: Tennis. Weekly estimates; period: Jan - Nov 2026; ATP events vary through the year.",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "Tennis"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Jan - Nov 2026; ATP events vary through the year",
+    "start": "2026-01-01",
+    "end": "2026-11-30",
+    "source_note": "Jan - Nov 2026 - ATP events vary throughout the year."
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - Tennis",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-golf",
+   "title": "Entravision Plus - Live Sports - Golf",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: Golf. Weekly estimates; period: Tournaments almost weekly, Jan 15 - Dec 6, 2026.",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "Golf"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Tournaments almost weekly, Jan 15 - Dec 6, 2026",
+    "start": "2026-01-15",
+    "end": "2026-12-06",
+    "source_note": "Tournaments Run almost weekly from Jan 15 -December 6, 2026"
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - Golf",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-nfl-mnf",
+   "title": "Entravision Plus - Live Sports - NFL Monday Night Football",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: NFL - MNF. Weekly estimates; period: Monday Night Football; season dates not stated in the source file.",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "NFL - MNF"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Monday Night Football; season dates not stated in the source file",
+    "start": null,
+    "end": null,
+    "source_note": ""
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - NFL Monday Night Football",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "live-sports-ncaaf",
+   "title": "Entravision Plus - Live Sports - NCAA Football",
+   "channel": "live_sports",
+   "targeting_key": "general",
+   "avails_unit": "weekly",
+   "description": "Live sports estimates by DMA: NCAAF. Weekly estimates; period: Thursday - Saturday games; season dates not stated in the source file.",
+   "reader": "live_sports_xlsx",
+   "source": "Live Sports Estimates- Entravision.xlsx",
+   "params": {
+    "sheet": "NCAAF"
+   },
+   "data_basis": "modeled",
+   "exported_on": "2026-10-13",
+   "period": {
+    "label": "Thursday - Saturday games; season dates not stated in the source file",
+    "start": null,
+    "end": null,
+    "source_note": ""
+   },
+   "products": [
+    {
+     "name": "Entravision Plus - Live Sports - NCAA Football",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "roku",
+   "title": "Roku Channel",
+   "channel": "platform_model",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "From the CTV avails-by-DMA model workbook (planning range low / mid / high per DMA).",
+   "reader": "bundled_platform_json",
+   "params": {
+    "platform": "roku"
+   },
+   "data_basis": "modeled",
+   "band_low": 0.7,
+   "band_high": 1.3,
+   "products": [
+    {
+     "name": "Entravision Plus - Roku Ads (Includes The Roku Channel and the popular Espacio Latino Hub)",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "prime",
+   "title": "Amazon Prime Video",
+   "channel": "platform_model",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "From the CTV avails-by-DMA model workbook (planning range low / mid / high per DMA).",
+   "reader": "bundled_platform_json",
+   "params": {
+    "platform": "prime"
+   },
+   "data_basis": "modeled",
+   "band_low": 0.7,
+   "band_high": 1.3,
+   "products": [
+    {
+     "name": "Entravision Plus - Amazon Prime Video",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "hulu",
+   "title": "Hulu",
+   "channel": "platform_model",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "From the CTV avails-by-DMA model workbook (planning range low / mid / high per DMA).",
+   "reader": "bundled_platform_json",
+   "params": {
+    "platform": "hulu"
+   },
+   "data_basis": "modeled",
+   "band_low": 0.7,
+   "band_high": 1.3,
+   "products": [
+    {
+     "name": "Entravision Plus - Hulu",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "peacock",
+   "title": "Peacock",
+   "channel": "platform_model",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "From the CTV avails-by-DMA model workbook (planning range low / mid / high per DMA).",
+   "reader": "bundled_platform_json",
+   "params": {
+    "platform": "peacock"
+   },
+   "data_basis": "modeled",
+   "band_low": 0.7,
+   "band_high": 1.3,
+   "products": [
+    {
+     "name": "Entravision Plus - Peacock",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "other_fast",
+   "title": "Other FAST (Tubi, Pluto TV, Samsung TV Plus, …)",
+   "channel": "platform_model",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "From the CTV avails-by-DMA model workbook (planning range low / mid / high per DMA).",
+   "reader": "bundled_platform_json",
+   "params": {
+    "platform": "other_fast"
+   },
+   "data_basis": "modeled",
+   "band_low": 0.7,
+   "band_high": 1.3,
+   "products": [
+    {
+     "name": "Entravision Plus - Other FAST (Tubi, Pluto TV, Samsung TV Plus, and other long-tail FAST channels)",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "vmvpd",
+   "title": "vMVPD (Fubo, Sling, DIRECTV Stream, …)",
+   "channel": "platform_model",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "From the CTV avails-by-DMA model workbook (planning range low / mid / high per DMA).",
+   "reader": "bundled_platform_json",
+   "params": {
+    "platform": "vmvpd"
+   },
+   "data_basis": "modeled",
+   "band_low": 0.7,
+   "band_high": 1.3,
+   "products": [
+    {
+     "name": "Entravision Plus - vMVPD (Fubo, Sling, DIRECTV Stream, Philo, Frndly, Vidgo + MVPD streaming apps)",
+     "relation": "primary"
+    }
+   ]
+  },
+  {
+   "series_key": "cumulative",
+   "title": "Blended CTV/OTT (Madhive cumulative)",
+   "channel": "platform_model",
+   "targeting_key": "general",
+   "avails_unit": "monthly",
+   "description": "From the CTV avails-by-DMA model workbook (planning range low / mid / high per DMA).",
+   "reader": "bundled_platform_json",
+   "params": {
+    "platform": "cumulative"
+   },
+   "data_basis": "modeled",
+   "band_low": 0.7,
+   "band_high": 1.3,
+   "products": [
+    {
+     "name": "Entravision Plus CTV/OTT - English Content",
+     "relation": "primary"
+    },
+    {
+     "name": "Entravision Plus CTV/OTT- Spanish Content only",
+     "relation": "primary"
+    },
+    {
+     "name": "Entravision Plus - Hispanics CTV/OTT",
+     "relation": "primary"
+    },
+    {
+     "name": "Entravision Plus - CTV/OTT Reach",
+     "relation": "primary"
+    }
+   ]
+  }
+ ]
+}
