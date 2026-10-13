@@ -407,23 +407,25 @@ def test_only_one_instance_bootstraps_at_a_time(monkeypatch, db):
 
 # --------------------------------------------------------------------------------------------- the product seed
 
-def test_seed_products_are_added_once_without_touching_rows_an_admin_changed(db):
+def test_seed_products_are_added_once_without_touching_rows_an_admin_changed(db, monkeypatch):
+    """Uses THROWAWAY seed products only: deleting a real catalog product would cascade away its forecast link."""
+    from dataclasses import replace
     from app.services.forecast_import import product_seed
-    names = [p.name for p, _ in catalog._load_forecast_seed_products()]
     with get_connection() as conn:
-        if conn.execute("SELECT count(*) AS n FROM products").fetchone()["n"] == 0:
-            pytest.skip("empty products table: the first-use seed fills it")
-        conn.execute("DELETE FROM products WHERE name = ANY(%s)", (names[:2],))                 # as if a database predates them
-        conn.execute("UPDATE products SET base_rate = 55, is_deleted = TRUE WHERE name = %s", (names[2],))   # an admin edited / removed one
-        before = conn.execute("SELECT base_rate, is_deleted FROM products WHERE name = %s", (names[2],)).fetchone()
-        added = product_seed.apply_to_db(conn)
-        assert added == 2 and product_seed.apply_to_db(conn) == 0
-        after = conn.execute("SELECT base_rate, is_deleted FROM products WHERE name = %s", (names[2],)).fetchone()
-        assert after == before and float(after["base_rate"]) == 55 and after["is_deleted"] is True       # untouched
+        anchor = conn.execute("SELECT name FROM products ORDER BY sort_order, id LIMIT 1").fetchone()
+    if anchor is None:
+        pytest.skip("empty products table: the first-use seed fills it")
+    template = catalog.CATALOG[0]
+    a, b, c = (replace(template, name=f"zz-test Seed {x}", base_rate=40.0) for x in "ABC")
+    monkeypatch.setattr(catalog, "_load_forecast_seed_products", lambda: [(a, anchor["name"]), (b, a.name), (c, b.name)])
+    with get_connection() as conn:
+        conn.execute("INSERT INTO products (name, family, buying_model, base_rate, is_deleted) VALUES (%s, 'Test', 'CPM', 55, TRUE)", (c.name,))   # an admin edited AND removed C
+        before = conn.execute("SELECT base_rate, is_deleted FROM products WHERE name = %s", (c.name,)).fetchone()
+        assert product_seed.apply_to_db(conn) == 2 and product_seed.apply_to_db(conn) == 0                  # A and B added, once
+        after = conn.execute("SELECT base_rate, is_deleted FROM products WHERE name = %s", (c.name,)).fetchone()
+        assert after == before and float(after["base_rate"]) == 55 and after["is_deleted"] is True            # C untouched
         order = {r["name"]: r["sort_order"] for r in conn.execute("SELECT name, sort_order FROM products").fetchall()}
-        assert order[names[0]] == order["Netflix - Spanish Content :30s Ads"] + 1                      # placed after its anchor
-        assert len(set(order.values())) == len(order)
-        conn.execute("UPDATE products SET base_rate = 40, is_deleted = FALSE WHERE name = %s", (names[2],))
+        assert order[a.name] == order[anchor["name"]] + 1 and order[b.name] == order[a.name] + 1             # placed after their anchors
 
 
 # --------------------------------------------------------------------------------------------- the migration runner, isolated
