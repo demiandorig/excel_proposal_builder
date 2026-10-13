@@ -171,7 +171,7 @@ SEGMENTS: dict[str, tuple] = {
         ["live events", "concerts", "live shows", "festivals", "events", "event goers", "tickets", "live entertainment", "eventos en vivo"],
         "Adults who attended a live event (concert, sports, theater, festival) in the past 12 months."),
     "ent_latin_concerts": ("entertainment", "Latin Music Concert Goers", ["Concert Goers - Latin Music"],
-        ["latin concerts", "latin music", "reggaeton", "regional mexican", "bachata", "salsa", "cumbia", "latin concert", "concierto"],
+        ["latin concerts", "latin music", "hispanic music", "hispanic concerts", "latino music", "latino concerts", "spanish music", "reggaeton", "regional mexican", "bachata", "salsa", "cumbia", "latin concert", "concierto"],
         "Adults who attend Latin-music concerts."),
     "ent_theater": ("entertainment", "Live Theater & Performing Arts Fans", ["Live Theater & Performing Arts Fans"],
         ["theater", "theatre", "broadway", "musicals", "plays", "performing arts", "opera", "ballet", "symphony", "teatro"],
@@ -252,7 +252,7 @@ SEGMENTS: dict[str, tuple] = {
         ["k-12", "school age children", "parents of school kids", "school choice", "back to school", "elementary", "high school parents", "padres de familia"],
         "Adults raising a child aged 5 to 17, the K-12 decision makers."),
     "edu_alumni_students": ("education", "University Alumni, Students & Education In-Market", ["University Alumni or Students or In-Market for Education"],
-        ["alumni", "university alumni", "graduate", "bachelor's degree", "college grad", "education", "college educated", "continuing education"],
+        ["alumni", "university alumni", "college alumni", "graduate", "bachelor's degree", "college grad", "education", "college educated", "continuing education"],
         "Adults who hold a bachelor's degree or higher, are enrolled, or are considering enrolling."),
     # ------------------------------------------------------------------------------------------------ family
     "fam_young_children": ("family", "Parents of Young Children (0-5)", ["Parents of Young Children (Ages 0-5)"],

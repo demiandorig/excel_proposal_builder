@@ -287,11 +287,11 @@ def parse(data: dict) -> Taxonomy:
         segments.append(Segment(
             id=sid, group_key=raw["group"], group_label=keys[raw["group"]], label=raw["label"], parent_id=raw.get("parent"),
             company_names=tuple(raw.get("company_names") or ()), keywords=tuple(raw.get("keywords") or ()),
-            description=raw.get("description", ""), sort=int(raw.get("sort", 0)), status=status, rate_all=rate_all,
+            description=raw.get("description") or "", sort=int(raw.get("sort", 0)), status=status, rate_all=rate_all,
             rate_male=_num(inc.get("male"), f"{where} male"), rate_female=_num(inc.get("female"), f"{where} female"),
-            definition=inc.get("definition", ""), denominator=inc.get("denominator", ""), time_window=inc.get("time_window", ""),
+            definition=inc.get("definition") or "", denominator=inc.get("denominator") or "", time_window=inc.get("time_window") or "",
             source_title=src.get("title"), source_publisher=src.get("publisher"), source_url=src.get("url"), source_date=src.get("date"),
-            evidence=inc.get("evidence"), derivation=inc.get("derivation"), confidence=confidence, caveats=inc.get("caveats", ""),
+            evidence=inc.get("evidence"), derivation=inc.get("derivation"), confidence=confidence, caveats=inc.get("caveats") or "",
             supporting_sources=tuple(inc.get("supporting_sources") or ()), verification=inc.get("verification") or {}))
     for s in segments:
         if s.parent_id and s.parent_id not in seen:

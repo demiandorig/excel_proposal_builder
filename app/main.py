@@ -94,6 +94,7 @@ from app.services import constanza_geo
 from app.services import constanza_forecast_map as forecast_map_svc
 from app.services import forecast_store
 from app.services.constanza_engine import estimate_avails
+from app.services import audience_taxonomy
 from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, parse_audience_text
 from app.services.line_modifier import clean_line_modifier_or_none
 
@@ -1464,8 +1465,12 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
             "search_multiplier_applied": audience_estimate.search_multiplier_applied,
             "interests": [
                 {
-                    "input_text": i.input_text, "category": i.category, "supported": i.supported,
-                    "source": i.source, "source_date": i.source_date,
+                    "input_text": i.input_text, "category": i.category, "label": i.label, "group": i.group,
+                    "supported": i.supported, "status": i.status, "confidence": i.confidence,
+                    # the rate that was applied (the gender-specific one when the source gives it)
+                    "rate": (i.rate_by_gender or {}).get(body.audience.gender or "all"),
+                    "definition": i.definition, "source": i.source, "source_date": i.source_date, "source_url": i.source_url,
+                    "caveats": i.caveats, "how": i.how, "suggestions": i.suggestions,
                 }
                 for i in audience_estimate.interests
             ],
@@ -1499,16 +1504,28 @@ def constanza_parse_audience(body: ConstanzaParseAudienceRequest) -> dict:
 
 
 @app.get("/api/constanza/interest-taxonomy")
-async def constanza_interest_taxonomy() -> dict:
-    """The known, sourced interest categories constanza_audience.py can
-    apply a real incidence rate for — drives the UI's "browse supported
-    interests" picker so free text isn't the only way in."""
+def constanza_interest_taxonomy() -> dict:
+    """The audience taxonomy — every segment the sales team sells, grouped, with the sourced incidence rate where one
+    exists (a segment with `supported: false` is listed and searchable but carries no number: the engine never guesses
+    one). `categories` keeps the shape the first version of the picker used (only segments with a rate)."""
+    taxonomy = audience_taxonomy.load_taxonomy()
     return {
+        **taxonomy.to_public(),
         "categories": [
             {"category": c["category"], "label": c["label"], "source": c["source"], "source_date": c["source_date"]}
             for c in load_interest_taxonomy()
         ],
     }
+
+
+@app.get("/api/constanza/interests")
+def constanza_interest_search(q: str = "", limit: int = 8) -> dict:
+    """Segments ranked by how well they match what the planner typed ("likes sports", "dentist", "fitnes gym") — the same
+    scoring the estimate itself uses to read an interest phrase, so what the picker shows is what the engine will apply."""
+    q = (q or "").strip()[:100]
+    taxonomy = audience_taxonomy.load_taxonomy()
+    hits = taxonomy.search(q, limit=max(1, min(int(limit), 20))) if q else []
+    return {"query": q, "results": [{**h.segment.to_public(), "score": round(h.score, 1), "how": h.how} for h in hits]}
 
 
 @app.get("/api/constanza/platform-products")

@@ -205,6 +205,39 @@ Re-measure on Replit after the first import:
 python scripts/explain_forecast_queries.py --check --sizes
 ```
 
+## Audience incidence (the interest "factors")
+
+Interest targeting multiplies an estimate by *incidence*: the share of US adults 18+ who match an audience in a typical 12
+months. The table lives in Postgres (`audience_group`, `audience_segment`, `audience_incidence`, migration `0002`) and is
+seeded from `app/data/constanza/audience_taxonomy.json` (`python -m app.services.forecast_import seed-audience`, also run by
+the post-merge hook and at startup). If the database cannot be read, the bundled file answers, so interest targeting never
+depends on Postgres being up. The whole taxonomy is about a hundred rows, so search runs in Python
+(`app/services/audience_taxonomy.py`): exact name or team wording, a keyword phrase inside what was typed ("likes sports"),
+the typed text inside a name ("dental"), shared words, and near-spellings ("fitnes gym").
+
+* **90 audiences in 15 groups**, named the way the sales team writes them (kept as `company_names`, so the team's own wording
+  finds the segment) plus search keywords in English and Spanish. The specific sports (NFL, college football, NBA, WNBA, MLB,
+  soccer, NHL, golf, tennis, motorsports, MMA/boxing) are separate audiences next to "Sports Fans".
+* **Each rate has a status.** `sourced` (a published figure answers the definition), `derived` (computed from cited inputs; the
+  arithmetic is stored in `derivation`) or `no_public_rate` (listed and searchable, **no number**: the engine says so and leaves
+  the estimate unchanged rather than guess). Every rate also carries its definition, denominator, time window, source and
+  URL, the verbatim evidence, a confidence grade and caveats.
+* **How the numbers were produced.** One researcher per theme found a figure from a primary or reputable source; a second,
+  independent agent re-opened every cited page and checked the number, the denominator (adults, not households, workers or
+  ages 6+), the time window and any arithmetic. Their verdicts are stored with each record
+  (`verification`): 39 sourced and 15 derived rates survived, many after corrections (for example the video-game rate was
+  replaced because the cited page did not carry it and its base was not adults); **36 audiences have no defensible public
+  number** and ship blank. Rebuild with `python scripts/audience_taxonomy/build.py --research DIR`.
+* **Confidence feeds the range.** Each applied interest widens the low/high band by its grade (high 15%, moderate 25%, low
+  40%), combined with the other factors by root-sum-of-squares. Interests are multiplied as if independent, and the result
+  says so.
+* **Admin edits are kept.** A segment or rate an admin changed (`origin = 'admin'`) is not overwritten by the next seed; a
+  segment dropped from the file is deactivated, not deleted (saved proposals may still name it).
+* **Freshness.** `scripts/check_constanza_data_freshness.py` reports the file's age against a 365-day cadence.
+
+API: `GET /api/constanza/interest-taxonomy` (every group and segment, plus the legacy `categories` list) and
+`GET /api/constanza/interests?q=` (ranked search, the same scoring the estimate uses to read an interest phrase).
+
 ## Connection pool
 
 `app/db.py` keeps one small pool per process instead of opening a connection for every database operation (about 11× less

@@ -202,7 +202,7 @@ def bootstrap() -> dict:
     """The startup path. Never raises. Loads what has never been loaded (a fresh database, or a series added to the
     manifest by a newer release); it does NOT touch a series that already has a version - refreshing those is a
     deliberate `import` run, reviewed like any other change."""
-    result: dict = {"migrations": [], "geo": None, "products": 0, "series": []}
+    result: dict = {"migrations": [], "geo": None, "products": 0, "audience": None, "series": []}
     try:
         from app.services import migrations
         result["migrations"] = migrations.apply_pending()
@@ -215,6 +215,9 @@ def bootstrap() -> dict:
             try:
                 from app.services.forecast_import import product_seed
                 result["products"] = product_seed.apply_to_db(lock_conn)
+                lock_conn.commit()
+                from app.services import audience_taxonomy
+                result["audience"] = audience_taxonomy.seed_to_db(lock_conn)
                 lock_conn.commit()
                 outcomes = run_import(requested_by="startup", skip_existing_series=True)
                 result["series"] = [(o.series_key, o.status) for o in outcomes]

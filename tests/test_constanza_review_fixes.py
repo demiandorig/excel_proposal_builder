@@ -229,9 +229,15 @@ def test_the_audience_range_is_never_narrower_than_the_estimate_it_narrows_and_w
 def test_two_phrases_for_one_interest_are_applied_once():
     base = estimate_avails(ROKU, resolve_geo("Los Angeles"), months=1)
     once = estimate_audience(base, AudienceSpec(interest_terms=["sports"]))
-    twice = estimate_audience(base, AudienceSpec(interest_terms=["sports", "football"]))
+    twice = estimate_audience(base, AudienceSpec(interest_terms=["sports", "likes sports"]))      # both mean "Sports Fans"
     assert twice.imps_mid == pytest.approx(once.imps_mid) and twice.cuts_applied == once.cuts_applied == 1
     assert any("applied once" in n for n in twice.notes)
+
+
+def test_a_specific_sport_is_its_own_audience_not_a_second_phrase_for_sports_fans():
+    base = estimate_avails(ROKU, resolve_geo("Los Angeles"), months=1)
+    both = estimate_audience(base, AudienceSpec(interest_terms=["sports", "football"]))
+    assert both.cuts_applied == 2 and {i.category for i in both.interests} == {"sports_fan", "sports_football_nfl"}
 
 
 def test_an_area_without_acs_data_is_called_out_while_others_are_narrowed():
@@ -254,7 +260,9 @@ def test_interest_rates_match_what_their_cited_sources_say_and_are_internally_co
     cats = {c["category"]: c for c in load_interest_taxonomy()}
     sports, gamer = cats["sports_fan"], cats["video_gamer"]
     assert sports["rate_by_gender"] == {"all": 0.59, "male": 0.66, "female": 0.51} and sports["source_date"] == "2015-06"   # Gallup, June 2015
-    assert gamer["rate_by_gender"] == {"all": 0.49, "male": 0.53, "female": 0.46} and gamer["source_date"] == "2026-06"      # ESA 2026
+    # ESA 2025: adults 18+ who play every week. The earlier 0.49 / 0.53 / 0.46 figures were not on the cited page and their
+    # base was not adults, so the independent check replaced them; the source gives no gender split, so both fall back to 'all'.
+    assert gamer["rate_by_gender"] == {"all": 0.6, "male": 0.6, "female": 0.6} and gamer["source_date"] == "2025-06"
     for c in cats.values():
         r = c["rate_by_gender"]
         assert min(r["male"], r["female"]) <= r["all"] <= max(r["male"], r["female"]), c["category"]    # 'all' can't be outside its parts

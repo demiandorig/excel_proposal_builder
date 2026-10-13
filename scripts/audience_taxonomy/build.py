@@ -52,11 +52,11 @@ def incidence_for(rec: dict | None) -> tuple[dict, str | None]:
     verdict = rec.get("verdict", "confirmed")
     issues = (rec.get("issues") or "").strip()
     if rec.get("status") == "no_public_rate" or rec.get("rate_all") is None:
-        blank.update(definition=rec.get("definition_used", ""), caveats=rec.get("caveats", ""),
+        blank.update(definition=rec.get("definition_used") or "", caveats=rec.get("caveats") or "",
                      verification={"verdict": verdict, "notes": issues})
         return blank, None
     if verdict == "rejected":
-        blank.update(definition=rec.get("definition_used", ""), verification={"verdict": "rejected", "notes": issues},
+        blank.update(definition=rec.get("definition_used") or "", verification={"verdict": "rejected", "notes": issues},
                      caveats="A figure was researched but the independent check rejected it, so no rate is applied. " + issues)
         return blank, f"rejected: {issues[:120]}"
     rate = float(rec["rate_all"])
@@ -66,10 +66,10 @@ def incidence_for(rec: dict | None) -> tuple[dict, str | None]:
         return blank, "invalid rate or missing source"
     block = {
         "status": rec["status"], "all": rate, "male": rec.get("rate_male"), "female": rec.get("rate_female"),
-        "definition": rec.get("definition_used", ""), "denominator": rec.get("denominator_used", ""), "time_window": rec.get("time_window", ""),
+        "definition": rec.get("definition_used") or "", "denominator": rec.get("denominator_used") or "", "time_window": rec.get("time_window") or "",
         "source": {"title": rec["source_title"], "publisher": rec.get("source_publisher", ""), "url": rec["source_url"], "date": rec.get("source_date", "")},
         "evidence": rec.get("evidence_quote"), "derivation": rec.get("derivation"), "confidence": rec.get("confidence", "low"),
-        "caveats": rec.get("caveats", ""), "supporting_sources": rec.get("supporting_sources") or [],
+        "caveats": rec.get("caveats") or "", "supporting_sources": rec.get("supporting_sources") or [],
         "verification": {"verdict": verdict, "notes": issues},
     }
     return block, None
@@ -94,6 +94,8 @@ def build(research_dir: Path, out: Path) -> dict:
             "rate_definition": "The share of US adults (18+) who match the segment in a typical 12-month window, 0-1. Male / female only where the same source gives them.",
             "policy": "No rate ships without a source and evidence, and every rate was re-checked against its source by an independent verifier. A segment with no defensible public number is listed with status 'no_public_rate' and no rate - the engine never guesses one.",
             "generated_on": date.today().isoformat(),
+            "vintage": date.today().isoformat(),          # scripts/check_constanza_data_freshness.py reads these two
+            "refresh_cadence_days": 365,
             "built_by": "scripts/audience_taxonomy/build.py",
         },
         "groups": groups, "segments": segments,

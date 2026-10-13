@@ -16,7 +16,7 @@ of parity with panel-based measurement.
     audience_imps(geo, age x gender, interests, months) =
         dma_baseline(geo, product, months)        # constanza_engine.py, already area-weighted
       x age_gender_share(geo)                       # this area's own ACS age x sex data when available
-      x PRODUCT of interest_incidence(interest_i)    # curated, SOURCED rates only — see interest_incidence.json
+      x PRODUCT of interest_incidence(interest_i)    # SOURCED / DERIVED rates only — see audience_taxonomy.py and audience_taxonomy.json
       x PRODUCT of geo_interest_multiplier(interest_i, area)  # Google Ads search-volume skew — see constanza_search.py; defaults to 1.0 (no-op) until configured
 
 The LLM (reused from app/services/llm_utils.py, same OPENAI_API_KEY/
@@ -24,7 +24,7 @@ _HAS_OPENAI degrade pattern as app/services/ai_enricher.py) has exactly
 two jobs, both classification, NEVER number generation:
   1. Parse free text into a structured AudienceSpec.
   2. Map a free-text interest phrase to the nearest category in
-     interest_incidence.json's known taxonomy, or report it unsupported.
+     the audience taxonomy (audience_taxonomy.py), or report it unsupported.
 The LLM is never asked for, and its output never becomes, an incidence
 rate or a final number. When no LLM is configured, parsing falls back to
 a plain keyword/substring match against the same taxonomy — narrower, but
@@ -74,7 +74,10 @@ _CV_GEO = {"exact": 0.05, "hud_ratio": 0.10, "tract_overlap": 0.15,
            "census_relationship_file": 0.20, "single_county_place": 0.10,
            "population_share_national": 0.35}
 _CV_AGE_GENDER = 0.05      # ACS-anchored — well measured
-_CV_INTEREST = 0.30        # curated, not sampled
+_CV_INTEREST = 0.30        # curated, not sampled (used when a segment carries no confidence grade)
+# How far a published rate can be trusted, from the research verdict (audience_taxonomy.json): a direct recent survey of the
+# exact definition is tighter than a proxy or an old figure. Still a coarse heuristic, not a measured standard error.
+_CV_INTEREST_BY_CONFIDENCE = {"high": 0.15, "moderate": 0.25, "low": 0.40}
 _CV_SEARCH_APPLIED = 0.20  # only counted when the multiplier actually fired (not a no-op 1.0)
 
 RELIABILITY_FLOOR_POPULATION = 10_000  # a starting heuristic, not a derived constant — see module docstring
@@ -395,7 +398,7 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
         cvs.append(_CV_AGE_GENDER)
     # One factor per distinct interest: each is its own curated, independence-assumed cut, so stacking them must widen
     # the band (they are the least-independent pair in practice — sports and gaming overlap).
-    cvs.extend(_CV_INTEREST for _ in supported_interests)
+    cvs.extend(_CV_INTEREST_BY_CONFIDENCE.get(i.confidence or "", _CV_INTEREST) for i in supported_interests)
     # constanza_search.py's geo_interest_multiplier() is ready to call here
     # once two things exist: real Google Ads credentials, AND a ZIP/county/
     # city -> Google Ads geo-target-criteria-ID crosswalk (not yet built —

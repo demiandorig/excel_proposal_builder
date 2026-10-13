@@ -9,6 +9,8 @@
     python -m app.services.forecast_import rollback SERIES_KEY [--to VERSION]
     python -m app.services.forecast_import prune [--keep N]
     python -m app.services.forecast_import seed-products
+    python -m app.services.forecast_import seed-audience
+        Load app/data/constanza/audience_taxonomy.json into the audience tables (idempotent; admin-edited rows are kept).
 """
 from __future__ import annotations
 
@@ -57,6 +59,7 @@ def main(argv=None) -> int:
     rb = sub.add_parser("rollback"); rb.add_argument("series_key"); rb.add_argument("--to", type=int)
     pr = sub.add_parser("prune"); pr.add_argument("--keep", type=int, default=2)
     sub.add_parser("seed-products")
+    sub.add_parser("seed-audience")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 
@@ -83,6 +86,14 @@ def main(argv=None) -> int:
         from app.services.forecast_import import product_seed
         with get_connection() as conn:
             print(f"inserted {product_seed.apply_to_db(conn)} product(s)")
+        return 0
+    if args.command == "seed-audience":
+        from app.db import get_connection
+        from app.services import audience_taxonomy
+        with get_connection() as conn:
+            report = audience_taxonomy.seed_to_db(conn)
+            conn.commit()
+        print(f"{report['groups']} groups, {report['segments']} segments seeded ({report['deactivated']} deactivated)")
         return 0
     return 2
 

@@ -27,6 +27,10 @@ fi
 if ! python -m app.services.forecast_import import --by post-merge; then
   echo "warning: the forecast import reported problems - run: python -m app.services.forecast_import plan"
 fi
+# The audience (interest) taxonomy and its sourced incidence rates: app/data/constanza/audience_taxonomy.json.
+if ! python -m app.services.forecast_import seed-audience; then
+  echo "warning: the audience taxonomy did not load here; the bundled file answers until it does"
+fi
 
 python -m compileall -q app tests
 python -m pytest -q
