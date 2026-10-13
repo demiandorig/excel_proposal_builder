@@ -373,7 +373,7 @@ def broaden(areas: list) -> list[dict]:
     return out
 
 
-def overlap_suggestions(areas: list) -> list[dict]:
+def overlap_suggestions(areas: list, typed: Optional[dict] = None) -> list[dict]:
     """A city / ZIP listed next to a county that PROBABLY contains it (same state, every market the small place touches is a
     market the county touches, and the county is bigger): counting both would count the place twice. Containment cannot be
     proven from the bundled data, so this is an offer — "use the larger area only" — never an automatic merge."""
@@ -393,14 +393,19 @@ def overlap_suggestions(areas: list) -> list[dict]:
         c_pop = sum(p.area_population for p in pieces)
         c_state = pieces[0].state
         c_label = pieces[0].label or county_id
-        inside = []
+        inside: list[str] = []
+        inside_ids: list[str] = []
         for geo_id, parts in small.items():
             s_dmas = {p.dma for p in parts}
             s_pop = sum(p.area_population for p in parts)
             s_state = parts[0].state
             if s_dmas <= c_dmas and s_pop <= c_pop and (s_state is None or c_state is None or s_state == c_state):
                 inside.append(parts[0].label or geo_id)
+                inside_ids.append(geo_id)
         if inside:
+            # `drop_inputs`: what the planner TYPED for the small places, so the UI can take exactly those out of the text.
+            drop_inputs = list(dict.fromkeys(typed[g] for g in inside_ids if typed and typed.get(g)))
             out.append({"kind": "overlap", "label": f"Use {c_label} only", "geo_type": "county", "resolve_hint": c_label, "drops": inside,
+                        "drop_inputs": drop_inputs,
                         "why": f"{', '.join(inside)} may be inside {c_label}; listing both counts the same people twice."})
     return out

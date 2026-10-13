@@ -557,8 +557,13 @@ def _merge_resolutions(text: str, parts: list[GeoResolution]) -> GeoResolution:
         areas = kept
 
     from app.services import constanza_geo_text as gtext
-    for sg in gtext.overlap_suggestions(areas):
-        if sg not in suggestions:
+    typed: dict[str, str] = {}
+    for part in parts:
+        for a in part.areas:
+            typed.setdefault(a.geo_id or a.label or a.dma or "", part.input_text)
+    for sg in gtext.overlap_suggestions(areas, typed):
+        # A list item that was itself split ("X and Y") already carried its own, more precise offer up from the inner merge.
+        if not any(o["kind"] == sg["kind"] and o["resolve_hint"] == sg["resolve_hint"] for o in suggestions):
             suggestions.append(sg)
 
     resolved_parts = [p for p in parts if p.areas]
@@ -728,5 +733,5 @@ def _resolve_item(item: str, hint: str | None, allow_split: bool = True) -> GeoR
             sub.input_text = item
             return sub
 
-    res.suggestions = gtext.suggest(item, hint)
+    res.suggestions = [{**sg, "replaces": item} for sg in gtext.suggest(item, hint)]
     return res
