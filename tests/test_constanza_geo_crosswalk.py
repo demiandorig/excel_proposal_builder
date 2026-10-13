@@ -32,8 +32,9 @@ r_default = resolve_geo("Sacramento")
 assert r_default.method == "exact_dma"  # plain text still means the DMA by default (backward compatible)
 r_city_ambiguous = resolve_geo("Sacramento", geo_type_hint="city")
 assert r_city_ambiguous.method == "unresolved" and r_city_ambiguous.ambiguous
-labels = {c["label"] for e in r_city_ambiguous.ambiguous for c in e["candidates"]}
-assert "Sacramento, CA" in labels
+hints = {c["resolve_hint"] for e in r_city_ambiguous.ambiguous for c in e["candidates"]}
+assert "Sacramento, CA" in hints  # (labels also carry the place's population to help the pick)
+assert resolve_geo("Sacramento, CA", geo_type_hint="city").resolved  # and the hint round-trips
 print("Bare 'Sacramento' + city hint -> correctly ambiguous (CA/KY/NM): OK")
 
 r_city = resolve_geo("Sacramento, CA", geo_type_hint="city")
@@ -62,14 +63,24 @@ assert all(0 < a.dma_share < 1 for a in r_county.areas)  # population share of p
 print(f"'Sacramento County, CA' -> geometric split {[(k, round(v/total_county_pop, 4)) for k, v in county_area_pop.items()]}, "
       f"dma_share (pop. share of parent DMA) {[(a.dma, round(a.dma_share, 4)) for a in r_county.areas]}: OK")
 
+# A county that really straddles two DMAs (Riverside: most of it is Los Angeles,
+# the Coachella Valley is the Palm Springs DMA). Near-boundary polygon noise
+# (a county 95%+ inside one DMA) is collapsed in the build, so what's left in
+# county_dma.json are genuine splits — and each must come back as one area per DMA.
+r_split = resolve_geo("Riverside County, CA")
+assert r_split.method == "county"
+split_pop = {a.dma: a.area_population for a in r_split.areas}
+total_split_pop = sum(split_pop.values())
+split_geometric = {k: round(v / total_split_pop, 2) for k, v in split_pop.items()}
+assert set(split_geometric) == {"Los Angeles", "Palm Springs"}, split_geometric
+assert split_geometric["Los Angeles"] > split_geometric["Palm Springs"] > 0
+assert abs(total_split_pop - 2_400_000) < 150_000, total_split_pop  # Riverside County's real ACS population
+print(f"'Riverside County, CA' (real split county) -> split {split_geometric}: OK")
+
+# Boundary noise is collapsed: Solano County sits wholly inside the Sacramento DMA (as Nielsen has it).
 r_solano = resolve_geo("Solano County, CA")
-assert r_solano.method == "county"
-solano_area_pop = {a.dma: a.area_population for a in r_solano.areas}
-total_solano_pop = sum(solano_area_pop.values())
-solano_geometric_split = {k: round(v / total_solano_pop, 2) for k, v in solano_area_pop.items()}
-assert "Sacramento-Stockton-Modesto" in solano_geometric_split and "San Francisco-Oakland-San Jose" in solano_geometric_split
-assert solano_geometric_split["Sacramento-Stockton-Modesto"] > solano_geometric_split["San Francisco-Oakland-San Jose"]
-print(f"'Solano County, CA' (real split county) -> geometric split {solano_geometric_split}: OK")
+assert [a.dma for a in r_solano.areas] == ["Sacramento-Stockton-Modesto"]
+print("'Solano County, CA' -> whole Sacramento DMA, no spurious sliver in SF (boundary noise collapsed): OK")
 
 # --- The specific bug an adversarial spatial-join check caught: a bare
 # "County, ST" query must NOT get swallowed by the plain state matcher

@@ -1,7 +1,8 @@
 """
 Builds Project Constanza's US sub-DMA geo crosswalks: county, ZCTA
 (ZIP-code proxy), and Census Place (city) to DMA, plus congressional
-district to DMA (via the official Census CD-to-county relationship file).
+district to DMA (via the official Census CD-to-ZCTA relationship file,
+population-weighted with ACS ZCTA population).
 
 Method: real Nielsen DMA polygon boundaries (community-maintained, see
 NIELSEN_DMA_GEOJSON_URL) intersected against Census TIGER/Line
@@ -14,27 +15,37 @@ Nielsen's request — this script's spatial-join approach was built as the
 replacement after verifying that dataset no longer exists.)
 
 Where a downstream weight ideally wants POPULATION (not raw area) — most
-importantly congressional districts, whose county intersections are
-weighted by each county's real population disaggregated by area share
-within just that one county, not by land area across different counties
-— this script uses ACS county population once available (see
-CENSUS_API_KEY below) rather than land area, per the Phase 2 plan's
-correction to the first-draft design.
+importantly congressional districts — the CD -> DMA split is built from
+the finer CD-to-ZCTA relationship file: each (CD, ZCTA) piece carries that
+ZCTA's real ACS population x the fraction of the ZCTA's land inside the
+CD, then that ZCTA's own DMA split. (The earlier CD -> county route
+silently dropped Connecticut, whose 2023 county-equivalents — planning
+regions — don't exist in the 2020 relationship file's county FIPS, and was
+coarser besides.)
+
+Alaska's three DMAs (Anchorage, Fairbanks, Juneau) have no polygon in the
+community Nielsen file, and Nielsen's borough/census-area assignment is
+not something this script should guess — Alaska sub-DMA geographies are
+left unresolved (the resolver reports that explicitly) while Alaska DMA /
+state queries keep working off the workbook. Honolulu's DMA is exactly
+the state of Hawaii, so its polygon is synthesized from the Hawaii
+counties.
 
 Run the shapefile downloads once first (see README at the top of main()),
 then:
     python scripts/extract_constanza_geo_crosswalks.py --shp-dir /tmp/constanza_shp
 
-Writes, under app/data/constanza/geo/:
-    county_dma.json    — county FIPS -> [{dma, share}], area-weighted
-    zcta_dma.json       — ZCTA5 -> [{dma, share}], area-weighted
-    place_dma.json      — "STATEFP|PLACEFP" -> [{dma, share, name}], area-weighted
-    cd_county.json       — "STATEFP|CD" -> [{county_fips, land_share}] (from the Census relationship file)
-    cd_dma.json          — "STATEFP|CD" -> [{dma, share}], population-weighted via ACS county population when available
+Writes (gzip-compressed — see read_json_maybe_gz), under app/data/constanza/geo/:
+    county_dma.json.gz    — county FIPS -> [{dma, share}], area-weighted
+    county_names.json.gz  — county FIPS -> {name, state_fips}
+    zcta_dma.json.gz      — ZCTA5 -> [{dma, share}], area-weighted
+    place_dma.json.gz     — {"shares": place GEOID -> [{dma, share}], "names": ...}
+    cd_dma.json.gz        — {"_meta", "cd_dma": STATEFP+CD -> [{dma, share}]}, ACS-ZCTA-population-weighted
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -59,10 +70,10 @@ OUT_DIR = REPO_ROOT / "app" / "data" / "constanza" / "geo"
 # .topojson is the actual source of truth; this script decodes it itself
 # per the TopoJSON spec instead of trusting the repo's GeoJSON conversion.
 NIELSEN_DMA_TOPOJSON_URL = "https://raw.githubusercontent.com/simzou/nielsen-dma/master/nielsentopo.json"
-CD_COUNTY_REL_FILE_URL = "https://www2.census.gov/geo/docs/maps-data/data/rel2020/cd-sld/tab20_cd11920_county20_natl.txt"
+CD_ZCTA_REL_FILE_URL = "https://www2.census.gov/geo/docs/maps-data/data/rel2020/cd-sld/tab20_cd11920_zcta520_natl.txt"
 
 sys.path.insert(0, str(REPO_ROOT))
-from app.data.constanza import load_dma_reference  # noqa: E402
+from app.data.constanza import load_dma_reference, read_json_maybe_gz, write_json_gz  # noqa: E402
 from app.services.constanza_geo import _normalize, _dma_candidates  # noqa: E402
 
 # geojson dma_name (before the trailing ", ST"/", ST-ST" suffix) -> exact
@@ -98,6 +109,18 @@ DMA_NAME_ALIASES = {
     "tyler-longview(lufkin & nacogdoches)": "Tyler-Longview(Lfkn&Ncgd)",
     "greenville-new bern-washington": "Greenville-N.Bern-Washngtn",
     "harlingen-weslaco-brownsville-mcallen": "Harlingen-Wslco-Brnsvl-McA",
+}
+
+
+# Keyed by the geojson's FULL normalized name, for the rare polygon whose
+# first-comma base ("Rochester") collides with a different DMA's base AND
+# whose workbook name is too abbreviated/misspelled to match by segment
+# ("Rochestr-Mason City-Austin" — the workbook's own spelling). Without
+# this the Minnesota polygon was silently labeled "Rochester, NY": two
+# polygons shared one label, Rochester NY came out 31% over its workbook
+# population, and the real Rochester MN DMA had zero coverage.
+DMA_FULLNAME_ALIASES = {
+    "rochester, mn-mason city, ia-austin, mn": "Rochestr-Mason City-Austin",
 }
 
 
@@ -173,7 +196,19 @@ def _decode_topojson(topo: dict) -> list[dict]:
     return features
 
 
-def load_dma_polygons() -> gpd.GeoDataFrame:
+HAWAII_STATEFP = "15"
+
+
+def _synthesize_honolulu(shp_dir: Path) -> gpd.GeoSeries:
+    """Nielsen's Honolulu DMA is the entire state of Hawaii, which the
+    community polygon file omits — dissolve the Hawaii counties instead.
+    Returned in EPSG:4326 to match the decoded Nielsen polygons."""
+    counties = gpd.read_file(shp_dir / "county" / "cb_2023_us_county_500k.shp")
+    hawaii = counties[counties["STATEFP"].astype(str) == HAWAII_STATEFP].to_crs("EPSG:4326")
+    return hawaii.geometry.union_all() if hasattr(hawaii.geometry, "union_all") else hawaii.geometry.unary_union
+
+
+def load_dma_polygons(shp_dir: Path) -> gpd.GeoDataFrame:
     """Real Nielsen DMA boundaries, name-matched to our own dma_reference.json."""
     topo = json.loads(_fetch(NIELSEN_DMA_TOPOJSON_URL))
     features = _decode_topojson(topo)
@@ -184,6 +219,7 @@ def load_dma_polygons() -> gpd.GeoDataFrame:
     )
 
     my_dma_list = list(load_dma_reference())
+    my_dmas = {d.dma for d in my_dma_list}
     by_norm_full: dict[str, list] = defaultdict(list)
     by_norm_segment: dict[str, list] = defaultdict(list)
     for d in my_dma_list:
@@ -206,6 +242,9 @@ def load_dma_polygons() -> gpd.GeoDataFrame:
         # partly in "Columbus, OH"). Every state code actually present in
         # the geojson's own name is required to match one of the
         # candidate DMA's `state` field before accepting it.
+        full_key = dma_name.strip().lower()
+        if full_key in DMA_FULLNAME_ALIASES:
+            return DMA_FULLNAME_ALIASES[full_key]
         base = re.split(r",", dma_name)[0].strip()
         norm = _normalize(base)
         states_in_name = set(STATE_RE.findall(dma_name))
@@ -220,6 +259,12 @@ def load_dma_polygons() -> gpd.GeoDataFrame:
         if not candidates:
             return None
         if len(candidates) == 1:
+            # A lone candidate still has to agree with the state codes in
+            # the polygon's own name — "Rochester, MN-..." must not be
+            # accepted as "Rochester, NY" just because it was the only
+            # name-segment hit.
+            if states_in_name and candidates[0].state not in states_in_name:
+                return None
             return candidates[0].dma
         state_matched = [d for d in candidates if d.state in states_in_name]
         if len(state_matched) == 1:
@@ -233,8 +278,42 @@ def load_dma_polygons() -> gpd.GeoDataFrame:
     unmatched = gdf[gdf["dma"].isna()]["dma_name"].tolist()
     if unmatched:
         print(f"  (unmatched Nielsen DMA polygons, skipped: {unmatched})")
-    gdf = gdf[gdf["dma"].notna()].to_crs("EPSG:5070")  # CONUS Albers Equal Area — for accurate area weighting
+    gdf = gdf[gdf["dma"].notna()]
+    dupes = gdf["dma"][gdf["dma"].duplicated()].unique().tolist()
+    if dupes:
+        raise RuntimeError(f"Two Nielsen polygons were given the same DMA label {dupes} — a name-matching bug "
+                           "(this is exactly how Rochester MN got swallowed by Rochester NY); fix the aliases above.")
+    if "Honolulu" in my_dmas and "Honolulu" not in set(gdf["dma"]):
+        hi = gpd.GeoDataFrame({"dma": ["Honolulu"]}, geometry=[_synthesize_honolulu(shp_dir)], crs="EPSG:4326")
+        gdf = pd.concat([gdf, hi], ignore_index=True)
+        print("  (Honolulu DMA polygon synthesized from the Hawaii counties)")
+    no_polygon = sorted(my_dmas - set(gdf["dma"]))
+    if no_polygon:
+        print(f"  (DMAs with NO polygon in the Nielsen file — must be synthesized or left unsupported: {no_polygon})")
+    gdf = gdf.to_crs("EPSG:5070")  # CONUS Albers Equal Area — for accurate area weighting
     return gdf[["dma", "geometry"]]
+
+
+# The community Nielsen polygons are simplified/quantized, so a county or
+# ZIP that sits cleanly inside one DMA still "overlaps" its neighbor along
+# the boundary by a few percent (measured: 1,992 counties overlap >1 DMA,
+# yet 1,977 of those are >90% inside one — boundary noise, not real
+# splits; Nielsen itself assigns whole counties to a single DMA). Without
+# this collapse a planner sees a spurious second DMA on most border-area
+# ZIPs/counties/cities. A geography >= SNAP_SHARE inside one DMA is assigned
+# wholly to it; below that, shares under MIN_SPLIT_SHARE are dropped as
+# noise and the rest renormalized.
+SNAP_SHARE = 0.90
+MIN_SPLIT_SHARE = 0.02
+
+
+def _denoise_shares(shares: list[dict]) -> list[dict]:
+    top = max(shares, key=lambda s: s["share"])
+    if top["share"] >= SNAP_SHARE:
+        return [{"dma": top["dma"], "share": 1.0}]
+    kept = [s for s in shares if s["share"] >= MIN_SPLIT_SHARE]
+    total = sum(s["share"] for s in kept)
+    return [{"dma": s["dma"], "share": round(s["share"] / total, 6)} for s in sorted(kept, key=lambda s: -s["share"])]
 
 
 def _area_weighted_dma_shares(features: gpd.GeoDataFrame, id_col: str, dma_polys: gpd.GeoDataFrame) -> dict[str, list[dict]]:
@@ -255,7 +334,7 @@ def _area_weighted_dma_shares(features: gpd.GeoDataFrame, id_col: str, dma_polys
         if row["share"] <= 0:
             continue
         result[str(row[id_col])].append({"dma": row["dma"], "share": round(float(row["share"]), 6)})
-    return dict(result)
+    return {key: _denoise_shares(shares) for key, shares in result.items()}
 
 
 def build_county_dma(shp_dir: Path, dma_polys: gpd.GeoDataFrame) -> tuple[dict, dict]:
@@ -266,8 +345,11 @@ def build_county_dma(shp_dir: Path, dma_polys: gpd.GeoDataFrame) -> tuple[dict, 
     print(f"  {len(result)} counties resolved")
     # NAME + STATEFP so the text resolver can go "Sacramento County, CA" -> FIPS,
     # not just FIPS -> DMA share (which is all the overlay above produces).
+    # full_name = NAMELSAD ("Sacramento County", "Orleans Parish", "Richmond
+    # city") — NAME alone can't tell Virginia's independent "Richmond city"
+    # from "Richmond County", and can't label Louisiana's parishes correctly.
     names = {
-        row["GEOID"]: {"name": row["NAME"], "state_fips": row["STATEFP"]}
+        row["GEOID"]: {"name": row["NAME"], "full_name": row["NAMELSAD"], "state_fips": row["STATEFP"]}
         for _, row in counties.iterrows()
     }
     return result, names
@@ -305,53 +387,53 @@ def build_place_dma(shp_dir: Path, dma_polys: gpd.GeoDataFrame) -> tuple[dict, d
     return result, names
 
 
-def build_cd_county() -> dict:
-    print("Fetching Census 119th Congress CD-to-county relationship file...")
-    text = _fetch(CD_COUNTY_REL_FILE_URL).decode("utf-8-sig")
-    rows = list(csv := __import__("csv").DictReader(text.splitlines(), delimiter="|"))
-    by_cd: dict[str, list[dict]] = defaultdict(list)
+def build_cd_dma(zcta_dma: dict, zcta_population: dict[str, float]) -> tuple[dict, dict]:
+    """CD -> DMA shares from the Census CD-to-ZCTA relationship file.
+
+    Each (CD, ZCTA) row contributes   zcta_pop x (land of the ZCTA inside
+    the CD / the ZCTA's total land)   people, split across DMAs by that
+    ZCTA's own area-weighted DMA shares. Summed per CD and normalized.
+    A CD whose ZCTAs mostly have no DMA assignment (Alaska) is skipped
+    rather than reported off a sliver of its population."""
+    print("Fetching Census 119th Congress CD-to-ZCTA relationship file...")
+    text = _fetch(CD_ZCTA_REL_FILE_URL).decode("utf-8-sig")
+    rows = list(csv.DictReader(text.splitlines(), delimiter="|"))
+
+    dma_weight: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    covered: dict[str, float] = defaultdict(float)
+    total: dict[str, float] = defaultdict(float)
     for row in rows:
-        cd_geoid = row["GEOID_CD119_20"]  # STATEFP(2) + CD(2)
-        county_fips = row.get("GEOID_COUNTY_20", "")
-        if not county_fips:
+        zcta = row.get("GEOID_ZCTA5_20") or ""
+        if not zcta:
             continue
-        land_part = float(row["AREALAND_PART"] or 0)
-        by_cd[cd_geoid].append({"county_fips": county_fips, "land_area_part": land_part})
-    print(f"  {len(by_cd)} congressional districts")
-    return dict(by_cd)
+        cd_geoid = row["GEOID_CD119_20"]
+        zcta_land = float(row["AREALAND_ZCTA5_20"] or 0)
+        part_land = float(row["AREALAND_PART"] or 0)
+        if zcta_land <= 0:
+            continue
+        pop_in_cd = zcta_population.get(zcta, 0.0) * min(part_land / zcta_land, 1.0)
+        if pop_in_cd <= 0:
+            continue
+        total[cd_geoid] += pop_in_cd
+        shares = zcta_dma.get(zcta)
+        if not shares:
+            continue
+        covered[cd_geoid] += pop_in_cd
+        for s_ in shares:
+            dma_weight[cd_geoid][s_["dma"]] += pop_in_cd * s_["share"]
 
-
-def build_cd_dma(cd_county: dict, county_dma: dict, county_population: dict[str, float] | None) -> dict:
-    """CD -> DMA shares. If real county population is available (ACS,
-    keyed by county FIPS), each intersecting county's contribution to the
-    CD is that county's OWN population, disaggregated only by this one
-    county's own land-area split across the CD boundary (never compared
-    against a DIFFERENT county's land area) — see module docstring. Falls
-    back to land-area-only weighting (with a clear caveat) when no
-    population data is available yet."""
     result: dict[str, list[dict]] = {}
-    for cd_geoid, counties in cd_county.items():
-        total_county_land = defaultdict(float)
-        for c in counties:
-            total_county_land[c["county_fips"]] += c["land_area_part"]
-
-        dma_weight: dict[str, float] = defaultdict(float)
-        for county_fips, land_in_cd in total_county_land.items():
-            pop = (county_population or {}).get(county_fips)
-            # Weight = (this county's population, or 1.0 as a land-only
-            # fallback) x this county's OWN share of itself that falls in
-            # this CD — never a cross-county area comparison.
-            base_weight = pop if pop is not None else 1.0
-            for dma_share in county_dma.get(county_fips, []):
-                dma_weight[dma_share["dma"]] += base_weight * dma_share["share"]
-
-        total = sum(dma_weight.values())
-        if not total:
+    skipped = []
+    for cd_geoid, weights in dma_weight.items():
+        if covered[cd_geoid] < 0.5 * total[cd_geoid]:
+            skipped.append(cd_geoid)
             continue
-        result[cd_geoid] = [
-            {"dma": dma, "share": round(w / total, 6)} for dma, w in dma_weight.items()
-        ]
-    return result
+        norm = sum(weights.values())
+        result[cd_geoid] = [{"dma": dma, "share": round(w / norm, 6)} for dma, w in sorted(weights.items(), key=lambda kv: -kv[1])]
+    for cd_geoid in set(total) - set(dma_weight):
+        skipped.append(cd_geoid)
+    print(f"  {len(result)} congressional districts resolved; skipped (no DMA coverage): {sorted(skipped)}")
+    return result, {"skipped_no_dma_coverage": sorted(skipped)}
 
 
 def main():
@@ -363,44 +445,35 @@ def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("Loading Nielsen DMA boundary polygons...")
-    dma_polys = load_dma_polygons()
+    dma_polys = load_dma_polygons(shp_dir)
     print(f"  {len(dma_polys)} DMA polygons matched to dma_reference.json")
 
     county_dma, county_names = build_county_dma(shp_dir, dma_polys)
-    (OUT_DIR / "county_dma.json").write_text(json.dumps(county_dma, indent=2))
-    (OUT_DIR / "county_names.json").write_text(json.dumps(county_names, indent=2))
+    write_json_gz(OUT_DIR / "county_dma.json", county_dma)
+    write_json_gz(OUT_DIR / "county_names.json", county_names)
 
     zcta_dma = build_zcta_dma(shp_dir, dma_polys)
-    (OUT_DIR / "zcta_dma.json").write_text(json.dumps(zcta_dma, indent=2))
+    write_json_gz(OUT_DIR / "zcta_dma.json", zcta_dma)
 
     place_dma, place_names = build_place_dma(shp_dir, dma_polys)
-    (OUT_DIR / "place_dma.json").write_text(json.dumps({"shares": place_dma, "names": place_names}, indent=2))
+    write_json_gz(OUT_DIR / "place_dma.json", {"shares": place_dma, "names": place_names})
 
-    cd_county = build_cd_county()
-    (OUT_DIR / "cd_county.json").write_text(json.dumps(cd_county, indent=2))
-
-    # County population for CD weighting: read from the ACS bundle if
-    # extract_constanza_acs.py has already produced one, else fall back to
-    # land-area-only CD weighting with an explicit caveat.
-    acs_county_path = OUT_DIR.parent / "acs_age_sex_county.json"
-    county_population = None
-    if acs_county_path.exists():
-        acs_county = json.loads(acs_county_path.read_text())
-        county_population = {fips: v["total_population"] for fips, v in acs_county.items() if fips != "_meta"}
-        print("Using real ACS county population for CD weighting.")
-    else:
-        print("WARNING: no ACS county population bundle found yet — CD-to-DMA weighting will use "
-              "land-area-only fallback for now. Re-run this script after extract_constanza_acs.py "
-              "has run to upgrade CD weighting to real population (see cd_dma.json's _meta flag).")
-
-    cd_dma = build_cd_dma(cd_county, county_dma, county_population)
-    (OUT_DIR / "cd_dma.json").write_text(json.dumps({
+    acs_zcta = read_json_maybe_gz(OUT_DIR.parent / "acs_age_sex_zcta.json")
+    zcta_population = {z: v["total_population"] for z, v in acs_zcta.items() if not z.startswith("_")}
+    cd_dma, cd_info = build_cd_dma(zcta_dma, zcta_population)
+    write_json_gz(OUT_DIR / "cd_dma.json", {
         "_meta": {
-            "weighting": "population" if county_population else "land_area_fallback",
-            "source": "Census 119th Congress CD-to-county relationship file (2020 tabulation geography)",
+            "weighting": "population",
+            "vintage": "119th Congress CD (2020 tabulation geography) x ACS 2023 5-year",
+            "refresh_cadence_days": 180,  # re-pull after any redistricting (2025-26 mid-decade maps are in flux)
+            "source": "Census 119th Congress CD-to-ZCTA relationship file (2020 tabulation geography) x ACS 2023 ZCTA population x area-weighted ZCTA-to-DMA shares",
+            **cd_info,
         },
         "cd_dma": cd_dma,
-    }, indent=2))
+    })
+    stale = OUT_DIR / "cd_county.json.gz"
+    if stale.exists():
+        stale.unlink()  # superseded by the CD-to-ZCTA route; nothing reads it anymore
 
     print("Done.")
 

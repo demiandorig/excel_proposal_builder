@@ -106,16 +106,16 @@
       <p class="lede">DMA-weighted CTV avails, pulled fast from bundled platform data — a starting point, not a replacement for checking Roku Ads Manager / Amazon DSP / The Trade Desk / Madhive when precision matters on a specific deal.</p>
       <div class="constanza-modal-form">
         <label>Geo
-          <input type="text" id="constanza-modal-geo" placeholder="e.g. National, Los Angeles DMA, Sacramento, 95814" />
+          <input type="text" id="constanza-modal-geo" placeholder="e.g. National · Los Angeles DMA · 95814, 95815 · Sacramento County, CA · CA-06" />
         </label>
         <label>Geo type
           <select id="constanza-modal-geo-type">
-            <option value="">Auto (DMA/State)</option>
+            <option value="">Auto-detect (DMA / State / ZIP / County / District)</option>
             <option value="zip">ZIP code</option>
             <option value="county">County</option>
             <option value="congressional_district">Congressional district</option>
             <option value="city">City</option>
-            <option value="country">Country (non-US)</option>
+            <option value="country">Country (incl. US)</option>
           </select>
         </label>
         <label>Platform
@@ -123,6 +123,9 @@
         </label>
         <label>Months
           <input type="number" id="constanza-modal-months" min="1" value="1" />
+        </label>
+        <label title="Platform data only exists for the U.S. For another country, enter the monthly impressions you want spread across it by population share (low confidence).">Monthly imps total <span class="constanza-optional">(non-US countries only)</span>
+          <input type="number" id="constanza-modal-total" min="0" step="1000" placeholder="e.g. 1000000" />
         </label>
       </div>
       <details class="constanza-audience-details">

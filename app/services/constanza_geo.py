@@ -25,10 +25,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from app.data.constanza import DMA, load_dma_reference
 
-_NATIONAL_WORDS = {"national", "nationwide", "us", "usa", "united states", "all markets", "all", ""}
+_NATIONAL_WORDS = {
+    "national", "nationwide", "us", "usa", "united states", "all markets", "all", "",
+    "u.s.", "u.s.a.", "america", "united states of america", "the us", "the united states",
+    "entire us", "all us", "us national", "usa national",
+}
 
 _STATE_NAMES_TO_ABBR = {
     "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR", "california": "CA",
@@ -85,6 +90,13 @@ class GeoResolution:
     # the DMA vs. "Sacramento" the city). Each entry:
     # {"input": str, "candidates": [{"label": str, "source_type": str, "resolve_hint": str}]}
     ambiguous: list[dict] = field(default_factory=list)
+    # Why specific inputs couldn't be resolved, when we know — [{"input": str, "reason": str}].
+    # unmatched_tokens lists every failed input; this adds the explanation where one exists
+    # (e.g. an Alaska ZIP: recognized, but Alaska's sub-DMA boundaries aren't bundled).
+    unmatched_details: list[dict] = field(default_factory=list)
+    # Advisory caveats that don't block a result (mixed geography levels that may overlap,
+    # a same-name place resolved to the larger one, ...).
+    notes: list[str] = field(default_factory=list)
 
     @property
     def resolved(self) -> bool:
@@ -140,6 +152,18 @@ def _dma_candidates(dma_name: str) -> list[str]:
     return [dma_name] + segments
 
 
+# The workbook's own spelling of a few DMA names is abbreviated or misspelled
+# enough that no name segment is what a planner would type ("Rochestr-Mason
+# City-Austin" — nobody types "Rochestr"), and its name carries no state code
+# for the second state it reaches into. Keyed by exact workbook name.
+_EXTRA_DMA_SEGMENTS = {"Rochestr-Mason City-Austin": ["Rochester"]}
+_EXTRA_DMA_STATES = {"Rochestr-Mason City-Austin": {"MN", "IA"}}
+
+
+def _dma_segments(d: DMA) -> list[str]:
+    return _dma_candidates(d.dma)[1:] + _EXTRA_DMA_SEGMENTS.get(d.dma, [])
+
+
 def _match_dma_candidates(token: str, dmas: tuple[DMA, ...]) -> list[DMA]:
     """Every DMA the token could mean. A short common first word
     ("Columbus", "Greenville", "Tri-Cities") is legitimately a name
@@ -158,9 +182,23 @@ def _match_dma_candidates(token: str, dmas: tuple[DMA, ...]) -> list[DMA]:
         return exact
     segment_matches = []
     for d in dmas:
-        if any(_normalize(seg) == normalized_token for seg in _dma_candidates(d.dma)[1:]):
+        if any(_normalize(seg) == normalized_token for seg in _dma_segments(d)):
             segment_matches.append(d)
     return segment_matches
+
+
+def _all_dma_matches(token: str, dmas: tuple[DMA, ...]) -> list[DMA]:
+    """Exact-name AND name-segment matches together — what a state qualifier
+    chooses among ("Austin, MN" is the Rochester-Mason City-Austin DMA even
+    though a bare "Austin" is exactly the Texas one)."""
+    normalized_token = _normalize(token)
+    if not normalized_token:
+        return []
+    return [
+        d for d in dmas
+        if _normalize(d.dma) == normalized_token
+        or any(_normalize(seg) == normalized_token for seg in _dma_segments(d))
+    ]
 
 
 def _match_state(token: str) -> str | None:
@@ -168,7 +206,59 @@ def _match_state(token: str) -> str | None:
     upper = stripped.upper()
     if len(upper) == 2 and upper in _VALID_STATE_ABBR:
         return upper
-    return _STATE_NAMES_TO_ABBR.get(stripped.lower())
+    lower = stripped.lower()
+    if lower.endswith(" state"):  # "New York State", "Washington State"
+        lower = lower[: -len(" state")].strip()
+    return _STATE_NAMES_TO_ABBR.get(lower)
+
+
+def _dma_name_variants(d: DMA) -> set[str]:
+    """The full workbook name, and the same without its trailing parenthetical
+    ("Washington, DC (Hagerstown)" -> "Washington, DC")."""
+    variants = {d.dma}
+    bare = re.sub(r"\s*\([^)]*\)", "", d.dma).strip()
+    if bare:
+        variants.add(bare)
+    return variants
+
+
+def _dma_in_state(d: DMA, state: str) -> bool:
+    """True when the DMA is homed in `state` or its own name says it reaches
+    into it ("Columbus, GA (Opelika, AL)" is in both GA and AL)."""
+    return (
+        d.state == state
+        or state in re.findall(r"\b[A-Z]{2}\b", d.dma)
+        or state in _EXTRA_DMA_STATES.get(d.dma, ())
+    )
+
+
+@lru_cache(maxsize=1)
+def _punctuated_dma_names() -> tuple[tuple[re.Pattern, DMA], ...]:
+    """Name variants that contain the characters the list splitter treats as
+    separators — commas, "&", parentheses, " and " ("Columbus, OH",
+    "Hartford & New Haven", "Birmingham (Ann and Tusc)", "Tri-Cities, TN-VA").
+    Longest first, so the fullest spelling in a string wins."""
+    out = []
+    for d in load_dma_reference():
+        for v in _dma_name_variants(d):
+            if re.search(r"[,&()]|\band\b", v, re.IGNORECASE):
+                out.append((v, d))
+    out.sort(key=lambda t: -len(t[0]))
+    return tuple((re.compile(r"(?<!\w)" + re.escape(v) + r"(?!\w)", re.IGNORECASE), d) for v, d in out)
+
+
+def _extract_punctuated_dmas(text: str) -> tuple[list[DMA], str]:
+    """Pulls complete DMA names that contain separator characters out of a
+    string BEFORE it is split into tokens — otherwise picking "Columbus, OH"
+    from the ambiguity picker re-splits into "Columbus" (ambiguous again) +
+    "OH" (the whole state), and "Hartford & New Haven" never matches at all."""
+    found: list[DMA] = []
+    for pattern, d in _punctuated_dma_names():
+        if pattern.search(text):
+            if d not in found:
+                found.append(d)
+            text = pattern.sub(" ; ", text)
+    return found, text
 
 
 def _dma_area(d: DMA) -> ResolvedArea:
@@ -191,34 +281,69 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
             areas=[_dma_area(d) for d in dmas], geo_confidence="high",
         )
 
-    tokens = [t for t in (_SPLIT_RE.split(text)) if t.strip()]
-    named_dmas: list[DMA] = []
+    notes: list[str] = []
+
+    # A string that IS one complete DMA name is that DMA — before any state
+    # matching ("New York" is the NYC market; the whole state is "NY" or
+    # "New York State").
+    whole = [d for d in dmas if _normalize(_clean_token(text)) in {_normalize(v) for v in _dma_name_variants(d)}]
+    if len(whole) == 1:
+        if _match_state(_clean_token(text)):
+            notes.append(
+                f"'{text}' matched the {whole[0].dma} DMA. For the whole state, enter its abbreviation "
+                f"({whole[0].state}) or '{_clean_token(text)} State'."
+            )
+        return GeoResolution(
+            input_text=text, method="exact_dma", areas=[_dma_area(whole[0])],
+            geo_confidence="high", notes=notes,
+        )
+
+    punctuated, remainder = _extract_punctuated_dmas(text)
+    tokens = [t for t in (_SPLIT_RE.split(remainder)) if t.strip()]
+    named_dmas: list[DMA] = list(punctuated)
     matched_states: set[str] = set()
     unmatched: list[str] = []
     ambiguous: list[dict] = []
 
+    # "Sacramento, CA" / "Columbus, OH" / "Washington, DC": a state right
+    # after a place name QUALIFIES that place (when the place has a DMA in
+    # that state) instead of also adding every DMA in the state. Without a
+    # DMA in that state ("Los Angeles, NV"), they remain two separate items.
+    units: list[dict] = []
     for raw_token in tokens:
         token = _clean_token(raw_token)
         if not token:
             continue
         state = _match_state(token)
-        if state:
-            matched_states.add(state)
+        if state and units and units[-1]["state"] is None:
+            if any(_dma_in_state(d, state) for d in _all_dma_matches(units[-1]["token"], dmas)):
+                units[-1]["state"] = state
+                continue
+        units.append({"token": token, "raw": raw_token.strip(), "state": None, "is_state": state is not None})
+
+    for unit in units:
+        token, raw = unit["token"], unit["raw"]
+        if unit["state"] is None and unit["is_state"]:
+            matched_states.add(_match_state(token))
             continue
-        candidates = _match_dma_candidates(token, dmas)
+        if unit["state"] is not None:
+            candidates = [d for d in _all_dma_matches(token, dmas) if _dma_in_state(d, unit["state"])]
+            raw = f"{raw}, {unit['state']}"
+        else:
+            candidates = _match_dma_candidates(token, dmas)
         if len(candidates) == 1:
             named_dmas.append(candidates[0])
             continue
         if len(candidates) > 1:
             ambiguous.append({
-                "input": raw_token.strip(),
+                "input": raw,
                 "candidates": [
                     {"label": d.dma, "source_type": "dma", "resolve_hint": d.dma}
                     for d in candidates
                 ],
             })
             continue
-        unmatched.append(raw_token.strip())
+        unmatched.append(raw)
 
     state_dmas = [d for d in dmas if d.state in matched_states]
 
@@ -250,77 +375,192 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
     else:
         method = "exact_dma"
 
+    if matched_states:
+        notes.append(
+            "A state is covered as the whole DMAs headquartered in it — all of each market, including its "
+            "out-of-state counties, and none of another state's DMA that reaches in — so the population can "
+            "differ from the state's own by a few percent. Use counties for an exact state boundary."
+        )
     return GeoResolution(
         input_text=text, method=method,
         areas=[_dma_area(d) for d in deduped],
-        unmatched_tokens=unmatched, geo_confidence="high", ambiguous=ambiguous,
+        unmatched_tokens=unmatched, geo_confidence="high", ambiguous=ambiguous, notes=notes,
     )
 
 
 _CROSSWALK_HINT_RESOLVERS = {"zip", "county", "congressional_district", "city"}
+_TYPED_HINTS = _CROSSWALK_HINT_RESOLVERS | {"country"}
+_HINT_LABELS = {
+    "zip": "ZIP code", "county": "county", "congressional_district": "congressional district",
+    "city": "city", "country": "country",
+}
+
+# Items in a list are separated by newlines, semicolons, "|", or commas — commas
+# only when the list is unambiguous (see _split_items), since "Sacramento, CA" /
+# "Sacramento County, CA" use the comma to attach a state to ONE place.
+_DELIM_RE = re.compile(r"[\n;|]+")
+_ZIP_TOKEN = r"\d{5}(?:-\d{4})?"
+_ZIP_SPACE_LIST_RE = re.compile(rf"^{_ZIP_TOKEN}(?:\s+{_ZIP_TOKEN})+$")
 
 
-def resolve_geo(geo_text: str | None, geo_type_hint: str | None = None) -> GeoResolution:
-    """geo_type_hint lets a caller that KNOWS what kind of geography this
-    is (the UI's geography-type selector — see the Phase 2 plan's §1.5)
-    skip straight to the right resolver, bypassing the DMA/state-first
-    default below. This matters because plain free text is genuinely
-    ambiguous for a name like "Sacramento" — DMA/state matching runs
-    FIRST by default (matching every DMA/state text this resolver has
-    ever accepted, for backward compatibility with existing saved
-    proposals), so a bare "Sacramento" always means the
-    Sacramento-Stockton-Modesto DMA unless the planner explicitly picks
-    "City" as the geography type, which routes here with
-    geo_type_hint="city" and reaches the actual city of Sacramento
-    instead. `geo_type_hint="dma"` or "state" (or None) keeps the default
-    DMA/state-first behavior; "country" routes straight to the
-    international resolver.
-    """
-    text = (geo_text or "").strip()
+def _pair_states(pieces: list[str]) -> list[str]:
+    """Re-attaches a state piece to the place before it: ["Sacramento County",
+    "CA", "Placer County", "CA"] -> ["Sacramento County, CA", "Placer County, CA"].
+    A state following another state (or leading the list) stays its own item
+    ("CA, NV, AZ" -> three states)."""
+    items: list[list] = []  # [text, has_state]
+    for piece in pieces:
+        is_state = _match_state(piece) is not None
+        if items and is_state and not items[-1][1] and _match_state(items[-1][0]) is None:
+            items[-1][0] = f"{items[-1][0]}, {piece}"
+            items[-1][1] = True
+        else:
+            items.append([piece, False])
+    return [t for t, _ in items]
 
+
+def _split_items(text: str, hint: str | None) -> list[str]:
+    """One entry per geography the planner listed. Lists with no strong
+    signal and no hint (e.g. "Los Angeles, San Diego", "CA, NV, AZ") stay
+    whole — the DMA/state matcher has always split those itself."""
+    from app.services.constanza_geo_crosswalk import has_strong_signal
+
+    chunks = [c.strip() for c in _DELIM_RE.split(text) if c.strip()]
+    if not chunks:
+        return [text]
+    items: list[str] = []
+    for chunk in chunks:
+        if _ZIP_SPACE_LIST_RE.match(chunk):
+            items.extend(chunk.split())
+            continue
+        pieces = [p.strip() for p in chunk.split(",") if p.strip()]
+        if len(pieces) > 1 and (hint is not None or any(has_strong_signal(p) for p in pieces)):
+            items.extend(pieces if hint in ("zip", "congressional_district", "country") else _pair_states(pieces))
+        else:
+            items.append(chunk)
+    return items
+
+
+_CONFIDENCE_RANK = {"high": 3, "medium": 2, "low_confidence_international": 1, "unresolved": 0}
+
+
+def _merge_resolutions(text: str, parts: list[GeoResolution]) -> GeoResolution:
+    """Combines per-item resolutions of a list into one. Areas are de-duplicated
+    (the same ZIP or DMA listed twice counts once); confidence is the weakest
+    contributing item's; anything that failed is carried through, never dropped."""
+    areas: list[ResolvedArea] = []
+    seen: set = set()
+    unmatched: list[str] = []
+    details: list[dict] = []
+    ambiguous: list[dict] = []
+    notes: list[str] = []
+    for part in parts:
+        for a in part.areas:
+            key = (a.source_type, a.geo_id or a.label or a.dma, a.dma)
+            if key not in seen:
+                seen.add(key)
+                areas.append(a)
+        unmatched.extend(t for t in part.unmatched_tokens if t not in unmatched)
+        details.extend(d for d in part.unmatched_details if d not in details)
+        ambiguous.extend(part.ambiguous)
+        notes.extend(n for n in part.notes if n not in notes)
+
+    resolved_parts = [p for p in parts if p.areas]
+    methods = {p.method for p in resolved_parts}
+    if not areas:
+        method, confidence = "unresolved", "unresolved"
+    else:
+        method = methods.pop() if len(methods) == 1 else "mixed"
+        confidence = min((p.geo_confidence for p in resolved_parts), key=lambda c: _CONFIDENCE_RANK.get(c, 0))
+        levels = sorted({a.source_type for a in areas})
+        if len(levels) > 1 and any(l != "dma" for l in levels):
+            notes.append(
+                "This list mixes geography levels (" + ", ".join(levels) + ") and they are added together — "
+                "if one listed area sits inside another (a ZIP inside a listed county or DMA), it is counted twice."
+            )
+    return GeoResolution(
+        input_text=text, method=method, areas=areas, unmatched_tokens=unmatched,
+        geo_confidence=confidence, ambiguous=ambiguous, unmatched_details=details, notes=notes,
+    )
+
+
+def _unresolved(text: str, hint: str | None) -> GeoResolution:
+    res = GeoResolution(input_text=text, method="unresolved", areas=[], unmatched_tokens=[text], geo_confidence="unresolved")
+    if hint in _HINT_LABELS:
+        res.unmatched_details = [{"input": text, "reason": f"Couldn't match '{text}' as a {_HINT_LABELS[hint]}."}]
+    return res
+
+
+def _resolve_single(text: str, hint: str | None) -> GeoResolution:
     # Imported lazily to avoid a hard import-time dependency for callers
     # that only ever pass DMA/state text (and to dodge any circular-import
     # risk, since these modules don't need anything from here beyond
     # ResolvedArea/GeoResolution).
     from app.services import constanza_geo_crosswalk, constanza_geo_international
 
-    if geo_type_hint in _CROSSWALK_HINT_RESOLVERS:
-        hinted = getattr(constanza_geo_crosswalk, f"_resolve_{geo_type_hint}")(text)
-        if hinted is not None:
-            return hinted
-    elif geo_type_hint == "country":
+    if hint in _CROSSWALK_HINT_RESOLVERS:
+        hinted = constanza_geo_crosswalk.resolve_with_hint(hint, text)
+        return hinted if hinted is not None else _unresolved(text, hint)
+
+    if hint == "country":
+        # "Country" includes the US itself — "United States"/"USA" mean the
+        # national DMA set, not a foreign-country row for the US's UN population.
+        if text.lower() in _NATIONAL_WORDS:
+            return _resolve_dma_or_state("national")
         hinted = constanza_geo_international.resolve(text)
-        if hinted is not None:
-            return hinted
+        return hinted if hinted is not None else _unresolved(text, hint)
 
-    if geo_type_hint is None:
-        # Strongly-typed sub-DMA patterns (ZIP digits, a "county"/"parish"
-        # keyword, a "ST-##" congressional-district shape) run FIRST — their
-        # textual signal can't false-positive against DMA/state text, so
-        # checking them first avoids the DMA/state matcher's token-splitter
-        # swallowing e.g. "Sacramento County, CA" by matching the trailing
-        # "CA" as if the whole string just meant the state of California.
-        strongly_typed = constanza_geo_crosswalk.resolve_strongly_typed(text)
-        if strongly_typed is not None:
-            return strongly_typed
+    # Strongly-typed sub-DMA patterns (ZIP digits, a "county"/"parish"
+    # keyword, a "ST-##" congressional-district shape) run FIRST — their
+    # textual signal can't false-positive against DMA/state text, so
+    # checking them first avoids the DMA/state matcher's token-splitter
+    # swallowing e.g. "Sacramento County, CA" by matching the trailing
+    # "CA" as if the whole string just meant the state of California.
+    strongly_typed = constanza_geo_crosswalk.resolve_strongly_typed(text)
+    if strongly_typed is not None:
+        return strongly_typed
 
-        dma_or_state = _resolve_dma_or_state(text)
-        if dma_or_state is not None:
-            return dma_or_state
+    dma_or_state = _resolve_dma_or_state(text)
+    if dma_or_state is not None:
+        return dma_or_state
 
-        # A real country name takes priority over the city fallback below —
-        # a planner typing "Mexico" overwhelmingly means the country, not
-        # the small towns of Mexico, ME / Mexico, NY that would otherwise
-        # tie with it in the weak city-name match.
-        international = constanza_geo_international.resolve(text)
-        if international is not None:
-            return international
+    # A real country name takes priority over the city fallback below —
+    # a planner typing "Mexico" overwhelmingly means the country, not
+    # the small towns of Mexico, ME / Mexico, NY that would otherwise
+    # tie with it in the weak city-name match.
+    international = constanza_geo_international.resolve(text)
+    if international is not None:
+        return international
 
-        city_fallback = constanza_geo_crosswalk.resolve_city_fallback(text)
-        if city_fallback is not None:
-            return city_fallback
+    city_fallback = constanza_geo_crosswalk.resolve_city_fallback(text)
+    if city_fallback is not None:
+        return city_fallback
 
-    return GeoResolution(
-        input_text=text, method="unresolved", areas=[],
-        unmatched_tokens=[text], geo_confidence="unresolved",
-    )
+    return _unresolved(text, None)
+
+
+def resolve_geo(geo_text: str | None, geo_type_hint: str | None = None) -> GeoResolution:
+    """geo_type_hint lets a caller that KNOWS what kind of geography this
+    is (the UI's geography-type selector) skip straight to the right
+    resolver, bypassing the DMA/state-first default. This matters because
+    plain free text is genuinely ambiguous for a name like "Sacramento" —
+    DMA/state matching runs FIRST by default (matching every DMA/state text
+    this resolver has ever accepted, for backward compatibility with
+    existing saved proposals), so a bare "Sacramento" always means the
+    Sacramento-Stockton-Modesto DMA unless the planner explicitly picks
+    "City" as the geography type, which reaches the actual city of
+    Sacramento instead. An unrecognized hint (including "dma"/"state")
+    behaves exactly like no hint.
+
+    The input may be a LIST — separated by newlines, semicolons, or commas
+    (ZIPs "95814, 95815"; "Sacramento County, CA; Placer County, CA";
+    "Sacramento, Fresno" with the city hint). Each item resolves on its own
+    and the results are merged: every item either contributes areas or is
+    reported back (unmatched / ambiguous) — nothing is silently dropped.
+    """
+    text = (geo_text or "").strip()
+    hint = geo_type_hint if geo_type_hint in _TYPED_HINTS else None
+    items = _split_items(text, hint)
+    if len(items) > 1:
+        return _merge_resolutions(text, [_resolve_single(item, hint) for item in items])
+    return _resolve_single(items[0], hint)

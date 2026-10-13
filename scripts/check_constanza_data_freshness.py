@@ -13,17 +13,30 @@ Usage:
 from __future__ import annotations
 
 import datetime
-import json
+import sys
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "app" / "data" / "constanza"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+from app.data.constanza import read_json_maybe_gz  # noqa: E402
+
+DATA_DIR = REPO_ROOT / "app" / "data" / "constanza"
 
 BUNDLES = [
     "country_reference.json",
     "acs_age_sex_county.json", "acs_age_sex_zcta.json", "acs_age_sex_cd.json",
     "acs_age_sex_place.json", "acs_age_sex_dma.json", "acs_age_sex_state.json",
-    "geo/county_dma.json",  # no _meta today (extract_constanza_geo_crosswalks.py doesn't stamp one yet) — reported as unknown
+    "geo/county_dma.json", "geo/cd_dma.json",  # county_dma has no _meta today (extract_constanza_geo_crosswalks.py doesn't stamp one yet) — reported as unknown
 ]
+
+
+def _resolve(path: Path) -> Path | None:
+    """The bundle's real file: the .gz sibling when present (that's the one
+    the app actually reads), else the plain .json, else None."""
+    gz = path.with_suffix(path.suffix + ".gz")
+    if gz.exists():
+        return gz
+    return path if path.exists() else None
 
 
 def _file_mtime_days(path: Path) -> int:
@@ -34,12 +47,12 @@ def main():
     print("Constanza bundled-data freshness check")
     print("=" * 60)
     for rel_path in BUNDLES:
-        path = DATA_DIR / rel_path
-        if not path.exists():
+        path = _resolve(DATA_DIR / rel_path)
+        if path is None:
             print(f"  MISSING  {rel_path}")
             continue
         try:
-            data = json.loads(path.read_text())
+            data = read_json_maybe_gz(DATA_DIR / rel_path)
             meta = data.get("_meta", {}) if isinstance(data, dict) else {}
         except Exception as e:
             print(f"  ERROR    {rel_path}: {e}")

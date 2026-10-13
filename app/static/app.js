@@ -5985,6 +5985,35 @@ function renderAvailsGrid() {
 // Manager / Amazon DSP / The Trade Desk / Madhive — not a silent
 // replacement for checking the platform when precision matters.
 // ----------------------------------------------------------------------
+// Warning for the parts of a geo list that did NOT make it into the numbers —
+// with the reason when the backend knows one (e.g. an Alaska ZIP). The backend
+// also puts a "NOT INCLUDED ..." line in `notes`; _constanzaNotes() drops that
+// one so the planner doesn't see it twice.
+function _constanzaUnmatchedHtml(data, suffix = "") {
+  const tokens = data.unmatched_geo_tokens || [];
+  if (!tokens.length) return "";
+  const reasons = {};
+  (data.unmatched_geo_details || []).forEach(d => { reasons[d.input] = d.reason; });
+  const items = tokens.map(t => `<li><strong>${escapeHtml(t)}</strong>${reasons[t] ? ` — ${escapeHtml(reasons[t])}` : ""}</li>`).join("");
+  return `<div class="constanza-warning"><p>Not included — couldn't be matched${escapeHtml(suffix)}:</p><ul>${items}</ul></div>`;
+}
+
+function _constanzaNotes(data) {
+  return (data.notes || []).filter(n => !n.startsWith("NOT INCLUDED in this estimate"));
+}
+
+// Swap ONE item of a geo list for the planner's pick ("Springfield" -> "Springfield, MO"
+// inside "Springfield, 95814, Placer County, CA"), tolerant of spacing/case differences
+// between what was typed and what the backend echoed back. Falls back to replacing the
+// whole input only if the item can't be found.
+function _replaceGeoItem(text, item, replacement) {
+  const pattern = item.trim().split(/\s*,\s*/)
+    .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("\\s*,\\s*");
+  const re = new RegExp(pattern, "i");
+  return re.test(text) ? text.replace(re, () => replacement) : replacement;
+}
+
 async function onConstanzaAutoCalc(lid) {
   const li = state.lineItems.find(x => x.id === lid);
   const btn = document.querySelector(`.constanza-autocalc-btn[data-lid="${escapeAttr(lid)}"]`);
@@ -6041,14 +6070,14 @@ function renderConstanzaResult(lid, data) {
 
   const confidenceLabel = data.confidence === "platform_modeled"
     ? "✅ Modeled from real platform-avails-by-DMA data"
-    : "⚠️ Rough estimate — no CTV platform modeled for this product (population-share only)";
+    : (data.geo_confidence === "low_confidence_international"
+        ? "⚠️ Rough estimate — platform data is U.S.-only; spread by population share"
+        : "⚠️ Rough estimate — no CTV platform modeled for this product (population-share only)");
   const geoNote = data.geo_method === "unresolved"
     ? "Geo didn't resolve to any DMA."
     : `Geo resolved via <strong>${escapeHtml(data.geo_method)}</strong> → ${data.by_area.length} area${data.by_area.length === 1 ? "" : "s"}.`;
-  const unmatchedNote = (data.unmatched_geo_tokens || []).length
-    ? `<p class="constanza-warning">Couldn't match: ${escapeHtml(data.unmatched_geo_tokens.join(", "))} — add these markets manually if they matter.</p>`
-    : "";
-  const notesHtml = (data.notes || []).map(n => `<li>${escapeHtml(n)}</li>`).join("");
+  const unmatchedNote = _constanzaUnmatchedHtml(data, " — add these markets manually if they matter");
+  const notesHtml = _constanzaNotes(data).map(n => `<li>${escapeHtml(n)}</li>`).join("");
 
   // The avails fields this writes into are explicitly MONTHLY ("Max
   // Recommended Monthly Imps/Spend", paired with "Est. Monthly Uniques")
@@ -6184,6 +6213,8 @@ async function onConstanzaModalCalculate() {
   const geoText = document.getElementById("constanza-modal-geo").value;
   const geoTypeHint = document.getElementById("constanza-modal-geo-type").value || null;
   const months = Math.max(1, parseInt(document.getElementById("constanza-modal-months").value, 10) || 1);
+  const totalRaw = parseFloat(document.getElementById("constanza-modal-total").value);
+  const nationalMonthlyTotal = totalRaw > 0 ? totalRaw : null;
   const option = CONSTANZA_PLATFORM_OPTIONS[Number(document.getElementById("constanza-modal-platform").value)];
   const audience = _constanzaAudienceFromForm();
 
@@ -6206,7 +6237,10 @@ async function onConstanzaModalCalculate() {
       return;
     }
     if (!resolved.resolved) {
-      resultEl.innerHTML = `<p class="constanza-error">⚠️ Couldn't resolve "${escapeHtml(geoText)}" to any geography — try a different spelling or geo type.</p>`;
+      const reasons = (resolved.unmatched_details || []).map(d => `<li>${escapeHtml(d.reason)}</li>`).join("");
+      resultEl.innerHTML = reasons
+        ? `<div class="constanza-error"><p>⚠️ Couldn't resolve "${escapeHtml(geoText)}":</p><ul>${reasons}</ul></div>`
+        : `<p class="constanza-error">⚠️ Couldn't resolve "${escapeHtml(geoText)}" to any geography — try a different spelling or geo type.</p>`;
       return;
     }
 
@@ -6215,6 +6249,7 @@ async function onConstanzaModalCalculate() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         product_name: option.product, geo_text: geoText, geo_type_hint: geoTypeHint, months,
+        national_monthly_total: nationalMonthlyTotal,
         audience,
       }),
     });
@@ -6261,12 +6296,12 @@ async function onBrowseConstanzaInterests() {
 
 function renderConstanzaAmbiguity(ambiguous, geoTypeHint) {
   const resultEl = document.getElementById("constanza-modal-result");
-  const blocks = ambiguous.map(entry => `
+  const blocks = ambiguous.map((entry, i) => `
     <div class="constanza-ambiguity-block">
       <p>"${escapeHtml(entry.input)}" matches more than one place — pick one:</p>
       <div class="constanza-insert-row">
         ${entry.candidates.map(c => `
-          <button type="button" class="btn-secondary constanza-ambiguity-pick-btn" data-resolve-hint="${escapeHtml(c.resolve_hint)}">${escapeHtml(c.label)}</button>
+          <button type="button" class="btn-secondary constanza-ambiguity-pick-btn" data-entry="${i}" data-resolve-hint="${escapeHtml(c.resolve_hint)}">${escapeHtml(c.label)}</button>
         `).join("")}
       </div>
     </div>
@@ -6274,7 +6309,11 @@ function renderConstanzaAmbiguity(ambiguous, geoTypeHint) {
   resultEl.innerHTML = `<div class="constanza-warning">${blocks}</div>`;
   resultEl.querySelectorAll(".constanza-ambiguity-pick-btn").forEach(btn => {
     btn.addEventListener("click", () => {
-      document.getElementById("constanza-modal-geo").value = btn.dataset.resolveHint;
+      // Replace only the ambiguous item — the rest of a list ("Springfield, 95814,
+      // Placer County, CA") stays exactly as the planner typed it.
+      const geoInput = document.getElementById("constanza-modal-geo");
+      const entry = ambiguous[Number(btn.dataset.entry)];
+      geoInput.value = _replaceGeoItem(geoInput.value, entry.input, btn.dataset.resolveHint);
       onConstanzaModalCalculate();
     });
   });
@@ -6300,13 +6339,14 @@ function renderConstanzaModalResult(option, data) {
   const resultEl = document.getElementById("constanza-modal-result");
   const confidenceLabel = data.confidence === "platform_modeled"
     ? "✅ Modeled from real platform-avails-by-DMA data"
-    : "⚠️ Rough estimate — no CTV platform modeled for this product";
+    : (data.geo_confidence === "low_confidence_international"
+        ? "⚠️ Rough estimate — platform data is U.S.-only; spread by population share"
+        : "⚠️ Rough estimate — no CTV platform modeled for this product");
   const geoNote = data.geo_method === "unresolved"
     ? "Geo didn't resolve to any DMA."
     : `Geo resolved via <strong>${escapeHtml(data.geo_method)}</strong> → ${data.by_area.length} area${data.by_area.length === 1 ? "" : "s"}.`;
-  const unmatchedNote = (data.unmatched_geo_tokens || []).length
-    ? `<p class="constanza-warning">Couldn't match: ${escapeHtml(data.unmatched_geo_tokens.join(", "))}</p>`
-    : "";
+  const unmatchedNote = _constanzaUnmatchedHtml(data);
+  const geoNotesHtml = _constanzaNotes(data).map(n => `<p class="constanza-notes">${escapeHtml(n)}</p>`).join("");
   const confidenceBadge = _constanzaConfidenceBadge(data);
 
   // When an audience spec was applied, the audience-narrowed numbers are
@@ -6356,6 +6396,7 @@ function renderConstanzaModalResult(option, data) {
     ${confidenceBadge ? `<p class="constanza-badge-row">${confidenceBadge}</p>` : ""}
     <p class="constanza-geo-note">${geoNote}</p>
     ${unmatchedNote}
+    ${geoNotesHtml}
     ${audienceBlock}
     <table class="constanza-range-table">
       <tr><th></th><th>Low</th><th>Mid</th><th>High</th></tr>

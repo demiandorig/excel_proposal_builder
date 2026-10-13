@@ -6,7 +6,7 @@ CC BY 3.0 IGO, covers all 237 countries/areas). See the Phase 2 plan doc
 for why nothing finer than country-level is bundled for international
 geographies (no free unified sub-national source exists worldwide).
 
-Writes app/data/constanza/country_reference.json:
+Writes app/data/constanza/country_reference.json.gz:
     {"_meta": {...}, "<ISO2>": {"name", "iso2", "iso3", "population",
                                  "age_sex": [{"age_min","age_max","male","female"}, ...]}}
 
@@ -19,10 +19,14 @@ import csv
 import gzip
 import io
 import json
+import sys
 import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+from app.data.constanza import write_json_gz  # noqa: E402
+
 OUT_PATH = REPO_ROOT / "app" / "data" / "constanza" / "country_reference.json"
 
 TOTAL_POP_URL = (
@@ -99,7 +103,7 @@ def main():
     }
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUT_PATH.write_text(json.dumps(countries, indent=2))
+    write_json_gz(OUT_PATH, countries)
     print(f"Wrote {len(countries) - 1} countries to {OUT_PATH}")
 
 

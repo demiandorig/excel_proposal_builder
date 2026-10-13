@@ -28,6 +28,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "app" / "data" / "constanza"
+sys.path.insert(0, str(REPO_ROOT))
+from app.data.constanza import write_json_gz  # noqa: E402
 ACS_YEAR = "2023"
 ACS_BASE = f"https://api.census.gov/data/{ACS_YEAR}/acs/acs5"
 
@@ -175,19 +177,19 @@ def main():
 
     county = fetch_county(key)
     county["_meta"] = meta
-    (OUT_DIR / "acs_age_sex_county.json").write_text(json.dumps(county))
+    write_json_gz(OUT_DIR / "acs_age_sex_county.json", county)
 
     zcta = fetch_zcta(key)
     zcta["_meta"] = meta
-    (OUT_DIR / "acs_age_sex_zcta.json").write_text(json.dumps(zcta))
+    write_json_gz(OUT_DIR / "acs_age_sex_zcta.json", zcta)
 
     cd = fetch_cd(key)
     cd["_meta"] = meta
-    (OUT_DIR / "acs_age_sex_cd.json").write_text(json.dumps(cd))
+    write_json_gz(OUT_DIR / "acs_age_sex_cd.json", cd)
 
     place = fetch_place(key)
     place["_meta"] = meta
-    (OUT_DIR / "acs_age_sex_place.json").write_text(json.dumps(place))
+    write_json_gz(OUT_DIR / "acs_age_sex_place.json", place)
 
     print("Done.")
 

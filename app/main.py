@@ -1157,6 +1157,8 @@ def _serialize_geo_resolution(resolution) -> dict:
         "geo_confidence": resolution.geo_confidence,
         "resolved": resolution.resolved,
         "unmatched_tokens": resolution.unmatched_tokens,
+        "unmatched_details": resolution.unmatched_details,
+        "notes": resolution.notes,
         "ambiguous": resolution.ambiguous,
         "areas": [
             {
@@ -1182,6 +1184,27 @@ async def constanza_resolve(body: ConstanzaResolveRequest) -> dict:
     return _serialize_geo_resolution(resolution)
 
 
+def _geo_warning_notes(resolution) -> list[str]:
+    """Caveats from geo resolution that belong next to the numbers: advisory
+    notes, plus — for a list that only partly resolved — exactly which inputs
+    are NOT in the total (and why, when known), so a dropped item is never silent."""
+    notes = list(resolution.notes)
+    if resolution.unmatched_tokens:
+        reasons = {d["input"]: d["reason"] for d in resolution.unmatched_details}
+        dropped = "; ".join(f"{t!r}" + (f" ({reasons[t]})" if t in reasons else "") for t in resolution.unmatched_tokens)
+        notes.insert(0, f"NOT INCLUDED in this estimate — couldn't be matched: {dropped}")
+    return notes
+
+
+def _geo_failure_detail(geo_text: str, resolution) -> str:
+    if resolution.ambiguous:
+        which = ", ".join(repr(a["input"]) for a in resolution.ambiguous)
+        return f"{which} could mean more than one place — pick one and retry."
+    if resolution.unmatched_details:
+        return " ".join(d["reason"] for d in resolution.unmatched_details)
+    return f"Could not resolve geo {geo_text!r} — check the spelling or choose the geography type."
+
+
 def _serialize_avails_estimate(estimate, resolution) -> dict:
     return {
         "product_name": estimate.product_name,
@@ -1194,8 +1217,9 @@ def _serialize_avails_estimate(estimate, resolution) -> dict:
         "imps_mid": estimate.imps_mid,
         "imps_high": estimate.imps_high,
         "est_uniques": estimate.est_uniques,
-        "notes": estimate.notes,
+        "notes": _geo_warning_notes(resolution) + list(estimate.notes),
         "unmatched_geo_tokens": resolution.unmatched_tokens,
+        "unmatched_geo_details": resolution.unmatched_details,
         "ambiguous": resolution.ambiguous,
         "by_area": [
             {
@@ -1218,28 +1242,25 @@ async def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
     `audience` is given, routes through constanza_audience.py's age/
     gender/interest layer on top of this same geo/platform estimate."""
     resolution = constanza_geo.resolve_geo(body.geo_text, geo_type_hint=body.geo_type_hint)
-    if resolution.ambiguous:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Geo {body.geo_text!r} is ambiguous between multiple markets — pick one and retry.",
-        )
-    if not resolution.resolved:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Could not resolve geo {body.geo_text!r} to any DMA — pick markets manually.",
-        )
+    if resolution.ambiguous or not resolution.resolved:
+        raise HTTPException(status_code=422, detail=_geo_failure_detail(body.geo_text, resolution))
     estimate = estimate_avails(
         body.product_name, resolution, months=body.months,
         national_monthly_total=body.national_monthly_total,
     )
     if estimate is None:
-        raise HTTPException(
-            status_code=422,
-            detail=(
+        if resolution.geo_confidence == "low_confidence_international":
+            detail = (
+                "There is no platform avails data outside the U.S. — enter a budget or impression total for the "
+                "line and Constanza will spread it across the selected countries by population share "
+                "(low confidence)."
+            )
+        else:
+            detail = (
                 f"{body.product_name!r} has no modeled CTV platform and no "
                 "national_monthly_total was given to apportion by population share."
-            ),
-        )
+            )
+        raise HTTPException(status_code=422, detail=detail)
 
     if body.audience is None:
         return _serialize_avails_estimate(estimate, resolution)

@@ -1798,6 +1798,7 @@ input[readonly] {
 .constanza-geo-note { margin: 0 0 4px; color: var(--ink-soft); }
 .constanza-warning { margin: 0 0 6px; color: #b8560c; }
 .constanza-error { color: var(--red); font-weight: 600; }
+.constanza-optional { font-weight: 400; opacity: 0.7; }
 .constanza-range-table {
   width: 100%;
   border-collapse: collapse;

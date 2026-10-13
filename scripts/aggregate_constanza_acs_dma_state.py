@@ -23,11 +23,13 @@ extract_constanza_geo_crosswalks.py have produced their output):
 """
 from __future__ import annotations
 
-import json
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+from app.data.constanza import read_json_maybe_gz, write_json_gz  # noqa: E402
 DATA_DIR = REPO_ROOT / "app" / "data" / "constanza"
 GEO_DIR = DATA_DIR / "geo"
 
@@ -55,9 +57,9 @@ def _add(dst: dict, src: dict, weight: float) -> None:
 
 
 def main():
-    county_acs = json.loads((DATA_DIR / "acs_age_sex_county.json").read_text())
-    county_dma = json.loads((GEO_DIR / "county_dma.json").read_text())
-    county_names = json.loads((GEO_DIR / "county_names.json").read_text())
+    county_acs = read_json_maybe_gz(DATA_DIR / "acs_age_sex_county.json")
+    county_dma = read_json_maybe_gz(GEO_DIR / "county_dma.json")
+    county_names = read_json_maybe_gz(GEO_DIR / "county_names.json")
 
     template = next(v["age_sex"] for k, v in county_acs.items() if k != "_meta")
 
@@ -86,8 +88,8 @@ def main():
     by_dma["_meta"] = meta
     by_state["_meta"] = meta
 
-    (DATA_DIR / "acs_age_sex_dma.json").write_text(json.dumps(by_dma))
-    (DATA_DIR / "acs_age_sex_state.json").write_text(json.dumps(by_state))
+    write_json_gz(DATA_DIR / "acs_age_sex_dma.json", by_dma)
+    write_json_gz(DATA_DIR / "acs_age_sex_state.json", by_state)
     print(f"Wrote {len(by_dma) - 1} DMAs and {len(by_state) - 1} states.")
 
 

@@ -231,12 +231,22 @@ def estimate_generic_population(
         ))
 
     total_mid = national_monthly_total * months
-    notes = [
-        "No CTV platform is separately modeled for this product (it's bought as a custom "
-        "Trade-Desk site-list/PMP) — this spreads your own entered monthly total across the "
-        "resolved geo by population share only. Not validated against real platform delivery."
-    ]
-    if geo.geo_confidence == "low_confidence_international":
+    is_international = geo.geo_confidence == "low_confidence_international"
+    if is_international and product_name in PLATFORM_MODELED_PRODUCTS:
+        # A platform-modeled product (Roku, Prime, ...) whose bundled data is US-only —
+        # the generic wording below ("no platform is modeled for this product") would be wrong.
+        notes = [
+            "This product's platform data covers U.S. DMAs only — outside the U.S. this spreads your "
+            "own entered monthly total across the selected countries by population share. "
+            "Not validated against real platform delivery."
+        ]
+    else:
+        notes = [
+            "No CTV platform is separately modeled for this product (it's bought as a custom "
+            "Trade-Desk site-list/PMP) — this spreads your own entered monthly total across the "
+            "resolved geo by population share only. Not validated against real platform delivery."
+        ]
+    if is_international:
         notes.append(
             "International geography — population-share approximation only, no local platform "
             "avails data behind it. Materially lower confidence than a US DMA-backed estimate."

@@ -35,6 +35,21 @@ def read_json_maybe_gz(path: Path) -> dict | list:
             return json.load(f)
     return json.loads(path.read_text())
 
+
+def write_json_gz(path: Path, obj) -> Path:
+    """Counterpart to read_json_maybe_gz for the refresh scripts: writes
+    `path` + ".gz" (compact separators) and deletes any stale plain
+    sibling. Without this, a refresh script that wrote plain .json next
+    to an existing .json.gz would silently lose — read_json_maybe_gz
+    prefers the .gz — leaving the app serving the OLD data after a
+    "successful" refresh."""
+    gz_path = path.with_suffix(path.suffix + ".gz")
+    with gzip.open(gz_path, "wt", encoding="utf-8", compresslevel=9) as f:
+        json.dump(obj, f, separators=(",", ":"))
+    if path.exists():
+        path.unlink()
+    return gz_path
+
 # The platform keys this bundle has data for. "cumulative" is the blended
 # Madhive-list total (Roku Channel + Hulu + Peacock + other FAST + vMVPD,
 # deduplicated) — what actually backs the generic "Entravision Plus
