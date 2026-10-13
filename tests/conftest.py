@@ -74,3 +74,18 @@ def _faq_rows_without_a_database(request, monkeypatch):
     real_load = faq_entries.load_entries
     monkeypatch.setattr(faq_entries, "load_entries", faq_entries.default_entries)
     monkeypatch.setattr(faq_entries, "_real_load_entries", real_load, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _forecast_map_without_a_database(request, monkeypatch):
+    """Admin -> Forecast reads its overrides from the `forecast_product_map` table; offline there are none, so every
+    product keeps its built-in default (what the app did before the mapping existed). A test of the table or of
+    overrides patches `app.services.constanza_forecast_map._read_rows` (and _write/_delete) itself; real_db tests keep
+    the real reader."""
+    if request.node.get_closest_marker("real_db"):
+        return
+    from app.services import constanza_forecast_map
+    monkeypatch.setattr(constanza_forecast_map, "_read_rows", lambda: [])
+    constanza_forecast_map.invalidate()
+    yield
+    constanza_forecast_map.invalidate()

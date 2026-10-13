@@ -30,6 +30,8 @@ const adminState = {
   disclaimersLoaded: false,
   disclaimerEditingId: null,
   restrictions: null,
+  forecast: null,     // Admin -> Forecast: {products, coverage, platforms, families, summary} from /api/admin/forecast-map
+  forecastLoaded: false,
   faq: [],            // the Process FAQs rows: [{id, section, services, question, link_title, link_url}]
   faqLoaded: false,
   faqEditingId: null,
@@ -48,6 +50,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireAddUser();
   wireDisclaimers();
   wireRestrictions();
+  wireForecast();
   wireFaq();
   wireCsvExports();
   loadProposals();
@@ -65,6 +68,7 @@ function wireTabs() {
       document.getElementById("tab-proposals").classList.toggle("hidden", tab !== "proposals");
       document.getElementById("tab-analytics").classList.toggle("hidden", tab !== "analytics");
       document.getElementById("tab-rates").classList.toggle("hidden", tab !== "rates");
+      document.getElementById("tab-forecast").classList.toggle("hidden", tab !== "forecast");
       document.getElementById("tab-markets").classList.toggle("hidden", tab !== "markets");
       document.getElementById("tab-users").classList.toggle("hidden", tab !== "users");
       document.getElementById("tab-disclaimers").classList.toggle("hidden", tab !== "disclaimers");
@@ -72,6 +76,7 @@ function wireTabs() {
       document.getElementById("tab-faq").classList.toggle("hidden", tab !== "faq");
       if (tab === "analytics" && !adminState.analyticsLoaded) loadAnalytics();
       if (tab === "rates" && !adminState.ratesLoaded) loadRates();
+      if (tab === "forecast" && !adminState.forecastLoaded) loadForecast();
       if (tab === "markets" && !adminState.marketsLoaded) loadMarketConfig();
       if (tab === "users" && !adminState.usersLoaded) loadUsers();
       if (tab === "disclaimers" && !adminState.disclaimersLoaded) loadDisclaimers();
@@ -1785,4 +1790,226 @@ function wireRestrictions() {
       reader.readAsArrayBuffer(file);
     }));
   });
+}
+
+// --------------------------------------------------------------------------
+// Forecast — which products get Constanza's "Auto-calculate avails" button on the Avails step, and what it
+// computes (app/services/constanza_forecast_map.py). Every change saves as it is made; the server answers with the
+// refreshed list, so the page always shows what is actually stored.
+// --------------------------------------------------------------------------
+
+function wireForecast() {
+  document.getElementById("fc-search").addEventListener("input", renderForecastRows);
+  document.getElementById("fc-family-filter").addEventListener("change", renderForecastRows);
+  document.getElementById("fc-only-on").addEventListener("change", renderForecastRows);
+}
+
+async function loadForecast() {
+  try {
+    const res = await fetch("/api/admin/forecast-map");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    adminState.forecastLoaded = true;
+    applyForecastPayload(data);
+  } catch (e) {
+    document.getElementById("fc-body").innerHTML = `<tr><td colspan="8" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+    document.getElementById("fc-coverage-body").innerHTML = `<tr><td colspan="4" class="admin-empty">—</td></tr>`;
+  }
+}
+
+function applyForecastPayload(data) {
+  adminState.forecast = data;
+  const select = document.getElementById("fc-family-filter");
+  const chosen = select.value;
+  select.innerHTML = `<option value="">All families</option>` +
+    (data.families || []).map(f => `<option value="${escapeAttr(f)}">${escapeHtml(f)}</option>`).join("");
+  select.value = (data.families || []).includes(chosen) ? chosen : "";
+  renderForecastSummary();
+  renderForecastCoverage();
+  renderForecastRows();
+}
+
+function renderForecastSummary() {
+  const sm = adminState.forecast.summary;
+  document.getElementById("fc-summary").innerHTML =
+    _analyticsStatCard("Products with the button", sm.enabled, `of ${sm.total} in the catalog`) +
+    _analyticsStatCard("Platform data", sm.platform_modeled, "modeled from the DMA avails data") +
+    _analyticsStatCard("Population share", sm.generic, "the line's budget, spread by population") +
+    _analyticsStatCard("Customized", sm.customized, "differ from the built-in default");
+}
+
+function renderForecastCoverage() {
+  const body = document.getElementById("fc-coverage-body");
+  const rows = adminState.forecast.coverage || [];
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="4" class="admin-empty">No platform data is bundled.</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(c => {
+    const using = c.products.length
+      ? c.products.map(n => `<div class="fc-prod">${escapeHtml(n)}</div>`).join("")
+      : `<span class="muted">No product uses this yet</span>`;
+    const parked = c.disabled_products.length
+      ? `<div class="fc-parked">Button off: ${c.disabled_products.map(escapeHtml).join("; ")}</div>` : "";
+    const m = c.missing_product;
+    const add = m
+      ? `<button type="button" class="btn-secondary fc-add" data-fc-add="${escapeAttr(m.name)}" data-fc-rate="${escapeAttr(m.base_rate == null ? "" : m.base_rate)}" data-fc-model="${escapeAttr(m.buying_model)}" data-fc-min="${escapeAttr(m.minimum_spend)}">+ Add “${escapeHtml(m.name.length > 44 ? m.name.slice(0, 41) + "…" : m.name)}” to the catalog</button>`
+      : "";
+    return `<tr>
+      <td><strong>${escapeHtml(c.label)}</strong><div class="mono">${escapeHtml(c.key)}</div></td>
+      <td class="mono">${c.dmas}</td>
+      <td class="wrap">${using}${parked}</td>
+      <td class="wrap">${add}</td>
+    </tr>`;
+  }).join("");
+  body.querySelectorAll("[data-fc-add]").forEach(btn => btn.addEventListener("click", () => addForecastPlatformProduct(btn)));
+}
+
+function _forecastRowHtml(p) {
+  const platforms = adminState.forecast.platforms || [];
+  const platformOptions = platforms.map(pl =>
+    `<option value="${escapeAttr(pl.key)}" ${p.platform === pl.key ? "selected" : ""}>${escapeHtml(pl.label)}</option>`).join("");
+  const isPlatform = p.method === "platform";
+  const def = p.default || {};
+  const defaultText = def.enabled
+    ? `On · ${def.method === "platform" ? "platform data" : "population share"}`
+    : "Off";
+  return `
+    <tr class="fc-row ${p.enabled ? "fc-on" : "fc-off"}" data-fc-product="${escapeAttr(p.name)}">
+      <td class="wrap">${escapeHtml(p.name)}</td>
+      <td>${escapeHtml(p.family)}</td>
+      <td><label class="fc-toggle"><input type="checkbox" data-fc="enabled" ${p.enabled ? "checked" : ""} /> <span>${p.enabled ? "On" : "Off"}</span></label></td>
+      <td>
+        <select data-fc="method" aria-label="What it computes">
+          <option value="platform" ${isPlatform ? "selected" : ""}>Platform data</option>
+          <option value="generic" ${isPlatform ? "" : "selected"}>Population share</option>
+        </select>
+      </td>
+      <td>
+        <select data-fc="platform" aria-label="Platform data" ${isPlatform ? "" : "disabled"}>
+          ${isPlatform ? "" : `<option value="" selected>—</option>`}${platformOptions}
+        </select>
+      </td>
+      <td><input type="checkbox" data-fc="hispanic_weighted" aria-label="Hispanic weighting" ${p.hispanic_weighted ? "checked" : ""} ${isPlatform ? "" : "disabled"} /></td>
+      <td><span class="fc-badge ${p.customized ? "fc-custom" : "fc-default"}" title="Built-in default: ${escapeAttr(defaultText)}">${p.customized ? "Customized" : "Default"}</span></td>
+      <td class="fc-actions">
+        <span class="fc-saved" data-fc-status></span>
+        ${p.customized ? `<button type="button" class="btn-delete-row" data-fc-reset title="Back to the built-in default (${escapeAttr(defaultText)})">Reset</button>` : ""}
+      </td>
+    </tr>`;
+}
+
+function renderForecastRows() {
+  const body = document.getElementById("fc-body");
+  const all = adminState.forecast.products || [];
+  const q = document.getElementById("fc-search").value.trim().toLowerCase();
+  const family = document.getElementById("fc-family-filter").value;
+  const onlyOn = document.getElementById("fc-only-on").checked;
+  const list = all.filter(p =>
+    (!family || p.family === family) && (!onlyOn || p.enabled) &&
+    (!q || p.name.toLowerCase().includes(q) || p.family.toLowerCase().includes(q)));
+  document.getElementById("fc-count").textContent = `${list.length} of ${all.length} products`;
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="8" class="admin-empty">No products match.</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map(_forecastRowHtml).join("");
+  body.querySelectorAll("tr[data-fc-product]").forEach(wireForecastRow);
+}
+
+function wireForecastRow(tr) {
+  tr.querySelectorAll("[data-fc]").forEach(el => el.addEventListener("change", () => saveForecastRow(tr, el.dataset.fc)));
+  const reset = tr.querySelector("[data-fc-reset]");
+  if (reset) reset.addEventListener("click", () => resetForecastRow(tr));
+}
+
+function _forecastStatus(tr, text, isError) {
+  const el = tr.querySelector("[data-fc-status]");
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle("fc-err", !!isError);
+  if (text && !isError) setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 2000);
+}
+
+function _forecastRowState(name) {
+  return (adminState.forecast.products || []).find(p => p.name === name);
+}
+
+async function saveForecastRow(tr, changed) {
+  const name = tr.dataset.fcProduct;
+  const before = _forecastRowState(name);
+  const platforms = adminState.forecast.platforms || [];
+  const enabled = tr.querySelector('[data-fc="enabled"]').checked;
+  const method = tr.querySelector('[data-fc="method"]').value;
+  let platform = tr.querySelector('[data-fc="platform"]').value || null;
+  let hispanic = tr.querySelector('[data-fc="hispanic_weighted"]').checked;
+  if (method === "platform") {
+    // Switching a product to platform data with nothing chosen yet: use the platform it would have by default, else the first one.
+    if (!platform) platform = (before && before.default && before.default.platform) || (platforms[0] && platforms[0].key) || null;
+  } else {
+    platform = null; hispanic = false;
+  }
+  tr.querySelectorAll("[data-fc]").forEach(el => { el.disabled = true; });
+  _forecastStatus(tr, "Saving…", false);
+  try {
+    const res = await fetch("/api/admin/forecast-map", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ product_name: name, enabled, method, platform, hispanic_weighted: hispanic }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    applyForecastPayload(data);
+    const fresh = document.querySelector(`#fc-body tr[data-fc-product="${CSS.escape(name)}"]`);
+    if (fresh) _forecastStatus(fresh, "Saved ✓", false);
+  } catch (e) {
+    renderForecastRows();        // put the row back to what is actually stored
+    const fresh = document.querySelector(`#fc-body tr[data-fc-product="${CSS.escape(name)}"]`);
+    if (fresh) _forecastStatus(fresh, e.message, true);
+  }
+}
+
+async function resetForecastRow(tr) {
+  const name = tr.dataset.fcProduct;
+  tr.querySelectorAll("[data-fc], [data-fc-reset]").forEach(el => { el.disabled = true; });
+  _forecastStatus(tr, "Resetting…", false);
+  try {
+    const res = await fetch("/api/admin/forecast-map/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ product_name: name }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    applyForecastPayload(data);
+    const fresh = document.querySelector(`#fc-body tr[data-fc-product="${CSS.escape(name)}"]`);
+    if (fresh) _forecastStatus(fresh, "Back to default ✓", false);
+  } catch (e) {
+    renderForecastRows();
+    const fresh = document.querySelector(`#fc-body tr[data-fc-product="${CSS.escape(name)}"]`);
+    if (fresh) _forecastStatus(fresh, e.message, true);
+  }
+}
+
+async function addForecastPlatformProduct(btn) {
+  const name = btn.dataset.fcAdd;
+  const rate = btn.dataset.fcRate ? `$${btn.dataset.fcRate} ${btn.dataset.fcModel}` : btn.dataset.fcModel;
+  if (!confirm(`Add "${name}" to the Product Catalog?\n\nIt starts with a PLACEHOLDER rate (${rate}, $${Number(btn.dataset.fcMin || 0).toLocaleString("en-US")} minimum). Set the real rate in Product Catalog before quoting it to a client.`)) return;
+  btn.disabled = true;
+  btn.textContent = "Adding…";
+  try {
+    const res = await fetch("/api/admin/forecast-map/add-product", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ product_name: name }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    applyForecastPayload(data);
+    adminState.ratesLoaded = false;        // the Product Catalog tab must show the new product next time it opens
+  } catch (e) {
+    alert("Couldn't add it: " + e.message);
+    btn.disabled = false;
+    btn.textContent = "Retry: add to the catalog";
+  }
 }

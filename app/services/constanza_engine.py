@@ -43,33 +43,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.data.constanza import PlatformFigures, load_platform_dma, load_hispanic_pct_by_state
+from app.services.constanza_forecast_map import (
+    DEFAULT_HISPANIC_PRODUCTS, DEFAULT_PLATFORM_PRODUCTS, ForecastConfig, resolve_forecast,
+)
 from app.services.constanza_geo import GeoResolution, ResolvedArea
 
-# Catalog product name -> workbook platform key. Only products whose
-# inventory pool is actually one of the workbook's modeled platforms are
-# listed here; everything else (VIX 360, Netflix, and any product not
-# present at all) falls back to the generic population-based estimate.
-# See Product Constanza's plan doc for the buying-stack rationale (Roku
-# Ads = Roku's self-serve platform, Prime Video = Amazon DSP, the generic
-# CTV/OTT products = Madhive's blended list — all still describable by
-# this workbook's per-DMA figures regardless of who executes the buy).
-PLATFORM_MODELED_PRODUCTS: dict[str, str] = {
-    "Entravision Plus - Roku Ads (Includes The Roku Channel and the popular Espacio Latino Hub)": "roku",
-    "Entravision Plus - Amazon Prime Video": "prime",
-    "Entravision Plus - Hulu": "hulu",
-    "Entravision Plus - Peacock": "peacock",
-    "Entravision Plus - Other FAST (Tubi, Pluto TV, Samsung TV Plus, and other long-tail FAST channels)": "other_fast",
-    "Entravision Plus - vMVPD (Fubo, Sling, DIRECTV Stream, Philo, Frndly, Vidgo + MVPD streaming apps)": "vmvpd",
-    "Entravision Plus CTV/OTT - English Content": "cumulative",
-    "Entravision Plus CTV/OTT- Spanish Content only": "cumulative",
-    "Entravision Plus - Hispanics CTV/OTT": "cumulative",
-    "Entravision Plus - CTV/OTT Reach": "cumulative",
-}
-
-# Products whose targeting is Hispanic-specific — re-weight area shares by
-# state-level Hispanic population % (a proxy; the workbook has no DMA-level
-# demographic breakout) instead of general population share.
-HISPANIC_TARGETED_PRODUCTS = {"Entravision Plus - Hispanics CTV/OTT"}
+# The BUILT-IN mapping of catalog products to the workbook's platform data, and the Hispanic-weighted set, now live in
+# constanza_forecast_map.py as the DEFAULTS of Admin -> Forecast (an admin can override any product there). They are
+# re-exported here under their old names; the estimate paths below ask resolve_forecast() for a product's EFFECTIVE
+# config, so an admin's change takes effect without a code change.
+PLATFORM_MODELED_PRODUCTS = DEFAULT_PLATFORM_PRODUCTS
+HISPANIC_TARGETED_PRODUCTS = DEFAULT_HISPANIC_PRODUCTS
 
 LOW_MULT = 0.7
 HIGH_MULT = 1.3
@@ -139,12 +123,13 @@ def _area_weights(areas: list[ResolvedArea], trait: str | None = None) -> list[f
 
 
 def estimate_platform_modeled(
-    product_name: str, platform: str, geo: GeoResolution, months: int,
+    product_name: str, platform: str, geo: GeoResolution, months: int, hispanic_weighted: bool | None = None,
 ) -> AvailsEstimate:
+    """`hispanic_weighted` is the product's effective config (Admin -> Forecast); None = the built-in default for the name."""
     figures_by_dma = load_platform_dma().get(platform, {})
     notes: list[str] = []
 
-    use_hispanic_weights = product_name in HISPANIC_TARGETED_PRODUCTS
+    use_hispanic_weights = hispanic_weighted if hispanic_weighted is not None else product_name in HISPANIC_TARGETED_PRODUCTS
     if use_hispanic_weights:
         notes.append(
             "Weighted by state-level Hispanic population % (proxy — the source "
@@ -209,9 +194,10 @@ def estimate_platform_modeled(
 
 def estimate_generic_population(
     product_name: str, geo: GeoResolution, months: int, national_monthly_total: float,
+    platform_modeled: bool | None = None,
 ) -> AvailsEstimate:
     """Fallback for products with no workbook-modeled platform (VIX 360,
-    Netflix, or any product not in PLATFORM_MODELED_PRODUCTS), and the
+    Netflix, or any product whose forecast config isn't "platform"), and the
     only path available for a country-level (non-US) resolution: apportion
     the planner's own entered national/global monthly total by plain
     population share across the resolved areas. Rougher than the
@@ -232,7 +218,9 @@ def estimate_generic_population(
 
     total_mid = national_monthly_total * months
     is_international = geo.geo_confidence == "low_confidence_international"
-    if is_international and product_name in PLATFORM_MODELED_PRODUCTS:
+    if platform_modeled is None:
+        platform_modeled = product_name in PLATFORM_MODELED_PRODUCTS
+    if is_international and platform_modeled:
         # A platform-modeled product (Roku, Prime, ...) whose bundled data is US-only —
         # the generic wording below ("no platform is modeled for this product") would be wrong.
         notes = [
@@ -263,17 +251,22 @@ def estimate_generic_population(
 def estimate_avails(
     product_name: str, geo: GeoResolution, months: int = 1,
     national_monthly_total: float | None = None,
+    config: ForecastConfig | None = None,
 ) -> AvailsEstimate | None:
     """Entry point: routes to the platform-modeled or generic-fallback
-    estimator based on the product name. Returns None only when the
+    estimator by the product's forecast config — its Admin -> Forecast row if
+    it has one, else the built-in default for its name (see
+    constanza_forecast_map.resolve_forecast); `config` lets a caller that has
+    already resolved it pass it in. Returns None only when the
     generic fallback would apply but no `national_monthly_total` was
     given (nothing to apportion). A country-level (non-US) resolution
     always routes to the generic fallback — no platform ever has
     DMA-style bundled data outside the US."""
-    platform = PLATFORM_MODELED_PRODUCTS.get(product_name)
+    cfg = config or resolve_forecast(product_name)
+    platform = cfg.platform if cfg.method == "platform" else None
     is_international = geo.geo_confidence == "low_confidence_international"
     if platform and not is_international:
-        return estimate_platform_modeled(product_name, platform, geo, months)
+        return estimate_platform_modeled(product_name, platform, geo, months, hispanic_weighted=cfg.hispanic_weighted)
     if national_monthly_total is None:
         return None
-    return estimate_generic_population(product_name, geo, months, national_monthly_total)
+    return estimate_generic_population(product_name, geo, months, national_monthly_total, platform_modeled=bool(platform))

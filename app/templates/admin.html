@@ -25,6 +25,7 @@
         <button class="admin-tab active" data-tab="proposals">Proposal History</button>
         <button class="admin-tab" data-tab="analytics">Analytics</button>
         <button class="admin-tab" data-tab="rates">Product Catalog</button>
+        <button class="admin-tab" data-tab="forecast">Forecast</button>
         <button class="admin-tab" data-tab="markets">Markets</button>
         <button class="admin-tab" data-tab="disclaimers">Disclaimers</button>
         <button class="admin-tab" data-tab="restrictions">Restrictions</button>
@@ -277,6 +278,63 @@
           </thead>
           <tbody id="rates-body">
             <tr><td colspan="7" class="admin-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ================= FORECAST TAB ================= -->
+    <section class="panel hidden" id="tab-forecast">
+      <div class="panel-head">
+        <div class="kicker">Admin</div>
+        <h1 class="display">Avails Forecast</h1>
+        <p class="lede">The Avails step (Step 05) shows a <strong>🛰️ Auto-calculate avails (Constanza)</strong> button on a line only for the products switched <strong>On</strong> below, and each product decides <em>what the button computes</em>: <strong>platform data</strong> (the DMA-level avails model for Roku, Prime Video, Hulu, Peacock, Other FAST, vMVPD or the blended Madhive total) or a <strong>population share</strong> of the line's own budget (rougher — it isn't validated against any platform). A product you haven't touched keeps the built-in default: everything in the <em>Entravision Plus</em> family has the button. Changes save as you make them and reach planners the next time they open the app. (A line whose avails are set to <em>free-form</em> — the default for Search products — never shows the button, whatever is set here.)</p>
+      </div>
+
+      <div class="analytics-stat-grid" id="fc-summary"></div>
+
+      <h2 class="fc-subhead">Platform data &rarr; products</h2>
+      <p class="rs-hint">Which catalog products read each bundled platform series. A series no product uses can't be reached from an avails card.</p>
+      <div class="table-scroll">
+        <table class="admin-table" id="fc-coverage-table">
+          <thead>
+            <tr>
+              <th>Platform data</th>
+              <th>DMAs</th>
+              <th>Products that use it <small>(button on)</small></th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="fc-coverage-body">
+            <tr><td colspan="4" class="admin-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 class="fc-subhead">Products</h2>
+      <div class="admin-toolbar">
+        <input type="text" id="fc-search" placeholder="Search products…" />
+        <select id="fc-family-filter" aria-label="Family"><option value="">All families</option></select>
+        <label class="fc-only"><input type="checkbox" id="fc-only-on" /> Only products with the button</label>
+        <span class="admin-count" id="fc-count"></span>
+      </div>
+
+      <div class="table-scroll">
+        <table class="admin-table" id="fc-table">
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>Family</th>
+              <th>Button</th>
+              <th title="Platform data: the DMA-level avails model. Population share: the line's own budget, converted to impressions and spread across the geo by population (rougher, not validated against any platform).">What it computes</th>
+              <th>Platform data</th>
+              <th title="Re-weights the areas by each state's Hispanic population % (a proxy — the source data has no DMA-level demographic breakout). Only for platform data.">Hispanic weighting</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="fc-body">
+            <tr><td colspan="8" class="admin-empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>

@@ -89,7 +89,8 @@ from app.services import gamma_client
 from app.services import monthly_allocation
 from app.services import notion_client
 from app.services import constanza_geo
-from app.services.constanza_engine import estimate_avails, PLATFORM_MODELED_PRODUCTS
+from app.services import constanza_forecast_map as forecast_map_svc
+from app.services.constanza_engine import estimate_avails
 from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, parse_audience_text
 from app.services.line_modifier import clean_line_modifier_or_none
 
@@ -859,7 +860,7 @@ class ConstanzaEstimateRequest(BaseModel):
     geo_type_hint: Optional[str] = None
     months: int = 1
     # Only used for products with no workbook-modeled platform (VIX 360,
-    # Netflix — see constanza_engine.PLATFORM_MODELED_PRODUCTS): the
+    # Netflix — see constanza_forecast_map.DEFAULT_PLATFORM_PRODUCTS and Admin -> Forecast): the
     # planner's own national monthly total, apportioned by DMA population
     # share. Ignored for platform-modeled products.
     national_monthly_total: Optional[float] = None
@@ -870,6 +871,19 @@ class ConstanzaEstimateRequest(BaseModel):
 
 class ConstanzaParseAudienceRequest(BaseModel):
     text: str
+
+
+class ForecastMapUpdateRequest(BaseModel):
+    """Admin -> Forecast: one product's choice (see constanza_forecast_map.clean_config for the rules)."""
+    product_name: str
+    enabled: bool
+    method: str
+    platform: Optional[str] = None
+    hispanic_weighted: bool = False
+
+
+class ForecastMapProductRequest(BaseModel):
+    product_name: str
 
 
 class DriveUploadRequest(BaseModel):
@@ -974,7 +988,10 @@ async def me(request: Request) -> dict:
 async def get_catalog() -> dict:
     """Return the product list (as the admin has it in Admin -> Product Catalog), grouped by family."""
     grouped: dict[str, list] = {}
-    for p in effective_catalog():
+    products = effective_catalog()
+    # Which products show Constanza's "Auto-calculate avails" button on Step 05, and what it computes (Admin -> Forecast).
+    forecast = forecast_map_svc.forecast_for_products(products)
+    for p in products:
         grouped.setdefault(p.family, []).append({
             "name": p.name,
             "short_label": p.short_label,
@@ -989,6 +1006,7 @@ async def get_catalog() -> dict:
             "notes": p.notes,
             "wide_orbit_code": p.wide_orbit_code,
             "is_addon": p.is_addon,
+            "forecast": forecast.get(p.name),
         })
     return {
         "families": families(),
@@ -1418,10 +1436,11 @@ async def constanza_interest_taxonomy() -> dict:
 
 @app.get("/api/constanza/platform-products")
 async def constanza_platform_products() -> dict:
-    """Which catalog products Constanza can platform-model directly (vs.
-    falling back to a generic population-share estimate) — drives the
-    frontend's "Auto-calculate" affordance per avails card."""
-    return {"platform_modeled_products": PLATFORM_MODELED_PRODUCTS}
+    """Which catalog products Constanza platform-models directly (vs. falling
+    back to a generic population-share estimate) — the LIVE mapping, i.e. the
+    built-in default with every Admin -> Forecast override applied. (The
+    Avails step itself reads each product's `forecast` from /api/catalog.)"""
+    return {"platform_modeled_products": forecast_map_svc.live_platform_products()}
 
 
 def _sync_monthly_budgets_to_allocations(tiers: list[dict]) -> None:
@@ -3429,6 +3448,10 @@ async def admin_create_product(body: ProductRequest, request: Request) -> dict:
             logging.getLogger(__name__).exception("couldn't copy restriction approvals to %r", created["name"])
             warning = ("The product was added, but copying its Restricted Verticals approvals failed — "
                        "map it in Admin → Restrictions or it will read as not accepted.")
+        try:      # a copy of a forecast-enabled product forecasts the same way (best effort, like the approvals)
+            forecast_map_svc.inherit_config(created["copied_from"], created["name"], request.state.user["email"])
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).exception("couldn't copy the forecast mapping to %r", created["name"])
     return {"added": True, "product": created, "restrictions_inherited": inherited, "restrictions_warning": warning}
 
 
@@ -3457,6 +3480,56 @@ async def admin_delete_product(product_id: int) -> dict:
     if name is None:
         raise HTTPException(status_code=404, detail="Product not found.")
     return {"deleted": True, "name": name}
+
+
+# ---------------------------------------------------------------------------
+# Admin -> Forecast: which products get Constanza's "Auto-calculate avails" button (Step 05) and what it computes.
+# See app/services/constanza_forecast_map.py. Admin-only through the blanket /api/admin/* rule.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/admin/forecast-map")
+async def admin_get_forecast_map() -> dict:
+    """Every live product with its effective forecast config, the platform coverage and the totals."""
+    return forecast_map_svc.admin_payload()
+
+
+@app.put("/api/admin/forecast-map")
+async def admin_set_forecast_map(body: ForecastMapUpdateRequest, request: Request) -> dict:
+    """Save one product's choice (enabled / what it computes / which platform / Hispanic weighting)."""
+    try:
+        forecast_map_svc.set_override(body.product_name, body.model_dump(exclude={"product_name"}), request.state.user["email"])
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"saved": True, **forecast_map_svc.admin_payload()}
+
+
+@app.post("/api/admin/forecast-map/reset")
+async def admin_reset_forecast_map(body: ForecastMapProductRequest) -> dict:
+    """Put one product back on its built-in default."""
+    try:
+        forecast_map_svc.clear_override(body.product_name)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"reset": True, **forecast_map_svc.admin_payload()}
+
+
+@app.post("/api/admin/forecast-map/add-product")
+async def admin_add_forecast_platform_product(body: ForecastMapProductRequest) -> dict:
+    """Add one of the built-in platform SKUs (Hulu, Peacock, ...) that exists in the code seed but was never in a
+    database that was seeded before it was added. Its rate is a PLACEHOLDER — the response says so."""
+    try:
+        created = forecast_map_svc.add_missing_platform_product(body.product_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"added": True, "product": created, **forecast_map_svc.admin_payload()}
 
 
 # CSV columns shared by the export and the bulk upload, so a planner can export -> edit in Excel -> re-upload.

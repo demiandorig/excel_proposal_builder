@@ -6540,7 +6540,7 @@ function renderAvailsGrid() {
         `}
       </div>
       <p class="sov-helper" id="sov-helper-${escapeAttr(li.id)}"></p>
-      ${!isFreeform && p.family === "Entravision Plus" ? `
+      ${!isFreeform && _forecastEnabled(p) ? `
       <div class="constanza-block">
         <button type="button" class="btn-secondary constanza-autocalc-btn" data-lid="${escapeAttr(li.id)}">🛰️ Auto-calculate avails (Constanza)</button>
         <div class="constanza-result" id="constanza-result-${escapeAttr(li.id)}" style="display:none;"></div>
@@ -6796,6 +6796,14 @@ function _replaceGeoItem(text, item, replacement) {
   return re.test(text) ? text.replace(re, () => replacement) : replacement;
 }
 
+// Does this product's avails card get the "Auto-calculate avails (Constanza)" button? Admin -> Forecast decides: every
+// product in /api/catalog carries its effective `forecast` config. A payload without it (a page cached from before that
+// existed) keeps the original rule, the "Entravision Plus" family.
+function _forecastEnabled(p) {
+  if (!p) return false;
+  return p.forecast ? !!p.forecast.enabled : p.family === "Entravision Plus";
+}
+
 async function onConstanzaAutoCalc(lid) {
   const li = state.lineItems.find(x => x.id === lid);
   const btn = document.querySelector(`.constanza-autocalc-btn[data-lid="${escapeAttr(lid)}"]`);
@@ -6947,9 +6955,10 @@ function syncAvailsFromGrid() {
 // #constanza-modal and app/services/constanza_engine.py.
 // ----------------------------------------------------------------------
 // label -> representative catalog product name Constanza can estimate
-// for it. Mirrors app/services/constanza_engine.PLATFORM_MODELED_PRODUCTS
-// (the server is still the source of truth for the actual computation —
-// this list only drives the dropdown's display).
+// for it. Mirrors the BUILT-IN mapping in app/services/constanza_forecast_map.
+// DEFAULT_PLATFORM_PRODUCTS (the server is still the source of truth for the
+// actual computation — this list only drives the dropdown's display, and
+// Admin -> Forecast changes don't alter it).
 const CONSTANZA_PLATFORM_OPTIONS = [
   { label: "Roku Channel", product: "Entravision Plus - Roku Ads (Includes The Roku Channel and the popular Espacio Latino Hub)" },
   { label: "Amazon Prime Video", product: "Entravision Plus - Amazon Prime Video" },
