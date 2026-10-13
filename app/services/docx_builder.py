@@ -15,6 +15,8 @@ try:
 except ImportError:
     _HAS_DOCX = False
 
+from app.services import period_copy
+
 # Entravision brand purple as RGB
 _PURPLE = (91, 45, 142)   # #5B2D8E
 
@@ -291,6 +293,7 @@ def build_strategy_brief_docx(
     monthly_budget: float = 0.0,
     total_months: int = 0,
     ad_presence: dict = None,
+    time_unit: str = "month",
 ) -> bool:
     """
     Write the Step 03 AI Strategy Brief as a Word document, in the same
@@ -298,6 +301,11 @@ def build_strategy_brief_docx(
     client/business summary, market context, objectives analysis, the
     recommended tactic mix with rationale/data/budget split, the overall
     strategy direction, and key insights for the AE.
+
+    time_unit: the proposal's billing period. "full_flight" prints the Step 02 budget
+    as the flat flight total ("Budget: $X total flight (single billing period)", nothing
+    multiplied) instead of "$X/month x N months" — the wording comes from
+    period_copy.budget_sentence, the same helper the brief's AI prompt uses.
     Returns True on success, False if python-docx is unavailable.
     """
     if not _HAS_DOCX:
@@ -309,12 +317,10 @@ def build_strategy_brief_docx(
     for run in h.runs:
         run.font.color.rgb = RGBColor(*_PURPLE)
 
-    if monthly_budget and total_months:
+    time_unit = period_copy.resolve_time_unit(time_unit, where="strategy brief docx")
+    if period_copy.has_budget_sentence(monthly_budget, total_months, time_unit):
         budget_para = doc.add_paragraph()
-        budget_run = budget_para.add_run(
-            f"Budget: ${monthly_budget:,.0f}/month × {total_months} months "
-            f"= ${monthly_budget * total_months:,.0f} total flight"
-        )
+        budget_run = budget_para.add_run(period_copy.budget_sentence(monthly_budget, total_months, time_unit))
         budget_run.italic = True
 
     def _section(label: str, body: str) -> None:

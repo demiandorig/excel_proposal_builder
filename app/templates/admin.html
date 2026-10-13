@@ -24,10 +24,11 @@
       <nav class="admin-tabs" aria-label="Admin sections">
         <button class="admin-tab active" data-tab="proposals">Proposal History</button>
         <button class="admin-tab" data-tab="analytics">Analytics</button>
-        <button class="admin-tab" data-tab="rates">Rate Overrides</button>
+        <button class="admin-tab" data-tab="rates">Product Catalog</button>
         <button class="admin-tab" data-tab="markets">Markets</button>
         <button class="admin-tab" data-tab="disclaimers">Disclaimers</button>
         <button class="admin-tab" data-tab="restrictions">Restrictions</button>
+        <button class="admin-tab" data-tab="faq">FAQ</button>
         <button class="admin-tab" data-tab="users">Users</button>
       </nav>
       <div id="account-widget" class="account-widget"></div>
@@ -134,124 +135,115 @@
         </div>
 
         <div class="analytics-card">
-          <h3>Billing Period Toggle Adoption <small>(Weekly / Monthly / Quarterly)</small></h3>
+          <h3>Billing Period Toggle Adoption <small>(Weekly / Monthly / Quarterly / Full Flight)</small></h3>
           <div class="analytics-bars" id="analytics-time-unit-bars"></div>
         </div>
       </div>
     </section>
 
-    <!-- ================= RATES TAB ================= -->
+    <!-- ================= PRODUCTS TAB ================= -->
     <section class="panel hidden" id="tab-rates">
       <div class="panel-head">
         <div class="kicker">Admin</div>
-        <h1 class="display">Rate Overrides &amp; Catalog</h1>
-        <p class="lede">Adjust a product's NET rate, minimum spend, or estimated CPM without touching the AdFlo catalog source, or add a brand-new product below. Changes apply immediately across the app — leave a rate field blank to keep the catalog default.</p>
+        <h1 class="display">Product Catalog</h1>
+        <p class="lede">Every product the app can sell, in one list you can change freely: edit any field, rename it, <strong>duplicate</strong> it to make a variant, add a new one, or delete it. Changes apply immediately across the app; a renamed product is still recognized under its old name in saved proposals and pasted requests.</p>
       </div>
 
-      <details class="add-product-panel" id="add-product-panel">
-        <summary>+ Add a new product</summary>
-        <form id="add-product-form">
+      <details class="add-product-panel" id="product-panel">
+        <summary id="product-panel-title">+ Add a product</summary>
+        <form id="product-form">
           <div class="add-product-grid">
             <label>Family <span class="req">*</span>
-              <input type="text" id="np-family" placeholder="e.g. Podcasts" required />
+              <input type="text" id="pf-family" list="pf-families" placeholder="e.g. Podcasts" required />
+              <datalist id="pf-families"></datalist>
             </label>
             <label>Product Name <span class="req">*</span>
-              <input type="text" id="np-name" placeholder="e.g. Podcast Sponsorship" required />
+              <input type="text" id="pf-name" placeholder="e.g. Podcast Sponsorship" required />
             </label>
             <label>Objective / Short Label
-              <input type="text" id="np-short-label" placeholder="e.g. Awareness / Sponsorship" />
+              <input type="text" id="pf-short-label" placeholder="e.g. Awareness / Sponsorship" />
             </label>
             <label>Buying Model <span class="req">*</span>
-              <select id="np-buying-model" required>
+              <select id="pf-buying-model" required>
                 <option value="CPM">CPM</option>
                 <option value="CPP">CPP</option>
                 <option value="Fixed" selected>Fixed</option>
               </select>
             </label>
             <label>Rate (NET) <small>(blank if Fixed with no per-unit rate)</small>
-              <input type="number" step="0.01" min="0" id="np-base-rate" />
+              <input type="number" step="any" min="0" id="pf-base-rate" />
             </label>
             <label>Minimum Spend
-              <input type="number" step="1" min="0" id="np-min-spend" placeholder="0" />
+              <input type="number" step="any" min="0" id="pf-min-spend" placeholder="0" />
             </label>
             <label>Est. CPM <small>(for Fixed products — enables "Est. n impressions")</small>
-              <input type="number" step="0.01" min="0" id="np-est-cpm" />
+              <input type="number" step="any" min="0" id="pf-est-cpm" />
             </label>
             <label>Sizes
-              <input type="text" id="np-sizes" placeholder="Custom" />
+              <input type="text" id="pf-sizes" placeholder="Custom" />
             </label>
             <label>Tech Platform
-              <input type="text" id="np-tech-platform" placeholder="e.g. Triton" />
+              <input type="text" id="pf-tech-platform" placeholder="e.g. Triton" />
             </label>
             <label class="checkbox-label span-2">
-              <input type="checkbox" id="np-is-addon" />
+              <input type="checkbox" id="pf-is-addon" />
               This is an add-on <small>(a fixed-price extra like a landing page or call tracking — picked via Step 04's Add-Ons module instead of the main product list, no suggested budget)</small>
             </label>
             <label class="span-2">Proposal Description <small>(shown in the DETAILS column)</small>
-              <textarea id="np-description" rows="2"></textarea>
+              <textarea id="pf-description" rows="2"></textarea>
             </label>
             <label class="span-2">Planner Notes <small>(compliance/restriction text)</small>
-              <textarea id="np-notes" rows="2"></textarea>
+              <textarea id="pf-notes" rows="2"></textarea>
             </label>
           </div>
+          <details class="pf-advanced">
+            <summary>Advanced</summary>
+            <div class="add-product-grid">
+              <label>Minimum flight (days) — from
+                <input type="number" step="1" min="0" id="pf-flight-min" />
+              </label>
+              <label>Minimum flight (days) — to
+                <input type="number" step="1" min="0" id="pf-flight-max" />
+              </label>
+              <label>Wide Orbit code <small>(defaults to the name)</small>
+                <input type="text" id="pf-wide-orbit" />
+              </label>
+              <label>Target margin — upper <small>(0–1)</small>
+                <input type="number" step="any" min="0" max="1" id="pf-margin-upper" />
+              </label>
+              <label>Target margin — lower <small>(0–1)</small>
+                <input type="number" step="any" min="0" max="1" id="pf-margin-lower" />
+              </label>
+              <label>SLA — data (business days)
+                <input type="number" step="1" min="0" id="pf-sla-data" />
+              </label>
+              <label>SLA — creative
+                <input type="number" step="1" min="0" id="pf-sla-creative" />
+              </label>
+              <label>SLA — activation
+                <input type="number" step="1" min="0" id="pf-sla-activate" />
+              </label>
+              <label>SLA — total to go live
+                <input type="number" step="1" min="0" id="pf-sla-total" />
+              </label>
+              <label class="checkbox-label span-2">
+                <input type="checkbox" id="pf-estimated-impressions" />
+                Show impressions as an estimate ("Est. n")
+              </label>
+              <label class="checkbox-label span-2">
+                <input type="checkbox" id="pf-discloses-impressions" />
+                Show impressions on the client export
+              </label>
+              <label class="checkbox-label span-2">
+                <input type="checkbox" id="pf-national-supported" />
+                National buys supported
+              </label>
+            </div>
+          </details>
           <div class="add-product-actions">
-            <span id="add-product-error" class="add-product-error hidden"></span>
-            <button type="button" class="btn-secondary" id="add-product-cancel-btn">Cancel</button>
-            <button type="submit" class="btn-primary">Add Product</button>
-          </div>
-        </form>
-      </details>
-
-      <details class="add-product-panel" id="edit-product-panel">
-        <summary>✎ Edit product <span id="edit-product-name-label"></span></summary>
-        <form id="edit-product-form">
-          <div class="add-product-grid">
-            <label>Family <span class="req">*</span>
-              <input type="text" id="ep-family" required />
-            </label>
-            <label>Product Name
-              <input type="text" id="ep-name" title="Renaming keeps the old name resolvable — the parser and any already-saved proposal still recognize it." />
-            </label>
-            <label>Objective / Short Label
-              <input type="text" id="ep-short-label" />
-            </label>
-            <label>Buying Model <span class="req">*</span>
-              <select id="ep-buying-model" required>
-                <option value="CPM">CPM</option>
-                <option value="CPP">CPP</option>
-                <option value="Fixed">Fixed</option>
-              </select>
-            </label>
-            <label>Rate (NET) <small>(blank if Fixed with no per-unit rate)</small>
-              <input type="number" step="0.01" min="0" id="ep-base-rate" />
-            </label>
-            <label>Minimum Spend
-              <input type="number" step="1" min="0" id="ep-min-spend" placeholder="0" />
-            </label>
-            <label>Est. CPM <small>(for Fixed products — enables "Est. n impressions")</small>
-              <input type="number" step="0.01" min="0" id="ep-est-cpm" />
-            </label>
-            <label>Sizes
-              <input type="text" id="ep-sizes" placeholder="Custom" />
-            </label>
-            <label>Tech Platform
-              <input type="text" id="ep-tech-platform" />
-            </label>
-            <label class="checkbox-label span-2">
-              <input type="checkbox" id="ep-is-addon" />
-              This is an add-on <small>(a fixed-price extra like a landing page or call tracking — picked via Step 04's Add-Ons module instead of the main product list, no suggested budget)</small>
-            </label>
-            <label class="span-2">Proposal Description <small>(shown in the DETAILS column)</small>
-              <textarea id="ep-description" rows="2"></textarea>
-            </label>
-            <label class="span-2">Planner Notes <small>(compliance/restriction text)</small>
-              <textarea id="ep-notes" rows="2"></textarea>
-            </label>
-          </div>
-          <div class="add-product-actions">
-            <span id="edit-product-error" class="add-product-error hidden"></span>
-            <button type="button" class="btn-secondary" id="edit-product-cancel-btn">Cancel</button>
-            <button type="submit" class="btn-primary">Save Changes</button>
+            <span id="product-form-error" class="add-product-error hidden"></span>
+            <button type="button" class="btn-secondary" id="product-cancel-btn">Cancel</button>
+            <button type="submit" class="btn-primary" id="product-submit-btn">Add Product</button>
           </div>
         </form>
       </details>
@@ -260,6 +252,7 @@
         <input type="text" id="rates-search" placeholder="Filter by product or family…" />
         <span class="admin-count" id="rates-count"></span>
         <div class="spacer"></div>
+        <button type="button" class="btn-primary" id="add-product-btn">+ Add a product</button>
         <button type="button" class="btn-secondary" data-csv-export="/api/admin/products/export">⬇ Export CSV</button>
         <label class="btn-secondary bulk-upload-btn">
           ⬆ Bulk Upload CSV
@@ -267,6 +260,7 @@
         </label>
       </div>
       <div id="bulk-upload-result" class="bulk-upload-result hidden"></div>
+      <div id="product-notice" class="bulk-upload-result hidden" role="status"></div>
 
       <div class="table-scroll">
         <table class="admin-table" id="rates-table">
@@ -293,7 +287,7 @@
       <div class="panel-head">
         <div class="kicker">Admin</div>
         <h1 class="display">Market Config</h1>
-        <p class="lede">Each market's Entravision office address (shown on every proposal export's meta block), its DSC (assistant) and DSM contacts, and the CC list for the Step 07 seller email. <strong>Default</strong> is what every market uses until it has its own row below.</p>
+        <p class="lede">Each market's Entravision office address (shown on every proposal export's meta block), its DSC (assistant) and DSM contacts, its research assignees, and the CC list for the Step 07 seller email. The DSC, DSM and research assignees are CC'd on that email along with the market's CC list. <strong>Default</strong> is what every market uses until it has its own row below.</p>
       </div>
 
       <div class="admin-toolbar base-ccs-toolbar">
@@ -325,12 +319,13 @@
               <th>Address Line 2</th>
               <th>DSC <small>(assistant)</small></th>
               <th>DSM</th>
+              <th>Research Assignees <small>(comma-separated)</small></th>
               <th>CC Emails <small>(comma-separated)</small></th>
               <th></th>
             </tr>
           </thead>
           <tbody id="markets-body">
-            <tr><td colspan="7" class="admin-empty">Loading…</td></tr>
+            <tr><td colspan="8" class="admin-empty">Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -394,7 +389,7 @@
       <div class="panel-head">
         <div class="kicker">Admin</div>
         <h1 class="display">Restrictions</h1>
-        <p class="lede">Entravision's "Restricted Verticals by Platforms" Google Sheet is the source of truth for whether a client vertical (Political, Cannabis, Casino/Gambling…) is allowed on each product. The Roadblocks step reads it, computes a verdict per product, and the AI isn't allowed to contradict it. Sync it here whenever the sheet changes.</p>
+        <p class="lede">Entravision's "Restricted Verticals by Platforms" Google Sheet is the source of truth for whether a client vertical (Political, Cannabis, Casino/Gambling…) is allowed on each product. The Roadblocks step reads it, computes a verdict per product, and the AI isn't allowed to contradict it. Sync it here whenever the sheet changes. You can also <strong>add your own categories and extra rules</strong> below: Step 07 offers them as choices and the AI reads them exactly like a sheet tab.</p>
       </div>
 
       <div class="dz-card" id="rs-source">
@@ -411,12 +406,115 @@
           <input type="file" id="rs-file" accept=".xlsx" />
           <button type="button" class="btn-secondary" id="rs-upload-btn">Upload .xlsx</button>
         </div>
-        <p class="rs-hint">Sync uses the app's connected Google Drive account, so that account needs access to the sheet. If it doesn't, download the sheet from Google (File → Download → Microsoft Excel) and upload it here instead. Syncing replaces what's below with what's in the sheet; keyword and product-mapping edits you made are kept for every tab and sheet entry that is still there.</p>
+        <p class="rs-hint">Sync uses the app's connected Google Drive account, so that account needs access to the sheet. If it doesn't, download the sheet from Google (File → Download → Microsoft Excel) and upload it here instead. Syncing replaces the sheet's tabs with what's in the sheet; the categories you added by hand, your extra notes, and the keyword and product-mapping edits you made are kept.</p>
         <span id="rs-error" class="add-product-error hidden"></span>
         <div class="rs-warnings hidden" id="rs-warnings"></div>
       </div>
 
+      <details class="add-product-panel" id="rs-add-panel">
+        <summary id="rs-add-title">+ Add a category</summary>
+        <form id="rs-add-form">
+          <p class="rs-hint">Add a restricted vertical, or any restriction, directly here — no sheet needed. Step 07 offers it as a choice, plan text that mentions its keywords suggests it, and the Roadblocks AI reads what you write below like a sheet tab. A sync never deletes it.</p>
+          <div class="add-product-grid">
+            <label>Name <span class="req">*</span>
+              <input type="text" id="rs-add-name" maxlength="80" required placeholder="Alcohol" />
+            </label>
+            <label>Type
+              <select id="rs-add-kind">
+                <option value="guidance">Guidance — rules the AI should apply</option>
+                <option value="blanket_hold">Not accepted on any product</option>
+                <option value="allowlist">Approved products only</option>
+              </select>
+            </label>
+            <label class="span-2">Suggested when the plan mentions <small>(comma separated — whole words, case-insensitive; leave blank to use the name)</small>
+              <input type="text" id="rs-add-keywords" placeholder="alcohol, beer, wine, spirits" />
+            </label>
+            <label class="span-2">One-line summary <small>(shown beside each product's verdict; optional)</small>
+              <input type="text" id="rs-add-summary" maxlength="500" />
+            </label>
+            <label class="span-2" id="rs-add-body-wrap">Details / rules for the AI <span class="req" id="rs-add-body-req">*</span> <small>(what's restricted, what's required, approvals, creative rules…)</small>
+              <textarea id="rs-add-body" rows="5" maxlength="20000"></textarea>
+            </label>
+            <label class="span-2 hidden" id="rs-add-items-wrap">Approved products <span class="req">*</span> <small>(one per line — name them as you like; you can map each to catalog products after saving)</small>
+              <textarea id="rs-add-items" rows="5"></textarea>
+            </label>
+            <label class="span-2">Extra notes <small>(optional — more rules for the AI to keep in mind)</small>
+              <textarea id="rs-add-notes" rows="2" maxlength="6000"></textarea>
+            </label>
+          </div>
+          <div class="add-product-actions">
+            <span id="rs-add-error" class="add-product-error hidden"></span>
+            <button type="button" class="btn-secondary" id="rs-add-cancel">Cancel</button>
+            <button type="submit" class="btn-primary" id="rs-add-submit">Add Category</button>
+          </div>
+        </form>
+      </details>
+
       <div id="rs-list" class="dz-list"><p class="admin-empty">Loading…</p></div>
+    </section>
+
+    <!-- ================= FAQ TAB ================= -->
+    <section class="panel hidden" id="tab-faq">
+      <div class="panel-head">
+        <div class="kicker">Admin</div>
+        <h1 class="display">FAQ</h1>
+        <p class="lede">The rows of the <strong>Process FAQs</strong> tab in every Excel export: the FAQ table (SERVICES, Frequently Asked Question, Resource Link) and the "Category and product restrictions" block under it. Add, edit, reorder or delete rows; a row's <strong>link title</strong> becomes a clickable link to its <strong>link</strong> in the export (a title with no link stays plain text). The export's header always links to <a id="faq-guidelines-link" href="https://entravision-digital-ad-guidelines.netlify.app/" target="_blank" rel="noopener noreferrer">Entravision's Ad Guidelines</a>.</p>
+      </div>
+
+      <details class="add-product-panel" id="faq-panel">
+        <summary id="faq-panel-title">+ Add an FAQ row</summary>
+        <form id="faq-form">
+          <div class="add-product-grid">
+            <label>Block
+              <select id="faq-section">
+                <option value="faq">Process FAQ</option>
+                <option value="restriction">Category and product restriction</option>
+              </select>
+            </label>
+            <label>SERVICES <span class="req">*</span> <small>(or the category / products)</small>
+              <input type="text" id="faq-services" maxlength="300" required />
+            </label>
+            <label class="span-2">Frequently Asked Question <span class="req">*</span> <small>(or what the restriction relates to)</small>
+              <textarea id="faq-question" rows="2" maxlength="1000" required></textarea>
+            </label>
+            <label>Resource Link Title <small>(the clickable text)</small>
+              <input type="text" id="faq-link-title" maxlength="200" />
+            </label>
+            <label>Resource Link <small>(https://…)</small>
+              <input type="text" id="faq-link-url" maxlength="2000" placeholder="https://" />
+            </label>
+          </div>
+          <div class="add-product-actions">
+            <span id="faq-error" class="add-product-error hidden"></span>
+            <button type="button" class="btn-secondary" id="faq-cancel-btn">Cancel</button>
+            <button type="submit" class="btn-primary" id="faq-submit-btn">Add Row</button>
+          </div>
+        </form>
+      </details>
+
+      <div class="admin-toolbar">
+        <span class="admin-count" id="faq-count"></span>
+        <div class="spacer"></div>
+        <button type="button" class="btn-primary" id="add-faq-btn">+ Add an FAQ row</button>
+      </div>
+
+      <div class="table-scroll">
+        <table class="admin-table" id="faq-table">
+          <thead>
+            <tr>
+              <th>Block</th>
+              <th>SERVICES</th>
+              <th>Frequently Asked Question</th>
+              <th>Resource Link Title</th>
+              <th>Resource Link</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="faq-body">
+            <tr><td colspan="6" class="admin-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- ================= USERS TAB ================= -->

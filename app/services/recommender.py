@@ -16,10 +16,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from app.catalog import CATALOG, by_name, by_family
+from app.catalog import by_name, by_family, effective_catalog
 from app.services.notion_parser import ProposalRequest, compose_target_fallback
 from app.services.proposal_generator import LineItem
-from app.services.monthly_allocation import granularity_scale
+from app.services.monthly_allocation import granularity_scale, is_full_flight
 
 
 # ---------------------------------------------------------------------------
@@ -31,12 +31,12 @@ GOAL_PRIORITIES: dict[str, list[str]] = {
         "Search - SEM",
         "Facebook & Instagram Ads | Traffic / Conversion",
         "eDigital Network Display - Standard IAB",
-        "YouTube Ads",
+        "YouTube Ads - Skippable",
     ],
     "awareness": [
         "Entravision Plus CTV/OTT - English Content",
         "Video - Pre-roll (OLV)",
-        "YouTube Ads",
+        "YouTube Ads - Skippable",
         "AudioEngage",
         "Facebook & Instagram Ads | Awareness",
     ],
@@ -55,7 +55,7 @@ GOAL_PRIORITIES: dict[str, list[str]] = {
         "Facebook & Instagram Ads | Awareness",
         "Tiktok Ads",
         "Spotify",
-        "YouTube Ads",
+        "YouTube Ads - Skippable",
     ],
     "default": [
         "Search - SEM",
@@ -115,6 +115,10 @@ def recommend_line_items(
     means "month" anyway; see LineItem.monthly_budget's own module-wide
     convention of never renaming this field per granularity).
 
+    Full Flight (time_unit == "full_flight"): the budget is the WHOLE
+    flight's and every line gets months == 1 — one billing period, so each
+    product's catalog MONTHLY minimum applies once (granularity_scale is 1.0).
+
     Strategy:
         1. Seed with whatever the salesperson already selected (matched products).
         2. If budget remains, add goal-priority products until budget is exhausted
@@ -131,6 +135,8 @@ def recommend_line_items(
 
     months = request.total_months or 3
     scale = granularity_scale(time_unit)
+    if is_full_flight(time_unit):
+        months = 1
 
     # If a confirmed AI strategy brief is provided, use its tactic recommendations
     # as the primary product priority + budget weights instead of goal-based rules.
@@ -140,21 +146,20 @@ def recommend_line_items(
     goal = _classify_goal(request.campaign_goal)
     priority = GOAL_PRIORITIES.get(goal, GOAL_PRIORITIES["default"])
 
-    # 1. Build chosen list: salesperson-selected first, then goal priorities
+    # 1. Build chosen list: salesperson-selected first, then goal priorities. A name is followed to the product's
+    #    CURRENT name (a renamed product is still recommended, once), and a product that's been deleted from the
+    #    list is never recommended.
+    live = {p.name for p in effective_catalog()}
     chosen: list[str] = []
-    for name in request.products_selected:
-        if name not in chosen:
-            chosen.append(name)
-    for name in priority:
-        if name not in chosen:
-            chosen.append(name)
+    for name in list(request.products_selected) + list(priority):
+        current = by_name(name)
+        if current is not None and current.name in live and current.name not in chosen:
+            chosen.append(current.name)
 
     # 2. Filter to products that fit at all (minimum <= budget)
     fitting: list[tuple[str, float]] = []
     for name in chosen:
         p = by_name(name)
-        if p is None:
-            continue
         min_spend = (p.minimum_spend or 0.0) * scale
         if min_spend <= monthly_budget:
             fitting.append((name, min_spend))
@@ -162,7 +167,7 @@ def recommend_line_items(
     if not fitting:
         # Budget too small for any product — return the cheapest catalog item as a fallback
         cheapest = min(
-            (p for p in CATALOG if (p.minimum_spend or 0) > 0),
+            (p for p in effective_catalog() if (p.minimum_spend or 0) > 0),
             key=lambda p: p.minimum_spend or float("inf"),
         )
         return [LineItem(
@@ -187,7 +192,7 @@ def recommend_line_items(
     if not selected:
         # Same fallback as above
         cheapest = min(
-            (p for p in CATALOG if (p.minimum_spend or 0) > 0),
+            (p for p in effective_catalog() if (p.minimum_spend or 0) > 0),
             key=lambda p: p.minimum_spend or float("inf"),
         )
         return [LineItem(
@@ -280,9 +285,10 @@ def _recommend_from_brief(
         # whatever $0-minimum custom-quote line happened to sit in that
         # family, regardless of whether it made any sense as a recommendation.
         preferred = None
+        live_names = {x.name for x in products_in_family}
         for name in request.products_selected:
             p = by_name(name)
-            if p and p.family == family:
+            if p and p.family == family and p.name in live_names:
                 preferred = p
                 break
         if preferred is None:

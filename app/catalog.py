@@ -64,11 +64,15 @@ Some fields the rate card doesn't give per-product were approximated or
 left at sensible defaults — spot-check margins, flight windows, and
 Fixed-model products with no dollar figure at all (pure "See Sales
 Planning" lines) before relying on them for margin-sensitive approvals.
-Use the admin rate override UI (/admin) to correct base_rate /
-minimum_spend / estimated_cpm_for_imps without a code change, or the admin
-"Add Product" form for anything genuinely missing from this rate card.
+THIS LIST IS ONLY THE SEED. Once the app has run, the `products` table is
+the one and only product list — edit, add, duplicate and delete products in
+Admin -> Product Catalog; nothing here is consulted again except to fill an empty
+table and as the fail-safe when the database can't be read.
 """
 
+import logging
+import math
+import re
 import time
 from dataclasses import dataclass, field, asdict, replace
 from typing import Optional, Union
@@ -254,9 +258,9 @@ CATALOG: list[Product] = [
     ),
     Product(
         family='Online Video',
-        name='YouTube Ads',
+        name='YouTube Ads - Skippable',
         short_label='Awareness / Retargeting',
-        proposal_description='In-stream and Video discovery ad. Search results: Ad is shown when people search for a specific topic. Targeting availability: Demographics, Interests, Video Remarketing, Topics, Keywords (keyword targeting option depends on your ad format). 6 creatives max. Skippable, NonSkippable and Bumper ads are available, each ad type requires a separate campaign (ie WO line ID) Each language target will need separate campaigns (ie WO line IDs)',
+        proposal_description='Skippable in-stream and video discovery ads on YouTube; viewers can skip after five seconds. Targeting availability: Demographics, Interests, Video Remarketing, Topics, Keywords (keyword targeting option depends on your ad format). 6 creatives max. Each language target will need separate campaigns (ie WO line IDs)',
         sizes=':15s/:30s (skippable), 16:9',
         buying_model='Fixed',
         base_rate=None,
@@ -272,7 +276,34 @@ CATALOG: list[Product] = [
         margin_upper=0.4,
         margin_lower=0.3,
         tech_platform='',
-        wide_orbit_code='YouTube Ads',
+        wide_orbit_code='YouTube Ads - Skippable',
+        notes=NOTE_GOOGLE_VERTICALS,
+        estimated_cpm_for_imps=15.0,
+        hispanic_targeting_forced=None,
+        cannabis_policy='not_allowed',
+        political_policy='not_allowed',
+    ),
+    Product(
+        family='Online Video',
+        name='YouTube Ads - Non-Skippable',
+        short_label='Awareness / Retargeting',
+        proposal_description='Non-skippable in-stream ads (up to :15s) and bumper ads (:6s) on YouTube that play in full before the video. Targeting availability: Demographics, Interests, Video Remarketing, Topics, Keywords (keyword targeting option depends on your ad format). 6 creatives max. Each language target will need separate campaigns (ie WO line IDs)',
+        sizes=':15s non-skippable / :6s bumper, 16:9',
+        buying_model='Fixed',
+        base_rate=None,
+        estimated_impressions=True,
+        discloses_impressions=False,
+        minimum_spend=500.0,
+        minimum_flight_days=[30, 90],
+        sla_data_days=1,
+        sla_creative_days=3,
+        sla_activate_days=7,
+        sla_total_days=9,
+        media_allocation_pct=0.0,
+        margin_upper=0.4,
+        margin_lower=0.3,
+        tech_platform='',
+        wide_orbit_code='YouTube Ads - Non-Skippable',
         notes=NOTE_GOOGLE_VERTICALS,
         estimated_cpm_for_imps=15.0,
         hispanic_targeting_forced=None,
@@ -1895,66 +1926,69 @@ CATALOG: list[Product] = [
     ),
 ]
 
-
-
-# The 3 numeric fields were the original, narrow scope of the single-row
-# rate editor; the admin "Edit product" panel widens this to every field
-# that form also lets you SET when adding a brand-new product — same
-# fields, symmetric add/edit UX — for a BUILT-IN catalog product (a custom
-# product's full edit goes through update_custom_product below instead,
-# not this override mechanism). Deeper compliance/SLA/margin fields the
-# add-product form doesn't expose either stay out of scope here too.
+# ===========================================================================
+# THE PRODUCT LIST
 #
-# `name` IS in this list (unlike earlier versions of this file): renaming a
-# built-in product now goes through this exact same override mechanism —
-# rate_overrides.product_name stays the STABLE lookup key (the product's
-# original catalog.py literal name, which never changes) while the
-# override's own `name` FIELD becomes the current display name. See
-# by_name()/record_product_alias() below for how an old display name (from
-# before a rename) keeps resolving — that's what actually makes renaming
-# safe, not excluding the field.
+# The `products` table is THE product list. Every product — whether it began
+# as a row of the rate card this file was seeded from, or was typed in (or
+# duplicated) by an admin — is an equal, fully editable row: there is no
+# "original" list to revert to, no built-in/custom distinction and nothing an
+# admin can't change or remove. CATALOG above is only the SEED: it fills an
+# empty table once, and it is the fail-safe when the database can't be read
+# (so a missing table never takes proposal generation down).
+#
+# Rows that used to live in the three legacy tables (rate_overrides,
+# custom_products and the soft-delete flag) are folded in at seed time; those
+# tables are only READ for that, never written, and can be dropped later.
+# ===========================================================================
+
+
+log = logging.getLogger(__name__)
+
+# The legacy override layer's field list — still how a legacy rate_overrides row is read when seeding.
 _OVERRIDABLE_FIELDS = (
     "name", "base_rate", "minimum_spend", "estimated_cpm_for_imps",
     "family", "short_label", "buying_model", "sizes", "tech_platform",
     "proposal_description", "notes", "is_addon",
 )
 
+# Names a product used to have in CODE (a product that was split or renamed in this file) -> its current name, so a
+# saved proposal or a pasted request that still says "YouTube Ads" keeps resolving even with no database.
+_STATIC_ALIASES = {"YouTube Ads": "YouTube Ads - Skippable"}
+# A legacy rate override on a product that has since been split in two applies to both halves.
+_LEGACY_SPLITS = {"YouTube Ads": ("YouTube Ads - Skippable", "YouTube Ads - Non-Skippable")}
+
 
 class _TTLCache:
     """
-    Tiny read-through cache for one DB-backed loader function below.
+    Tiny read-through cache for one DB-backed loader.
 
-    WHY THIS EXISTS (read before touching): _apply_override() calls
-    load_rate_overrides() — a full-table SELECT — and effective_catalog()
-    calls _apply_override() ONCE PER PRODUCT (56+). by_family() calls
-    effective_catalog() fresh every time, and recommend_line_items()'s
-    AI-brief path calls by_family() once per recommended tactic (2-5). A
-    single Suggest Mix click was therefore triggering on the order of
-    hundreds of separate DB round trips (tactics × products, each doing
-    its own rate_overrides fetch) — this is the actual, confirmed root
-    cause of the reported "Suggest Mix takes forever," not a vaguer
-    "several serial round-trips" as an earlier pass characterized it.
-
-    Every mutation path below calls .invalidate() itself the moment it
-    writes — an admin's own edit is NEVER left waiting on the TTL to see
-    its own change. The TTL is purely a backstop (a second app instance
-    writing, or a direct DB edit bypassing this module entirely) — should
-    basically never be what makes a value refresh in normal operation.
-    `None` is the "not loaded yet" sentinel; every loader below returns a
-    dict/list/set that's falsy-but-never-None when genuinely empty, so
-    this can't be confused with "loaded, but empty."
+    WHY: effective_catalog()/by_name()/by_family() are called constantly (per product, per
+    recommended tactic, per line item). Reading the table each time would mean hundreds of
+    round trips per click. Every mutation below calls .invalidate() itself, so an admin's own
+    edit never waits on the TTL; the TTL is only a backstop for a second app instance writing.
+    `None` is the "not loaded" sentinel; only SUCCESSFUL reads are ever stored.
     """
     def __init__(self, ttl_seconds: float = 30.0):
         self._ttl = ttl_seconds
         self._value = None
         self._loaded_at = 0.0
 
+    def peek(self):
+        if self._value is not None and (time.monotonic() - self._loaded_at) <= self._ttl:
+            return self._value
+        return None
+
+    def set(self, value) -> None:
+        self._value = value
+        self._loaded_at = time.monotonic()
+
     def get(self, loader):
-        now = time.monotonic()
-        if self._value is None or (now - self._loaded_at) > self._ttl:
-            self._value = loader()
-            self._loaded_at = now
-        return self._value
+        value = self.peek()
+        if value is None:
+            value = loader()
+            self.set(value)
+        return value
 
     def invalidate(self) -> None:
         self._value = None
@@ -1963,12 +1997,32 @@ class _TTLCache:
 _rate_overrides_cache = _TTLCache()
 _custom_products_cache = _TTLCache()
 _deleted_builtin_names_cache = _TTLCache()
+_products_cache = _TTLCache()
+_aliases_cache = _TTLCache()
+_products_retry_at = 0.0     # after a failed read of the products table, don't retry it (and re-seed) for a few seconds
+_seed_memo: dict = {"key": None, "rows": None, "aliases": None, "at": 0.0}
+_last_good_rows = None       # the last rows read successfully: served (stale) if a later read fails
+_fallback_aliases: dict = {}  # legacy renames, only while the list is the seed fallback
 
+
+def invalidate_product_caches(keep_stale: bool = False) -> None:
+    """Forget every cached product read — called by each write below, and by tests. `keep_stale` keeps the last
+    good rows around as the answer to "the database blinked right after a write"; tests drop them too."""
+    global _products_retry_at, _last_good_rows
+    _products_cache.invalidate()
+    _aliases_cache.invalidate()
+    _products_retry_at = 0.0
+    _seed_memo["key"] = None
+    if not keep_stale:
+        _last_good_rows = None
+
+
+# ---------------------------------------------------------------------------
+# Legacy tables — read ONLY, to seed the product list (see above)
+# ---------------------------------------------------------------------------
 
 def load_rate_overrides() -> dict:
-    """Return {product_name: {field: value, ...}} from PostgreSQL. Cached
-    (see _TTLCache) — this used to run fresh on every _apply_override()
-    call, i.e. once PER PRODUCT per effective_catalog() call."""
+    """{product_name: {field: value}} from the legacy rate_overrides table (seed input only)."""
     def _fetch():
         columns = ", ".join(("product_name",) + _OVERRIDABLE_FIELDS)
         with get_connection() as conn:
@@ -1987,76 +2041,295 @@ def load_rate_overrides() -> dict:
     return _rate_overrides_cache.get(_fetch)
 
 
-def save_rate_overrides(overrides: dict) -> None:
-    """
-    Persist {product_name: {field: value, ...}} to PostgreSQL. Only known catalog
-    (built-in or custom) product names and overridable fields are kept —
-    anything else is dropped silently so a bad admin payload can't corrupt
-    the store.
-    """
-    valid_names = {p.name for p in CATALOG} | {p.name for p in load_custom_products()}
-    cleaned: dict = {}
-    for name, fields_ in (overrides or {}).items():
-        if name not in valid_names or not isinstance(fields_, dict):
-            continue
-        kept = {k: v for k, v in fields_.items() if k in _OVERRIDABLE_FIELDS and v is not None}
-        if kept:
-            cleaned[name] = kept
-    columns = ", ".join(("product_name",) + _OVERRIDABLE_FIELDS)
-    placeholders = ", ".join(["%s"] * (1 + len(_OVERRIDABLE_FIELDS)))
-    update_columns = ", ".join(
-        f"{field_name} = EXCLUDED.{field_name}" for field_name in _OVERRIDABLE_FIELDS
-    )
-    with get_connection() as conn:
-        conn.execute("DELETE FROM rate_overrides")
-        for name, fields_ in cleaned.items():
-            conn.execute(
-                f"""
-                INSERT INTO rate_overrides ({columns})
-                VALUES ({placeholders})
-                ON CONFLICT (product_name) DO UPDATE SET
-                    {update_columns},
-                    updated_at = now()
-                """,
-                [name] + [fields_.get(field_name) for field_name in _OVERRIDABLE_FIELDS],
-            )
-    _rate_overrides_cache.invalidate()
+def load_deleted_builtin_names() -> set[str]:
+    """Names flagged deleted in the legacy rate_overrides table (seed input only)."""
+    def _fetch():
+        with get_connection() as conn:
+            rows = conn.execute("SELECT product_name FROM rate_overrides WHERE is_deleted").fetchall()
+        return {r["product_name"] for r in rows}
+    return _deleted_builtin_names_cache.get(_fetch)
 
 
-def clear_rate_override(product_name: str) -> None:
-    """Remove a single product's override (revert to catalog default)."""
-    with get_connection() as conn:
-        conn.execute("DELETE FROM rate_overrides WHERE product_name = %s", (product_name,))
-    _rate_overrides_cache.invalidate()
+_PRODUCT_COLUMNS = (
+    "name", "family", "short_label", "proposal_description", "sizes", "buying_model",
+    "base_rate", "estimated_impressions", "discloses_impressions", "minimum_spend",
+    "minimum_flight_days_min", "minimum_flight_days_max", "sla_data_days",
+    "sla_creative_days", "sla_activate_days", "sla_total_days", "media_allocation_pct",
+    "margin_upper", "margin_lower", "tech_platform", "wide_orbit_code", "billing_interval",
+    "billing_calendar", "billing_source", "national_supported", "notes",
+    "estimated_cpm_for_imps", "hispanic_targeting_forced", "cannabis_policy",
+    "political_policy", "is_addon",
+)
+_NUMERIC_COLUMNS = {
+    "base_rate", "minimum_spend", "media_allocation_pct", "margin_upper", "margin_lower",
+    "estimated_cpm_for_imps",
+}
 
 
-def _apply_override(p: Product) -> Product:
-    """Return `p` unchanged, or a copy with admin-overridden fields applied."""
-    overrides = load_rate_overrides()
-    override = overrides.get(p.name)
+def _row_to_product(row) -> Optional[Product]:
+    data = {k: row[k] for k in _PRODUCT_COLUMNS}
+    for field_name in _NUMERIC_COLUMNS:
+        if data[field_name] is not None:
+            data[field_name] = float(data[field_name])
+    data["minimum_flight_days"] = (data.pop("minimum_flight_days_min"), data.pop("minimum_flight_days_max"))
+    try:
+        return Product(**data)
+    except TypeError:
+        return None        # a malformed legacy record is skipped, never fatal
+
+
+def _product_params(p: Product) -> list:
+    return [
+        p.name, p.family, p.short_label, p.proposal_description, p.sizes, p.buying_model,
+        p.base_rate, p.estimated_impressions, p.discloses_impressions, p.minimum_spend,
+        p.minimum_flight_days[0], p.minimum_flight_days[1], p.sla_data_days,
+        p.sla_creative_days, p.sla_activate_days, p.sla_total_days, p.media_allocation_pct,
+        p.margin_upper, p.margin_lower, p.tech_platform, p.wide_orbit_code, p.billing_interval,
+        p.billing_calendar, p.billing_source, p.national_supported, p.notes,
+        p.estimated_cpm_for_imps, p.hispanic_targeting_forced, p.cannabis_policy,
+        p.political_policy, p.is_addon,
+    ]
+
+
+def load_custom_products() -> list[Product]:
+    """Products from the legacy custom_products table (seed input only)."""
+    def _fetch():
+        with get_connection() as conn:
+            rows = conn.execute(f"SELECT {', '.join(_PRODUCT_COLUMNS)} FROM custom_products ORDER BY name").fetchall()
+        return [p for p in (_row_to_product(r) for r in rows) if p is not None]
+    return _custom_products_cache.get(_fetch)
+
+
+def _apply_override(p: Product, overrides: Optional[dict] = None) -> Product:
+    """`p` with its legacy admin override (if any) applied — seed time only."""
+    override = (overrides if overrides is not None else load_rate_overrides()).get(p.name)
     if not override:
         return p
     return replace(p, **{k: v for k, v in override.items() if k in _OVERRIDABLE_FIELDS})
 
 
+def _legacy(loader, default, strict: bool = False):
+    """A legacy table read. A table that was never created (a fresh database) simply has nothing to fold in. Any
+    OTHER failure (a dropped connection, a missing column) must not be mistaken for "nothing there": with
+    `strict` it propagates, so the one-shot seed aborts and retries rather than permanently losing every legacy
+    edit; the read-only fallback (`strict` False) just goes without."""
+    try:
+        return loader()
+    except Exception as exc:  # noqa: BLE001
+        absent = type(exc).__name__ in ("UndefinedTable", "UndefinedColumn")
+        if strict and not absent:
+            raise
+        log.warning("legacy product table unavailable (%s): %s", getattr(loader, "__name__", loader), exc)
+        return default
+
+
+def _seed_rows(strict: bool = False) -> list[tuple[Product, bool]]:
+    """[(product, deleted)] as the legacy stores stood: the code list with every admin override applied (renames
+    included), admin-added products, and the admin's deletions kept as deleted — a deleted product must still
+    resolve by name or a saved proposal would lose its line."""
+    overrides = _legacy(load_rate_overrides, {}, strict)
+    deleted = _legacy(load_deleted_builtin_names, set(), strict)
+    rows = [(_apply_override(p, overrides), p.name in deleted) for p in CATALOG]
+    for legacy_name, halves in _LEGACY_SPLITS.items():
+        carried = {k: v for k, v in overrides.get(legacy_name, {}).items()
+                   if k in ("base_rate", "minimum_spend", "estimated_cpm_for_imps")}
+        gone = legacy_name in deleted
+        rows = [(replace(p, **carried) if (carried and p.name in halves) else p, d or (gone and p.name in halves))
+                for p, d in rows]
+    taken = {p.name for p, _ in rows}
+    for custom in _legacy(load_custom_products, [], strict):
+        if custom.name not in taken:
+            rows.append((_apply_override(custom, overrides), False))
+            taken.add(custom.name)
+    return rows
+
+
+def _seed_alias_map(strict: bool = False) -> dict[str, str]:
+    """{name a legacy rename replaced: its new name} — so the old name keeps resolving."""
+    overrides = _legacy(load_rate_overrides, {}, strict)
+    code_names = {p.name for p in CATALOG}
+    return {raw: ov["name"] for raw, ov in overrides.items()
+            if raw in code_names and ov.get("name") and ov["name"] != raw}
+
+
+def _seed_products() -> list[Product]:
+    """The live (non-deleted) seed list — also the read-only fallback when the table can't be reached."""
+    return [p for p, deleted in _seed_rows() if not deleted]
+
+
 # ---------------------------------------------------------------------------
-# Product renaming — aliases + built-in soft-delete
-#
-# A rename changes a product's DISPLAY name (the override's `name` field, or
-# a custom product's `name` column) while its STABLE key (rate_overrides.
-# product_name for a built-in) never changes. That alone would strand any
-# reference to the OLD display name — a planner's free-text paste, or
-# product_name on an already-saved proposal's line item — so every rename
-# also records an alias here. by_name() consults this after failing to
-# match the raw/current name; the parser (notion_parser.py) consults it via
-# all_product_aliases() when building its own match candidates.
+# Reading the list
+# ---------------------------------------------------------------------------
+
+def _seed_memo_rows() -> tuple[list[dict], dict]:
+    """The seed as fallback rows, remembered for a few seconds: with the table unreadable every lookup would
+    otherwise re-read the legacy tables (each a database round trip) on every call."""
+    key = (id(load_rate_overrides), id(load_custom_products), id(load_deleted_builtin_names))
+    now = time.monotonic()
+    if _seed_memo["key"] == key and now - _seed_memo["at"] < 5.0:
+        return _seed_memo["rows"], _seed_memo["aliases"]
+    rows = [{"id": None, "is_deleted": deleted, "product": p} for p, deleted in _seed_rows()]
+    aliases = _seed_alias_map()
+    _seed_memo.update(key=key, rows=rows, aliases=aliases, at=now)
+    return rows, aliases
+
+
+def _read_product_rows() -> Optional[list[dict]]:
+    """[{id, is_deleted, product}] in display order, or None when the table can't be read."""
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT id, is_deleted, {', '.join(_PRODUCT_COLUMNS)} FROM products ORDER BY sort_order, id"
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — a missing table / unreachable DB must never break callers
+        log.warning("products table unavailable, using the built-in seed list: %s", exc)
+        return None
+    out = []
+    for row in rows:
+        product = _row_to_product(row)
+        if product is not None:
+            out.append({"id": row["id"], "is_deleted": bool(row["is_deleted"]), "product": product})
+    return out
+
+
+def _seed_products_table() -> None:
+    """Fill an empty table from the code list plus everything the legacy tables held. Strict: if a legacy table
+    can't be read for any reason other than not existing, nothing is written (the next read tries again) — a
+    half-informed seed would be permanent."""
+    rows = _seed_rows(strict=True)
+    aliases = _seed_alias_map(strict=True)
+    placeholders = ", ".join(["%s"] * (len(_PRODUCT_COLUMNS) + 2))
+    with get_connection() as conn:
+        for order, (product, deleted) in enumerate(rows):
+            conn.execute(
+                f"INSERT INTO products (sort_order, is_deleted, {', '.join(_PRODUCT_COLUMNS)}) VALUES ({placeholders}) "
+                "ON CONFLICT (name) DO NOTHING",
+                [order, deleted] + _product_params(product),
+            )
+        for old_name, new_name in aliases.items():
+            conn.execute(
+                "INSERT INTO product_aliases (alias_name, current_name) VALUES (%s, %s) ON CONFLICT (alias_name) DO NOTHING",
+                (old_name, new_name),
+            )
+
+
+def load_product_rows() -> list[dict]:
+    """Every product row, deleted ones included (they still resolve by name for saved proposals). Cached.
+    Seeds an empty table on first use; with the table unreachable, the seed list (ids None)."""
+    global _products_retry_at, _last_good_rows, _fallback_aliases
+    rows = _products_cache.peek()
+    if rows is None and time.monotonic() >= _products_retry_at:
+        rows = _read_product_rows()
+        if rows is not None and not rows:
+            try:
+                _seed_products_table()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("couldn't seed the products table: %s", exc)
+                rows = None
+            else:
+                rows = _read_product_rows()
+        if rows is not None:
+            _products_cache.set(rows)
+            _last_good_rows = rows
+            _fallback_aliases = {}
+        else:
+            _products_retry_at = time.monotonic() + 15.0
+    if rows is None:
+        if _last_good_rows is not None:
+            return _last_good_rows           # a blip after the list was loaded: keep serving it, edits and all
+        rows, _fallback_aliases = _seed_memo_rows()
+    return rows
+
+
+def effective_catalog(include_deleted: bool = False) -> list[Product]:
+    """The product list, in display order. Deleted products are left out unless include_deleted."""
+    return [r["product"] for r in load_product_rows() if include_deleted or not r["is_deleted"]]
+
+
+def _db_aliases() -> dict[str, str]:
+    cached = _aliases_cache.peek()
+    if cached is not None:
+        return cached
+    try:
+        found = all_product_aliases()
+    except Exception:  # noqa: BLE001 — the alias table is optional context
+        return {}
+    _aliases_cache.set(found)
+    return found
+
+
+def by_name(name: str) -> Optional[Product]:
+    """
+    A product by its current name — or by a name it USED to have (a rename, or a product that was split in
+    code). Deleted products still resolve, so a saved proposal that uses one keeps its line.
+    """
+    rows = load_product_rows()
+    by_exact = {r["product"].name: r["product"] for r in rows}
+    seen = set()
+    current = name
+    for _ in range(6):                                       # name -> former-name chains are short
+        if current in by_exact:
+            return by_exact[current]
+        if current in seen:
+            break
+        seen.add(current)
+        nxt = _STATIC_ALIASES.get(current) or _db_aliases().get(current) or _fallback_aliases.get(current)
+        if not nxt or nxt == current:
+            break
+        current = nxt
+    return None
+
+
+def name_variants(name: str) -> set[str]:
+    """Every name `name`'s product answers to: the name as given, its current name, and the names it used to
+    have (including, for either half of a split product, the name it had before the split). Anything keyed by a
+    product NAME (the Restricted Verticals mapping) is looked up through all of them, so a rename or split
+    doesn't silently orphan it."""
+    out = {name}
+    product = by_name(name)
+    if product is None:
+        return out
+    out.add(product.name)
+    for legacy_name, halves in _LEGACY_SPLITS.items():
+        if out & set(halves):
+            out.add(legacy_name)
+    aliases = {**_STATIC_ALIASES, **_fallback_aliases, **_db_aliases()}
+    changed = True
+    while changed:                                           # follow A -> B -> C to the end, whatever the order
+        changed = False
+        for alias, current in aliases.items():
+            if current in out and alias not in out:
+                out.add(alias)
+                changed = True
+    return out
+
+
+def by_family(family: str, include_deleted: bool = False) -> list[Product]:
+    return [p for p in effective_catalog(include_deleted=include_deleted) if p.family == family]
+
+
+def families() -> list[str]:
+    """Distinct families in list order, including any family an admin introduced."""
+    seen, out = set(), []
+    for p in effective_catalog():
+        if p.family not in seen:
+            seen.add(p.family)
+            out.append(p.family)
+    return out
+
+
+def to_dict_list() -> list[dict]:
+    """Serialize for JSON / web use."""
+    return [asdict(p) for p in effective_catalog()]
+
+
+# ---------------------------------------------------------------------------
+# Names that changed — the alias table
 # ---------------------------------------------------------------------------
 
 def record_product_alias(old_name: str, new_name: str) -> None:
-    """Record that `old_name` is now called `new_name`. Also repoints any
-    EARLIER alias that pointed at old_name, so a chain of renames
-    (A -> B -> C) still resolves in one hop from any historical name to
-    the current one."""
+    """Record that `old_name` is now called `new_name`, repointing earlier aliases so a chain of renames
+    (A -> B -> C) still resolves in one hop from any historical name."""
     if not old_name or not new_name or old_name == new_name:
         return
     with get_connection() as conn:
@@ -2072,386 +2345,342 @@ def record_product_alias(old_name: str, new_name: str) -> None:
             """,
             (old_name, new_name),
         )
+    _aliases_cache.invalidate()
 
 
 def resolve_product_alias(name: str) -> Optional[str]:
-    """If `name` is a former product display name, return its current one."""
+    """If `name` is a former product name, its current one."""
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT current_name FROM product_aliases WHERE alias_name = %s", (name,)
-        ).fetchone()
+        row = conn.execute("SELECT current_name FROM product_aliases WHERE alias_name = %s", (name,)).fetchone()
     return row["current_name"] if row else None
 
 
 def all_product_aliases() -> dict[str, str]:
-    """{former_name: current_name} for every renamed product — fed into the
-    free-text parser's own candidate list (see notion_parser.py) so a
-    client's pasted request can still mention a product by a name it no
-    longer has."""
+    """{former_name: current_name} for every renamed product — also fed to the free-text parser so a pasted
+    request can still mention a product by a name it no longer has. Includes the names changed in code."""
     with get_connection() as conn:
         rows = conn.execute("SELECT alias_name, current_name FROM product_aliases").fetchall()
-    return {r["alias_name"]: r["current_name"] for r in rows}
-
-
-def load_deleted_builtin_names() -> set[str]:
-    """Stable (original catalog.py literal) names of every soft-deleted
-    built-in product. Independent of load_rate_overrides()/_OVERRIDABLE_FIELDS
-    — is_deleted is a delete/restore action, not an editable form field.
-    Cached (see _TTLCache) — effective_catalog()'s default (include_deleted=
-    False) path calls this on every invocation, same hot-path reasoning as
-    load_rate_overrides() above."""
-    def _fetch():
-        with get_connection() as conn:
-            rows = conn.execute(
-                "SELECT product_name FROM rate_overrides WHERE is_deleted"
-            ).fetchall()
-        return {r["product_name"] for r in rows}
-    return _deleted_builtin_names_cache.get(_fetch)
-
-
-def set_builtin_deleted(stable_name: str, deleted: bool) -> None:
-    """Soft-delete (or restore) a BUILT-IN product by its stable catalog.py
-    name. A built-in can't be truly removed without a code change/deploy
-    (see module docstring) — this only hides it from new selection; by_name()
-    still resolves it so an already-saved proposal referencing it keeps
-    working. Upserts a bare rate_overrides row if one doesn't exist yet."""
-    with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO rate_overrides (product_name, is_deleted) VALUES (%s, %s)
-            ON CONFLICT (product_name) DO UPDATE SET
-                is_deleted = EXCLUDED.is_deleted, updated_at = now()
-            """,
-            (stable_name, deleted),
-        )
-    _deleted_builtin_names_cache.invalidate()
-    # is_deleted lives in the SAME rate_overrides row load_rate_overrides()
-    # reads (just a different column) — a set_builtin_deleted() call
-    # doesn't change any of the OVERRIDABLE fields that cache actually
-    # holds, but invalidating it too costs nothing and rules out any
-    # future field added to this same upsert silently going stale.
-    _rate_overrides_cache.invalidate()
+    return {**_STATIC_ALIASES, **{r["alias_name"]: r["current_name"] for r in rows}}
 
 
 # ---------------------------------------------------------------------------
-# Admin custom products
-#
-# Lets the admin add brand-new catalog products from the /admin UI without a
-# code change or restart — persisted separately from the built-in CATALOG
-# (which stays a pure reflection of the rate card) so the two sources never
-# get confused. Custom products participate in by_name()/by_family()/
-# families()/effective_catalog() exactly like built-in ones, including rate
-# overrides.
+# Editing the list (admin)
 # ---------------------------------------------------------------------------
 
-def load_custom_products() -> list[Product]:
-    """Return the admin-added products from PostgreSQL, or [] if none saved.
-    Cached (see _TTLCache) — effective_catalog()/by_name()/families() all
-    call this fresh on every invocation otherwise, same hot-path reasoning
-    as load_rate_overrides() above."""
-    def _fetch():
-        columns = (
-            "name, family, short_label, proposal_description, sizes, buying_model, "
-            "base_rate, estimated_impressions, discloses_impressions, minimum_spend, "
-            "minimum_flight_days_min, minimum_flight_days_max, sla_data_days, "
-            "sla_creative_days, sla_activate_days, sla_total_days, media_allocation_pct, "
-            "margin_upper, margin_lower, tech_platform, wide_orbit_code, billing_interval, "
-            "billing_calendar, billing_source, national_supported, notes, "
-            "estimated_cpm_for_imps, hispanic_targeting_forced, cannabis_policy, "
-            "political_policy, is_addon"
-        )
-        with get_connection() as conn:
-            rows = conn.execute(f"SELECT {columns} FROM custom_products ORDER BY name").fetchall()
-        products = []
-        numeric_fields = {
-            "base_rate", "minimum_spend", "media_allocation_pct", "margin_upper",
-            "margin_lower", "estimated_cpm_for_imps",
-        }
-        for row in rows:
-            data = dict(row)
-            for field_name in numeric_fields:
-                if data[field_name] is not None:
-                    data[field_name] = float(data[field_name])
-            data["minimum_flight_days"] = (
-                data.pop("minimum_flight_days_min"),
-                data.pop("minimum_flight_days_max"),
-            )
-            try:
-                products.append(Product(**data))
-            except TypeError:
-                continue  # preserve the old behavior for malformed legacy records
-        return products
-    return _custom_products_cache.get(_fetch)
+# What the admin form can set. Everything else on a product keeps the value it has (or the default for a new one).
+EDITABLE_FIELDS = (
+    "name", "family", "short_label", "buying_model", "base_rate", "minimum_spend", "estimated_cpm_for_imps",
+    "sizes", "tech_platform", "proposal_description", "notes", "is_addon",
+    "minimum_flight_days_min", "minimum_flight_days_max", "sla_data_days", "sla_creative_days",
+    "sla_activate_days", "sla_total_days", "margin_upper", "margin_lower", "wide_orbit_code",
+    "estimated_impressions", "discloses_impressions", "national_supported",
+)
+_NULLABLE = {"base_rate", "estimated_cpm_for_imps", "sla_data_days", "sla_creative_days", "sla_activate_days", "sla_total_days"}
+_INT_FIELDS = {"minimum_flight_days_min", "minimum_flight_days_max", "sla_data_days", "sla_creative_days",
+               "sla_activate_days", "sla_total_days"}
+_BOOL_FIELDS = {"is_addon", "estimated_impressions", "discloses_impressions", "national_supported"}
+_FLOAT_FIELDS = {"base_rate", "minimum_spend", "estimated_cpm_for_imps", "margin_upper", "margin_lower"}
+_TEXT_FIELDS = {"name", "family", "short_label", "sizes", "tech_platform", "proposal_description", "notes", "wide_orbit_code"}
+_MAX_TEXT = {"name": 200, "family": 120, "short_label": 200, "sizes": 500, "tech_platform": 200, "wide_orbit_code": 200,
+             "proposal_description": 5000, "notes": 5000}
+# Text pasted from Word / PDF carries control characters that openpyxl refuses to write — one such product would
+# break /api/generate for every proposal that uses it — and a NUL is rejected by Postgres.
+_CONTROL_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# What the NUMERIC columns hold (and sane business limits within them).
+_RANGES = {"base_rate": (0, 1e9), "minimum_spend": (0, 1e9), "estimated_cpm_for_imps": (0, 1e6),
+           "margin_upper": (0, 1), "margin_lower": (0, 1)}
+_INT_MAX = 100000
 
 
-def _save_custom_products(products: list[Product]) -> None:
-    columns = (
-        "name, family, short_label, proposal_description, sizes, buying_model, "
-        "base_rate, estimated_impressions, discloses_impressions, minimum_spend, "
-        "minimum_flight_days_min, minimum_flight_days_max, sla_data_days, "
-        "sla_creative_days, sla_activate_days, sla_total_days, media_allocation_pct, "
-        "margin_upper, margin_lower, tech_platform, wide_orbit_code, billing_interval, "
-        "billing_calendar, billing_source, national_supported, notes, "
-        "estimated_cpm_for_imps, hispanic_targeting_forced, cannabis_policy, "
-        "political_policy, is_addon"
-    )
-    placeholders = ", ".join(["%s"] * 31)
-    update_columns = ", ".join(
-        f"{column} = EXCLUDED.{column}" for column in columns.split(", ")
-        if column != "name"
-    )
-    with get_connection() as conn:
-        conn.execute("DELETE FROM custom_products")
-        for product in products:
-            conn.execute(
-                f"""
-                INSERT INTO custom_products ({columns})
-                VALUES ({placeholders})
-                ON CONFLICT (name) DO UPDATE SET
-                    {update_columns},
-                    updated_at = now()
-                """,
-                [
-                    product.name,
-                    product.family,
-                    product.short_label,
-                    product.proposal_description,
-                    product.sizes,
-                    product.buying_model,
-                    product.base_rate,
-                    product.estimated_impressions,
-                    product.discloses_impressions,
-                    product.minimum_spend,
-                    product.minimum_flight_days[0],
-                    product.minimum_flight_days[1],
-                    product.sla_data_days,
-                    product.sla_creative_days,
-                    product.sla_activate_days,
-                    product.sla_total_days,
-                    product.media_allocation_pct,
-                    product.margin_upper,
-                    product.margin_lower,
-                    product.tech_platform,
-                    product.wide_orbit_code,
-                    product.billing_interval,
-                    product.billing_calendar,
-                    product.billing_source,
-                    product.national_supported,
-                    product.notes,
-                    product.estimated_cpm_for_imps,
-                    product.hispanic_targeting_forced,
-                    product.cannabis_policy,
-                    product.political_policy,
-                    product.is_addon,
-                ],
-            )
-    _custom_products_cache.invalidate()
+def product_to_form(p: Product) -> dict:
+    """A product as the admin form shows it (flat, JSON-friendly)."""
+    out = {k: getattr(p, k) for k in EDITABLE_FIELDS if hasattr(p, k)}
+    out["minimum_flight_days_min"], out["minimum_flight_days_max"] = p.minimum_flight_days[0], p.minimum_flight_days[1]
+    return out
 
 
-def add_custom_product(fields: dict) -> Product:
-    """
-    Validate and persist a new admin-added product. Raises ValueError with a
-    user-facing message on any problem (missing required field, bad
-    buying_model, duplicate name) — the caller (the admin API endpoint)
-    surfaces that message directly to the UI.
-    """
-    name = (fields.get("name") or "").strip()
-    family = (fields.get("family") or "").strip()
-    buying_model = (fields.get("buying_model") or "").strip()
+def _label(key: str) -> str:
+    return key.replace("_", " ")
+
+
+def _shown(n: float) -> str:
+    return f"{n:,.0f}" if abs(n) >= 1000 else f"{n:g}"
+
+
+def _number(key: str, value) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{_label(key).capitalize()} must be a number.") from None
+    if not math.isfinite(number):
+        raise ValueError(f"{_label(key).capitalize()} must be a real number.")
+    low, high = _RANGES.get(key) or ((0, _INT_MAX) if key in _INT_FIELDS or key.startswith("minimum_flight_days") else (0, 1e9))
+    if not (low <= number <= high):
+        raise ValueError(f"{_label(key).capitalize()} must be between {_shown(low)} and {_shown(high)}.")
+    return number
+
+
+def _build_product(fields: dict, base: Optional[Product]) -> Product:
+    """`base` (or a blank product) with the provided `fields` laid over it, validated. ValueError carries a
+    planner-readable message. A key that is absent keeps the base value; a nullable key sent as None clears it."""
+    data = asdict(base) if base is not None else {
+        "family": "", "name": "", "short_label": "Product", "proposal_description": "", "sizes": "Custom",
+        "buying_model": "Fixed", "base_rate": None, "estimated_impressions": False, "discloses_impressions": True,
+        "minimum_spend": 0.0, "minimum_flight_days": (7, 90), "sla_data_days": None, "sla_creative_days": None,
+        "sla_activate_days": None, "sla_total_days": None, "media_allocation_pct": 0.0, "margin_upper": 0.5,
+        "margin_lower": 0.3, "tech_platform": "", "wide_orbit_code": "", "billing_interval": "Monthly",
+        "billing_calendar": "Standard/prorated", "billing_source": "1st Party Actual", "national_supported": True,
+        "notes": "", "estimated_cpm_for_imps": None, "hispanic_targeting_forced": None,
+        "cannabis_policy": "not_allowed", "political_policy": "allowed", "is_addon": False,
+    }
+    flight = list(data.get("minimum_flight_days") or (7, 90))
+    for key in EDITABLE_FIELDS:
+        if key not in fields:
+            continue
+        value = fields[key]
+        if key in ("minimum_flight_days_min", "minimum_flight_days_max"):
+            if value not in (None, ""):
+                days = _number(key, value)
+                if days != int(days):
+                    raise ValueError(f"{_label(key).capitalize()} must be a whole number of days.")
+                flight[0 if key.endswith("min") else 1] = int(days)
+            continue
+        if isinstance(value, str):
+            value = _CONTROL_CHARS.sub("", value).strip()
+        if value in (None, "") and key in _NULLABLE:
+            data[key] = None
+        elif key in _BOOL_FIELDS:
+            data[key] = bool(value)
+        elif key in _INT_FIELDS:
+            number = _number(key, value)
+            if number != int(number):
+                raise ValueError(f"{_label(key).capitalize()} must be a whole number.")
+            data[key] = int(number)
+        elif key in _FLOAT_FIELDS:
+            if value in (None, ""):
+                if key == "minimum_spend":
+                    data[key] = 0.0
+            else:
+                data[key] = _number(key, value)
+        elif key in _TEXT_FIELDS:
+            if value is not None:
+                if len(str(value)) > _MAX_TEXT[key]:
+                    raise ValueError(f"{_label(key).capitalize()} is too long (max {_MAX_TEXT[key]} characters).")
+                data[key] = str(value)
+        elif value is not None:
+            data[key] = value
+    data["minimum_flight_days"] = (flight[0], flight[1])
+    name = re.sub(r"\s+", " ", data.get("name") or "").strip()
+    family = re.sub(r"\s+", " ", data.get("family") or "").strip()
     if not name:
         raise ValueError("Product name is required.")
     if not family:
         raise ValueError("Family is required.")
-    if buying_model not in ("CPM", "CPP", "Fixed"):
-        raise ValueError("buying_model must be one of CPM, CPP, or Fixed.")
-
-    existing_names = {p.name for p in CATALOG} | {p.name for p in load_custom_products()}
-    if name in existing_names:
-        raise ValueError(f"A product named '{name}' already exists.")
-
-    flight_days = fields.get("minimum_flight_days") or (7, 90)
-    product = Product(
-        family=family,
-        name=name,
-        short_label=(fields.get("short_label") or "Custom Product").strip(),
-        proposal_description=fields.get("proposal_description") or "",
-        sizes=fields.get("sizes") or "Custom",
-        buying_model=buying_model,
-        base_rate=fields.get("base_rate"),
-        estimated_impressions=bool(fields.get("estimated_impressions", False)),
-        discloses_impressions=bool(fields.get("discloses_impressions", True)),
-        minimum_spend=float(fields.get("minimum_spend") or 0.0),
-        minimum_flight_days=tuple(flight_days),
-        # SLA breakdown: an admin-added product has no rate-card SLA columns
-        # to source these from, so they stay unknown (None) unless the
-        # caller explicitly provides one — matches the Optional[int] typing
-        # rather than fabricating a business-day figure with no real basis.
-        sla_data_days=fields.get("sla_data_days"),
-        sla_creative_days=fields.get("sla_creative_days"),
-        sla_activate_days=fields.get("sla_activate_days"),
-        sla_total_days=fields.get("sla_total_days"),
-        media_allocation_pct=float(fields.get("media_allocation_pct") or 0.0),
-        margin_upper=float(fields.get("margin_upper") or 0.5),
-        margin_lower=float(fields.get("margin_lower") or 0.3),
-        tech_platform=fields.get("tech_platform") or "",
-        wide_orbit_code=fields.get("wide_orbit_code") or name,
-        national_supported=bool(fields.get("national_supported", True)),
-        notes=fields.get("notes") or "",
-        estimated_cpm_for_imps=fields.get("estimated_cpm_for_imps"),
-        hispanic_targeting_forced=fields.get("hispanic_targeting_forced"),
-        cannabis_policy=fields.get("cannabis_policy") or "not_allowed",
-        political_policy=fields.get("political_policy") or "allowed",
-        is_addon=bool(fields.get("is_addon", False)),
-    )
-
-    custom = load_custom_products()
-    custom.append(product)
-    _save_custom_products(custom)
-    return product
+    if data.get("buying_model") not in ("CPM", "CPP", "Fixed"):
+        raise ValueError("Buying model must be one of CPM, CPP, or Fixed.")
+    if flight[0] < 0 or flight[1] > _INT_MAX or flight[0] > flight[1]:
+        raise ValueError("Minimum flight days: the first number can't be larger than the second (and both must be 0 or more).")
+    data["name"], data["family"] = name, family
+    # A new product's Wide Orbit code starts as its name; a code that's already there (an edit, or a copy of a
+    # product whose code is shared) is left exactly as it is.
+    if not (data.get("wide_orbit_code") or "").strip():
+        data["wide_orbit_code"] = name
+    return Product(**data)
 
 
-def delete_custom_product(name: str) -> bool:
-    """Remove a custom product by name. Returns False if it wasn't found (or is a built-in)."""
-    custom = load_custom_products()
-    filtered = [p for p in custom if p.name != name]
-    if len(filtered) == len(custom):
-        return False
-    _save_custom_products(filtered)
-    clear_rate_override(name)  # drop any override that pointed at it
-    return True
+def _canonical_family(family: str, known: list[str]) -> str:
+    """The family as it's already spelled elsewhere in the list (case-insensitively), so "online video" files
+    under "Online Video" instead of starting a look-alike family."""
+    for existing in known:
+        if existing.casefold() == family.casefold():
+            return existing
+    return family
 
 
-def update_custom_product(name: str, fields: dict) -> Product:
-    """
-    Update an existing CUSTOM (admin-added) product's fields in place — the
-    admin "Edit product" panel's path for a product that isn't part of the
-    built-in catalog (a built-in goes through the rate-override mechanism
-    above instead). Implemented as delete + re-add under the same name so
-    every field, not just the 3 numeric ones, actually changes.
+def _require_table() -> list[dict]:
+    """The product rows, for a write. Loading them also SEEDS an empty table — which must happen before the first
+    write, or that write would make the table non-empty and the seed would never run. RuntimeError when the table
+    can't be reached."""
+    rows = load_product_rows()
+    if any(r["id"] is None for r in rows):
+        raise RuntimeError("The products table isn't available — apply the latest schema.sql and try again.")
+    return rows
 
-    `fields` may be a PARTIAL set (None/missing = keep the current value) —
-    the caller (the admin API endpoint) is expected to pre-fill its edit
-    form with the product's current values, so in practice every field
-    that's shown gets resubmitted; this is just defensive.
-    Raises ValueError (same messages as add_custom_product) on invalid input.
-    """
-    custom = load_custom_products()
-    existing = next((p for p in custom if p.name == name), None)
-    if existing is None:
-        raise ValueError(f"Custom product '{name}' not found.")
 
-    merged = asdict(existing)
-    for k, v in fields.items():
-        if v is not None and k in merged:
-            merged[k] = v
+def list_products() -> list[dict]:
+    """Admin view: [{id, ...form fields}] for every non-deleted product, in display order. RuntimeError when
+    the table can't be reached (nothing to edit)."""
+    rows = _require_table()
+    return [{"id": r["id"], **product_to_form(r["product"])} for r in rows if not r["is_deleted"]]
 
-    delete_custom_product(name)
+
+def _row(conn, product_id: int) -> Optional[dict]:
+    row = conn.execute(
+        f"SELECT id, is_deleted, sort_order, {', '.join(_PRODUCT_COLUMNS)} FROM products WHERE id = %s", (product_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return {"id": row["id"], "is_deleted": bool(row["is_deleted"]), "sort_order": row["sort_order"],
+            "product": _row_to_product(row)}
+
+
+def _same_name(conn, name: str, exclude_id: Optional[int] = None) -> list[dict]:
+    """Rows whose name matches `name` ignoring case (names are unique that way: the parser matches
+    case-insensitively, so two names differing only by case could never both be picked from pasted text)."""
+    rows = conn.execute("SELECT id, is_deleted, name FROM products").fetchall()
+    return [r for r in rows if r["name"].casefold() == name.casefold() and r["id"] != exclude_id]
+
+
+def _db_errors():
+    import psycopg
+    return psycopg.errors
+
+
+def create_product(fields: dict, copy_from_id: Optional[int] = None) -> dict:
+    """Add a product — blank, or a COPY of `copy_from_id` with `fields` laid over it (a quick variant). A copy
+    sits right after its source. Returns {id, ...form fields}."""
+    rows = _require_table()
+    errors = _db_errors()
     try:
-        return add_custom_product(merged)
-    except ValueError:
-        # Validation failed on the new values — put the original back
-        # rather than leaving the product deleted with nothing to replace it.
-        custom_now = load_custom_products()
-        custom_now.append(existing)
-        _save_custom_products(custom_now)
-        raise
+        with get_connection() as conn:
+            source = _row(conn, copy_from_id) if copy_from_id is not None else None
+            if copy_from_id is not None and source is None:
+                raise ValueError("The product to copy no longer exists.")
+            product = _build_product(fields, source["product"] if source else None)
+            product = replace(product, family=_canonical_family(product.family, [r["product"].family for r in rows]))
+            clash = _same_name(conn, product.name)
+            live = [r for r in clash if not r["is_deleted"]]
+            if live:
+                raise ValueError(f"A product named '{product.name}' already exists.")
+            revive = clash[0] if clash else None            # a deleted product of the same name: reuse its row
+            if source is not None:
+                order = source["sort_order"] + 1
+                conn.execute("UPDATE products SET sort_order = sort_order + 1 WHERE sort_order >= %s", (order,))
+            else:
+                order = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM products").fetchone()["n"]
+            if revive is not None:
+                sets = ", ".join(f"{c} = %s" for c in _PRODUCT_COLUMNS)
+                conn.execute(f"UPDATE products SET {sets}, is_deleted = FALSE, sort_order = %s, updated_at = now() WHERE id = %s",
+                             _product_params(product) + [order, revive["id"]])
+                new_id = revive["id"]
+            else:
+                placeholders = ", ".join(["%s"] * (len(_PRODUCT_COLUMNS) + 1))
+                new_id = conn.execute(
+                    f"INSERT INTO products (sort_order, {', '.join(_PRODUCT_COLUMNS)}) VALUES ({placeholders}) RETURNING id",
+                    [order] + _product_params(product),
+                ).fetchone()["id"]
+    except errors.UniqueViolation:
+        raise ValueError("A product with that name already exists.") from None
+    except errors.DataError:
+        raise ValueError("One of the numbers or texts is too large or isn't valid.") from None
+    invalidate_product_caches(keep_stale=True)
+    return {"id": new_id, **product_to_form(product), "copied_from": source["product"].name if source else None}
 
 
-def effective_catalog(include_deleted: bool = False) -> list[Product]:
-    """Built-in + custom products, with any admin rate overrides (including
-    a rename) applied — for listing/the wizard's product picker/the parser's
-    candidate list. include_deleted=False (the default) hides soft-deleted
-    built-ins from all of those — pass True for the admin view, which needs
-    to show (and offer to restore) a deleted product, not just hide it."""
-    all_products = list(CATALOG) + load_custom_products()
-    applied = [_apply_override(p) for p in all_products]
-    if include_deleted:
-        return applied
-    deleted = load_deleted_builtin_names()
-    return [p for p, raw in zip(applied, all_products) if raw.name not in deleted]
-
-
-def by_name(name: str) -> Optional[Product]:
-    """
-    Find a product (built-in or custom) by its CURRENT display name, its
-    original/never-renamed name, or any FORMER name it's since been renamed
-    from — with any admin rate override applied. Always resolves a
-    soft-deleted built-in too (unlike effective_catalog()'s default) so an
-    already-saved proposal referencing it doesn't silently lose the line
-    item; callers that need to exclude deleted products (the wizard's
-    picker, the parser) go through effective_catalog() instead, not this.
-    """
-    # 1. Raw catalog/custom literal name — covers "never renamed" (the
-    #    common case) and a saved LineItem.product_name from BEFORE a
-    #    rename (the original name is always rate_overrides' own stable key).
-    p = next((prod for prod in CATALOG if prod.name == name), None)
-    if p is None:
-        p = next((prod for prod in load_custom_products() if prod.name == name), None)
-    if p is not None:
-        return _apply_override(p)
-    # 2. Current EFFECTIVE (possibly renamed) display name — covers a fresh
-    #    lookup using today's name for a built-in whose raw literal differs.
-    for prod in list(CATALOG) + load_custom_products():
-        applied = _apply_override(prod)
-        if applied.name == name:
-            return applied
-    # 3. Alias table — covers an OLDER intermediate display name, from
-    #    further back than the most recent rename.
-    current = resolve_product_alias(name)
-    if current and current != name:
-        return by_name(current)
-    return None
-
-
-def name_variants(name: str) -> set[str]:
-    """Every name `name`'s product answers to: the name as given, its CURRENT
-    (possibly renamed) display name, and its stable raw catalog/custom name.
-    Anything keyed by the raw literal (e.g. the Restricted Verticals mapping)
-    has to be looked up through all three, or a renamed product silently
-    stops matching."""
-    out = {name}
-    product = by_name(name)
-    if product is None:
-        return out
-    out.add(product.name)
-    renamed = False
-    for raw in list(CATALOG) + load_custom_products():
-        if _apply_override(raw).name == product.name:
-            out.add(raw.name)
-            renamed = renamed or raw.name != product.name
-    if renamed:
-        # ...and the names it carried in between (A -> B -> C), which an admin may have typed into a mapping.
+def update_product(product_id: int, fields: dict) -> dict:
+    """Edit any field of a product. A new name is recorded as an alias, so the old one keeps resolving in saved
+    proposals and pasted requests."""
+    rows = _require_table()
+    errors = _db_errors()
+    try:
+        with get_connection() as conn:
+            row = _row(conn, product_id)
+            if row is None or row["is_deleted"]:
+                raise LookupError("Product not found.")
+            old = row["product"]
+            product = _build_product(fields, old)
+            product = replace(product, family=_canonical_family(product.family, [r["product"].family for r in rows]))
+            if product.name != old.name:
+                clash = _same_name(conn, product.name, exclude_id=product_id)
+                if any(not r["is_deleted"] for r in clash):
+                    raise ValueError(f"A product named '{product.name}' already exists.")
+                if clash:
+                    raise ValueError(f"A deleted product already uses the name '{product.name}' (saved proposals still point at it) "
+                                     "— pick another name, or add a new product with that name to bring it back.")
+            sets = ", ".join(f"{c} = %s" for c in _PRODUCT_COLUMNS)
+            conn.execute(f"UPDATE products SET {sets}, updated_at = now() WHERE id = %s", _product_params(product) + [product_id])
+    except errors.UniqueViolation:
+        raise ValueError("A product with that name already exists.") from None
+    except errors.DataError:
+        raise ValueError("One of the numbers or texts is too large or isn't valid.") from None
+    if product.name != old.name:
         try:
-            out.update(alias for alias, current in all_product_aliases().items() if current in out)
-        except Exception:  # noqa: BLE001 — the alias table is optional context here, never a reason to fail
-            pass
-    return out
+            record_product_alias(old.name, product.name)
+        except Exception as exc:  # noqa: BLE001 — the rename itself is saved; only the old-name lookup is lost
+            log.warning("couldn't record the alias %r -> %r: %s", old.name, product.name, exc)
+    invalidate_product_caches(keep_stale=True)
+    return {"id": product_id, **product_to_form(product)}
 
 
-def by_family(family: str, include_deleted: bool = False) -> list[Product]:
-    """All products (built-in or custom) in a Family, with any admin rate
-    overrides (including a rename) applied. See effective_catalog() for
-    include_deleted."""
-    return [p for p in effective_catalog(include_deleted=include_deleted) if p.family == family]
+def delete_product(product_id: int) -> Optional[str]:
+    """Remove a product from every list. The row stays, hidden, only so a proposal that already uses it keeps
+    resolving it by name. Returns the product's name, or None if it wasn't there."""
+    _require_table()
+    with get_connection() as conn:
+        row = _row(conn, product_id)
+        if row is None or row["is_deleted"]:
+            return None
+        conn.execute("UPDATE products SET is_deleted = TRUE, updated_at = now() WHERE id = %s", (product_id,))
+    invalidate_product_caches(keep_stale=True)
+    return row["product"].name
 
 
-def families() -> list[str]:
-    """Distinct families in catalog order, including any new family a custom product introduces."""
-    seen, out = set(), []
-    for p in list(CATALOG) + load_custom_products():
-        if p.family not in seen:
-            seen.add(p.family)
-            out.append(p.family)
-    return out
-
-
-def to_dict_list() -> list[dict]:
-    """Serialize for JSON / web use."""
-    return [asdict(p) for p in CATALOG]
+def bulk_upsert_products(items: list[dict]) -> dict:
+    """Add or update many products in ONE transaction. items: [{"line": n, "fields": {...}}], matched to the
+    list by name (case-insensitively): a match is updated — and left untouched when nothing in it changed — and
+    anything else is added. A bad row is reported and skipped (each row runs in its own savepoint), never fatal."""
+    rows = _require_table()
+    errors = _db_errors()
+    import psycopg
+    known_families = [r["product"].family for r in rows]
+    live = {r["product"].name.casefold(): r for r in rows if not r["is_deleted"]}
+    tombstones = {r["product"].name.casefold(): r for r in rows if r["is_deleted"]}
+    created, updated, unchanged, problems = [], [], [], []
+    with get_connection() as conn:
+        next_order = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM products").fetchone()["n"]
+        for item in items:
+            line, fields = item["line"], item["fields"]
+            name = (fields.get("name") or "").strip()
+            try:
+                match = live.get(name.casefold())
+                if match is not None:
+                    fields = {k: v for k, v in fields.items() if k != "name"}     # matched by name: never a rename by case
+                product = _build_product(fields, match["product"] if match else None)
+                product = replace(product, family=_canonical_family(product.family, known_families))
+                if match is not None and product == match["product"]:
+                    unchanged.append(product.name)
+                    continue
+                with conn.transaction():                       # a savepoint: this row alone rolls back on a DB error
+                    if match is not None:
+                        sets = ", ".join(f"{c} = %s" for c in _PRODUCT_COLUMNS)
+                        conn.execute(f"UPDATE products SET {sets}, updated_at = now() WHERE id = %s",
+                                     _product_params(product) + [match["id"]])
+                    elif product.name.casefold() in tombstones:
+                        dead = tombstones.pop(product.name.casefold())
+                        sets = ", ".join(f"{c} = %s" for c in _PRODUCT_COLUMNS)
+                        conn.execute(f"UPDATE products SET {sets}, is_deleted = FALSE, sort_order = %s, updated_at = now() WHERE id = %s",
+                                     _product_params(product) + [next_order, dead["id"]])
+                        next_order += 1
+                    else:
+                        placeholders = ", ".join(["%s"] * (len(_PRODUCT_COLUMNS) + 1))
+                        new_id = conn.execute(
+                            f"INSERT INTO products (sort_order, {', '.join(_PRODUCT_COLUMNS)}) VALUES ({placeholders}) RETURNING id",
+                            [next_order] + _product_params(product),
+                        ).fetchone()["id"]
+                        live[product.name.casefold()] = {"id": new_id, "is_deleted": False, "product": product}
+                        next_order += 1
+                (updated if match is not None else created).append(product.name)
+                if match is not None:
+                    live[product.name.casefold()] = {**match, "product": product}
+            except ValueError as exc:
+                problems.append(f"Row {line} ('{name}'): {exc}")
+            except psycopg.Error as exc:
+                problems.append(f"Row {line} ('{name}'): the database refused it ({exc.__class__.__name__}).")
+    invalidate_product_caches(keep_stale=True)
+    return {"created": created, "updated": updated, "unchanged": unchanged, "errors": problems}
 
 
 if __name__ == "__main__":
-    print(f"Catalog has {len(CATALOG)} products across {len(families())} families.")
+    print(f"The product list has {len(effective_catalog())} products across {len(families())} families.")
     for fam in families():
-        prods = by_family(fam)
-        print(f"  {fam}: {len(prods)} product(s)")
+        print(f"  {fam}: {len(by_family(fam))} product(s)")

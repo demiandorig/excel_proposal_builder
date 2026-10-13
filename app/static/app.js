@@ -2,6 +2,20 @@
  * Entravision Proposal Builder — front-end controller
  * ======================================================================== */
 
+// The proposal-wide billing period ("time_unit" on the wire, state.timeUnit here).
+// FULL_FLIGHT bills the WHOLE flight as ONE period — no per-month/week/quarter
+// split, no multiplication by a month count: a full-flight line has months == 1
+// and monthly_budget == the whole-flight net dollars, so every existing
+// "monthly_budget × months" total is already the plain sum of the lines.
+// Mirrors app/services/monthly_allocation.py (FULL_FLIGHT, FULL_FLIGHT_KEY,
+// TIME_UNITS) — the string is stored/sent verbatim, never display text.
+const FULL_FLIGHT = "full_flight";
+// The one period's key: a CONSTANT (never derived from the dates, so editing a
+// flight can't orphan anything keyed by it) with no "+" (the UI treats any
+// key containing "+" as a merged bucket).
+const FULL_FLIGHT_KEY = "full_flight";
+const TIME_UNITS = ["week", "month", "quarter", FULL_FLIGHT];
+
 const state = {
   catalog: null,            // { families: [...], products_by_family: {...} }
   productIndex: {},         // name -> product object (flat lookup)
@@ -14,17 +28,22 @@ const state = {
   // to let a stale or never-synced set silently drop tabs (see
   // _buildWizardStatePayload).
   tabsTouched: {},
-  // Restricted verticals (sheet tab names) the planner confirmed for Roadblocks;
-  // null until the list has been loaded and the suggested ones pre-ticked.
+  // The restricted vertical (sheet tab name) the planner picked for Roadblocks, as a Set: null until the planner
+  // has chosen (suggestions are only a hint, never pre-picked), an EMPTY set once they chose "None", and one name
+  // for a category. A proposal saved back when the picker was multi-select can hold several names — they all show
+  // as picked until the next click replaces them with that single choice.
   rvSelected: null,
   rvCategories: [],
-  rvUnconfirmed: false,           // true while the pre-ticked suggestions haven't been looked at by the planner
-  generatedProposalId: null,      // the proposal row Generate produced (a later autosave adopts a draft id into proposalId)
+  generatedProposalId: null,     // the proposal row Generate produced (a later autosave adopts a draft id into proposalId)
   // Step 04's staged "Edit mix %" session, or null. See onMixEditStart().
   mixEdit: null,
   strategyBrief: null,      // confirmed AI strategy brief (or null if skipped)
   roadblocks: null,         // Step 07 AI roadblocks/restrictions result (or null if skipped)
-  lineItems: [],            // array of { id, product_name, monthly_budget, months, ... }
+  // array of { id, product_name, monthly_budget, months, ... } — monthly_budget is
+  // "$ per ONE state.timeUnit period" and months is the period count, so a line's
+  // total is monthly_budget × months. In Full Flight (state.timeUnit ===
+  // FULL_FLIGHT) months is always 1 and monthly_budget is the whole flight.
+  lineItems: [],
   // Keyed by line item `id` — NOT product_name. Two lines can share the same
   // product (e.g. same product, different targeting), so a name-keyed dict
   // would silently collide between them; id is unique per line even then.
@@ -41,12 +60,18 @@ const state = {
   // flight). Proposal-wide, not per-tier (one control "at the top" of the
   // step, not per-option) — governs what a NEW default gets computed as
   // (checkbox-check, reset button, a newly-added line auto-joining); never
-  // retroactively rewrites a line's already-set allocations, same "don't
-  // silently overwrite a planner's figure" rule Monthly Breakdown already
-  // applies to date changes. Defaults to "even" per explicit instruction
+  // retroactively rewrites a line's already-set allocations (only the
+  // planner's explicit "Apply ... split to all lines" does, after a confirm
+  // when numbers they typed would be lost), same "don't silently overwrite a
+  // planner's figure" rule Monthly Breakdown already applies to date
+  // changes. Defaults to "even" per explicit instruction
   // (day-proration was this app's own earlier default; even is now what
   // the planner actually wants, with day-proration kept as an opt-in).
   mbDistributionMode: "even",
+  // True right after the planner flips the Default split while some line still holds the other split (or custom
+  // numbers): renderMonthlyBreakdown then shows an inline "Apply to all lines" hint under the toggle. Transient UI
+  // state (never saved); cleared by Apply, by dismissing the hint, or once every line already matches.
+  mbModeNotice: false,
   // Step 06's "By Month" (pick one period, see/edit every product's
   // figure for just that period in one table — the default, per explicit
   // instruction) vs. "By Product" (one panel per line item, every period
@@ -62,12 +87,15 @@ const state = {
   // whenever it no longer matches a real period in the current flight
   // (see renderMonthlyBreakdown's own guard).
   mbActiveMonthKey: null,
-  // Step 04's Week/Month/Quarter toggle — "week" | "month" | "quarter".
-  // Proposal-wide (not per-tier — the toggle lives once at Step 04 and
-  // governs the whole proposal, same reasoning as mbDistributionMode
-  // above), drives which of the _mbPeriodsBetween granularities Curate/
-  // Avails/Step 06/the export all use. Defaults to "month" — this app's
-  // original, only-ever behavior before the toggle existed.
+  // The proposal's billing period — "week" | "month" | "quarter" |
+  // "full_flight" (FULL_FLIGHT: the whole flight is ONE period). Set from
+  // Step 04's Weekly/Monthly/Quarterly/Full Flight pill AND Step 02's
+  // "Billing period" select (both drive onTimeUnitChange, both re-synced by
+  // _applyTimeUnitLabels). Proposal-wide (not per-tier — it governs the
+  // whole proposal, same reasoning as mbDistributionMode above), drives
+  // which of the _mbPeriodsBetween granularities Curate/Avails/Step 06/the
+  // export all use. Defaults to "month" — this app's original, only-ever
+  // behavior before the toggle existed.
   timeUnit: "month",
   // Step 06's "combine adjacent periods into one bucket" control for the
   // ACTIVE tier — [["2026-09","2026-10"], ...], each inner array 2+
@@ -82,6 +110,8 @@ const state = {
   proposalId: null,
   proposalSummary: null,
   enrichment: null,         // Step 07 AI email content (subjects/bodies) — reprompt-able in place
+  emailsPlanKey: null,      // _emailPlanKey() when those emails were last written — differs once the plan is edited (see _refreshEmailStaleNote)
+  emailFigures: null,       // the server's per-option dollar figures (equal to the Excel) behind those emails
   // The REAL naming-convention title, once known (from a successful Generate
   // or from reopening a past proposal) — the persistent name bar shows this
   // verbatim instead of the live best-guess preview once it's set. Cleared
@@ -529,8 +559,9 @@ async function maybeReopenProposal() {
     // (see reopen_state's own comment in main.py). Absent entirely on a
     // proposal generated before this feature existed — defaults to
     // "month", correct for every such proposal since that was the only
-    // granularity that existed then.
-    state.timeUnit = data.time_unit || "month";
+    // granularity that existed then. "full_flight" round-trips like any
+    // other value (_applyTimeUnitLabels below re-syncs every control).
+    state.timeUnit = _normalizeTimeUnit(data.time_unit);
     // Same "absent on an older proposal -> default" treatment as
     // time_unit above — both were only added to reopen_state once this
     // round's consistency pass closed the gap (see _build_reopen_state
@@ -569,6 +600,9 @@ async function maybeReopenProposal() {
     state.availsData = active.availsData;
     state.activeTierPeriodMergeGroups = active.periodMergeGroups || [];
     state.tiers = rest;
+    // A Full Flight proposal's saved lines may carry the server's synthesized single-period allocation; the
+    // client never works with allocations in Full Flight (see _normalizeFullFlightState), so drop them now.
+    _normalizeFullFlightState();
     _applyTimeUnitLabels();
 
     // Forced export-tab selections the planner made before generating. A save
@@ -577,9 +611,13 @@ async function maybeReopenProposal() {
     // before Step 08) — those are NOT real choices, so they only seed the
     // display and get replaced by the server's fresh suggestion; newer saves
     // carry just the boxes the planner actually toggled, which stay overrides.
-    const { _v: tabsFormat, ...savedTabs } = data.force_tabs || {};
-    const sixTabKeys = ["net", "wsections", "gross", "avails_only", "dooh_summary", "dooh_screenlist"];
-    const isLegacyFullSet = !tabsFormat && sixTabKeys.every(k => k in savedTabs);
+    // The two DOOH boxes became one ("DOOH Deliverables", key "dooh"): a save from before carries dooh_summary /
+    // dooh_screenlist, folded here (the server folds them on reopen too) so an old draft that had one ticked still
+    // ticks the new box. A "full set" is therefore the five boxes the page has now.
+    const { _v: tabsFormat, ...rawSavedTabs } = data.force_tabs || {};
+    const savedTabs = _normalizeTabKeys(rawSavedTabs);
+    const allTabKeys = ["net", "wsections", "gross", "avails_only", "dooh"];
+    const isLegacyFullSet = !tabsFormat && allTabKeys.every(k => k in savedTabs);
     state.suggestedTabs = isLegacyFullSet ? savedTabs : null;
     state.tabsTouched = isLegacyFullSet ? {} : { ...savedTabs };
 
@@ -598,6 +636,8 @@ async function maybeReopenProposal() {
     // even though the planner hasn't touched anything, just because the
     // restored state naturally differs from the initial null.
     _lastSavedDraftSnapshot = JSON.stringify({ ..._buildWizardStatePayload(), enrichment: state.enrichment });
+    // The saved emails were written against the plan that was just restored: an edit from here on makes them stale.
+    state.emailsPlanKey = state.enrichment ? _emailPlanKey() : null;
     if ((data.status || "generated") === "draft") {
       // A draft only ever has data up through wherever it was saved —
       // resume exactly there, with the nav pills unlocked only that far,
@@ -649,7 +689,7 @@ function _resumeAtStep(step) {
   if (state.roadblocks) renderRoadblocks(state.roadblocks);
   if (s >= 5) renderAvailsGrid();
   if (s >= 6) renderMonthlyBreakdown();
-  if (s === 7) _enterRoadblocksStep(false);     // the picker (and the saved selection) must be visible on resume
+  if (s === 7) _enterRoadblocksStep();     // the picker (and the saved selection) must be visible on resume
   if (s >= 8) renderGenerateSummary();
   state.furthestStep = s;
   goToStep(s);
@@ -673,6 +713,9 @@ function _migrateReopenedTier(t) {
       }
       item.id = newId;
     }
+    // The line note (Step 04): kept as saved, cleaned the way a typed one is; "" for a proposal saved before the
+    // field existed (the server sends null / nothing there).
+    item.line_modifier = _cleanLineModifier(item.line_modifier);
     return item;
   });
   return {
@@ -822,7 +865,7 @@ function wireEvents() {
       if (target === 4 && state.lineItems.length) renderLineItems();
       if (target === 5) renderAvailsGrid();
       if (target === 6) renderMonthlyBreakdown();
-      if (target === 7) _enterRoadblocksStep(false);
+      if (target === 7) _enterRoadblocksStep();
       if (target === 8) renderGenerateSummary();
       goToStep(target);
     });
@@ -883,6 +926,20 @@ function wireEvents() {
   });
   document.getElementById("total-months-fix-btn").addEventListener("click", onFixStep02Months);
 
+  // Step 02's "Billing period" select — the second control (beside Step 04's
+  // slider) for the ONE proposal-wide state.timeUnit. Deliberately has no
+  // data-field (fillForm/syncFormToParsed/resetAll would otherwise write it
+  // into state.parsed and blank it on reset). onTimeUnitChange may refuse the
+  // change (mix edit in progress) or the planner may cancel its confirm — in
+  // both cases state.timeUnit is untouched, so the select snaps back to it.
+  const step02Period = document.getElementById("step02-billing-period");
+  if (step02Period) {
+    step02Period.addEventListener("change", () => {
+      onTimeUnitChange(step02Period.value);
+      step02Period.value = state.timeUnit;
+    });
+  }
+
   // Proposal name bar — editable campaign-name segment.
   document.getElementById("save-draft-btn").addEventListener("click", onSaveDraft);
   document.getElementById("proposal-name-edit-btn").addEventListener("click", onEditProposalNameClick);
@@ -902,8 +959,19 @@ function wireEvents() {
     btn.addEventListener("click", () => {
       if (state.mbDistributionMode === btn.dataset.mode) return;
       state.mbDistributionMode = btn.dataset.mode;
+      // Flipping only changes what NEW defaults mean; ask for the hint so the planner can see that the lines already
+      // on screen kept their numbers (renderMonthlyBreakdown shows it only if some line really differs).
+      state.mbModeNotice = true;
       renderMonthlyBreakdown();
     });
+  });
+  // The MASTER redistribute control beside that toggle (and the same action inside the hint it can raise): applies
+  // the selected default to every line at once. Static elements, wired once like the toggle above.
+  document.getElementById("mb-apply-all-btn").addEventListener("click", onMbApplyAll);
+  document.getElementById("mb-notice-apply-btn").addEventListener("click", onMbApplyAll);
+  document.getElementById("mb-notice-dismiss-btn").addEventListener("click", () => {
+    state.mbModeNotice = false;
+    renderMonthlyBreakdown();
   });
   // By Product / By Month view toggle — same "wired once, static pair of
   // buttons" pattern as the mode tabs just above.
@@ -946,9 +1014,9 @@ function wireEvents() {
   document.getElementById("roadblocks-regenerate-btn").addEventListener("click", () => onRoadblocksGenerate());
 
   // Curation
-  // Week/Month/Quarter toggle. Wired once (not re-wired per render — see
-  // the mb-mode-tabs comment above for why); renderLineItems()/onTimeUnitChange
-  // keep .active in sync.
+  // Weekly/Monthly/Quarterly/Full Flight toggle. Wired once (not re-wired per
+  // render — see the mb-mode-tabs comment above for why); _applyTimeUnitLabels
+  // (via onTimeUnitChange) keeps .active and the thumb in sync.
   document.querySelectorAll("#time-unit-toggle .time-unit-slider-option").forEach(btn => {
     btn.addEventListener("click", () => onTimeUnitChange(btn.dataset.unit));
   });
@@ -1018,6 +1086,7 @@ function wireEvents() {
     _resetEmailRepromptScope();
   });
   document.getElementById("email-reprompt-submit-btn").addEventListener("click", onEmailReprompt);
+  document.getElementById("email-refresh-figures-btn").addEventListener("click", onEmailRefreshFigures);
 
   // Gamma outline — same reprompt UI shape as the emails above, but this
   // is the ONLY AI call anywhere in the Gamma-outline feature (building
@@ -1032,6 +1101,7 @@ function wireEvents() {
     document.getElementById("gamma-reprompt-input").value = "";
   });
   document.getElementById("gamma-reprompt-submit-btn").addEventListener("click", onGammaOutlineReprompt);
+  document.getElementById("gamma-create-btn").addEventListener("click", onGammaCreate);
 
   // Copy-to-clipboard buttons (delegated — buttons may not exist yet)
   document.addEventListener("click", e => {
@@ -1114,26 +1184,35 @@ function _clearPerProposalState() {
   state.roadblocks = null;
   state.rvSelected = null;
   state.rvCategories = [];
-  state.rvUnconfirmed = false;
   state.proposalId = null;
   state.generatedProposalId = null;
   state.proposalSummary = null;
   state.enrichment = null;
+  state.emailsPlanKey = null;
+  state.emailFigures = null;
   state.finalProposalTitle = null;
   _lastSavedDraftSnapshot = null;
   const result = document.getElementById("result");
   if (result) result.classList.add("hidden");
   const drive = document.getElementById("drive-status");
   if (drive) drive.classList.add("hidden");
+  _driveUploading = false;             // an upload still in flight sees the epoch change and leaves the button alone
+  const driveBtn = document.getElementById("drive-upload-btn");
+  if (driveBtn) driveBtn.disabled = false;
   const chips = document.getElementById("rv-chips");
   if (chips) chips.innerHTML = "";
   const picker = document.getElementById("restricted-verticals");
   if (picker) picker.classList.add("hidden");
+  state.mbModeNotice = false;
   _resetStrategyUI();
+  _cancelRoadblocksRun();              // a pick still waiting out its debounce, or a check in flight, belongs to the proposal being left
   _resetRoadblocksUI();
+  _rbResultCache.clear();             // paid results belong to the proposal being left
+  _gammaReset();                      // the previous proposal's "deck is ready" link / error doesn't carry over
 }
 
 let _resetEpoch = 0;   // bumped by every resetAll() and re-parse, so a response that was in flight across it can tell
+let _driveUploading = false;   // a Google Drive upload (with its automatic retries) is running - see onDriveUpload()
 
 function resetAll() {
   _clearPerProposalState();
@@ -1144,7 +1223,6 @@ function resetAll() {
   state.mbDistributionMode = "even";
   state.mbViewMode = "month";
   state.mbActiveMonthKey = null;
-  state.rvUnconfirmed = false;
   state.generatedProposalId = null;
   _applyTimeUnitLabels();
   state.rawNotionText = null;
@@ -1170,6 +1248,8 @@ function resetAll() {
   state.proposalId = null;
   state.proposalSummary = null;
   state.enrichment = null;
+  state.emailsPlanKey = null;
+  state.emailFigures = null;
   state.finalProposalTitle = null;
   state.furthestStep = 1;
   state.addons = {};
@@ -1480,6 +1560,10 @@ function goToStep(n) {
   if (n === 4 && state.step !== 4 && state.lineItems.length) renderLineItems();
   state.step = n;
   state.furthestStep = Math.max(state.furthestStep, n);
+  if (n === 7 && state.parsed) {
+    const chooser = document.getElementById("restricted-verticals");
+    if (chooser && chooser.classList.contains("hidden")) _loadRestrictedVerticals();   // e.g. Back from Step 08
+  }
   // Editing client name/request type/start date is only possible back on
   // Step 02 — once there, the last-generated title (if any) can no longer
   // be trusted as still-accurate, so drop back to the live preview until
@@ -1500,6 +1584,8 @@ function goToStep(n) {
     // itself — clicking it would be a no-op, so it shouldn't look clickable.
     navEl.classList.toggle("clickable", i <= state.furthestStep && i !== n);
   }
+  // Step 08 holds the generated emails: say so if the plan has changed since they were written.
+  if (n === 8) _refreshEmailStaleNote();
   updateProposalNameBar();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -1528,6 +1614,10 @@ function onNext(n) {
   }
   if (n === 4) {
     // Pre-populate budget + line items for Curate step
+    //
+    // Step 02's budget figure seeds Step 04's Total budget exactly as typed in
+    // EVERY billing period — in Full Flight it is simply the flight's budget
+    // (one period: nothing is multiplied by a month count).
     const budget = state.parsed.monthly_budget || parseBudgetFromRenewal(state.parsed);
     if (budget) {
       document.getElementById("total-budget-target").value = formatBudgetInputValue(Number(budget));
@@ -1546,18 +1636,21 @@ function onNext(n) {
         return {
           id: newLineItemId(),
           product_name: name,
-          // state.timeUnit is always "month" (its default) the first time
-          // this pre-fill runs — nothing earlier in the flow can have
-          // changed it yet — so no scaling needed here specifically, but
-          // _timeUnitMinimumScale() is a no-op (×1) for "month" anyway.
+          // state.timeUnit is NOT necessarily "month" here: Step 02's Billing
+          // period select can already have switched it (and a re-parse keeps
+          // the choice). The catalog minimum is monthly, so scale it to the
+          // active unit — ×1 for month AND for Full Flight (one period: one
+          // monthly minimum), see _timeUnitMinimumScale.
           monthly_budget: p ? (p.minimum_spend || 0) * _timeUnitMinimumScale() : 0,
           // Derived from the flight dates (falls back to the legacy
           // planner-typed total_months only if dates aren't parseable
           // yet) — never free-typed from here, see _curateDerivedMonths.
+          // Always 1 in Full Flight (that function returns 1 first).
           months: _curateDerivedMonths() || state.parsed.total_months || 3,
           _monthsReconciled: true,
           rate_override: null,
           notes_override: null,
+          line_modifier: "",      // the optional "line note" shown under the product name (see _cleanLineModifier)
           target_override: null,
           target_secondary: null,
           estimated_cpm_override: null,
@@ -1614,30 +1707,14 @@ function onNext(n) {
   goToStep(n);
 }
 
-// Landing on Step 07 (Continue, a nav pill, or resuming a saved proposal): the vertical picker is always
-// loaded; the check itself runs by itself only when that can't produce a wrong verdict.
-function _enterRoadblocksStep(autoRun = true) {
-  const needsRun = !state.roadblocks;      // an existing result (even a degraded one) stays until Regenerate
-  _loadRestrictedVerticals().then(awaitingConfirmation => {
-    if (!needsRun) return;
-    if (autoRun && state.step !== 7) return;      // the planner already left; don't spend an API call behind their back
-    if (awaitingConfirmation || !autoRun) {
-      // A suggested vertical (say Political) that the planner hasn't confirmed would put hard "not accepted"
-      // verdicts on products it may not even apply to — so wait for them to confirm and press Run. Coming
-      // back by nav pill or by resuming a saved proposal never spends an API call on its own either.
-      _resetRoadblocksUI();
-      if (awaitingConfirmation) {
-        const note = document.getElementById("rv-note");
-        note.textContent = "Tick the verticals that apply to this client, then click ▶ Run check.";
-        note.classList.remove("hidden");
-      }
-      const runBtn = document.getElementById("roadblocks-regenerate-btn");
-      runBtn.textContent = "▶ Run check";
-      runBtn.style.display = "";
-    } else {
-      onRoadblocksGenerate();
-    }
-  });
+// Landing on Step 07 (Continue, a nav pill, or resuming a saved proposal) only SHOWS the restricted-category
+// chooser — it never runs the check, however the planner got here. The planner picks Political / Cannabis / None
+// first and that pick starts the run (onRvPick), so no AI run is spent on a category that was never confirmed
+// (a wrong guess puts hard "not accepted" verdicts on products it may not even apply to). An existing result
+// stays exactly as it is, with its saved pick shown.
+function _enterRoadblocksStep() {
+  _loadRestrictedVerticals();
+  _refreshRoadblockLineNotes();     // an existing result's cards show the plan's CURRENT line notes
 }
 
 // Parse a budget number out of renewal_budget field (e.g. "7500 | $5k for LA...")
@@ -1649,9 +1726,11 @@ function parseBudgetFromRenewal(parsed) {
   return null;
 }
 
-// Distribute a total monthly budget across line items proportionally by catalog rate weight
+// Distribute a total budget (per period; the whole flight in Full Flight) across
+// line items proportionally by catalog rate weight.
 function distributeBudgetProportionally(items, totalBudget) {
   if (!items.length) return;
+  const scale = _timeUnitMinimumScale();
   // Weight by catalog minimum_spend (proxy for product "size")
   const weights = items.map(li => {
     const p = state.productIndex[li.product_name];
@@ -1661,7 +1740,7 @@ function distributeBudgetProportionally(items, totalBudget) {
   items.forEach((li, i) => {
     const share = Math.round((weights[i] / totalWeight) * totalBudget / 50) * 50;
     const p = state.productIndex[li.product_name];
-    li.monthly_budget = Math.max(share, p ? (p.minimum_spend || 0) * _timeUnitMinimumScale() : 0);
+    li.monthly_budget = Math.max(share, p ? (p.minimum_spend || 0) * scale : 0);
   });
   // Adjust last item to make sum exact
   const sum = items.reduce((s, li) => s + li.monthly_budget, 0);
@@ -1704,7 +1783,7 @@ async function onParse() {
     // Kept verbatim (not re-derived from the DOM later) so it survives a
     // reopen — see reopen_state's raw_notion_text and maybeReopenProposal().
     state.rawNotionText = text;
-    state.suggestedTabs = data.suggested_tabs;
+    state.suggestedTabs = _normalizeTabKeys(data.suggested_tabs);
     state.tabsTouched = {};
     state.lineItems = [];  // reset so step 3 re-populates from fresh parse
     state.availsData = {};
@@ -1757,6 +1836,7 @@ function fillForm(req) {
   // fair comparison instead of carrying over the previous proposal's.
   state._totalMonthsReconciled = undefined;
   _refreshStep02MonthsField();
+  _refreshStep02FlightNote();
 }
 
 // Campaign-level "Months" (Step 02) — same derived/flagged-legacy pattern
@@ -1791,6 +1871,35 @@ function _refreshStep02MonthsField() {
       flag.title = `Saved as ${state.parsed.total_months} — the flight's real month count is ${derived}. Left as-is; click Fix to match the real flight.`;
     }
   }
+}
+
+// Step 02's Full Flight note — shown only in Full Flight. Full Flight is ONE billing period and nothing in it is multiplied
+// by a month count, so the budget figure (and Tier #1-#4) is the flight's budget exactly as typed: the field and the Tiered
+// Budget legend are relabeled to say so (a field still called "Monthly budget" beside a note saying "flight total" would
+// invite a planner to type the wrong thing). Re-run by _applyTimeUnitLabels and fillForm.
+const _STEP02_FF_NOTE = "Billed as one period for the whole flight — the export shows one total per line and no month count. " +
+  "The budget below (and Tier #1–#4) is the flight's total, used exactly as typed — nothing is multiplied by months.";
+function _refreshStep02FlightNote() {
+  const ff = _isFullFlight();
+  const hint = document.getElementById("step02-billing-period-hint");
+  if (hint) {
+    hint.classList.toggle("hidden", !ff);
+    if (ff) hint.textContent = _STEP02_FF_NOTE;
+  }
+  const budgetLabel = document.getElementById("step02-budget-label");
+  if (budgetLabel) budgetLabel.textContent = ff ? "Flight budget" : "Monthly budget";
+  const tierNote = document.getElementById("step02-tier-note");
+  if (tierNote) tierNote.textContent = ff ? "(optional — alternate flight budgets)" : "(optional — alternate monthly options)";
+}
+
+// Step 04's "Min" column header explains the Full Flight rule: the whole flight is ONE period, so a line has to clear the
+// product's monthly minimum once (not once per calendar month). No title in any other billing period (their markup is
+// unchanged).
+function _refreshMinHeaderTitle() {
+  const header = document.getElementById("col-min-header");
+  if (!header) return;
+  if (_isFullFlight()) header.title = "Full Flight is one billing period: each line needs the product's monthly minimum once.";
+  else header.removeAttribute("title");
 }
 
 function onFixStep02Months() {
@@ -1884,8 +1993,22 @@ function onAddParsedProduct() {
 }
 
 function renderSuggestedTabs(tabs) {
-  const active = Object.entries(tabs).filter(([_, v]) => v).map(([k]) => prettyTabName(k));
+  const active = Object.entries(_normalizeTabKeys(tabs)).filter(([_, v]) => v).map(([k]) => prettyTabName(k));
   document.getElementById("suggested-tabs").textContent = active.join(" · ") || "(none)";
+}
+
+// The two DOOH sheets (Summary + Screenlist) are ONE export choice, "DOOH Deliverables" (key "dooh"). Older saved
+// drafts and API payloads carry dooh_summary / dooh_screenlist instead; either being on means both sheets. Mirrors
+// notion_parser.normalize_tab_keys on the server. An explicit "dooh" wins over the legacy keys.
+function _normalizeTabKeys(tabs) {
+  const out = { ...(tabs || {}) };
+  const legacy = ["dooh_summary", "dooh_screenlist"].filter(k => k in out);
+  if (legacy.length) {
+    const folded = legacy.some(k => !!out[k]);
+    legacy.forEach(k => delete out[k]);
+    if (!("dooh" in out)) out.dooh = folded;
+  }
+  return out;
 }
 
 function prettyTabName(key) {
@@ -1894,8 +2017,7 @@ function prettyTabName(key) {
     wsections: "Proposal A (wsections)",
     gross: "Proposal A (Gross)",
     avails_only: "Avails-Only",
-    dooh_summary: "DOOH Summary",
-    dooh_screenlist: "DOOH Screenlist",
+    dooh: "DOOH Deliverables",
   }[key] || key;
 }
 
@@ -1931,7 +2053,9 @@ async function onStrategyGenerate(reprompt = null, mode = "consistent") {
     const res = await fetch("/api/strategy", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ request: state.parsed, reprompt, mode, ad_presence: _adPresenceToCarry() }),
+      // time_unit: Full Flight changes how the brief should talk about the budget (one flight total, no
+      // monthly multiplication); every billing period is sent so the server never has to guess.
+      body: JSON.stringify({ request: state.parsed, reprompt, mode, ad_presence: _adPresenceToCarry(), time_unit: state.timeUnit }),
     });
     const brief = await _readJsonResponse(res);
     if (epoch !== _resetEpoch) return;     // a different proposal is on screen now
@@ -2015,13 +2139,15 @@ function renderStrategyBrief(brief) {
   renderAdPresence(brief.ad_presence || null, { fresh: adPresenceFresh });
   if (adPresenceFresh) _debouncedRebuildStrategyDoc();
 
-  // Budget note
+  // Budget note — "$X/mo × N mo = $T" in the monthly-style billing periods; in Full Flight the figure IS the flight's
+  // budget (one period, nothing multiplied), so it is stated as that.
   const budget = state.parsed.monthly_budget || parseBudgetFromRenewal(state.parsed) || 0;
   const months = state.parsed.total_months || 3;
   const budgetNote = document.getElementById("brief-budget-note");
-  budgetNote.textContent = budget
-    ? `Based on $${money(budget).replace("$","")}/mo × ${months} mo = ${money(budget * months)} total`
-    : "";
+  budgetNote.textContent = !budget ? ""
+    : _isFullFlight()
+      ? `Based on ${money(budget)} total flight budget (billed as one period)`
+      : `Based on $${money(budget).replace("$","")}/mo × ${months} mo = ${money(budget * months)} total`;
 
   // Tactics cards — each has a "include in brief" checkbox (defaults
   // checked/selected: undefined and selected: true both count as
@@ -2045,10 +2171,10 @@ function renderStrategyBrief(brief) {
           <input type="checkbox" class="tactic-select-checkbox" data-idx="${idx}" ${t.selected ? "checked" : ""} />
         </label>
         <span class="tactic-family">${escapeHtml(t.product_family)}</span>
-        <span class="tactic-pct">${pct}%${alloc ? ` · ~${money(alloc)}/mo` : ""}</span>
+        <span class="tactic-pct">${pct}%${alloc ? ` · ~${money(alloc)}${_isFullFlight() ? "" : "/mo"}` : ""}</span>
       </div>
       <p class="tactic-rationale">${escapeHtml(t.rationale)}</p>
-      <p class="tactic-data">📊 ${escapeHtml(t.data_point)} <em class="tactic-citation">(${escapeHtml(t.citation)})</em></p>
+      ${t.data_point ? `<p class="tactic-data">📊 ${escapeHtml(t.data_point)}${t.citation ? ` <em class="tactic-citation">(${escapeHtml(t.citation)})</em>` : ""}</p>` : ""}
       <p class="tactic-advantage">⚡ ${escapeHtml(t.entravision_advantage)}</p>
       <p class="tactic-min-note">ⓘ This % is a ceiling for the whole ${escapeHtml(t.product_family)} tactic — if you curate more than one product under it in Step 04, each one still has its own separate minimum spend, not a shared pool.</p>
     `;
@@ -2135,6 +2261,7 @@ const _debouncedRebuildStrategyDoc = _debounce(async () => {
         recommended_tactics: _selectedTactics(),
         key_insights: brief.key_insights,
         ad_presence: brief.ad_presence,
+        time_unit: state.timeUnit,
       }),
     });
   } catch (e) {
@@ -2340,8 +2467,46 @@ async function onAdPresenceCheck() {
 }
 
 // --------------------------------------------------------------------------
-// Step 5: AI Roadblocks / Restrictions Check
+// Step 07: AI Roadblocks / Restrictions Check
+//
+// The planner picks the client's restricted category FIRST (one of the sheet's categories, or "None") and that pick
+// starts the AI run — nothing runs on arrival, and the old "tick, then press Run/Regenerate" round trip is gone.
+// Rapid picks are debounced into ONE run; a pick that lands while a run is in flight abandons it (its answer can
+// never be shown) and starts one fresh run for the new pick. "Regenerate" only re-runs the SAME pick.
 // --------------------------------------------------------------------------
+
+const _RB_DEBOUNCE_MS = 600;     // a burst of picks (Political -> Cannabis -> None) costs one run, for the last one
+let _rbDebounceTimer = null;     // a pick waiting out its debounce
+let _rbRunToken = 0;             // identifies the one run whose answer may still be shown; bumping it abandons the rest
+let _rbAbort = null;             // the in-flight request's AbortController (saves the connection; the token is the guard)
+let _rbInFlight = false;         // a request for the CURRENT token is out there
+let _rvUsingBuiltin = false;     // the picker is showing the built-in snapshot, not an admin-synced sheet
+let _rvLoading = false;          // the category list is being fetched (so a second entry doesn't fetch it again)
+// A finished check, kept for this page session under (pick + plan): clicking back to a pick that already has a paid
+// result shows it instead of paying for the same check again (a mis-click and its correction cost nothing extra).
+// "Regenerate" is the deliberate way to pay for a fresh one. Cleared when the proposal on screen is replaced.
+const _rbResultCache = new Map();
+
+function _rbPlanKey() {
+  const names = [...new Set(allTiersForSubmit().flatMap(t => (t.line_items || []).map(li => li.product_name)))].sort();
+  return `${(state.parsed && state.parsed.client_name) || ""}::${names.join("|")}`;
+}
+
+function _rbCacheKey(categories) {
+  return `${[...categories].sort().join("|")}::${_rbPlanKey()}`;
+}
+let _rvLoadFailed = false;       // the category list could not be loaded (the picker still offers "None")
+
+// Drops a pick still waiting out its debounce and abandons any request in flight. Used when the pick changes and
+// when the proposal on screen is replaced (_clearPerProposalState).
+function _cancelRoadblocksRun() {
+  if (_rbDebounceTimer) { clearTimeout(_rbDebounceTimer); _rbDebounceTimer = null; }
+  _rbRunToken++;
+  if (_rbAbort) { try { _rbAbort.abort(); } catch (_) { /* already settled */ } _rbAbort = null; }
+  _rbInFlight = false;
+}
+
+function _rbBusy() { return !!_rbDebounceTimer || _rbInFlight; }
 
 function _resetRoadblocksUI() {
   document.getElementById("roadblocks-loading").classList.add("hidden");
@@ -2350,28 +2515,71 @@ function _resetRoadblocksUI() {
   document.getElementById("roadblocks-regenerate-btn").style.display = "none";
   document.getElementById("roadblocks-download-link").classList.add("hidden");
   document.getElementById("roadblocks-search-note").classList.add("hidden");
-  document.getElementById("rv-note").classList.add("hidden");
 }
 
-let _roadblocksInFlight = false;
-
-async function onRoadblocksGenerate() {
-  if (_roadblocksInFlight) return;      // overlapping entries to Step 07 must not each start a paid check
-  _roadblocksInFlight = true;
-  const epoch = _resetEpoch;
-  try {
-    await _runRoadblocks(epoch);
-  } finally {
-    _roadblocksInFlight = false;
-  }
-}
-
-async function _runRoadblocks(epoch) {
+// The spinner, with the pick it is working for (so a quick re-pick visibly restarts it).
+function _showRoadblocksPending() {
   _resetRoadblocksUI();
-  const loadingEl = document.getElementById("roadblocks-loading");
-  loadingEl.classList.remove("hidden");
+  document.getElementById("roadblocks-loading").classList.remove("hidden");
+  const picked = [...(state.rvSelected || [])];
   document.getElementById("roadblocks-loading-text").textContent =
-    `Searching platform policies for ${state.parsed.client_name || "this client"}…`;
+    `Searching platform policies for ${(state.parsed && state.parsed.client_name) || "this client"}${picked.length ? ` (${picked.join(", ")})` : ""}…`;
+}
+
+// The planner's click on a category chip (name) or on "None" (null).
+function onRvPick(name) {
+  const next = new Set(name === null ? [] : [name]);
+  const cur = state.rvSelected;
+  const unresolved = (state.roadblocks && state.roadblocks.unresolved_categories) || [];
+  const samePick = !!cur && cur.size === next.size && [...next].every(n => cur.has(n));
+  // The pick that is already showing — "Regenerate" re-runs it. But clicking it again when it has NO answer (a failed
+  // run, or a saved result whose category no longer exists) is a retry, not a no-op.
+  const settled = !!state.roadblocks && !unresolved.length;     // a finished answer for this pick is on screen
+  if (samePick && (_rbBusy() || settled)) return;
+  state.rvSelected = next;
+  _cancelRoadblocksRun();      // whatever was running or waiting answered the PREVIOUS pick
+  const cached = _rbResultCache.get(_rbCacheKey([...next]));
+  if (cached) {                // already paid for in this session: show it, run nothing
+    _resetRoadblocksUI();
+    _renderRvChips();
+    renderRoadblocks(cached);
+    return;
+  }
+  // That answer (if there was one) does not describe this pick: it must not stay on screen, in the saved draft or in
+  // the export next to a different category. The new run replaces it; Skip / Continue meanwhile carry no result.
+  state.roadblocks = null;
+  _renderRvChips();
+  _updateRvNote();
+  _showRoadblocksPending();
+  const epoch = _resetEpoch;
+  _rbDebounceTimer = setTimeout(() => {
+    _rbDebounceTimer = null;
+    if (epoch !== _resetEpoch) return;      // a different proposal is on screen now
+    _runRoadblocks();
+  }, _RB_DEBOUNCE_MS);
+}
+
+// "Regenerate": the same pick again. Ignored while a run (or a pick's debounce) is already under way — one paid
+// check per pick, never two.
+function onRoadblocksGenerate() {
+  if (_rbBusy() || !state.parsed) return;
+  if (state.rvSelected === null) {      // an old result that predates the category list: re-run it as "None" and say so
+    state.rvSelected = new Set();
+    _renderRvChips();
+  }
+  _runRoadblocks();
+}
+
+async function _runRoadblocks() {
+  const token = ++_rbRunToken;
+  const epoch = _resetEpoch;
+  const categories = [...(state.rvSelected || [])];
+  const controller = new AbortController();
+  _rbAbort = controller;
+  _rbInFlight = true;
+  _showRoadblocksPending();
+  const loadingEl = document.getElementById("roadblocks-loading");
+  const superseded = () => epoch !== _resetEpoch || token !== _rbRunToken;   // a different proposal, or a newer pick
 
   try {
     // Covers every product across every budget option — a tier-B-only
@@ -2385,15 +2593,16 @@ async function _runRoadblocks(epoch) {
     const res = await fetch("/api/roadblocks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
       body: JSON.stringify({
         request: state.parsed,
         line_items: [...unionByProduct.values()],
         strategy_brief: _briefWithSelectedTactics(),
-        categories: [...(state.rvSelected || [])],
+        categories,                          // [] = "None"
       }),
     });
     const data = await _readJsonResponse(res);
-    if (epoch !== _resetEpoch) return;      // a different proposal is on screen now
+    if (superseded()) return;               // answers a pick that is no longer the planner's (or another proposal): never shown
     loadingEl.classList.add("hidden");
 
     if (data.error && !data.product_roadblocks?.length) {
@@ -2407,12 +2616,14 @@ async function _runRoadblocks(epoch) {
 
     renderRoadblocks(data);
   } catch (e) {
-    if (epoch !== _resetEpoch) return;
+    if (superseded()) return;               // incl. the AbortError of a request abandoned on purpose
     loadingEl.classList.add("hidden");
     const errEl = document.getElementById("roadblocks-error");
     errEl.classList.remove("hidden");
     errEl.textContent = "Request failed: " + e.message;
     document.getElementById("roadblocks-regenerate-btn").style.display = "";
+  } finally {
+    if (token === _rbRunToken) { _rbInFlight = false; _rbAbort = null; }     // a superseded run must not clear the newer run's flags
   }
 }
 
@@ -2424,14 +2635,15 @@ function _roadblockMatrixHtml(matrix) {
     <p class="matrix-line matrix-${escapeAttr(c.status)}"><strong>${escapeHtml(c.category)}:</strong> ${escapeHtml(icon[c.status] || c.status)}${c.note ? ` <span class="matrix-note">— ${escapeHtml(c.note)}</span>` : ""}</p>`).join("")}</div>`;
 }
 
-// Step 07's vertical picker. Loads the sheet's verticals, pre-ticks the ones the
-// plan's own text suggests (client, goal, targeting, products), then leaves the
-// choice to the planner — a saved selection (reopened proposal) is kept as-is.
-// Resolves to true when the picker is showing suggestions the planner has not confirmed yet.
+// Step 07's restricted-category chooser: one of the categories the sheet defines (whatever the backend lists —
+// today Political and Cannabis) or "None". Loads the list, flags the ones the plan's own text suggests (client, goal,
+// targeting, products) as a HINT only — nothing is ever picked for the planner and nothing runs until they click.
+// A saved pick (reopened proposal) is kept as-is.
 async function _loadRestrictedVerticals() {
   const wrap = document.getElementById("restricted-verticals");
-  if (!wrap || !state.parsed) return false;
+  if (!wrap || !state.parsed || _rvLoading) return;
   const epoch = _resetEpoch;
+  _rvLoading = true;
   try {
     const names = [...new Set(allTiersForSubmit().flatMap(t => (t.line_items || []).map(li => li.product_name)))];
     const res = await fetch("/api/restrictions/categories", {
@@ -2441,79 +2653,109 @@ async function _loadRestrictedVerticals() {
     });
     if (!res.ok) throw new Error(res.statusText);
     const data = await res.json();
-    if (epoch !== _resetEpoch) return false;
+    if (epoch !== _resetEpoch) return;
     state.rvCategories = data.categories || [];
-    if (state.rvSelected === null) {
-      state.rvSelected = new Set(state.rvCategories.filter(c => c.suggested).map(c => c.name));
-      state.rvUnconfirmed = state.rvSelected.size > 0;     // pre-ticked by us, not yet confirmed by the planner
-    } else {
-      // A vertical the sheet no longer lists has no chip to untick; drop it so it isn't re-sent forever.
-      const known = new Set(state.rvCategories.map(c => c.name));
-      state.rvSelected = new Set([...state.rvSelected].filter(n => known.has(n)));
-    }
-    _renderRestrictedVerticals(data);
-    return !!state.rvUnconfirmed;
+    _rvUsingBuiltin = !!data.using_builtin;
+    _rvLoadFailed = false;
   } catch (e) {
-    wrap.classList.add("hidden");   // optional layer — Roadblocks still runs without it
-    return false;
+    if (epoch !== _resetEpoch) return;
+    // Optional layer: without the list the chooser still offers "None", so the check can always be run.
+    _rvLoadFailed = !state.rvCategories.length;
+  } finally {
+    _rvLoading = false;
+  }
+  if (epoch !== _resetEpoch) return;
+  _renderRestrictedVerticals();
+}
+
+function _renderRestrictedVerticals() {
+  document.getElementById("restricted-verticals").classList.remove("hidden");
+  _renderRvChips();
+  _updateRvNote();
+}
+
+// The chips, from state: a radio-style group (one choice), the sheet's categories first and "None" last. A pick
+// is "on" while it is in state.rvSelected — several can be on for a proposal saved by the old multi-select; the
+// next click replaces them all with the one clicked.
+function _renderRvChips() {
+  const chips = document.getElementById("rv-chips");
+  const hint = document.getElementById("rv-suggest");
+  if (!chips) return;
+  const sel = state.rvSelected;
+  const unresolved = (state.roadblocks && state.roadblocks.unresolved_categories) || [];
+  const noneOn = !!sel && sel.size === 0 && !unresolved.length;    // an empty saved list with unresolved names is not a "None" run
+  const focused = document.activeElement && chips.contains(document.activeElement) ? document.activeElement : null;
+  const focusKey = focused ? (focused.dataset.rvCategory !== undefined ? "c:" + focused.dataset.rvCategory : "none") : null;
+  const chip = (attrs, on, title, label) =>
+    `<button type="button" class="rv-chip ${on ? "on" : ""}" role="radio" aria-checked="${on}" ${attrs} title="${escapeHtml(title)}">${label}</button>`;
+  chips.innerHTML = state.rvCategories.map(c =>
+    chip(`data-rv-category="${escapeHtml(c.name)}"`, !!sel && sel.has(c.name), c.summary || "",
+         `${escapeHtml(c.name)}${c.suggested ? ' <span class="rv-suggested">suggested</span>' : ""}`)
+  ).join("") + chip(`data-rv-none="1"`, noneOn, "This client isn't in a restricted category — run the check without one", "None");
+  chips.querySelectorAll("[data-rv-category]").forEach((btn, i) => {
+    btn.addEventListener("click", () => onRvPick(state.rvCategories[i].name));
+  });
+  const noneBtn = chips.querySelector("[data-rv-none]");
+  if (noneBtn) noneBtn.addEventListener("click", () => onRvPick(null));
+  if (focusKey) {                               // re-rendering replaced the button the keyboard user was on
+    const again = focusKey === "none" ? noneBtn
+      : [...chips.querySelectorAll("[data-rv-category]")].find(b => "c:" + b.dataset.rvCategory === focusKey);
+    if (again) again.focus();
+  }
+  if (!chips.dataset.keys) {                    // arrows move between the chips, like a radio group
+    chips.dataset.keys = "1";
+    chips.addEventListener("keydown", (ev) => {
+      const keys = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
+      if (!(ev.key in keys)) return;
+      const all = [...chips.querySelectorAll(".rv-chip")];
+      const at = all.indexOf(document.activeElement);
+      if (at < 0) return;
+      ev.preventDefault();
+      all[(at + keys[ev.key] + all.length) % all.length].focus();
+    });
+  }
+
+  // "Suggested: Political" — what the request itself points at, shown until the planner has picked anything.
+  const suggested = state.rvCategories.filter(c => c.suggested).map(c => c.name);
+  if (hint) {
+    hint.textContent = suggested.length ? `Suggested from this request: ${suggested.join(", ")}. Nothing runs until you pick.` : "";
+    hint.classList.toggle("hidden", !suggested.length || sel !== null);
   }
 }
 
-function _renderRestrictedVerticals(data) {
-  const wrap = document.getElementById("restricted-verticals");
-  const chips = document.getElementById("rv-chips");
-  if (!state.rvCategories.length) { wrap.classList.add("hidden"); return; }
-  wrap.classList.remove("hidden");
-  chips.innerHTML = state.rvCategories.map(c => `
-    <label class="rv-chip ${state.rvSelected.has(c.name) ? "on" : ""}" title="${escapeHtml(c.summary || "")}">
-      <input type="checkbox" data-rv-category="${escapeHtml(c.name)}" ${state.rvSelected.has(c.name) ? "checked" : ""} />
-      ${escapeHtml(c.name)}${c.suggested ? ' <span class="rv-suggested">suggested</span>' : ""}
-    </label>`).join("");
-  chips.querySelectorAll("[data-rv-category]").forEach(cb => {
-    cb.addEventListener("change", () => {
-      if (!state.rvSelected) state.rvSelected = new Set();
-      if (cb.checked) state.rvSelected.add(cb.dataset.rvCategory); else state.rvSelected.delete(cb.dataset.rvCategory);
-      state.rvUnconfirmed = false;     // the planner has now looked at the selection
-      cb.closest(".rv-chip").classList.toggle("on", cb.checked);
-      const note = document.getElementById("rv-note");
-      note.textContent = "Selection changed — click ↺ Regenerate to re-run the check with it.";
-      note.classList.remove("hidden");
-    });
-  });
+// The one small note under the chips, recomputed from state (never left over from an earlier run): the saved
+// result names a category the sheet no longer has, the list could not be loaded, or the built-in snapshot is in use.
+function _updateRvNote() {
   const note = document.getElementById("rv-note");
+  if (!note) return;
   const unresolved = (state.roadblocks && state.roadblocks.unresolved_categories) || [];
+  let text = "";
   if (unresolved.length) {
-    note.textContent = `Couldn't find ${unresolved.join(", ")} in the restricted-verticals sheet any more — an admin may have renamed it. Re-tick the verticals and regenerate.`;
-    note.classList.remove("hidden");
-  } else if (data && data.using_builtin) {
-    note.textContent = "Showing Entravision's built-in snapshot (Political, Cannabis) — an admin can sync the full sheet under Admin → Restrictions.";
-    note.classList.remove("hidden");
-  } else {
-    note.classList.add("hidden");
+    text = `Couldn't find ${unresolved.join(", ")} in the restricted-verticals sheet any more — an admin may have renamed it. Pick a category again to re-run the check.`;
+  } else if (_rvLoadFailed) {
+    text = "Couldn't load the restricted categories just now — you can still run the check with None, or try again.";
+  } else if (_rvUsingBuiltin) {
+    text = "Showing Entravision's built-in snapshot (Political, Cannabis) — an admin can sync the full sheet under Admin → Restrictions.";
+  }
+  note.textContent = text;
+  note.classList.toggle("hidden", !text);
+  const retry = document.getElementById("rv-retry");           // "Try again" beside the note when the list couldn't load
+  if (retry) {
+    retry.classList.toggle("hidden", !(_rvLoadFailed && !unresolved.length));
+    retry.onclick = () => _loadRestrictedVerticals();
   }
 }
 
 function renderRoadblocks(data) {
   state.roadblocks = data;
+  if (Array.isArray(data.categories) && !data.unresolved_categories?.length && (data.product_roadblocks || []).length) {
+    _rbResultCache.set(_rbCacheKey(data.categories), data);
+  }
+  // A saved result carries the categories it was computed for: that is the planner's pick when a proposal is
+  // reopened (an empty list is "None"; several names are a save from the old multi-select).
   if (Array.isArray(data.categories) && state.rvSelected === null) state.rvSelected = new Set(data.categories);
-  const covered = new Set(data.categories || []);
-  const stale = [...(state.rvSelected || [])].some(n => !covered.has(n)) || [...covered].some(n => !(state.rvSelected || new Set()).has(n));
-  const noteEl0 = document.getElementById("rv-note");
-  if (stale && Array.isArray(data.categories) && state.rvSelected !== null) {
-    // The planner changed the ticks while this check was running: it doesn't answer them.
-    noteEl0.textContent = "Selection changed — click ↺ Regenerate to re-run the check with it.";
-    noteEl0.classList.remove("hidden");
-  } else {
-    state.rvUnconfirmed = false;                                         // a completed run means the selection was confirmed
-    noteEl0.classList.add("hidden");                                     // "Selection changed…" is answered by this result
-  }
+  _updateRvNote();
   document.getElementById("roadblocks-regenerate-btn").textContent = "↺ Regenerate";
-  const unresolved = data.unresolved_categories || [];
-  if (unresolved.length) {
-    const note = document.getElementById("rv-note");
-    note.textContent = `Couldn't find ${unresolved.join(", ")} in the restricted-verticals sheet any more — an admin may have renamed it. Re-tick the verticals and regenerate.`;
-    note.classList.remove("hidden");
-  }
 
   setText("roadblocks-summary", data.overall_summary || "");
 
@@ -2540,6 +2782,7 @@ function renderRoadblocks(data) {
         <span class="roadblock-product">${escapeHtml(item.product_name)}</span>
         <span class="risk-badge risk-${escapeAttr(item.risk_level || "low")}">${escapeHtml((item.risk_level || "low").toUpperCase())} RISK</span>
       </div>
+      <div class="roadblock-line-notes hidden" data-lines-for="${escapeHtml(item.product_name)}"></div>
       ${_roadblockMatrixHtml(item.matrix)}
       ${(item.risks || []).map(r => `
         <div class="roadblock-risk">
@@ -2562,6 +2805,31 @@ function renderRoadblocks(data) {
   } else {
     dlLink.classList.add("hidden");
   }
+  _refreshRoadblockLineNotes();
+}
+
+// The line notes of the plan's lines for each roadblock card's product, as read-only purple reference under the
+// product name. Recomputed from the CURRENT plan every time Step 07 is shown, so a note edited in Step 04 after the
+// check ran is never stale here. Built with textContent (the note is planner-typed text).
+function _refreshRoadblockLineNotes() {
+  const cards = document.getElementById("roadblocks-cards");
+  if (!cards) return;
+  cards.querySelectorAll("[data-lines-for]").forEach(box => {
+    const notes = _lineNotesForProduct(box.dataset.linesFor);
+    box.textContent = "";
+    box.classList.toggle("hidden", !notes.length);
+    if (!notes.length) return;
+    const prefix = document.createElement("span");
+    prefix.className = "line-note-prefix";
+    prefix.textContent = notes.length === 1 ? "Line note:" : "Line notes:";
+    box.appendChild(prefix);
+    notes.forEach(note => {
+      const chip = document.createElement("span");
+      chip.className = "line-note";
+      chip.textContent = note;
+      box.appendChild(chip);
+    });
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -2580,8 +2848,34 @@ function renderRoadblocks(data) {
 // Step 02 (or a per-option override) the options that weren't re-rendered would otherwise keep the old count and
 // the totals, Step 06 and the export would disagree with the calendar. Only lines still marked reconciled move —
 // a reopened legacy line stays "saved" until the planner clicks Fix.
+// Full Flight's ONE period, enforced on a line whose months is still > 1 (a stale or hand-built saved state — the SPA
+// itself never produces one): the line is FOLDED, exactly as the server's normalize_full_flight_lines does —
+// monthly_budget x months becomes the whole-flight amount and months becomes 1 — so its total never changes.
+// Merely setting months to 1 would silently cut the line to a fraction of what the export prints (and what the
+// planner saw). Idempotent; a no-op when months is already 1; Added Value lines carry no money to fold.
+function _foldLineIntoOnePeriod(li) {
+  const periods = Number(li.months) > 1 ? Number(li.months) : 1;
+  if (periods > 1 && !li.is_added_value) li.monthly_budget = _round2((Number(li.monthly_budget) || 0) * periods);
+  li.months = 1;
+}
+
 function _resyncAllTierMonths() {
   const sync = (lines, label) => {
+    // Full Flight: ONE period, so months is 1 no matter what the dates say — and even with no dates at all
+    // (otherwise a date-less option would keep its old count and every total would still be multiplied by it).
+    // A legacy "saved N" line is forced too: 1 is definitional here, not derived from the calendar, so there is
+    // nothing to flag. Leaving Full Flight re-derives from the dates the normal way (the early-return below).
+    if (_isFullFlight()) {
+      (lines || []).forEach(li => {
+        li._monthsReconciled = true;
+        if (li.months !== 1) {
+          _mbStampBaseline(li);          // BEFORE the months change (no-op while allocations are null, as they are in Full Flight)
+          _foldLineIntoOnePeriod(li);
+          _mbRescaleLine(li);
+        }
+      });
+      return;
+    }
     const start = _mbParseDate(_effectiveStartDate(label));
     const end = _mbParseDate(_effectiveEndDate(label));
     if (!start || !end) {
@@ -2724,12 +3018,20 @@ function addTier(targetBudget) {
     // state — a brand-new clone is never "legacy," it just gets a fresh
     // auto-sync to whatever this new option's own (initially unset) dates
     // derive, same as any other newly-created line.
-    return { ...li, id: newId, _monthsReconciled: true, monthly_allocations: li.monthly_allocations ? { ...li.monthly_allocations } : li.monthly_allocations };
+    // Full Flight has no allocations at all (and its single period is always months === 1).
+    return {
+      ...li, id: newId, _monthsReconciled: true,
+      months: _isFullFlight() ? 1 : li.months,
+      monthly_allocations: _isFullFlight() ? null : (li.monthly_allocations ? { ...li.monthly_allocations } : li.monthly_allocations),
+    };
   });
   const clonedAvails = {};
   Object.keys(state.availsData).forEach(oldId => {
     if (idMap[oldId]) clonedAvails[idMap[oldId]] = { ...state.availsData[oldId] };
   });
+  // The NEW option starts with no date override (below), so its flight — and
+  // in Full Flight its minimum scale — is the campaign's, not the source
+  // option's (which is still the active one at this point).
   if (targetBudget) distributeBudgetProportionally(clonedItems, targetBudget);
 
   state.activeTierLabel = nextLabel;
@@ -3026,6 +3328,9 @@ function moveTier(fromLabel, toLabel, insertAfter) {
 // from here on). null when the active tier's dates aren't parseable yet
 // (Step 02 not filled in) — callers show "—" rather than guessing.
 function _curateDerivedMonths() {
+  // Full Flight is ONE period by definition — 1 even with no (or unreadable) dates, so no caller's
+  // "|| state.parsed.total_months || 3" fallback can ever inject a month count into a full-flight line.
+  if (_isFullFlight()) return 1;
   // Base (pre-merge) periods: combining periods in Step 06 regroups the allocation, it never changes how many
   // periods are bought — so a merge can't shrink the plan.
   const months = _mbEffectiveMonthsUnmerged();
@@ -3049,8 +3354,12 @@ function renderLineItems() {
   // silently rewrites; _monthsReconciled (stamped once per line, first
   // render only) is what tells the two cases apart on every render after.
   const derivedMonths = _curateDerivedMonths();
+  _refreshMinHeaderTitle();
   state.lineItems.forEach((li, idx) => {
     let monthsMismatch = false;
+    // Full Flight never shows the "N saved / Fix" legacy flag: months is definitionally 1 (derivedMonths is 1),
+    // so a reopened line that still says 3 is simply folded into one period here (its total kept) rather than flagged.
+    if (_isFullFlight()) { li._monthsReconciled = true; _foldLineIntoOnePeriod(li); }
     if (derivedMonths != null) {
       if (li._monthsReconciled === undefined) li._monthsReconciled = (li.months === derivedMonths);
       if (li._monthsReconciled) {
@@ -3102,6 +3411,13 @@ function renderLineItems() {
       <td class="product">
         ${escapeHtml(li.product_name)}
         <span class="family-tag">${escapeHtml(p.family || "")}</span>
+        <label class="line-note-field">
+          <span class="line-note-field-label">Line note (optional) <em>— shown under the product name in the export</em></span>
+          <input type="text" class="line-note-input" maxlength="${LINE_MODIFIER_MAX}" autocomplete="off"
+                 placeholder="e.g. Hispanic, Phoenix only"
+                 value="${escapeHtml(_lineNote(li))}"
+                 data-idx="${idx}" data-key="line_modifier" data-line-note-input />
+        </label>
       </td>
       <td class="model">
         <select class="model-override-select ${li.buying_model_override != null ? "overridden" : ""}"
@@ -3514,6 +3830,10 @@ function onLineItemEdit(e) {
     // to the backend always stays a valid number.
     const isOptionalOverride = key === "rate_override" || key === "estimated_cpm_override";
     v = v === "" ? (isOptionalOverride ? null : 0) : parseFloat(v);
+  } else if (key === "line_modifier") {
+    // The line note is a plain-text label: stored cleaned (control characters out, trimmed, capped) while the box
+    // keeps what the planner is typing — no re-render here, so focus and the cursor stay put.
+    v = _cleanLineModifier(v);
   }
   if (key === "monthly_budget" || key === "months") _mbStampBaseline(state.lineItems[idx]);
   state.lineItems[idx][key] = v;
@@ -3768,7 +4088,9 @@ function _syncMixEditChrome() {
   _syncMixEditButton();
   const paidCount = _paidLineIndices().length;
   if (!editing) return;
-  document.getElementById("mix-edit-base").textContent = `of ${money(state.mixEdit.base)} per ${_mbUnitNoun().toLowerCase()} · ${paidCount} paid lines`;
+  document.getElementById("mix-edit-base").textContent = _isFullFlight()
+    ? `of ${money(state.mixEdit.base)} for the full flight · ${paidCount} paid lines`
+    : `of ${money(state.mixEdit.base)} per ${_mbUnitNoun().toLowerCase()} · ${paidCount} paid lines`;
   document.querySelectorAll("#mix-mode-tabs [data-mix-mode]").forEach(b => b.classList.toggle("active", b.dataset.mixMode === state.mixEdit.mode));
   _mixEditRefresh();
 }
@@ -4044,15 +4366,20 @@ function syncLineItemsFromTable() {
 }
 
 // Every static "Month"/"Monthly"/"Months" label this toggle governs, in
-// one place — called on toggle change AND once at page init/reopen so a
+// one place — called on toggle change AND once at page init/reopen/reset so a
 // non-default state.timeUnit (a reopened proposal) shows correctly from
-// the start. Deliberately does NOT touch any $ or count NUMBER (see
-// onTimeUnitChange's own comment on why those are left for the planner
-// to manually review rather than auto-converted).
+// the start. It is also what keeps EVERY control that shows the billing
+// period in sync (Step 04's pill + thumb, Step 02's "Billing period" select)
+// and what toggles the Full Flight layout (`.ff-mode` on Steps 02/04/06: the
+// CSS hides Step 04's Months column and duplicate flight total and Step 06's
+// breakdown machinery). Deliberately does NOT touch any $ or count NUMBER
+// (see onTimeUnitChange's own comment on how those are handled). Must
+// tolerate state.parsed === null — it runs at DOMContentLoaded and on reset.
 function _applyTimeUnitLabels() {
   const noun = _mbUnitNoun();
   const nounPlural = _mbUnitNounPlural();
   const adjective = _mbUnitAdjective();
+  const ff = _isFullFlight();
 
   const sliderOptions = Array.from(document.querySelectorAll("#time-unit-toggle .time-unit-slider-option"));
   const activeIdx = sliderOptions.findIndex(btn => btn.dataset.unit === state.timeUnit);
@@ -4060,59 +4387,251 @@ function _applyTimeUnitLabels() {
   const thumb = document.getElementById("time-unit-slider-thumb");
   // Percentages here are relative to the THUMB's own width (one segment),
   // not the track's — translateX(100%) moves it exactly one thumb-width
-  // right, landing it on the middle segment regardless of the track's
-  // actual pixel width. Falls back to the "month" position (index 1) if
-  // state.timeUnit somehow doesn't match any option.
+  // right, landing it on the next segment regardless of the track's
+  // actual pixel width (the thumb is 1/N of the track, N = the number of
+  // options — see .time-unit-slider in styles.css). Falls back to the
+  // "month" position (index 1) if state.timeUnit somehow doesn't match any option.
   if (thumb) thumb.style.transform = `translateX(${(activeIdx === -1 ? 1 : activeIdx) * 100}%)`;
 
+  // Step 02's select + its Full Flight hint (the select carries no data-field, so nothing else keeps it in step).
+  const step02Select = document.getElementById("step02-billing-period");
+  if (step02Select) step02Select.value = TIME_UNITS.includes(state.timeUnit) ? state.timeUnit : "month";
+  _refreshStep02FlightNote();
+  _refreshMinHeaderTitle();
+  // Step 06's Full Flight note follows the unit too (the step can be re-entered without a re-render, e.g. Back from Step 07).
+  const fullFlightNote = document.getElementById("mb-fullflight-note");
+  if (fullFlightNote) fullFlightNote.classList.toggle("hidden", !ff);
+  if (ff) _mbRenderFullFlightNote();
+  ["step-2", "step-4", "step-6"].forEach(id => {
+    const section = document.getElementById(id);
+    if (section) section.classList.toggle("ff-mode", ff);
+  });
+
   const setText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
-  setText("budget-target-label", `Total ${adjective.toLowerCase()} budget`);
-  setText("monthly-total-label", `${adjective} total`);
-  setText("monthly-total-gross-label", `${adjective} total (Gross)`);
-  setText("col-budget-header", `${adjective} $`);
-  setText("col-months-header", nounPlural);
-  setText("mb-step-title", `${adjective} breakdown`);
-  setText("mb-step-lede", `Split each line item's budget across the ${nounPlural.toLowerCase()} your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat ${adjective.toLowerCase()} figure is all you need; nothing else changes if you do.`);
-  setText("mb-step-name", `${adjective} Breakdown`);
-  setText("mb-no-dates-text", `${adjective} Breakdown needs a campaign flight to divide into ${nounPlural.toLowerCase()}. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.`);
-  setText("mb-mode-even-btn", `Even across ${nounPlural.toLowerCase()}`);
+  // Full Flight gets explicit copy wherever "Full-Flight monthly breakdown"-style interpolation would read
+  // badly; Weekly/Monthly/Quarterly keep exactly the interpolated text they always had.
+  setText("budget-target-label", ff ? "Total full-flight budget" : `Total ${adjective.toLowerCase()} budget`);
+  setText("monthly-total-label", ff ? "Full-Flight total" : `${adjective} total`);
+  setText("monthly-total-gross-label", ff ? "Full-Flight total (Gross)" : `${adjective} total (Gross)`);
+  setText("col-budget-header", ff ? "Full-Flight $" : `${adjective} $`);
+  setText("col-months-header", nounPlural);     // hidden in Full Flight (#step-4.ff-mode)
+  setText("mb-step-title", ff ? "Full-Flight billing" : `${adjective} breakdown`);
+  setText("mb-step-lede", ff
+    ? "This proposal bills the whole flight as one period, so there is no per-period breakdown to build — each line is a single amount in the proposal. To split budgets across months, weeks or quarters, change the billing period in Step 04 (or Step 02)."
+    : `Split each line item's budget across the ${nounPlural.toLowerCase()} your flight actually touches — useful for phased campaigns or seasonal weighting. Skip this if a flat ${adjective.toLowerCase()} figure is all you need; nothing else changes if you do.`);
+  setText("mb-step-name", ff ? "Full-Flight billing" : `${adjective} Breakdown`);
+  setText("mb-no-dates-text", ff
+    ? "Full-Flight billing has no breakdown to build."
+    : `${adjective} Breakdown needs a campaign flight to divide into ${nounPlural.toLowerCase()}. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.`);
+  setText("mb-mode-even-btn", ff ? "Even split" : `Even across ${nounPlural.toLowerCase()}`);
   setText("nav-step-6-label", ` ${adjective}`);
   const navStep6 = document.getElementById("nav-step-6");
   if (navStep6) navStep6.title = adjective;
 }
 
-// Step 04's Week/Month/Quarter toggle. Deliberately does NOT auto-convert
-// any existing $ or count number when the unit changes (e.g. rescale a
-// curated "$2,000/month" line into "$461/week") — that's real billing
-// data, and a silent automatic conversion is exactly the kind of thing
-// that could ship a wrong number into a client-facing proposal if this
-// logic ever had a subtle bug. Instead the raw numbers stay exactly as
-// curated and the planner reviews/adjusts them under the new labels,
-// same as any other curation field. What DOES get cleared: every option's
-// Step 06 Monthly Breakdown allocations and merge groups, since their
-// period KEYS (e.g. "2026-09" for month, "W1-2026-09-01" for week) are
-// tied to the OLD granularity and become meaningless under the new one.
+// The new per-period budget for one line when the billing period flips INTO full
+// flight (periodCount === null: monthly_budget × months — the flight total it
+// already is) or OUT of it (periodCount = how many periods of the NEW unit the
+// option's flight has: the flight total ÷ that). Either way the line's FLIGHT
+// TOTAL is preserved — the old "never auto-convert dollars" rule is too
+// dangerous around full flight, because its factor is the flight's month count
+// (switching in would shrink every line by that factor, switching out would
+// multiply it).
+function _convertBudgetForFullFlightSwitch(budget, months, periodCount) {
+  const flightTotal = (Number(budget) || 0) * (months || 1);
+  return periodCount == null ? _round2(flightTotal) : _round2(flightTotal / periodCount);
+}
+
+// "$2,000" / "$1,666.67" — whole dollars unless there are cents, for the confirm's worked example.
+function _moneyExact(n) { return "$" + formatBudgetInputValue(_round2(n)); }
+
+// The confirm() text for a switch that touches Full Flight (a switch among week/month/quarter keeps the
+// original wording — see onTimeUnitChange). `example` is the line shown as a worked number (a converted line is
+// preferred over a restored one); fromTotal/toTotal are the plan's flight totals before/after, summed over every
+// converted line, so the text can say PLAINLY whether rounding to cents moved them — leaving Full Flight divides each
+// flight total into equal per-period amounts, which cannot be exact for every total (1,000 over 6 weeks is
+// 166.67 x 6 = 1,000.02), so the old unconditional "Totals stay the same, to the cent." was untrue.
+function _fullFlightSwitchConfirmText({ oldUnit, newUnit, example, converts, clears, skippedTiers, fromTotal, toTotal }) {
+  const parts = [`Switch the billing period to ${_TIME_UNIT_DISPLAY[newUnit]}?`];
+  if (converts && example) {
+    const who = example.name ? `${example.name}: ` : "";
+    const moved = Math.abs(_round2((toTotal || 0) - (fromTotal || 0))) >= 0.005;
+    if (newUnit === FULL_FLIGHT) {
+      if (example.restored) {
+        parts.push(`Each line goes back to the exact flight total it had before you left Full Flight (e.g. ${who}${_moneyExact(example.from)} → ${_moneyExact(example.to)}).`);
+      } else {
+        const noun = _MB_UNIT_NOUN[oldUnit].toLowerCase();
+        const nounPlural = _MB_UNIT_NOUN_PLURAL[oldUnit].toLowerCase();
+        parts.push(`Each line's budget becomes its flight total (e.g. ${who}${_moneyExact(example.from)}/${noun} × ${example.months} ${example.months === 1 ? noun : nounPlural} = ${_moneyExact(example.to)}).`);
+      }
+      parts.push(moved
+        ? `The plan total goes from ${_moneyExact(fromTotal)} to ${_moneyExact(toTotal)} (the earlier rounding to cents is undone).`
+        : "Totals stay the same.");
+    } else {
+      const noun = _MB_UNIT_NOUN[newUnit].toLowerCase();
+      const nounPlural = _MB_UNIT_NOUN_PLURAL[newUnit].toLowerCase();
+      parts.push(`Each line's flight total is divided across the ${nounPlural} of its option's flight (e.g. ${who}${_moneyExact(example.flightTotal)} ÷ ${example.count} ${example.count === 1 ? noun : nounPlural} = ${_moneyExact(example.to)}/${noun}).`);
+      parts.push(moved
+        ? `Rounding each ${noun} to the cent moves the plan total by ${_moneyExact(Math.abs(toTotal - fromTotal))} (${_moneyExact(fromTotal)} → ${_moneyExact(toTotal)}); switching straight back restores the original.`
+        : "Totals stay the same.");
+    }
+  }
+  if (skippedTiers) {
+    parts.push(`${skippedTiers === 1 ? "One option has" : skippedTiers + " options have"} no readable flight dates, so ${skippedTiers === 1 ? "its" : "their"} budgets can't be divided across periods and are left as they are — once the dates are set they are flagged for review (not multiplied automatically).`);
+  }
+  if (clears) {
+    parts.push(`Every option's Step 06 breakdown and combined periods will be cleared — the old ${_MB_UNIT_NOUN[oldUnit].toLowerCase()}-based numbers won't carry over.`);
+  }
+  parts.push("Continue?");
+  return parts.join(" ");
+}
+
+// The billing-period switch — Step 04's pill and Step 02's select both land here.
+// Switching among Weekly / Monthly / Quarterly deliberately does NOT auto-convert
+// any existing $ or count number (e.g. rescale a curated "$2,000/month" line into
+// "$461/week") — that's real billing data, and a silent automatic conversion is
+// exactly the kind of thing that could ship a wrong number into a client-facing
+// proposal if this logic ever had a subtle bug. Instead the raw numbers stay
+// exactly as curated and the planner reviews/adjusts them under the new labels,
+// same as any other curation field. What DOES get cleared: every option's Step 06
+// Monthly Breakdown allocations and merge groups, since their period KEYS (e.g.
+// "2026-09" for month, "W1-2026-09-01" for week) are tied to the OLD
+// granularity and become meaningless under the new one.
+//
+// Switching INTO or OUT OF Full Flight is the exception: there the factor is the
+// flight's month count, so leaving the dollars alone would silently cut every
+// line to a fraction of its total (in) or multiply it (out). Every line of every
+// option therefore keeps its FLIGHT TOTAL — in: monthly_budget × months, months
+// becomes 1; out: the flight total ÷ the periods of the new unit in that option's
+// own effective dates — and the confirm says so, with a number from the plan.
+//
+// Leaving Full Flight is NOT exactly invertible (equal per-period cents), so each converted line remembers the
+// exact flight total it came from (li._ffBase: a client-only memo, never sent to the server): a straight return to
+// Full Flight — nothing edited, same dates — restores those exact numbers instead of the rounded product, so
+// passing through Weekly/Monthly/Quarterly and back can never drift. The Total budget input is restored the same way.
+// Switching in the other direction (-> Full Flight from a unit) multiplies, which is exact, so it needs no memo.
+//
+// An option whose flight dates can't be read keeps its numbers when leaving Full Flight (nothing to divide by); its
+// lines are flagged "saved" (the app's existing legacy-months machinery) so that when dates are entered later the
+// flag appears instead of the whole-flight dollars being silently multiplied by the new month count.
 function onTimeUnitChange(newUnit) {
   if (_mixEditBlocks()) return;
-  if (newUnit === state.timeUnit || !(newUnit in _MB_UNIT_ADJECTIVE)) return;
+  if (newUnit === state.timeUnit || !TIME_UNITS.includes(newUnit)) return;
+
+  const oldUnit = state.timeUnit;
+  const intoFF = newUnit === FULL_FLIGHT;
+  const outOfFF = oldUnit === FULL_FLIGHT;
+  const touchesFF = intoFF || outOfFF;
+  // Money is about to be converted by each line's months: make sure they follow the CURRENT dates first (Step 02
+  // may have just changed them). A switch among Weekly/Monthly/Quarterly converts nothing and stays untouched.
+  if (touchesFF) _resyncAllTierMonths();
+  // Full Flight lines carry no allocations of their own (a reopened one may hold the server's single synthetic
+  // period) — so leaving it must not warn about a "breakdown" that was never the planner's.
+  if (outOfFF) _normalizeFullFlightState();
+
+  const tierSets = [
+    { label: state.activeTierLabel, lines: state.lineItems || [] },
+    ...(state.tiers || []).map(t => ({ label: t.label, lines: t.lineItems || [] })),
+  ];
+
+  // The planned conversion (nothing is written until the planner confirms).
+  const plan = [];
+  const skippedLines = [];
+  let skippedTiers = 0;
+  if (touchesFF) {
+    tierSets.forEach(t => {
+      let count = null;
+      if (outOfFF) {
+        const start = _mbParseDate(_effectiveStartDate(t.label));
+        const end = _mbParseDate(_effectiveEndDate(t.label));
+        count = (start && end) ? _mbPeriodsBetween(start, end, newUnit).length : 0;
+        if (!count) {      // can't tell how many periods this option has: leave its numbers alone
+          const withMoney = t.lines.filter(li => (li.monthly_budget || 0) > 0);
+          if (withMoney.length) { skippedTiers++; skippedLines.push(...withMoney); }
+          return;
+        }
+      }
+      t.lines.forEach(li => {
+        const flightTotal = (li.monthly_budget || 0) * (li.months || 1);
+        const memo = li._ffBase;
+        // A straight return: the per-period number is still exactly what the conversion produced and the period
+        // count is unchanged, so the line gets its original flight total back, to the cent.
+        const restored = intoFF && !!memo && Math.abs((li.monthly_budget || 0) - memo.perPeriod) < 0.005 && (li.months || 1) === memo.periods;
+        const to = restored ? memo.flightTotal : _convertBudgetForFullFlightSwitch(li.monthly_budget, li.months, count);
+        plan.push({ li, label: t.label, count, from: li.monthly_budget || 0, to, months: li.months || 1, flightTotal, restored });
+      });
+    });
+  }
+  const changing = plan.filter(x => Math.abs(x.to - x.from) >= 0.005);
+  const converts = changing.length > 0;
+  // The plan's FLIGHT totals before / after (out of Full Flight each converted line then bills `count` periods).
+  const fromTotal = plan.reduce((sum, x) => sum + x.flightTotal, 0);
+  const toTotal = plan.reduce((sum, x) => sum + x.to * (x.count || 1), 0);
 
   const allTiers = allTiersForSubmit();
   const hasAllocations = allTiers.some(t => (t.line_items || []).some(li => li.monthly_allocations && Object.keys(li.monthly_allocations).length));
   const hasMerges = allTiers.some(t => (t.period_merge_groups || []).length);
-  if (hasAllocations || hasMerges) {
-    const ok = confirm(
-      `Switching to ${_MB_UNIT_ADJECTIVE[newUnit]} will clear every budget option's Step 06 breakdown and combined periods — ` +
-      `the old ${_mbUnitNoun().toLowerCase()}-based numbers won't carry over. Curated budgets and product mix are untouched either way. Continue?`
-    );
-    if (!ok) return;
+  const clears = hasAllocations || hasMerges;
+  if (clears || converts || skippedTiers > 0) {
+    let message;
+    if (touchesFF) {
+      const first = changing.find(x => x.label === state.activeTierLabel && !x.restored) || changing.find(x => !x.restored) || changing[0];
+      message = _fullFlightSwitchConfirmText({
+        oldUnit, newUnit, converts, clears, skippedTiers, fromTotal, toTotal,
+        example: first ? { name: first.li.product_name, from: first.from, to: first.to, months: first.months, count: first.count, flightTotal: first.flightTotal, restored: first.restored } : null,
+      });
+    } else {
+      message =
+        `Switching to ${_MB_UNIT_ADJECTIVE[newUnit]} will clear every budget option's Step 06 breakdown and combined periods — ` +
+        `the old ${_mbUnitNoun().toLowerCase()}-based numbers won't carry over. Curated budgets and product mix are untouched either way. Continue?`;
+    }
+    if (!confirm(message)) return;
+  }
+
+  // The Total budget input is a target in the OLD unit — carry it across by the factor the active option's
+  // plan just moved by (into Full Flight: its months; out: 1 ÷ its periods), or "Scale plan to total" would
+  // squash the converted lines straight back to the unconverted number. A straight return to Full Flight (every
+  // active line restored, target untouched since it was converted) restores the exact original target.
+  const targetInput = document.getElementById("total-budget-target");
+  const typedTarget = targetInput ? parseFormattedInput(targetInput.value) : null;
+  const activePlan = plan.filter(x => x.label === state.activeTierLabel);
+  const fromSum = activePlan.reduce((sum, x) => sum + x.from, 0);
+  const toSum = activePlan.reduce((sum, x) => sum + x.to, 0);
+  const targetMemo = state._ffTargetBase;
+  if (converts && typedTarget > 0 && fromSum > 0 && toSum > 0) {
+    const straightReturn = intoFF && targetMemo && targetMemo.unit === oldUnit && activePlan.length > 0
+      && activePlan.every(x => x.restored) && Math.abs(typedTarget - targetMemo.converted) < 0.005;
+    const newTarget = straightReturn ? targetMemo.original : _round2(typedTarget * toSum / fromSum);
+    targetInput.value = formatBudgetInputValue(newTarget);
+    state._ffTargetBase = outOfFF ? { unit: newUnit, original: typedTarget, converted: newTarget } : null;
+  } else {
+    state._ffTargetBase = null;
   }
 
   state.timeUnit = newUnit;
 
-  const clearLine = (li) => { li.monthly_allocations = null; delete li._mbBaseline; };
-  state.lineItems.forEach(clearLine);
-  state.tiers.forEach(t => { (t.lineItems || []).forEach(clearLine); t.periodMergeGroups = []; });
+  plan.forEach(x => {
+    if (outOfFF) x.li._ffBase = { flightTotal: x.flightTotal, perPeriod: x.to, periods: x.count };
+    x.li.monthly_budget = x.to;
+  });
+  // Lines of an option with no readable dates were not divided: flag them as "saved" so entering the dates later
+  // shows the "N saved / Fix" marker instead of silently multiplying their whole-flight dollars.
+  if (outOfFF) skippedLines.forEach(li => { li._monthsReconciled = false; });
+  // Back in Full Flight the memos have done their job (or are stale).
+  if (intoFF) tierSets.forEach(t => t.lines.forEach(li => { delete li._ffBase; }));
+  const clearLine = (li) => {
+    li.monthly_allocations = null;
+    delete li._mbBaseline;
+    // li.mb_off is the planner's own opt-out: left exactly as it was (see _normalizeFullFlightState).
+    if (intoFF) { li.months = 1; li._monthsReconciled = true; }
+  };
+  tierSets.forEach(t => t.lines.forEach(clearLine));
+  state.tiers.forEach(t => { t.periodMergeGroups = []; });
   state.activeTierPeriodMergeGroups = [];
+  state.mbActiveMonthKey = null;
+  // Out of Full Flight every line is "reconciled", so this re-derives months from each option's own dates
+  // (the very counts the conversion above divided by).
+  _resyncAllTierMonths();
 
   _applyTimeUnitLabels();
   renderLineItems();
@@ -4156,6 +4675,7 @@ function onAddProduct() {
     _monthsReconciled: true,
     rate_override: null,
     notes_override: null,
+    line_modifier: "",
     target_override: null,
     target_secondary: null,
     estimated_cpm_override: null,
@@ -4188,7 +4708,7 @@ function renderAddonsModule() {
     .filter(p => p.is_addon);
 
   if (!addonProducts.length) {
-    list.innerHTML = `<p class="addons-empty">No add-ons configured yet — an admin can add some from the Rates tab.</p>`;
+    list.innerHTML = `<p class="addons-empty">No add-ons configured yet — an admin can add some from the Product Catalog tab.</p>`;
     return;
   }
 
@@ -4238,11 +4758,15 @@ function onDuplicateLineItem(idx) {
   if (_mixEditBlocks()) return;
   const original = state.lineItems[idx];
   if (!original) return;
+  // The spread carries the line note along with every other per-line field (the planner then edits it to say how this
+  // copy differs — that is what the note is for).
   const copy = {
     ...original,
     id: newLineItemId(),
     _monthsReconciled: true,  // a fresh duplicate is never "legacy" — see addTier's clone for the same reasoning
-    monthly_allocations: original.monthly_allocations ? { ...original.monthly_allocations } : original.monthly_allocations,
+    // Full Flight: always the single period (months 1) and never any allocations.
+    months: _isFullFlight() ? 1 : original.months,
+    monthly_allocations: _isFullFlight() ? null : (original.monthly_allocations ? { ...original.monthly_allocations } : original.monthly_allocations),
   };
   // Carry over any avails already entered for the original line, so
   // duplicating a filled-in row for a targeting variant doesn't lose them.
@@ -4253,6 +4777,21 @@ function onDuplicateLineItem(idx) {
   state.rateOverrideOpen.clear();  // indices shift — avoid pointing at the wrong row
   state.objectiveOtherOpen.clear();
   renderLineItems();
+}
+
+// Where the line notes of the CURRENT lines go when they are replaced by a freshly recommended mix: each note moves to
+// the next new line for the SAME product (in order, one note per line). Returns { notes, lost }: `notes` is aligned to
+// `newLines` ("" where nothing carries over), `lost` lists "Product — note" for every note with no line to go to.
+function _carryLineNotes(oldLines, newLines) {
+  const queued = {};       // product_name -> notes of the current lines, in order
+  (oldLines || []).forEach(old => {
+    const note = _lineNote(old);
+    if (note) (queued[old.product_name] = queued[old.product_name] || []).push(note);
+  });
+  const notes = (newLines || []).map(li => (queued[li.product_name] && queued[li.product_name].length) ? queued[li.product_name].shift() : "");
+  const lost = [];
+  Object.keys(queued).forEach(name => queued[name].forEach(note => lost.push(`${name} — ${note}`)));
+  return { notes, lost };
 }
 
 // "Generate new product mix" (the "recommend-btn" element id/handler
@@ -4306,8 +4845,18 @@ async function onRecommend() {
     // Monthly Breakdown's _mbFindLineItem(), where every row resolved to
     // the very first one regardless of which row was actually edited.
     // Matches the same spread order onDuplicateLineItem already uses.
-    state.lineItems = data.line_items.map(li => ({
+    //
+    // A line note the planner typed on an existing line is theirs, not the recommender's to wipe: the new mix is a
+    // fresh set of lines, so each note moves to the new line for the SAME product (in order, one note per new line).
+    // A note whose product isn't in the new mix has no line to go to — the planner is asked before it is dropped.
+    const carry = _carryLineNotes(state.lineItems, data.line_items);
+    if (carry.lost.length && !confirm(
+      `The new mix has no line to keep ${carry.lost.length === 1 ? "this line note" : "these line notes"} on, so ${carry.lost.length === 1 ? "it" : "they"} will be dropped:\n\n${carry.lost.join("\n")}\n\nContinue?`)) {
+      return;
+    }
+    state.lineItems = data.line_items.map((li, i) => ({
       ...li, id: newLineItemId(),
+      line_modifier: carry.notes[i],
       months: _curateDerivedMonths() || li.months,     // the server stamps the campaign-wide count; this option's own dates win
       _monthsReconciled: true,
     }));
@@ -4487,7 +5036,11 @@ function calcMaxImpsFromSpend(p, maxSpend) {
 // Deliberately simple round factors (×4 / ÷3), not the more precise
 // 12/52 used for minimum-spend scaling elsewhere — explicit planner
 // preference for this specific comparison.
-const _SOV_MONTHLY_EQUIVALENT_SCALE = { week: 4, month: 1, quarter: 1 / 3 };
+//
+// Full Flight: the whole flight is ONE period, so its (whole-flight) budget is
+// compared with the monthly ceiling exactly as it stands (scale 1) — identical in
+// the Python compute_sov_pct and the Excel formula.
+const _SOV_MONTHLY_EQUIVALENT_SCALE = { week: 4, month: 1, quarter: 1 / 3, full_flight: 1 };
 function _sovMonthlyEquivalentBudget(budget) {
   return budget * (_SOV_MONTHLY_EQUIVALENT_SCALE[state.timeUnit] ?? 1);
 }
@@ -4538,7 +5091,15 @@ function applySovDisplay(lid, pct) {
   }
   if (helper) {
     helper.className = `sov-helper sov-${tier}`;
-    helper.textContent = `Proposed product allocation uses: ${pctLabel}% of total avails`;
+    let text = `Proposed product allocation uses: ${pctLabel}% of total avails`;
+    if (_isFullFlight()) {
+      // The ceilings are MONTHLY, the budget is the whole flight (one period): say what is being compared.
+      const li = state.lineItems.find(x => x.id === lid);
+      if (li && (li.monthly_budget || 0) > 0) {
+        text += ` · Full Flight compares the whole-flight budget (${_moneyExact(li.monthly_budget)}) with the monthly ceiling`;
+      }
+    }
+    helper.textContent = text;
   }
 }
 
@@ -4746,12 +5307,48 @@ function _mbQuartersBetween(start, end) {
   return quarters;
 }
 
+// The WHOLE flight as ONE period (Full Flight billing) — mirrors
+// monthly_allocation.py's flight_between() byte for byte: the same key, label,
+// date_range_label, day counts and period_count, because /api/generate and the
+// export identify the period by them.
+//   key          FULL_FLIGHT_KEY — a constant, never derived from the dates
+//   label        "November–December 2026" (same-year span, built exactly like a
+//                merged pair of months), "November 2026" (flight inside one
+//                month — NOT "November–November 2026"), "December 2026–January
+//                2027" (crosses a year)
+//   date_range_label  "Nov 24 – Dec 31, 2026"
+//   days_in_month / active_days  summed over every month the flight touches
+//   period_count 1 — the whole flight is ONE period, so the minimum-spend check
+//                holds a full-flight line to ONE monthly minimum (see
+//                _mbEffectiveMinimumForPeriod)
+// [] when there are no months (unparseable dates).
+function _mbFullFlightPeriods(start, end) {
+  if (!start || !end) return [];
+  const months = _mbMonthsBetween(start, end);
+  if (!months.length) return [];
+  const first = months[0], last = months[months.length - 1];
+  return [{
+    key: FULL_FLIGHT_KEY,
+    label: months.length === 1 ? first.label : _mbCombinedPeriodLabel(first, last),
+    date_range_label: _mbDateRangeLabel(first.start, last.end),
+    start: first.start,
+    end: last.end,
+    days_in_month: months.reduce((s, m) => s + m.days_in_month, 0),
+    active_days: months.reduce((s, m) => s + m.active_days, 0),
+    period_count: 1,
+  }];
+}
+
 // THE one place a caller asks for "the periods this flight touches"
 // without hardcoding which granularity that means — mirrors
-// monthly_allocation.py's periods_between() dispatcher exactly.
+// monthly_allocation.py's periods_between() dispatcher exactly (including its
+// fall-back to months for an unrecognized value — which here is also logged,
+// so a stray value can never silently pass for Monthly).
 function _mbPeriodsBetween(start, end, granularity) {
+  if (granularity === FULL_FLIGHT) return _mbFullFlightPeriods(start, end);
   if (granularity === "week") return _mbWeeksBetween(start, end);
   if (granularity === "quarter") return _mbQuartersBetween(start, end);
+  if (granularity !== "month") console.warn("Unknown billing period", granularity, "— treating it as month");
   return _mbMonthsBetween(start, end);
 }
 
@@ -4820,8 +5417,13 @@ function _mbCombinedPeriodLabel(first, last) {
 // state.timeUnit) AND _mbEffectiveMinimumForPeriod below (which further
 // multiplies by a specific period's period_count, >1 only for a merged
 // Step 06 bucket).
-const _MB_GRANULARITY_MIN_SCALE = { week: 12 / 52, month: 1, quarter: 3 };
-function _timeUnitMinimumScale() { return _MB_GRANULARITY_MIN_SCALE[state.timeUnit] ?? 1; }
+//
+// Full Flight is ONE period (its period_count is 1): a line has to clear ONE
+// monthly minimum, however many calendar months the flight touches — scale 1.
+const _MB_GRANULARITY_MIN_SCALE = { week: 12 / 52, month: 1, quarter: 3, full_flight: 1 };
+function _timeUnitMinimumScale() {
+  return _MB_GRANULARITY_MIN_SCALE[state.timeUnit] ?? 1;
+}
 
 // Deliberately NOT further prorated by the period's own active_days —
 // see monthly_allocation.py's _effective_minimum_for_period docstring for
@@ -4834,12 +5436,40 @@ function _mbEffectiveMinimumForPeriod(minimumSpend, period) {
 // Granularity-aware display text — the single source every "Month"/
 // "Monthly"/"# of months" string in Step 04/05/06 reads from, so the
 // toggle actually relabels everywhere rather than just changing the math.
-const _MB_UNIT_NOUN = { week: "Week", month: "Month", quarter: "Quarter" };
-const _MB_UNIT_NOUN_PLURAL = { week: "Weeks", month: "Months", quarter: "Quarters" };
-const _MB_UNIT_ADJECTIVE = { week: "Weekly", month: "Monthly", quarter: "Quarterly" };
-function _mbUnitNoun() { return _MB_UNIT_NOUN[state.timeUnit] || "Month"; }
-function _mbUnitNounPlural() { return _MB_UNIT_NOUN_PLURAL[state.timeUnit] || "Months"; }
-function _mbUnitAdjective() { return _MB_UNIT_ADJECTIVE[state.timeUnit] || "Monthly"; }
+//
+// Full Flight's noun/plural/adjective are only the fallbacks for generic
+// interpolation ("per flight", "of $X per flight"); every spot where those
+// would read badly has explicit full-flight copy in _applyTimeUnitLabels and
+// the places listed there. "Full-Flight" (hyphenated) is the adjective in a
+// label ("Full-Flight total"); the pill/select text is _TIME_UNIT_DISPLAY.
+const _MB_UNIT_NOUN = { week: "Week", month: "Month", quarter: "Quarter", [FULL_FLIGHT]: "Flight" };
+const _MB_UNIT_NOUN_PLURAL = { week: "Weeks", month: "Months", quarter: "Quarters", [FULL_FLIGHT]: "Flights" };
+const _MB_UNIT_ADJECTIVE = { week: "Weekly", month: "Monthly", quarter: "Quarterly", [FULL_FLIGHT]: "Full-Flight" };
+// What the planner picks between (Step 04 pill, Step 02 select) — not an adjective.
+const _TIME_UNIT_DISPLAY = { week: "Weekly", month: "Monthly", quarter: "Quarterly", [FULL_FLIGHT]: "Full Flight" };
+// A unit the tables don't know can't come from the UI (every writer validates against TIME_UNITS);
+// say so loudly instead of silently reading as Monthly, then fall back to the original default.
+function _mbUnitWord(table, fallback) {
+  const word = table[state.timeUnit];
+  if (word !== undefined) return word;
+  console.warn("Unknown billing period", state.timeUnit, "— labelling it as", fallback);
+  return fallback;
+}
+function _mbUnitNoun() { return _mbUnitWord(_MB_UNIT_NOUN, "Month"); }
+function _mbUnitNounPlural() { return _mbUnitWord(_MB_UNIT_NOUN_PLURAL, "Months"); }
+function _mbUnitAdjective() { return _mbUnitWord(_MB_UNIT_ADJECTIVE, "Monthly"); }
+
+// Lenient coercion for a value read back from storage (reopen/draft): absent or unknown -> "month",
+// exactly what a proposal saved before the toggle existed means. Mirrors normalize_time_unit() in
+// monthly_allocation.py.
+function _normalizeTimeUnit(value) {
+  const v = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return TIME_UNITS.includes(v) ? v : "month";
+}
+
+function _isFullFlight() { return state.timeUnit === FULL_FLIGHT; }
+
+function _round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
 // Day-prorated split — mirrors monthly_allocation.py's prorated_allocation()
 // exactly, including "last month absorbs the rounding remainder" so dollars
@@ -5084,12 +5714,148 @@ function _mbEffectiveDistribution(li, months) {
   return _mbDefaultAllocation(li.monthly_budget * li.months, months);
 }
 
+// --------------------------------------------------------------------------
+// Step 06's MASTER "Apply the default split to all lines".
+//
+// The Default split toggle only decides what a NEW default means; the one thing that ever redistributed a line was
+// the small per-line reset inside each product panel (By Product view only). This is that same reset, for every
+// line at once, reachable from both views. It deliberately re-derives nothing: each line's new split is
+// _mbDefaultAllocation(monthly_budget x months, months) — exactly what the per-line button writes — so a line's
+// total is kept to the cent, merged periods (the `months` list is the post-merge one) and the billing unit are
+// honoured for free, and it is written through _mbSetAllocation (which re-stamps the baseline the Curate-total
+// rescale compares against). Only the ACTIVE option's lines are touched: Step 06 is entered per option.
+// --------------------------------------------------------------------------
+
+// A line within this many dollars of a default (in every period) counts as simply holding that default when we ask
+// "did the planner customize this?": rescaling a line after its budget moved can leave a few cents of rounding
+// residue, and that must not read as hand-typed numbers (it would raise a pointless "overwrite?" confirm).
+const _MB_DEFAULT_SLACK = 1;
+
+// Two allocations (period key -> $) are the same split when every period agrees within `tolerance`.
+function _mbAllocationsMatch(a, b, tolerance = _MB_CENT) {
+  const keys = new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
+  for (const k of keys) {
+    if (Math.abs((Number(a && a[k]) || 0) - (Number(b && b[k]) || 0)) > tolerance) return false;
+  }
+  return true;
+}
+
+// What applying the selected default to every line would do, without doing it. Eligible = the lines the per-line
+// reset button works on: not Added Value, the breakdown is ON for them (they carry allocations; mb_off lines have
+// none), and they have a budget to split. For each: `target` (the new split), `changes` (it is not already that),
+// `custom` (it also matches NEITHER the even nor the day-prorated default, i.e. numbers the planner typed — a line
+// that merely holds the OTHER default loses nothing when it is switched).
+function _mbPlanRedistribution(lines, months) {
+  const rows = [];
+  (lines || []).forEach(li => {
+    if (li.is_added_value) return;
+    const current = li.monthly_allocations;
+    if (!current || !Object.keys(current).length) return;
+    // The line's real total is what its allocations add up to (that is what the server bills): after a hand edit
+    // monthly_budget is only round(sum / months, 2), so budget x months can sit a cent or two away from it. Use
+    // the allocation sum while the two agree to rounding; if they differ by more (the budget moved after the
+    // numbers were typed), the budget is the authority, exactly as the render-time rescale treats it.
+    const budgetTotal = li.monthly_budget * li.months;
+    const allocSum = Object.values(current).reduce((t, v) => t + (Number(v) || 0), 0);
+    const balanced = Math.abs(allocSum - budgetTotal) <= _MB_CENT * (months.length + 1);
+    const total = balanced ? Math.round(allocSum * 100) / 100 : budgetTotal;
+    if (!(total > 0)) return;
+    const target = _mbDefaultAllocation(total, months);
+    // `exact`: not the default to the cent (Apply tidies those cents up). `changes`: differs by more than a dollar in
+    // some period — a line within a dollar of the default already follows it (a budget rescale can leave a few cents
+    // of residue), so it must not keep the Apply button enabled or be counted as "different".
+    const exact = !_mbAllocationsMatch(current, target);
+    const changes = exact && !_mbAllocationsMatch(current, target, _MB_DEFAULT_SLACK);
+    const custom = changes
+      && !_mbAllocationsMatch(current, _mbEvenDefaultAllocation(total, months), _MB_DEFAULT_SLACK)
+      && !_mbAllocationsMatch(current, _mbProratedDefaultAllocation(total, months), _MB_DEFAULT_SLACK);
+    rows.push({ li, target, changes, exact, custom });
+  });
+  return {
+    rows,
+    eligible: rows.length,
+    changeCount: rows.filter(r => r.changes).length,
+    customCount: rows.filter(r => r.custom).length,
+  };
+}
+
+function _mbModeWord() { return state.mbDistributionMode === "prorated" ? "day-prorated" : "even"; }
+
+// The confirm shown before custom numbers are overwritten: how many lines will change and how many of those were
+// customized. (Never shown when nothing is customized.)
+function _mbRedistributeConfirmText(plan) {
+  const n = plan.changeCount, k = plan.customCount;
+  const scope = state.tiers.length ? " in this option" : "";
+  const overwritten = k === n
+    ? `${n === 1 ? "Its" : "Their"} custom numbers will be overwritten.`
+    : `${k} of them ${k === 1 ? "has" : "have"} custom numbers that will be overwritten.`;
+  return `Apply the ${_mbModeWord()} split to ${n} line${n === 1 ? "" : "s"}${scope}? ${overwritten} Each line's total stays the same. Continue?`;
+}
+
+// The button's click (and the hint's): confirm only when custom numbers would be lost, then rewrite every changing
+// line and re-render — the same re-render the per-line reset triggers, so the plan summary, every status badge and the
+// totals follow; the draft autosave picks the new allocations up from state on its next tick like any other edit.
+function onMbApplyAll() {
+  if (_isFullFlight()) return;                     // no breakdown in Full Flight (Step 06 is a read-only note)
+  const months = _mbEffectiveMonths();
+  if (!months || !months.length) return;
+  const plan = _mbPlanRedistribution(state.lineItems, months);
+  if (plan.changeCount) {
+    if (plan.customCount && !confirm(_mbRedistributeConfirmText(plan))) return;
+    plan.rows.forEach(r => { if (r.exact) _mbSetAllocation(r.li, r.target); });      // cent residue is tidied along the way
+  }
+  state.mbModeNotice = false;
+  renderMonthlyBreakdown();
+}
+
+// Keeps the master button and the "you flipped the toggle" hint in step with the lines on screen. Runs on every
+// render of the step (both views), so the button's enabled state and the hint's counts never go stale.
+function _mbRenderApplyControls(months) {
+  const btn = document.getElementById("mb-apply-all-btn");
+  const notice = document.getElementById("mb-mode-notice");
+  if (!btn) return;
+  const plan = _mbPlanRedistribution(state.lineItems, months);
+  const word = _mbModeWord();
+  const scope = state.tiers.length ? " in this option" : "";
+  btn.textContent = `↺ Apply ${word} split to all lines`;
+  btn.disabled = plan.changeCount === 0;
+  btn.title = plan.changeCount
+    ? `Redistribute ${plan.changeCount} line${plan.changeCount === 1 ? "" : "s"}${scope} across the ${_mbUnitNounPlural().toLowerCase()} with the ${word} split. Each line's total stays the same.`
+    : (plan.eligible ? `Every line${scope} already follows the ${word} split.` : "No line is using the breakdown yet.");
+
+  if (state.mbModeNotice && !plan.changeCount) state.mbModeNotice = false;   // nothing left to offer
+  if (!notice) return;
+  notice.classList.toggle("hidden", !state.mbModeNotice);
+  if (state.mbModeNotice) {
+    const custom = plan.customCount ? ` (${plan.customCount} with custom numbers)` : "";
+    document.getElementById("mb-notice-text").textContent =
+      `The default is now ${word}, but ${plan.changeCount} of ${plan.eligible} line${plan.eligible === 1 ? "" : "s"}${scope} still hold a different split${custom}.`;
+  }
+}
+
 function renderMonthlyBreakdown() {
   _resyncAllTierMonths();
-  const months = _mbEffectiveMonths();
   const emptyState = document.getElementById("mb-no-dates");
   const content = document.getElementById("mb-content");
   const masterLabel = document.querySelector(".mb-master-toggle");
+  const fullFlightNote = document.getElementById("mb-fullflight-note");
+
+  // Full Flight: every line is ONE period, so there is nothing to split. The step stays reachable (no renumbering,
+  // no nav changes — a saved draft can still resume at Step 06) but shows only a read-only note, and returns
+  // BEFORE any allocation reconcile / default-allocation logic below: Full Flight lines carry no allocations (the
+  // server writes the single-period breakdown itself), and the machinery would otherwise create month-keyed ones.
+  if (_isFullFlight()) {
+    if (fullFlightNote) fullFlightNote.classList.remove("hidden");
+    emptyState.classList.add("hidden");
+    content.classList.add("hidden");
+    if (masterLabel) masterLabel.classList.add("hidden");
+    _mbRenderFullFlightNote();
+    _mbSetContinueEnabled(true);
+    return;
+  }
+  if (fullFlightNote) fullFlightNote.classList.add("hidden");   // leaving Full Flight restores the normal step below
+
+  const months = _mbEffectiveMonths();
   if (masterLabel) masterLabel.classList.toggle("hidden", !months || !months.length);   // nothing to switch without dates
   if (!months || !months.length) {
     emptyState.classList.remove("hidden");
@@ -5171,8 +5937,22 @@ function renderMonthlyBreakdown() {
       || `<p class="mb-empty-hint">No line items yet — add products in Step 04 first.</p>`;
     _mbWireLineItemBlocks(months);
   }
+  _mbRenderApplyControls(months);
   _mbRenderPlanSummary(months);
   _mbUpdateContinueState(months);
+}
+
+// Step 06's read-only Full Flight panel: names the option's single period (the same label the export's one
+// breakdown column carries) and its flight total.
+function _mbRenderFullFlightNote() {
+  const detail = document.getElementById("mb-fullflight-detail");
+  if (!detail) return;
+  const period = (_mbEffectiveMonthsUnmerged() || [])[0];
+  const total = state.lineItems.reduce((s, li) => s + (li.monthly_budget || 0) * (li.months || 1), 0);
+  const optionPrefix = state.tiers.length ? `${_tierDisplayName(state.activeTierLabel)} — ` : "";
+  detail.textContent = period
+    ? `${optionPrefix}${period.label} (${period.date_range_label}): ${money(total)} net across ${state.lineItems.length} line${state.lineItems.length === 1 ? "" : "s"}.`
+    : "Set the flight's Start/End dates in Step 02 (or a per-option override in Step 04) so the period can be named.";
 }
 
 // "For reference" — impressions (or, for a CPP/rating-point product,
@@ -5238,6 +6018,7 @@ function _mbLineItemBlockHtml(li, months) {
       <summary>
         <span class="mb-line-name-wrap">
           <span class="mb-line-name">${escapeHtml(product ? product.name : li.product_name)}</span>
+          ${_lineNoteHtml(li)}
           ${_mbTargetingSnippet(li) ? `<span class="mb-line-targeting">${escapeHtml(_mbTargetingSnippet(li))}</span>` : ""}
         </span>
         <span class="mb-line-total">Total: ${money(total)}</span>
@@ -5347,6 +6128,7 @@ function _mbLiveUpdateAfterEdit(li, months, editedInput) {
 
   _mbRenderPlanSummary(months);
   _mbUpdateContinueState(months);
+  _mbRenderApplyControls(months);                  // the master button's state follows the keystrokes too
 }
 
 // --------------------------------------------------------------------------
@@ -5416,7 +6198,7 @@ function _mbRenderByMonthView(eligibleLines, months) {
     const unitsRef = enabled ? _mbUnitsRefText(li, product, dollars) : "";
     return `
       <tr data-line="${li.id}" class="${belowMin ? "mb-row-warn" : ""}">
-        <td class="mb-month-product-cell">${escapeHtml(product ? product.name : li.product_name)}${_mbTargetingSnippet(li) ? `<span class="mb-line-targeting">${escapeHtml(_mbTargetingSnippet(li))}</span>` : ""}<span class="mb-month-line-total">Line total: ${money(total)}</span></td>
+        <td class="mb-month-product-cell">${escapeHtml(product ? product.name : li.product_name)}${_lineNoteHtml(li)}${_mbTargetingSnippet(li) ?`<span class="mb-line-targeting">${escapeHtml(_mbTargetingSnippet(li))}</span>` : ""}<span class="mb-month-line-total">Line total: ${money(total)}</span></td>
         <td><input type="number" step="5" min="0" max="100" class="mb-pct-input" data-line="${li.id}" data-month="${monthKey}" value="${enabled ? Math.round(pct * 100) / 100 : ""}" ${enabled ? "" : "disabled"} /></td>
         <td><input type="number" step="50" min="0" class="mb-dollar-input" data-line="${li.id}" data-month="${monthKey}" value="${enabled ? dollars.toFixed(2) : ""}" ${enabled ? "" : "disabled"} /></td>
         <td class="mb-units-ref mono">${escapeHtml(unitsRef)}</td>
@@ -5696,7 +6478,7 @@ function renderAvailsGrid() {
     card.className = "avails-card";
     card.innerHTML = `
       <div class="avails-card-head">
-        <h3>${escapeHtml(li.product_name)}${escapeHtml(subtitle)}</h3>
+        <h3>${escapeHtml(li.product_name)}${escapeHtml(subtitle)}${_lineNoteHtml(li, "line-note-block")}</h3>
         <span class="sov-badge" id="sov-badge-${escapeAttr(li.id)}"></span>
       </div>
       <p class="avails-targeting-reminder">
@@ -6446,10 +7228,7 @@ function renderGenerateSummary() {
   const flight = state.lineItems.reduce((s, li) => s + (li.monthly_budget || 0) * (li.months || 1), 0);
   const fee = state.parsed.agency_fee || 0;
   const gross = fee > 0 ? flight / (1 - fee) : flight;
-  const months = state.parsed.total_months
-    || (state.lineItems[0] && state.lineItems[0].months)
-    || parseBudgetFromRenewal(state.parsed) && state.lineItems[0]?.months
-    || 3;
+  const ff = _isFullFlight();
 
   const allTiers = allTiersForSubmit();
   const multiTier = allTiers.length > 1;
@@ -6484,14 +7263,18 @@ function renderGenerateSummary() {
     <div class="sum-row"><span class="lbl">Seller</span><span class="val mono">${escapeHtml(state.parsed.salesperson_email || "—")}</span></div>
     <div class="sum-row"><span class="lbl">Request type</span><span class="val mono">${escapeHtml(state.parsed.request_type || "—")}</span></div>
     <div class="sum-row"><span class="lbl">Products${tierLabel}</span><span class="val">${state.lineItems.length}</span></div>
-    <div class="sum-row"><span class="lbl">Monthly total (Net)${tierLabel}</span><span class="val">${money(monthly)}</span></div>
-    <div class="sum-row"><span class="lbl">Flight total (Net)${tierLabel}</span><span class="val">${money(flight)}</span></div>
+    ${ff
+      // Full Flight: monthly total and flight total are the same number — one row, not two.
+      ? `<div class="sum-row"><span class="lbl">Full-Flight total (Net)${tierLabel}</span><span class="val">${money(flight)}</span></div>`
+      : `<div class="sum-row"><span class="lbl">Monthly total (Net)${tierLabel}</span><span class="val">${money(monthly)}</span></div>
+    <div class="sum-row"><span class="lbl">Flight total (Net)${tierLabel}</span><span class="val">${money(flight)}</span></div>`}
     ${fee > 0 ? `<div class="sum-row"><span class="lbl">Agency fee</span><span class="val mono">${(fee*100).toFixed(2)}%</span></div>` : ""}
-    ${fee > 0 ? `<div class="sum-row"><span class="lbl">Flight total (Gross)${tierLabel}</span><span class="val">${money(gross)}</span></div>` : ""}
+    ${fee > 0 ? `<div class="sum-row"><span class="lbl">${ff ? "Full-Flight" : "Flight"} total (Gross)${tierLabel}</span><span class="val">${money(gross)}</span></div>` : ""}
     ${multiTier ? `<div class="sum-row sum-tiers-row"><span class="lbl">Budget Options</span><span class="val">${allTiers.map(t => {
       const m = (t.line_items || []).reduce((s, li) => s + (li.monthly_budget || 0), 0);
-      return `${escapeHtml(_tierDisplayName(t.label))}: ${money(m)}/mo · ${(t.line_items || []).length} products`;
+      return `${escapeHtml(_tierDisplayName(t.label))}: ${money(m)}${ff ? "" : "/mo"} · ${(t.line_items || []).length} products`;
     }).join(" &nbsp;·&nbsp; ")}</span></div>` : ""}
+    ${_generateSummaryLineNotesHtml(allTiers, multiTier)}
   `;
   // Show the best suggestion we have right now, then replace it with a fresh
   // one from the server (the parse-time suggestion goes stale the moment the
@@ -6499,6 +7282,22 @@ function renderGenerateSummary() {
   _applyTabCheckboxes();
   _refreshSuggestedTabs();
   _refreshDisclaimersPreview();
+}
+
+// "Line notes" row of the Step 08 summary: every line that carries a Step 04 line note, as product + purple note
+// (per option when there are several), so the planner sees what will print under each product name before generating.
+// "" when no line has one — the summary is then exactly what it always was.
+function _generateSummaryLineNotesHtml(allTiers, multiTier) {
+  const groups = (allTiers || []).map(t => {
+    const items = (t.line_items || []).filter(li => _lineNote(li)).map(li =>
+      `<li><span class="sum-line-note-name">${escapeHtml(li.product_name)}</span>${_lineNoteHtml(li)}</li>`);
+    return items.length ? { label: _tierDisplayName(t.label), items } : null;
+  }).filter(Boolean);
+  if (!groups.length) return "";
+  const body = groups.map(g => `
+      ${multiTier ? `<div class="sum-line-notes-option">${escapeHtml(g.label)}</div>` : ""}
+      <ul class="sum-line-notes">${g.items.join("")}</ul>`).join("");
+  return `<div class="sum-row sum-notes-row"><span class="lbl">Line notes</span>${body}</div>`;
 }
 
 // Checkbox state = the planner's own override where they made one, otherwise
@@ -6525,7 +7324,7 @@ async function _refreshSuggestedTabs() {
       body: JSON.stringify({ request: state.parsed, product_names: names }),
     });
     if (!res.ok) return;
-    state.suggestedTabs = (await res.json()).tabs;
+    state.suggestedTabs = _normalizeTabKeys((await res.json()).tabs);
     _applyTabCheckboxes();
   } catch (e) {
     // keep whatever suggestion we already had — the server re-derives tabs
@@ -6570,6 +7369,29 @@ async function _refreshDisclaimersPreview() {
   }
 }
 
+// Full Flight's data contract, enforced on EVERY line of EVERY option right before a payload leaves: months 1
+// (a line that still carries months > 1 is FOLDED first, total kept — see _foldLineIntoOnePeriod), no
+// monthly_allocations (the server writes the single-period breakdown itself, so no period key ever has to cross the
+// wire), and no combined periods. li.mb_off is deliberately left alone: it is meaningless in Full Flight (Step 06 is a
+// note and the server ignores it) but it is the planner's own opt-out — resetting it here would silently re-enable
+// every breakdown they had turned off the moment they return to Weekly/Monthly/Quarterly. Idempotent, a no-op in any
+// other billing period, and defensive on purpose: a reopened or stale state can't silently export a wrong total.
+function _normalizeFullFlightState() {
+  if (!_isFullFlight()) return;
+  const fix = (li) => {
+    _foldLineIntoOnePeriod(li);
+    li._monthsReconciled = true;
+    li.monthly_allocations = null;
+    delete li._mbBaseline;
+  };
+  (state.lineItems || []).forEach(fix);
+  (state.tiers || []).forEach(t => {
+    (t.lineItems || []).forEach(fix);
+    t.periodMergeGroups = [];
+  });
+  state.activeTierPeriodMergeGroups = [];
+}
+
 // Fields shared by /api/generate and /api/proposal/draft — the whole
 // wizard state needed to resume or finish a proposal. Kept in ONE place
 // so the two payloads can't quietly drift apart (the same "one shared
@@ -6577,6 +7399,7 @@ async function _refreshDisclaimersPreview() {
 // llm_utils on the backend — see main.py's _build_reopen_state).
 function _buildWizardStatePayload() {
   _resyncAllTierMonths();
+  _normalizeFullFlightState();
   return {
     request: state.parsed,
     line_items: state.lineItems,     // legacy field — kept for back-compat; the server prefers `tiers` when present
@@ -6595,9 +7418,10 @@ function _buildWizardStatePayload() {
     // inline total row next to "TOTAL DIGITAL MONTHLY"); a line WITH its
     // own monthly_allocations already carries real numbers regardless.
     monthly_distribution_mode: state.mbDistributionMode,
-    // Step 04's Week/Month/Quarter toggle — drives which period
-    // granularity the server validates monthly_allocations against and
-    // which one the export's Monthly Breakdown columns/labels use.
+    // The billing period (Step 04's pill / Step 02's select: week | month |
+    // quarter | full_flight) — drives which period granularity the server
+    // validates monthly_allocations against and which one the export's
+    // Monthly Breakdown columns/labels use.
     time_unit: state.timeUnit,
     // Planner override for the campaign-name segment of the naming
     // convention (see the proposal-name-bar's Edit button) — null unless
@@ -6614,6 +7438,7 @@ function _wizardStateKey() {
 async function onGenerate() {
   const epoch = _resetEpoch;
   const sentStateKey = _wizardStateKey();
+  const sentPlanKey = _emailPlanKey();       // what the emails below are about to be written against
   const payload = {
     ..._buildWizardStatePayload(),
     // Echoes back an id from an earlier draft save (or a reopened
@@ -6663,6 +7488,8 @@ async function onGenerate() {
     state.proposalId = data.proposal_id;
     state.generatedProposalId = data.proposal_id;
     state.proposalSummary = data.summary;
+    state.emailsPlanKey = sentPlanKey;
+    state.emailFigures = data.email_figures || null;
     showResult(data);
     // The result itself changes state.enrichment, which would otherwise make the very next autosave /
     // "New proposal" file the just-generated proposal again as a stray draft. Only when nothing was edited
@@ -6704,7 +7531,13 @@ function buildGammaOutline() {
   if (targeting) lines.push(`- Target: ${targeting}`);
   const flightBits = [];
   if (req.start_date) flightBits.push(req.start_date + (req.end_date ? ` – ${req.end_date}` : ""));
-  if (req.total_months) flightBits.push(`(${req.total_months} month${req.total_months === 1 ? "" : "s"})`);
+  if (_isFullFlight()) {
+    // The whole flight is one billing period — "(N months)" would read as if it were billed monthly (and for a
+    // 5-week flight "2 months" is only the calendar span). The dates above already say how long it runs.
+    flightBits.push("(billed as one full-flight period)");
+  } else if (req.total_months) {
+    flightBits.push(`(${req.total_months} month${req.total_months === 1 ? "" : "s"})`);
+  }
   if (flightBits.length) lines.push(`- Flight: ${flightBits.join(" ")}`);
   lines.push("");
 
@@ -6727,13 +7560,33 @@ function buildGammaOutline() {
   tiers.forEach(t => {
     if (tiers.length > 1) lines.push(`${_tierDisplayName(t.label)}:`);
     let tierTotal = 0;
+    // "mo" in a monthly plan (the original wording), "wk" / "qtr" in a weekly / quarterly one — a $500 week is not "/mo".
+    const unitAbbr = { week: "wk", quarter: "qtr" }[state.timeUnit] || "mo";
     (t.line_items || []).forEach(li => {
       const p = state.productIndex[li.product_name] || {};
       tierTotal += (li.monthly_budget || 0) * (li.months || 1);
       const target = li.target_override || targeting || "(campaign default)";
-      lines.push(`  - ${li.product_name}${p.family ? ` (${p.family})` : ""} — ${money(li.monthly_budget)}/mo × ${li.months}mo — Target: ${target}`);
+      const amountText = _isFullFlight()
+        ? `${money(li.monthly_budget)} flat for the full flight`
+        : `${money(li.monthly_budget)}/${unitAbbr} × ${li.months}${unitAbbr}`;
+      // A line the planner gave a Step 04 line note reads "… — Note: Hispanic, Phoenix only — …", so two lines of
+      // one product stay distinguishable in the deck.
+      const lineNote = _lineNote(li);
+      lines.push(`  - ${li.product_name}${p.family ? ` (${p.family})` : ""}${lineNote ? ` — Note: ${lineNote}` : ""} — ${amountText} — Target: ${target}`);
     });
-    lines.push(`  Option total: ${money(tierTotal)}`);
+    // Right after a Generate the server's own figures (the ones in the Excel and the emails) are on hand: use them, so
+    // the outline's option total includes the one-time add-ons and honors customised per-period amounts exactly like
+    // the workbook. Without them (older state) the plain sum of the lines is the fallback.
+    const fig = ((state.emailFigures && state.emailFigures.options) || []).find(o => o.label === t.label);
+    if (fig) {
+      lines.push(`  Option total: ${money(fig.total_net)}` +
+        (fig.addons_net ? ` (${money(fig.media_net)} media + ${money(fig.addons_net)} one-time add-ons)` : ""));
+      if (fig.periods && fig.periods.length && !_isFullFlight()) {
+        lines.push(`  By ${_mbUnitNoun().toLowerCase()}: ` + fig.periods.map(pp => `${pp.label} ${money(pp.net)}`).join(" · "));
+      }
+    } else {
+      lines.push(`  Option total: ${money(tierTotal)}`);
+    }
     lines.push("");
   });
 
@@ -6756,6 +7609,127 @@ function buildGammaOutline() {
   }
 
   return lines.join("\n").trim();
+}
+
+// "Create in Gamma": the outline (as the planner may have refined it) goes to Gamma's API through the server,
+// which holds the key; Gamma builds the deck and the planner is taken to it to finish by hand. A blank tab is
+// opened straight from the click (a tab opened after waiting for Gamma would be blocked as a pop-up) and pointed
+// at the deck when it's ready. Without a Gamma key on the server, the outline is copied and Gamma's create page
+// opens instead.
+const GAMMA_CREATE_PAGE = "https://gamma.app/create";
+
+function _gammaStatus(text, { error = false } = {}) {
+  const el = document.getElementById("gamma-create-status");
+  el.textContent = text;
+  el.classList.toggle("hidden", !text);
+  el.classList.toggle("gamma-create-error", error);
+}
+
+// Back to the idle state: no message, button usable (a build still in flight stops on its own, see onGammaCreate).
+function _gammaReset() {
+  const btn = document.getElementById("gamma-create-btn");
+  if (btn) btn.disabled = false;
+  const el = document.getElementById("gamma-create-status");
+  if (el) { el.textContent = ""; el.classList.add("hidden"); el.classList.remove("gamma-create-error"); }
+}
+
+function _gammaShowLink(url) {
+  const el = document.getElementById("gamma-create-status");
+  el.classList.remove("hidden", "gamma-create-error");
+  el.textContent = "Your deck is ready: ";
+  const link = document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = "open it in Gamma ↗";
+  el.appendChild(link);
+}
+
+async function _copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (err) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+}
+
+async function onGammaCreate() {
+  const btn = document.getElementById("gamma-create-btn");
+  if (btn.disabled) return;
+  const outline = document.getElementById("gamma-outline-body").textContent.trim();
+  if (!outline) { _gammaStatus("There's no outline to send yet.", { error: true }); return; }
+
+  // Opened right here, from the click, so the browser lets it through; pointed at the deck below.
+  const tab = window.open("", "_blank");
+  if (tab) {
+    tab.document.write("<p style=\"font-family:sans-serif;padding:2rem\">Building your presentation in Gamma… this tab will switch to it when it's ready.</p>");
+    tab.document.close();
+    try { tab.opener = null; } catch (err) { /* the tab is only ever pointed at gamma.app; this just cuts the link back */ }
+  }
+  const epoch = _resetEpoch;
+  btn.disabled = true;
+  _gammaStatus("Sending the outline to Gamma…");
+  try {
+    const res = await fetch("/api/gamma/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ outline, title: state.finalProposalTitle || buildProposalNamePreview(state.parsed) }),
+    });
+    const data = await _readJsonResponse(res);
+    if (epoch !== _resetEpoch) { if (tab) tab.close(); return; }
+
+    if (!data.configured) {
+      const copied = await _copyText(outline);
+      if (tab) tab.location.href = GAMMA_CREATE_PAGE;
+      _gammaStatus(copied
+        ? "Gamma isn't connected to this app, so the outline is copied — paste it into Gamma's text box."
+        : "Gamma isn't connected to this app — use Copy, then paste the outline into Gamma.", { error: !copied });
+      return;
+    }
+
+    // Poll until Gamma finishes (usually under a minute). One failed poll isn't the deck failing — the build runs on
+    // Gamma's side regardless — so a few in a row are tolerated before giving up.
+    const started = Date.now();
+    let failedPolls = 0;
+    while (Date.now() - started < 5 * 60 * 1000) {
+      await new Promise(r => setTimeout(r, 3000));
+      if (epoch !== _resetEpoch) { if (tab) tab.close(); return; }
+      let status;
+      try {
+        const sres = await fetch(`/api/gamma/status/${encodeURIComponent(data.generation_id)}`);
+        status = await _readJsonResponse(sres);
+        failedPolls = 0;
+      } catch (pollError) {
+        if (epoch !== _resetEpoch) { if (tab) tab.close(); return; }
+        if (++failedPolls >= 5) {
+          throw new Error(`lost contact with Gamma while it was building (${pollError.message}). The deck may still finish — check your Gamma workspace.`);
+        }
+        continue;
+      }
+      if (status.status === "completed" && status.gamma_url) {
+        if (tab && !tab.closed) tab.location.href = status.gamma_url;
+        _gammaShowLink(status.gamma_url);
+        return;
+      }
+      if (status.status === "failed") throw new Error(status.error || "Gamma couldn't build the deck.");
+      _gammaStatus(`Gamma is building the deck… ${Math.round((Date.now() - started) / 1000)}s`);
+    }
+    throw new Error("Gamma is taking longer than expected — check your Gamma workspace in a minute.");
+  } catch (e) {
+    if (tab && !tab.closed) tab.close();
+    if (epoch !== _resetEpoch) return;     // another proposal is on screen — this failure isn't its business
+    _gammaStatus(`Couldn't create the deck: ${e.message}`, { error: true });
+  } finally {
+    if (epoch === _resetEpoch) btn.disabled = false;     // after a reset, _gammaReset() already freed the button
+  }
 }
 
 // Refines the Gamma outline via the ONE AI call this whole feature makes
@@ -6914,6 +7888,7 @@ async function buildInternalEmailMailtoLink() {
 async function showResult(data) {
   const result = document.getElementById("result");
   result.classList.remove("hidden");
+  _gammaStatus("");                    // a fresh Generate rebuilds the outline — an earlier deck link is for the old one
 
   // Proposal title (naming convention) — now the REAL, server-computed
   // title (campaign name AI-inferred, real ID assigned), so the persistent
@@ -6929,10 +7904,15 @@ async function showResult(data) {
     titleEl.classList.add("hidden");
   }
 
+  // Anything the generator had to work around (a skipped product, a DOOH pivot that couldn't be attached, tabs
+  // switched back on...) is shown, not just logged — the planner is about to send this file.
+  const exportWarnings = (data.summary.warnings || []).filter(w => typeof w === "string" && w.trim());
   document.getElementById("result-meta").innerHTML = `
-    Tabs: ${data.summary.tabs_built.join(" · ")}<br>
+    Tabs: ${data.summary.tabs_built.map(escapeHtml).join(" · ")}<br>
     Net: ${money(data.summary.total_net)} · Gross: ${money(data.summary.total_gross)}<br>
     File: ${escapeHtml(data.filename)}
+    ${exportWarnings.length ? `<div class="result-warnings" role="alert"><strong>Check before sending:</strong><ul>${
+      exportWarnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul></div>` : ""}
   `;
 
   const dl = document.getElementById("download-link");
@@ -6952,6 +7932,8 @@ async function showResult(data) {
   const aiError = document.getElementById("ai-error");
   const enrichment = data.enrichment || {};
   state.enrichment = enrichment;
+  // Dollar amounts the automatic check couldn't match to the plan's figures (empty when everything matched).
+  _showEmailFigureWarnings(enrichment.figure_warnings);
 
   aiContent.classList.add("hidden");
   aiError.classList.add("hidden");
@@ -6993,6 +7975,7 @@ async function showResult(data) {
     }
   }
 
+  _refreshEmailStaleNote();
   await buildInternalEmailMailtoLink();
 
   result.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -7007,25 +7990,116 @@ function _resetEmailRepromptScope() {
   if (bothRadio) bothRadio.checked = true;
 }
 
+// What the emails' dollar figures are worked out from, sent with every revision: the plan AS IT IS NOW — every option
+// (not just the active one that state.lineItems holds), the add-ons, any customised per-period amounts and the billing
+// period — so a revision can never re-price the proposal from a stale or partial picture. The server rebuilds the same
+// figures the Excel shows from exactly this (see main.py's _email_figures_for_tiers). Option avails are left out: they
+// don't change a dollar figure and can be large.
+function _emailFiguresPayload() {
+  const p = _buildWizardStatePayload();
+  return {
+    request: p.request,
+    line_items: p.line_items,
+    tiers: (p.tiers || []).map(({ avails_data, ...tier }) => tier),
+    addons: p.addons,
+    monthly_distribution_mode: p.monthly_distribution_mode,
+    time_unit: p.time_unit,
+  };
+}
+
+// Everything that can change a dollar figure in the emails (the billing period, every option's lines, per-period
+// amounts, dates and merged periods, the add-ons and the agency fee) and nothing else — editing product text or
+// targeting must not make the emails look stale. Compared with the key stored when they were last written.
+function _emailPlanKey() {
+  const p = _buildWizardStatePayload();
+  const req = p.request || {};
+  return JSON.stringify({
+    unit: p.time_unit,
+    mode: p.monthly_distribution_mode,
+    fee: req.agency_fee == null ? null : req.agency_fee,
+    start: req.start_date || "",
+    end: req.end_date || "",
+    months: req.total_months == null ? null : req.total_months,
+    addons: p.addons || [],
+    tiers: (p.tiers || []).map(t => ({
+      label: t.label, name: t.name || "", start: t.start_date || "", end: t.end_date || "",
+      merge: t.period_merge_groups || [],
+      lines: (t.line_items || []).map(li => [
+        li.product_name, Number(li.monthly_budget) || 0, Number(li.months) || 0, !!li.is_added_value,
+        li.monthly_allocations || null,
+      ]),
+    })),
+  });
+}
+
+// Emails already on screen when the planner later edits the plan: kept as they are (rewriting copy the planner may
+// have refined by hand would be the more surprising thing), but flagged, with one click to re-price them.
+function _refreshEmailStaleNote() {
+  const note = document.getElementById("email-stale-note");
+  if (!note) return;
+  let stale = false;
+  try {
+    stale = !!(state.enrichment && state.emailsPlanKey && state.parsed && _emailPlanKey() !== state.emailsPlanKey);
+  } catch (e) {
+    stale = false;      // a note must never break navigation
+  }
+  note.classList.toggle("hidden", !stale);
+}
+
+// Dollar amounts the server's automatic check couldn't match to the plan's figures (the Excel totals), even after its
+// one corrective pass — listed rather than shipped silently. Built with textContent: the text is model output.
+function _showEmailFigureWarnings(list) {
+  const el = document.getElementById("email-figures-warning");
+  if (!el) return;
+  const items = Array.isArray(list) ? list.filter(Boolean) : [];
+  el.textContent = "";
+  el.classList.toggle("hidden", !items.length);
+  if (!items.length) return;
+  const head = document.createElement("strong");
+  head.textContent = "⚠ Check these dollar amounts before sending — they don't match the plan's figures (the Excel totals):";
+  el.appendChild(head);
+  const ul = document.createElement("ul");
+  items.forEach(t => {
+    const li = document.createElement("li");
+    li.textContent = t;
+    ul.appendChild(li);
+  });
+  el.appendChild(ul);
+}
+
 async function onEmailReprompt() {
   const text = document.getElementById("email-reprompt-input").value.trim();
   if (!text) { alert("Enter what you'd like to change first."); return; }
-  const deliverableId = state.generatedProposalId || state.proposalId;
-  if (!deliverableId || !state.enrichment) return;
   const scopeInput = document.querySelector('input[name="email-reprompt-scope"]:checked');
   const scope = scopeInput ? scopeInput.value : "both";
+  await _submitEmailReprompt({
+    text, scope, btn: document.getElementById("email-reprompt-submit-btn"), idleLabel: "↺ Regenerate Emails",
+  });
+}
 
-  const btn = document.getElementById("email-reprompt-submit-btn");
+// The stale-emails note's button: the same revision call, asked only to bring the dollar figures up to the current plan.
+async function onEmailRefreshFigures() {
+  await _submitEmailReprompt({
+    text: "Update every dollar figure in the emails to the current plan's figures. Change nothing else: keep the wording, structure and tone exactly as they are.",
+    scope: "both", btn: document.getElementById("email-refresh-figures-btn"), idleLabel: "↺ Update the figures in the emails",
+  });
+}
+
+async function _submitEmailReprompt({ text, scope, btn, idleLabel }) {
+  const deliverableId = state.generatedProposalId || state.proposalId;
+  if (!deliverableId || !state.enrichment) return;
+  const epoch = _resetEpoch;
   btn.disabled = true;
   btn.textContent = "Regenerating…";
 
   try {
+    // The figures key is taken WITH the payload, so an edit made while the revision runs still reads as stale after it.
+    const sentPlanKey = _emailPlanKey();
     const res = await fetch(`/api/proposal/${deliverableId}/reprompt-emails`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        request: state.parsed,
-        line_items: state.lineItems,
+        ..._emailFiguresPayload(),
         campaign_name: state.enrichment.campaign_name || "",
         current_internal_subject: state.enrichment.internal_email_subject || "",
         current_internal_body: state.enrichment.internal_email_body || "",
@@ -7036,6 +8110,7 @@ async function onEmailReprompt() {
       }),
     });
     const data = await res.json();
+    if (epoch !== _resetEpoch) return;     // another proposal is on screen now — this revision isn't its business
     if (!res.ok) {
       alert("Reprompt failed: " + (data.detail || res.statusText));
       return;
@@ -7043,6 +8118,12 @@ async function onEmailReprompt() {
     if (data.error) {
       alert("Reprompt didn't fully succeed: " + data.error);
     }
+    // Both emails were just re-priced against the plan that was sent; a one-sided revision leaves the other email
+    // as it was, so the "plan changed" note stays until that one is refreshed too.
+    if (!data.error && scope === "both") state.emailsPlanKey = sentPlanKey;
+    if (data.email_figures) state.emailFigures = data.email_figures;
+    // A failed revision left the emails as they were, so whatever was flagged on them still stands.
+    if (!data.error) _showEmailFigureWarnings(data.figure_warnings);
 
     state.enrichment.internal_email_subject = data.internal_email_subject;
     state.enrichment.internal_email_body = data.internal_email_body;
@@ -7063,6 +8144,7 @@ async function onEmailReprompt() {
     document.getElementById("email-reprompt-input").value = "";
     _resetEmailRepromptScope();
 
+    _refreshEmailStaleNote();
     // The mailto link's subject/body are frozen at the moment they were
     // built — refresh it now so "Open in Email" reflects the just-revised text.
     await buildInternalEmailMailtoLink();
@@ -7070,7 +8152,7 @@ async function onEmailReprompt() {
     alert("Request failed: " + e.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = "↺ Regenerate Emails";
+    btn.textContent = idleLabel;
   }
 }
 
@@ -7079,10 +8161,56 @@ function setText(id, text) {
   if (el) el.textContent = text;
 }
 
+// A Drive upload is the one step that depends on Google, so it rides out the hiccups itself: a failure the server
+// marks retryable (503 / `retryable: true` - Google or the database blinked, already retried server-side), a
+// bare gateway/5xx with no JSON, or a dropped connection is retried twice more with a short backoff and a visible
+// "Retrying upload…" before any error is shown. Permanent failures (not generated, file gone, Google refused)
+// are shown straight away with the server's plain-language reason.
+const DRIVE_MAX_ATTEMPTS = 3;                       // the first try plus two automatic retries
+const DRIVE_RETRY_BACKOFF_MS = [1500, 3500];        // waits before retry 1 and retry 2 (plus up to 0.5s jitter)
+const DRIVE_RETRYABLE_STATUSES = [408, 429, 500, 502, 503, 504];
+
+function _driveSleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function _showDriveResult(status, data) {
+  if (data.uploaded) {
+    status.classList.add("ok");
+    const note = data.link_shared === false
+      ? " (Drive wouldn't switch on link sharing - open it and share it from there.)" : "";
+    status.innerHTML = data.shareable_link
+      ? `✓ Uploaded — <a href="${escapeHtml(data.shareable_link)}" target="_blank" rel="noopener">Open in Drive</a>${escapeHtml(note)}`
+      : `✓ Uploaded to Drive.${escapeHtml(note)}`;
+  } else if (data.auth_url) {
+    // Need OAuth authorization — opened as a real popup (not a plain
+    // target="_blank" link) so the opener side can detect when it closes
+    // and automatically retry the upload, instead of leaving the planner
+    // to remember to click Upload again themselves.
+    status.classList.add("warn");
+    status.innerHTML = `Drive not authorized. <a href="#" id="drive-auth-link">Click here to authorize Google Drive</a> — it will retry automatically once you approve.`;
+    document.getElementById("drive-auth-link").addEventListener("click", (e) => {
+      e.preventDefault();
+      openDriveAuthPopup(data.auth_url);
+    });
+  } else {
+    status.classList.add("warn");
+    status.textContent = "⚠ " + (data.reason || "Upload not configured");
+  }
+}
+
 async function onDriveUpload() {
   const deliverableId = state.generatedProposalId || state.proposalId;
-  if (!deliverableId) return;
+  if (!deliverableId || _driveUploading) return;      // a second click / the auth popup closing mid-upload is ignored
+  const epoch = _resetEpoch;
+  const btn = document.getElementById("drive-upload-btn");
   const status = document.getElementById("drive-status");
+  const payload = JSON.stringify({
+    proposal_id: deliverableId,
+    seller_email: (state.parsed && state.parsed.salesperson_email) || "",
+  });
+  _driveUploading = true;
+  if (btn) btn.disabled = true;
   status.classList.remove("hidden", "ok", "warn");
   status.innerHTML = '<span class="btn-inline-spinner"></span>Uploading to Drive…';
   // Everything below is awaited inside a try/catch on purpose — without it,
@@ -7090,37 +8218,53 @@ async function onDriveUpload() {
   // left the status text frozen on "Uploading to Drive…" forever with no
   // feedback at all, which is exactly the "stuck loading" symptom reported.
   try {
-    const res = await fetch("/api/drive/upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        proposal_id: deliverableId,
-        seller_email: state.parsed.salesperson_email || "",
-      }),
-    });
-    if (!res.ok) throw new Error(`Server returned ${res.status}`);
-    const data = await res.json();
-    if (data.uploaded) {
-      status.classList.add("ok");
-      status.innerHTML = `✓ Uploaded — <a href="${data.shareable_link}" target="_blank" rel="noopener">Open in Drive</a>`;
-    } else if (data.auth_url) {
-      // Need OAuth authorization — opened as a real popup (not a plain
-      // target="_blank" link) so the opener side can detect when it closes
-      // and automatically retry the upload, instead of leaving the planner
-      // to remember to click Upload again themselves.
+    for (let attempt = 1; attempt <= DRIVE_MAX_ATTEMPTS; attempt++) {
+      let res = null, data = null, networkError = null;
+      try {
+        res = await fetch("/api/drive/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+        });
+        data = await res.json().catch(() => null);
+      } catch (e) {
+        networkError = e;
+      }
+      if (epoch !== _resetEpoch) return;     // New Proposal while this was in flight — nothing here is its business
+      if (res && res.ok && data) {
+        _showDriveResult(status, data);
+        return;
+      }
+      const message = (data && data.detail)
+        || (networkError ? "couldn't reach the server" : (res && res.ok ? "unexpected response from the server" : `server returned ${res.status}`));
+      const retryable = data && typeof data.retryable === "boolean"
+        ? data.retryable
+        : (!!networkError || DRIVE_RETRYABLE_STATUSES.includes(res.status));
+      if (retryable && attempt < DRIVE_MAX_ATTEMPTS) {
+        status.classList.remove("ok", "warn");
+        status.innerHTML = `<span class="btn-inline-spinner"></span>Retrying upload… (attempt ${attempt + 1} of ${DRIVE_MAX_ATTEMPTS})`;
+        await _driveSleep(DRIVE_RETRY_BACKOFF_MS[attempt - 1] + Math.random() * 500);
+        if (epoch !== _resetEpoch) return;
+        continue;
+      }
       status.classList.add("warn");
-      status.innerHTML = `Drive not authorized. <a href="#" id="drive-auth-link">Click here to authorize Google Drive</a> — it will retry automatically once you approve.`;
-      document.getElementById("drive-auth-link").addEventListener("click", (e) => {
-        e.preventDefault();
-        openDriveAuthPopup(data.auth_url);
-      });
-    } else {
-      status.classList.add("warn");
-      status.textContent = "⚠ " + (data.reason || "Upload not configured");
+      status.textContent = "⚠ Upload failed: " + message
+        + (retryable ? ` (tried ${attempt} times)` : "")
+        + ((data && data.detail) ? "" : " — click Upload to try again.");
+      return;
     }
   } catch (e) {
-    status.classList.add("warn");
-    status.textContent = "⚠ Upload failed: " + e.message + " — try again.";
+    // Only a bug in this page's own handling can land here (the fetch failures are handled above).
+    if (epoch === _resetEpoch) {
+      status.classList.remove("ok");
+      status.classList.add("warn");
+      status.textContent = "⚠ Upload failed: " + e.message + " — click Upload to try again.";
+    }
+  } finally {
+    if (epoch === _resetEpoch) {          // after a reset, _clearPerProposalState() already freed the button
+      _driveUploading = false;
+      if (btn) btn.disabled = false;
+    }
   }
 }
 
@@ -7140,12 +8284,15 @@ function openDriveAuthPopup(authUrl) {
     return;
   }
   const status = document.getElementById("drive-status");
+  const epoch = _resetEpoch;
   const startedAt = Date.now();
   const giveUpAfterMs = 3 * 60 * 1000; // stop polling if it's left open unattended
   const poll = setInterval(() => {
-    if (popup.closed) {
+    if (epoch !== _resetEpoch) {
+      clearInterval(poll);               // New Proposal while the popup was open — don't upload the NEW proposal
+    } else if (popup.closed) {
       clearInterval(poll);
-      status.textContent = "Authorized — retrying upload…";
+      if (!_driveUploading) status.textContent = "Authorized — retrying upload…";
       onDriveUpload();
     } else if (Date.now() - startedAt > giveUpAfterMs) {
       clearInterval(poll);
@@ -7186,4 +8333,54 @@ function escapeHtml(s) {
 function escapeAttr(s) {
   // For use in HTML attribute values — also strip characters that break querySelector
   return String(s || "").replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+// --------------------------------------------------------------------------
+// The per-line "line note" (field: line_modifier) — a short plain-text label a planner types on a Step 04 line
+// ("Hispanic, Phoenix only") so two lines of the SAME product can be told apart. The export shows it in purple under
+// the product name + objective; every other step shows it read-only, small and purple, under the product name. It is
+// a label only (never a number) and NOT the "Planner note" (notes_override), which goes to the export's Planner Notes
+// column. Same rules as app/services/line_modifier.py: control characters become a space, whitespace collapses,
+// trimmed, capped (LINE_MODIFIER_MAX). Always HTML-escaped where it is rendered (_lineNoteHtml / escapeHtml).
+// --------------------------------------------------------------------------
+
+const LINE_MODIFIER_MAX = 100;
+
+// Control characters (incl. newline / tab), line + paragraph separators, zero-width and bidi marks, the BOM — the same
+// set the server strips. Built as a string so the escapes stay escapes in the source file.
+function _LINE_MODIFIER_UNWANTED() {
+  return new RegExp("[\\x00-\\x1f\\x7f-\\x9f\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u2064\\ufeff]+", "g");
+}
+
+function _cleanLineModifier(v) {
+  if (v == null || typeof v === "boolean") return "";
+  const text = String(v)
+    .replace(_LINE_MODIFIER_UNWANTED(), " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return Array.from(text).slice(0, LINE_MODIFIER_MAX).join("").trimEnd();
+}
+
+// The cleaned note of a line ("" when it has none — also for a line from a proposal saved before the field existed).
+function _lineNote(li) {
+  return li ? _cleanLineModifier(li.line_modifier) : "";
+}
+
+// Read-only reference markup for the other steps; "" when the line has no note.
+function _lineNoteHtml(li, extraClass) {
+  const note = _lineNote(li);
+  return note ? `<span class="line-note ${extraClass || ""}" title="Line note (set in Step 04)">${escapeHtml(note)}</span>` : "";
+}
+
+// Every distinct line note on lines of one product, across ALL options ([] when none) — for the places that list a
+// PRODUCT rather than a line (Step 07's roadblocks are per product: the platform's rules don't depend on the line).
+function _lineNotesForProduct(productName) {
+  const want = String(productName || "").trim().toLowerCase();
+  const seen = [];
+  allTiersForSubmit().forEach(t => (t.line_items || []).forEach(li => {
+    if (String(li.product_name || "").trim().toLowerCase() !== want) return;
+    const note = _lineNote(li);
+    if (note && !seen.includes(note)) seen.push(note);
+  }));
+  return seen;
 }

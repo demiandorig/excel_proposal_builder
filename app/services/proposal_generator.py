@@ -16,12 +16,14 @@ from typing import Optional
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 
-from app.catalog import CATALOG, Product, by_name, families, by_family
-from app.services.notion_parser import ProposalRequest, classify_output_tabs
+from app.catalog import Product, by_name, families, by_family
+from app.services.notion_parser import ProposalRequest, classify_output_tabs, normalize_tab_keys
+from app.services import dooh_pivot, faq_entries
 from app import excel_template as et
 from app.market_config import get_market_address
 from app.services import monthly_allocation as mo
 from app.services.text_utils import strip_variant_pricing
+from app.services.line_modifier import clean_line_modifier_or_none
 
 
 # ---------------------------------------------------------------------------
@@ -36,8 +38,8 @@ class LineItem:
     custom CPMs flagged in the business logic spec.
     """
     product_name: str               # canonical catalog name
-    monthly_budget: float           # net dollars per month
-    months: int = 3                 # flight length in months
+    monthly_budget: float           # net dollars per ONE period of the proposal's time_unit (the WHOLE-flight total when time_unit == "full_flight", where months == 1)
+    months: int = 3                 # number of periods (flight length in months; always 1 for time_unit == "full_flight")
     rate_override: Optional[float] = None     # optional CPM/CPP override
     notes_override: Optional[str] = None      # appended to the catalog note
     target_override: Optional[str] = None     # column D — defaults to campaign target
@@ -88,13 +90,23 @@ class LineItem:
     # feature (no separate enabled flag to fall out of sync with this).
     # period_key's format tracks the proposal's time_unit (see
     # GenerateRequest.time_unit in main.py) — "YYYY-MM" for month,
-    # "W{n}-YYYY-MM-DD" for week, "YYYY-MM+YYYY-MM+YYYY-MM" for quarter.
+    # "W{n}-YYYY-MM-DD" for week, "YYYY-MM+YYYY-MM+YYYY-MM" for quarter,
+    # the constant "full_flight" for Full Flight (one period for the whole flight).
     monthly_allocations: Optional[dict[str, float]] = None
     # Step 06's "combine adjacent periods into one bucket" control — see
     # monthly_allocation.apply_period_merges. Each inner list is 2+
     # period keys (in this SAME line's own granularity) to merge into one
     # combined period before allocation/reconciliation/minimum-checking.
     period_merge_groups: Optional[list[list[str]]] = None
+    # Step 04's optional per-line "line note" — a short plain-text label ("Hispanic, Phoenix only") written in purple,
+    # in a small font, directly under the product name + objective in the export's line cells so two lines of the same
+    # product can be told apart. A label only: it never feeds a number. NOT notes_override above (that one goes into the
+    # Planner Notes COLUMN). Always held already sanitized (see app/services/line_modifier.py); None = no note, and a
+    # line without one is exported exactly as it was before this field existed.
+    line_modifier: Optional[str] = None
+
+    def __post_init__(self):
+        self.line_modifier = clean_line_modifier_or_none(self.line_modifier)
 
     def total_budget(self) -> float:
         return self.monthly_budget * self.months
@@ -133,12 +145,14 @@ def _safe_sheet_name(base: str, suffix: str, used: set) -> str:
     """
     base = _SHEET_NAME_FORBIDDEN.sub("-", (base or "").strip()) or "Option"
     full = f"{base} {suffix}".strip() if suffix else base
-    full = full[:31]
+    # Excel also refuses a title that starts or ends with an apostrophe ("Smiths'" would make the workbook
+    # unopenable), including one the 31-character cut exposes — so strip them after truncating.
+    full = full[:31].strip("'").strip() or "Option"
     candidate = full
     n = 2
     while candidate.lower() in used:
         tail = f" ({n})"
-        candidate = full[:31 - len(tail)] + tail
+        candidate = full[:31 - len(tail)].rstrip("'").rstrip() + tail
         n += 1
     used.add(candidate.lower())
     return candidate
@@ -147,6 +161,38 @@ def _safe_sheet_name(base: str, suffix: str, used: set) -> str:
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
+def normalize_full_flight_lines(line_items: list["LineItem"]) -> list[str]:
+    """
+    Enforces the Full Flight data contract on `line_items`, IN PLACE:
+    months == 1, monthly_budget == the whole-flight net dollars, and — for
+    every paid line — monthly_allocations == {FULL_FLIGHT_KEY: that total}
+    (replacing whatever week/month/quarter keys a stale or legacy payload
+    carried: they are meaningless against the single full-flight period and
+    would otherwise print "—" cells / false below-minimum warnings), with
+    period merge groups cleared. Added Value lines get months == 1 and no
+    allocation.
+
+    A line that arrives with months > 1 is FOLDED into one period
+    (monthly_budget *= months), so its line total — monthly_budget x months,
+    what the planner saw — never changes; a correct client already sends
+    months == 1, making this a no-op. Idempotent. Returns human-readable
+    warnings for any line it had to fold.
+    """
+    warnings: list[str] = []
+    for li in line_items:
+        periods = li.months if (li.months and li.months > 0) else 1
+        if periods != 1 and not li.is_added_value and li.monthly_budget:
+            li.monthly_budget = round(li.monthly_budget * periods, 2)
+            warnings.append(
+                f"'{li.product_name}' arrived with {periods} billing periods in a Full-Flight proposal — "
+                "it was folded into one period (the line's total is unchanged)."
+            )
+        li.months = 1
+        li.period_merge_groups = None
+        li.monthly_allocations = None if li.is_added_value else {mo.FULL_FLIGHT_KEY: round(li.monthly_budget or 0.0, 2)}
+    return warnings
+
 
 def generate_proposal(
     request: ProposalRequest,
@@ -160,7 +206,7 @@ def generate_proposal(
     tiers: Optional[list[dict]] = None,   # [{"label": "A", "line_items": [...], "avails_data": {...}, "period_merge_groups": [...]}, ...]
     addons: Optional[list[AddonItem]] = None,   # Step 04's Add-Ons module picks — proposal-wide, not per-tier
     monthly_distribution_mode: str = "even",   # Step 06's plan-wide default-split choice — "even" or "prorated"
-    time_unit: str = "month",   # Step 04's toggle — "week" | "month" | "quarter", proposal-wide
+    time_unit: str = "month",   # the billing period — "week" | "month" | "quarter" | "full_flight", proposal-wide
     disclaimers_by_tier: Optional[dict] = None,   # {tier_label: [banner dict, ...]} — see app/disclaimers.py
 ) -> dict:
     """
@@ -195,13 +241,18 @@ def generate_proposal(
                 estimate shown for a line item that never got its own
                 monthly_allocations; a customized line's real numbers are
                 unaffected either way. See monthly_allocation.compute_default_allocation.
-        time_unit: Step 04's plan-wide "week"/"month" (default)/"quarter"
-                toggle — decides which of monthly_allocation.py's period
-                functions builds each tier's Monthly Breakdown column set
-                (and, combined with each tier's own period_merge_groups,
-                whether adjacent periods get combined into one column).
-                Also relabels the Curate/Avails-adjacent "months" language
-                app.js renders — this function only cares about periods.
+        time_unit: the plan-wide "week"/"month" (default)/"quarter"/
+                "full_flight" billing period — decides which of
+                monthly_allocation.py's period functions builds each tier's
+                Monthly Breakdown column set (and, combined with each tier's
+                own period_merge_groups, whether adjacent periods get
+                combined into one column). Also relabels the Curate/Avails-
+                adjacent "months" language app.js renders — this function
+                only cares about periods. "full_flight" bills the WHOLE
+                flight as ONE period: every line is normalized to
+                months == 1 (see normalize_full_flight_lines), the sheet
+                shows "Months: 1", one breakdown column spanning the flight,
+                and nothing is multiplied by a month count.
 
         disclaimers_by_tier: admin keyword disclaimers already matched per
                 option by app/disclaimers.py (resolved in main.py and passed
@@ -220,6 +271,13 @@ def generate_proposal(
     if not tiers:
         tiers = [{"label": "A", "line_items": line_items, "avails_data": avails_data}]
     multi_tier = len(tiers) > 1
+    is_full_flight = mo.is_full_flight(time_unit)
+    full_flight_warnings: list[str] = []
+    if is_full_flight:
+        # The Full Flight contract (months == 1, whole-flight dollars, one allocation) is enforced HERE as well
+        # as in /api/generate so a direct caller can never get a multiplied total out of a stale line.
+        for _tier in tiers:
+            full_flight_warnings.extend(normalize_full_flight_lines(_tier["line_items"]))
 
     # Convert AddonItems into the plain dicts excel_template expects — kept
     # dict-based at that boundary (like avails_data already is) so
@@ -251,14 +309,15 @@ def generate_proposal(
     )
     forced_tabs_ignored = False
     if force_tabs:
-        tabs.update({k: bool(v) for k, v in force_tabs.items() if k in tabs})
+        # A draft saved before "DOOH Deliverables" still carries dooh_summary / dooh_screenlist — folded into "dooh".
+        tabs.update({k: bool(v) for k, v in normalize_tab_keys(force_tabs).items() if k in tabs})
         # A tab override that switches EVERY deliverable off can only be a
         # stale/unsynced set of checkboxes (the Generate step's tab boxes used
         # to start unchecked and were only filled in when that step rendered)
         # — never a real request, since it would build an empty workbook, or
         # worse, silently drop the avails-bearing tabs. Fall back to the
         # classification instead and say so.
-        if not any(tabs.get(k) for k in ("net", "wsections", "gross", "avails_only", "dooh_summary", "dooh_screenlist")):
+        if not any(tabs.get(k) for k in ("net", "wsections", "gross", "avails_only", "dooh")):
             tabs = classify_output_tabs(
                 request.request_type,
                 all_product_names,
@@ -280,6 +339,7 @@ def generate_proposal(
 
     tabs_built = []
     warnings: list[str] = list(request.warnings)
+    warnings.extend(full_flight_warnings)
     if forced_tabs_ignored:
         warnings.append("Every export tab was switched off, so the suggested tabs were generated instead.")
     start_date = request.start_date or ""
@@ -291,6 +351,9 @@ def generate_proposal(
     # Shared across every tier/tab-type below so two tiers can't collide
     # with EACH OTHER's sheet titles, not just their own — see _safe_sheet_name.
     used_sheet_titles: set = set()
+    if tabs.get("dooh"):
+        # The DOOH sheets keep their fixed names (the pivot is attached to them by name), so no tier may take one.
+        used_sheet_titles.update({dooh_pivot.DOOH_SUMMARY_SHEET.lower(), dooh_pivot.DOOH_SCREENLIST_SHEET.lower()})
 
     for tier in tiers:
         label = (tier.get("label") or "A").strip() or "A"
@@ -337,13 +400,21 @@ def generate_proposal(
         # agree on one, that's the multiplier — otherwise the workbook's grand total would disagree with the
         # total_net the same request reports.
         _own_months = {li.months for li in tier["line_items"] if li.months and not li.is_added_value}
-        if len(_own_months) > 1:
+        if len(_own_months) > 1 and not is_full_flight:
             warnings.append(
                 f"{'Option ' + label + ': ' if len(tiers) > 1 else ''}lines have different month counts "
                 f"({', '.join(str(m) for m in sorted(_own_months))}), so the workbook's grand total uses the flight's "
                 "calendar span and may not match the line totals — set one month count in Step 04.")
         # (merging periods in Step 06 only regroups the allocation; it never changes how many periods are bought)
-        tier_total_months = _own_months.pop() if len(_own_months) == 1 else (len(_tier_base_periods) or total_months)
+        # Full Flight is one period by definition — never the calendar span (the single base period's own
+        # period_count) and never request.total_months, so a dateless/odd tier still reads "Months: 1".
+        tier_total_months = 1 if is_full_flight else (
+            _own_months.pop() if len(_own_months) == 1 else (len(_tier_base_periods) or total_months))
+        if is_full_flight and not _tier_base_periods and any(not li.is_added_value for li in tier["line_items"]):
+            # Without readable dates there is no period to label — say so, don't skip silently.
+            warnings.append(
+                f"{'Option ' + label + ': ' if len(tiers) > 1 else ''}the flight's Start/End dates couldn't be read, so the "
+                "Full Flight period column was left off — set valid dates and regenerate.")
         # This option's matched disclaimer banners that apply to the Excel export.
         tier_banners = [
             b for b in (disclaimers_by_tier or {}).get(label, [])
@@ -372,7 +443,9 @@ def generate_proposal(
         # history still key off the plain `label` regardless (see
         # TierModel.name's own docstring for why that stays stable).
         tier_display_name = (tier.get("name") or "").strip() or f"Option {label}"
-        tier_title_suffix = f" — {tier_display_name}" if multi_tier else ""
+        # The sheet banner is just a name plus what the sheet is ("ViX Only - Proposal", "Acme - Avails"): the option's
+        # own name for a multi-option proposal, the client's name for a single one.
+        banner_name = tier_display_name if multi_tier else (request.client_name or "TBD")
 
         # Materialize Product objects in the order the planner provided them.
         # Filter products and line_items together so a skipped/unmatched
@@ -411,14 +484,15 @@ def generate_proposal(
                                      sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit,
                                      banners=tier_banners)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=False, mb_width=tier_mb_width)
-            _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
-                           tier_start_date=tier_start_date, tier_end_date=tier_end_date)
+            _populate_meta(ws, request, gross=False, banner_name=banner_name,
+                           campaign_name=campaign_name, tier_geo=tier_geo,
+                           tier_start_date=tier_start_date, tier_end_date=tier_end_date, time_unit=time_unit)
             _populate_line_items(ws, products, tier_line_items, gross=False, blurbs=blurbs,
                                  avails_data=tier_avails, request=request, notes_col=notes_col, time_unit=time_unit)
             if tier_uses_monthly_breakdown:
                 _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=False,
-                                                   distribution_mode=monthly_distribution_mode, time_unit=time_unit)
+                                                   distribution_mode=monthly_distribution_mode, time_unit=time_unit,
+                                                   agency_fee=request.agency_fee)
             tabs_built.append(f"Proposal {label}")
 
         if tabs.get("wsections"):
@@ -428,14 +502,15 @@ def generate_proposal(
                                      sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit,
                                      banners=tier_banners)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=False, mb_width=tier_mb_width)
-            _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
-                           tier_start_date=tier_start_date, tier_end_date=tier_end_date)
+            _populate_meta(ws, request, gross=False, banner_name=banner_name,
+                           campaign_name=campaign_name, tier_geo=tier_geo,
+                           tier_start_date=tier_start_date, tier_end_date=tier_end_date, time_unit=time_unit)
             _populate_line_items(ws, products, tier_line_items, gross=False, with_sections=True, blurbs=blurbs,
                                  avails_data=tier_avails, request=request, notes_col=notes_col, time_unit=time_unit)
             if tier_uses_monthly_breakdown:
                 _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=False, with_sections=True,
-                                                   distribution_mode=monthly_distribution_mode, time_unit=time_unit)
+                                                   distribution_mode=monthly_distribution_mode, time_unit=time_unit,
+                                                   agency_fee=request.agency_fee)
             tabs_built.append(f"Proposal {label} (wsections)")
 
         if tabs.get("gross"):
@@ -445,20 +520,20 @@ def generate_proposal(
                                            sheet_name=sheet_title, addons=addons_dicts, time_unit=time_unit,
                                            banners=tier_banners)
             notes_col, _ = et.reposition_notes_adops(ws, 17, gross=True, mb_width=tier_mb_width)
-            _populate_meta(ws, request, gross=True, proposal_title=proposal_title,
-                           campaign_name=campaign_name, title_suffix=tier_title_suffix, tier_geo=tier_geo,
-                           tier_start_date=tier_start_date, tier_end_date=tier_end_date)
+            _populate_meta(ws, request, gross=True, banner_name=banner_name,
+                           campaign_name=campaign_name, tier_geo=tier_geo,
+                           tier_start_date=tier_start_date, tier_end_date=tier_end_date, time_unit=time_unit)
             _populate_line_items(ws, products, tier_line_items, gross=True, blurbs=blurbs,
                                  avails_data=tier_avails, request=request, notes_col=notes_col, time_unit=time_unit)
             if tier_uses_monthly_breakdown:
                 _populate_monthly_breakdown_inline(ws, products, tier_line_items, tier_months, gross=True,
-                                                   distribution_mode=monthly_distribution_mode, time_unit=time_unit)
-            # Set agency fee in I14 (Gross sheet's variable input cell)
+                                                   distribution_mode=monthly_distribution_mode, time_unit=time_unit,
+                                                   agency_fee=request.agency_fee)
+            # Set agency fee in I14 (Gross sheet's variable input cell; its "Agency Comm:" legend is H14). Keeps the
+            # builder's bold-blue-on-yellow look; a whole percent reads "15%", a fractional one "12.50%".
             if request.agency_fee is not None:
                 ws["I14"] = request.agency_fee
-                ws["I14"].number_format = "0.00%"
-                ws["I14"].font = Font(name="Arial", size=10, bold=True, color="FF0000FF")
-                ws["I14"].fill = PatternFill("solid", start_color="FFFFF2CC")
+                ws["I14"].number_format = "0%" if abs(request.agency_fee * 100 - round(request.agency_fee * 100)) < 1e-9 else "0.00%"
             tabs_built.append(f"Proposal {label} (Gross)")
 
         if tabs.get("avails_only"):
@@ -468,13 +543,13 @@ def generate_proposal(
                                       start_date=tier_start_date, end_date=tier_end_date, avails_data=tier_avails,
                                       campaign_name=campaign_name, sheet_name=sheet_title, time_unit=time_unit,
                                       banners=tier_banners)
-            _populate_meta(ws, request, gross=False, proposal_title=proposal_title,
-                           title_suffix=f" (Avails-Only){tier_title_suffix}",
+            _populate_meta(ws, request, gross=False, banner_name=banner_name, banner_kind="Avails",
                            include_billing=False, include_campaign_meta=False, tier_geo=tier_geo,
                            tier_start_date=tier_start_date, tier_end_date=tier_end_date)
             tabs_built.append(avails_sheet_name)
 
-        if tier_uses_monthly_breakdown:
+        # Full Flight skips the standalone breakdown tab: it would just repeat the single inline column.
+        if tier_uses_monthly_breakdown and not is_full_flight:
             mb_tab_adjective = et.unit_labels(time_unit)["adjective"]
             mb_sheet_name = f"{mb_tab_adjective} Breakdown {label}" if multi_tier else f"{mb_tab_adjective} Breakdown"
             # Bug fix: this used to hardcode the literal "(Monthly)" regardless of
@@ -485,7 +560,8 @@ def generate_proposal(
             # computed right above for exactly this, just never used here.
             mb_sheet_title = _safe_sheet_name(tier_display_name, f"({mb_tab_adjective})", used_sheet_titles) if multi_tier else mb_sheet_name
             et.build_monthly_breakdown_tab(wb, products, tier_line_items, tier_months, sheet_name=mb_sheet_title,
-                                           distribution_mode=monthly_distribution_mode, time_unit=time_unit)
+                                           distribution_mode=monthly_distribution_mode, time_unit=time_unit,
+                                           agency_fee=request.agency_fee)
             tabs_built.append(mb_sheet_name)
 
         tier_total_net = sum(li.total_budget() for li in tier_line_items)
@@ -497,25 +573,30 @@ def generate_proposal(
             "total_gross": tier_total_net / (1 - fee) if fee else tier_total_net,
         })
 
-    # DOOH / Process FAQs — shared, single instance regardless of tier count
-    if tabs.get("dooh_summary"):
-        ws = et.build_dooh_summary(wb)
-        # DOOH summary has its own structure; just stamp the client name in title
-        ws["A1"] = f"DOOH Summary — {request.client_name or 'TBD'}"
-        tabs_built.append("DOOH Summary")
-
-    if tabs.get("dooh_screenlist"):
+    # DOOH Deliverables / Process FAQs — shared, single instance regardless of tier count. The two DOOH sheets are
+    # always built together: the Summary is a pivot table over the Screenlist table.
+    if tabs.get("dooh"):
+        et.build_dooh_summary(wb, client_name=request.client_name or "")
+        tabs_built.append(dooh_pivot.DOOH_SUMMARY_SHEET)
         et.build_dooh_screenlist(wb)
-        tabs_built.append("DOOH Screenlist")
+        tabs_built.append(dooh_pivot.DOOH_SCREENLIST_SHEET)
 
-    # Always include Process FAQs as a reference tab
-    et.build_process_faqs(wb)
+    # Always include Process FAQs as a reference tab (the rows an admin keeps in Admin -> FAQ; built-ins if unreadable)
+    et.build_process_faqs(wb, entries=faq_entries.load_entries())
     tabs_built.append("Process FAQs")
 
     # Save
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
+    if tabs.get("dooh"):
+        # openpyxl cannot write a pivot table: attach the Summary's to the saved file. This must stay the LAST thing
+        # that touches the workbook (an openpyxl load + save afterwards would drop it). A failure keeps the workbook
+        # as saved — the Screenlist table is there, the Summary just has no pivot — and says so.
+        try:
+            dooh_pivot.add_dooh_pivot(output_path)
+        except Exception as e:  # noqa: BLE001
+            warnings.append(f"The DOOH Summary pivot table could not be added ({e}); the DOOH Screenlist is complete.")
 
     base = tier_summaries[0] if tier_summaries else {"total_net": 0.0, "total_gross": 0.0}
     return {
@@ -532,19 +613,45 @@ def generate_proposal(
 # Meta block & line item population (overwrites template defaults)
 # ---------------------------------------------------------------------------
 
+def _shows_three_month_commitment(request: ProposalRequest, start: Optional[str], end: Optional[str], time_unit: str) -> bool:
+    """Whether the sheet's "Minimum 3 month Commitment." sentence is printed.
+
+    Weekly / Monthly / Quarterly: the long-standing rule (the request's total_months, which follows the flight dates
+    whenever they exist, is 3+).
+
+    Full Flight: the sheet reads "Months: 1", so the sentence only appears when THIS option's own dates are readable and
+    really cover 3+ months (calendar months touched — the same count Step 02's Months field shows). A typed "Total months: 3"
+    with no dates, or a campaign-wide 3+ months where this option's override window is shorter, doesn't print it."""
+    if not mo.is_full_flight(time_unit):
+        return (request.total_months or 0) >= 3
+    s, e = mo.parse_flexible_date(start), mo.parse_flexible_date(end)
+    return bool(s and e) and len(mo.months_between(s, e)) >= 3
+
+
+def _banner_title(name: Optional[str], kind: str) -> str:
+    """The sheet banner: "<name> - Proposal" or "<name> - Avails". A name that already carries the word (a planner
+    who called the option "Proposal A", or "Avails Only") is left exactly as typed, so it never reads
+    "Proposal A - Proposal"."""
+    name = re.sub(r"\s+", " ", (name or "").strip()) or "TBD"
+    if re.search(rf"\b{re.escape(kind)}s?\b", name, re.IGNORECASE):
+        return name
+    return f"{name} - {kind}"
+
+
 def _populate_meta(
     ws,
     request: ProposalRequest,
     *,
     gross: bool,
-    title_suffix: str = "",
-    proposal_title: Optional[str] = None,
+    banner_name: Optional[str] = None,
+    banner_kind: str = "Proposal",
     include_billing: bool = True,
     include_campaign_meta: bool = True,
     campaign_name: str = "",
     tier_geo: Optional[str] = None,
     tier_start_date: Optional[str] = None,
     tier_end_date: Optional[str] = None,
+    time_unit: str = "month",
 ) -> None:
     """
     Overwrite the meta block cells (rows 4-15) with real client info.
@@ -572,12 +679,9 @@ def _populate_meta(
     pre-resolved (never None when the caller is the tier loop below) since
     the sheet-builder calls need a concrete string either way.
     """
-    # Title cell (E2 — merged E2:L2)
-    if proposal_title:
-        title = proposal_title + (title_suffix if title_suffix else "")
-    else:
-        title = f"Digital Media Proposal — {request.client_name or 'TBD'}{title_suffix}"
-    ws["E2"] = title
+    # Title cell (E2 — merged E2:L2): "<name> - Proposal" / "<name> - Avails" — the option's name (or the client's
+    # for a single option), not the full proposal title.
+    ws["E2"] = _banner_title(banner_name or request.client_name, banner_kind)
 
     # Customer billing block (F4..F8) — skipped on Avails-Only (not relevant there)
     if include_billing:
@@ -625,7 +729,7 @@ def _populate_meta(
     # _write_meta_block's default text stated it unconditionally regardless
     # of the real flight length; that part is independent of net vs. gross.
     rate_basis_text = "Rates shown are GROSS (inclusive of agency commission)." if gross else "All rates are NET."
-    if (request.total_months or 0) >= 3:
+    if _shows_three_month_commitment(request, effective_start_date, effective_end_date, time_unit):
         ws["C14"] = f"{rate_basis_text} Minimum 3 month Commitment."
     else:
         ws["C14"] = rate_basis_text
@@ -793,7 +897,8 @@ def _populate_line_items(
             ws[f"I{row}"] = f'=IFERROR("Est. "&TEXT(L{row}*1000/{li.estimated_cpm_override},"#,##0"),"NA")'
             ws[f"I{row}"].alignment = et.CENTER
 
-        # NET BUDGET (L) — the planner's MONTHLY budget, not the flight total.
+        # NET BUDGET (L) — the planner's per-PERIOD budget (monthly in the default
+        # month unit; the whole-flight total in Full Flight, where months == 1).
         # Every other formula on this sheet assumes that: "TOTAL DIGITAL
         # MONTHLY" is SUM(L), and the grand total then multiplies that by
         # the months cell (I10) to get the flight total. Writing the flight
@@ -808,6 +913,12 @@ def _populate_line_items(
         if av_value is not None:
             ws[f"L{row}"] = f"Estimated ${av_value:,.0f} value"
             et._format_av_value_cell(ws[f"L{row}"])
+            if gross:
+                # The Gross sheet's GROSS BUDGET cell is the template formula =L/(1-$I$14): over this TEXT it is #VALUE!,
+                # which then poisons TOTAL DIGITAL, the campaign total and (Full Flight) the breakdown total. It is an
+                # estimated gift value, not a budget, so it reads the same text on both sheets (no gross-up).
+                ws[f"N{row}"] = f"Estimated ${av_value:,.0f} value"
+                et._format_av_value_cell(ws[f"N{row}"])
         else:
             ws[f"L{row}"] = li.monthly_budget
             et._format_money_cell(ws[f"L{row}"], blue_input=True)
@@ -824,7 +935,10 @@ def _populate_line_items(
         # color so it doesn't read as a second product name. Falls back to
         # short_label when no objective was set (an older/manual request),
         # matching this cell's original text exactly in that case.
-        ws[f"C{row}"] = et.build_product_name_cell_value(product.name, product.short_label, li.objective_override)
+        # The planner's optional Step 04 line note ("Hispanic, Phoenix only") follows as a third line in small purple
+        # type, so two lines of the same product read as different; nothing changes for a line without one.
+        ws[f"C{row}"] = et.build_product_name_cell_value(product.name, product.short_label, li.objective_override,
+                                                         li.line_modifier)
 
         # DETAILS (E) — the catalog's real proposal_description is already
         # the template default here (written by _write_product_row before
@@ -840,6 +954,11 @@ def _populate_line_items(
             ws[f"E{row}"] = combined_details
             # Re-estimate row height for the (usually longer) combined text
             ws.row_dimensions[row].height = et._estimate_row_height(combined_details, col_width=50)
+
+        # Whatever height the row ended up with, make room for the purple line note under the name + objective — grows
+        # a row only when it HAS a note (a no-op otherwise, so every other row keeps its height).
+        et.fit_row_to_line_modifier(ws, row, f"{product.name}\n{li.objective_override or product.short_label}",
+                                    li.line_modifier)
 
         # Notes column — caller-computed (reposition_notes_adops), falling
         # back to the original fixed T (net) / W (gross) for any caller
@@ -907,8 +1026,14 @@ def _populate_line_items(
 def _populate_monthly_breakdown_inline(
     ws, products: list[Product], line_items: list[LineItem], months: list[dict], *,
     gross: bool, with_sections: bool = False, distribution_mode: str = "even", time_unit: str = "month",
+    agency_fee: Optional[float] = None,
 ) -> None:
     """
+    The block's dollars are in THIS sheet's own basis, and its banner says which ("MONTHLY BREAKDOWN (GROSS)" /
+    "(NET)"): the Gross sheet shows GROSS dollars — each net amount marked up by 1 / (1 - agency_fee), exactly like its
+    GROSS BUDGET column — in every billing period; the Net sheets show NET; and with no agency fee selected there is
+    nothing to mark up, so the Gross sheet falls back to NET too.
+
     Writes the Monthly Breakdown columns to the right of the avails block
     (see excel_template.py's own module comment on exactly which columns)
     — one row per line item, aligned with that SAME line item's row on
@@ -941,23 +1066,38 @@ def _populate_monthly_breakdown_inline(
     start_row = 19
     row = start_row
     last_family = None
+    # Full Flight: one column holding each paid line's WHOLE amount at 100%, as live formulas over the sheet's own
+    # budget column (GROSS BUDGET on the Gross sheet, NET BUDGET on the Net sheet) — see
+    # excel_template.write_full_flight_breakdown_row. Stored allocations are not read.
+    full_flight = mo.is_full_flight(time_unit)
+    factor = et.breakdown_gross_factor(agency_fee) if gross else 1.0
+    gross_basis = factor != 1.0
+    budget_col = "N" if gross_basis else "L"
     per_month_totals = {m["key"]: 0.0 for m in months}
     for product, li in zip(products, line_items):
         if with_sections and product.family != last_family:
             row += 1
             last_family = product.family
         if not li.is_added_value:
-            total = li.monthly_budget * li.months
-            et.write_monthly_breakdown_row(ws, row, months, li.monthly_allocations, total, start_col)
-            distribution = li.monthly_allocations or mo.compute_default_allocation(total, months, distribution_mode)
-            for m in months:
-                per_month_totals[m["key"]] += distribution.get(m["key"], 0.0)
+            if full_flight:
+                et.write_full_flight_breakdown_row(ws, row, start_col, budget_col)
+            else:
+                total_net = li.monthly_budget * li.months
+                allocations = {k: v * factor for k, v in li.monthly_allocations.items()} if li.monthly_allocations else None
+                et.write_monthly_breakdown_row(ws, row, months, allocations, total_net * factor, start_col)
+                distribution = li.monthly_allocations or mo.compute_default_allocation(total_net, months, distribution_mode)
+                for m in months:
+                    per_month_totals[m["key"]] += distribution.get(m["key"], 0.0) * factor
         row += 1
 
-    et.write_monthly_breakdown_header(ws, start_row - 2, months, start_col, time_unit=time_unit)
+    et.write_monthly_breakdown_header(ws, start_row - 2, months, start_col, time_unit=time_unit,
+                                      basis="GROSS" if gross_basis else "NET")
 
     # Same row as this sheet's own "TOTAL DIGITAL MONTHLY" row (build_proposal_a
     # / _gross compute it as `row + 1` from the exact same post-loop `row`
     # this function's own loop above also lands on).
     total_row = row + 1
-    et.write_monthly_breakdown_total_row(ws, total_row, months, per_month_totals, start_col)
+    if full_flight:
+        et.write_full_flight_breakdown_total(ws, total_row, start_col, budget_col)
+    else:
+        et.write_monthly_breakdown_total_row(ws, total_row, months, per_month_totals, start_col)

@@ -17,7 +17,8 @@ const adminState = {
   analytics: null,
   analyticsLoaded: false,
   analyticsWindow: "all",  // "30d" | "90d" | "12m" | "all"
-  rates: [],
+  rates: [],          // the product list: [{id, name, family, ...}]
+  productFamilies: [],
   ratesLoaded: false,
   markets: [],
   marketsLoaded: false,
@@ -29,6 +30,10 @@ const adminState = {
   disclaimersLoaded: false,
   disclaimerEditingId: null,
   restrictions: null,
+  faq: [],            // the Process FAQs rows: [{id, section, services, question, link_title, link_url}]
+  faqLoaded: false,
+  faqEditingId: null,
+  faqFormToken: null,
   currentUserEmail: null,  // set by loadUsers()'s /api/me call — lets the Users tab hide "disable/delete self" actions
 };
 
@@ -37,13 +42,13 @@ document.addEventListener("DOMContentLoaded", () => {
   wireSearch();
   wireProposalsControls();
   wireAnalyticsControls();
-  wireAddProduct();
-  wireEditProduct();
+  wireProductForm();
   wireBulkUpload();
   wireMarketConfig();
   wireAddUser();
   wireDisclaimers();
   wireRestrictions();
+  wireFaq();
   wireCsvExports();
   loadProposals();
 });
@@ -64,12 +69,14 @@ function wireTabs() {
       document.getElementById("tab-users").classList.toggle("hidden", tab !== "users");
       document.getElementById("tab-disclaimers").classList.toggle("hidden", tab !== "disclaimers");
       document.getElementById("tab-restrictions").classList.toggle("hidden", tab !== "restrictions");
+      document.getElementById("tab-faq").classList.toggle("hidden", tab !== "faq");
       if (tab === "analytics" && !adminState.analyticsLoaded) loadAnalytics();
       if (tab === "rates" && !adminState.ratesLoaded) loadRates();
       if (tab === "markets" && !adminState.marketsLoaded) loadMarketConfig();
       if (tab === "users" && !adminState.usersLoaded) loadUsers();
       if (tab === "disclaimers" && !adminState.disclaimersLoaded) loadDisclaimers();
       if (tab === "restrictions" && !adminState.restrictions) loadRestrictions();
+      if (tab === "faq" && !adminState.faqLoaded) loadFaq();
     });
   });
 }
@@ -136,6 +143,17 @@ function _analyticsBarList(rows, labelKey, countKey, formatLabel) {
   }).join("");
 }
 
+// The billing-period values the wizard stores in reopen_state.time_unit. "full_flight" is two words — a plain
+// capitalize would print "Full_flight" — so it is spelled out; every other value keeps the label it always had
+// (capitalized: Week / Month / Quarter), with underscores read as spaces for anything unforeseen.
+const _TIME_UNIT_LABELS = { full_flight: "Full Flight" };
+function _formatTimeUnitLabel(u) {
+  const key = String(u == null ? "" : u);
+  if (_TIME_UNIT_LABELS[key]) return _TIME_UNIT_LABELS[key];
+  const words = key.replace(/_/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Unknown";
+}
+
 const _ANALYTICS_MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function _formatMonthBucket(ym) {
   const [y, m] = ym.split("-");
@@ -181,7 +199,7 @@ function renderAnalytics(data) {
   document.getElementById("analytics-request-type-bars").innerHTML =
     _analyticsBarList(data.by_request_type, "request_type", "count");
   document.getElementById("analytics-time-unit-bars").innerHTML =
-    _analyticsBarList(data.by_time_unit, "time_unit", "count", u => u.charAt(0).toUpperCase() + u.slice(1));
+    _analyticsBarList(data.by_time_unit, "time_unit", "count", _formatTimeUnitLabel);
 }
 
 // Debounces a function — waits `ms` after the LAST call before actually
@@ -304,7 +322,6 @@ function wireBulkUpload() {
       if (!res.ok) throw new Error(body.detail || res.statusText);
       renderBulkUploadResult(body);
       await loadRates();
-      renderRates(filterRates(document.getElementById("rates-search").value));
     } catch (err) {
       resultEl.innerHTML = `<span class="bur-error">Bulk upload failed: ${escapeHtml(err.message)}</span>`;
     } finally {
@@ -315,11 +332,13 @@ function wireBulkUpload() {
 
 function renderBulkUploadResult(body) {
   const resultEl = document.getElementById("bulk-upload-result");
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
   const parts = [];
-  parts.push(`<strong>Processed ${body.total_rows_processed} row${body.total_rows_processed === 1 ? "" : "s"}.</strong>`);
-  parts.push(`${body.created.length} added, ${body.updated_as_rate_override.length} rate override${body.updated_as_rate_override.length === 1 ? "" : "s"} updated, ${body.updated_custom_product.length} custom product${body.updated_custom_product.length === 1 ? "" : "s"} replaced.`);
+  parts.push(`<strong>Processed ${plural(body.total_rows_processed, "row")}.</strong>`);
+  const unchanged = (body.unchanged || []).length;
+  parts.push(`${body.created.length} added, ${body.updated.length} updated${unchanged ? `, ${unchanged} unchanged` : ""}.`);
   if (body.errors.length) {
-    parts.push(`<div class="bur-error">${body.errors.length} row${body.errors.length === 1 ? "" : "s"} skipped:</div>`);
+    parts.push(`<div class="bur-error">${plural(body.errors.length, "row")} skipped:</div>`);
     parts.push(`<ul>${body.errors.map(e => `<li class="bur-error">${escapeHtml(e)}</li>`).join("")}</ul>`);
   }
   resultEl.innerHTML = parts.join(" ");
@@ -436,16 +455,21 @@ function shortenUA(ua) {
 }
 
 // --------------------------------------------------------------------------
-// Rate overrides
+// Products — the one product list. Every row is equal and fully editable;
+// there is no "original" list to revert to.
 // --------------------------------------------------------------------------
 
 async function loadRates() {
   try {
-    const res = await fetch("/api/admin/rates");
-    const data = await res.json();
+    const res = await fetch("/api/admin/products");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
     adminState.rates = data.products || [];
+    adminState.productFamilies = data.families || [];
     adminState.ratesLoaded = true;
-    renderRates(adminState.rates);
+    document.getElementById("pf-families").innerHTML =
+      adminState.productFamilies.map(f => `<option value="${escapeAttr(f)}"></option>`).join("");
+    renderRates(filterRates(document.getElementById("rates-search").value));
   } catch (e) {
     document.getElementById("rates-body").innerHTML =
       `<tr><td colspan="7" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
@@ -453,18 +477,14 @@ async function loadRates() {
 }
 
 function filterRates(query) {
-  const q = query.trim().toLowerCase();
+  const q = (query || "").trim().toLowerCase();
   if (!q) return adminState.rates;
-  return adminState.rates.filter(p =>
-    p.name.toLowerCase().includes(q) || p.family.toLowerCase().includes(q) ||
-    (p.stable_name || "").toLowerCase().includes(q)  // finds a renamed product by its former name too
-  );
+  return adminState.rates.filter(p => p.name.toLowerCase().includes(q) || p.family.toLowerCase().includes(q));
 }
 
 function renderRates(list) {
   const body = document.getElementById("rates-body");
-  document.getElementById("rates-count").textContent =
-    `${list.length} product${list.length === 1 ? "" : "s"}`;
+  document.getElementById("rates-count").textContent = `${list.length} product${list.length === 1 ? "" : "s"}`;
 
   if (!list.length) {
     body.innerHTML = `<tr><td colspan="7" class="admin-empty">No products match.</td></tr>`;
@@ -472,84 +492,100 @@ function renderRates(list) {
   }
 
   body.innerHTML = list.map(p => `
-    <tr data-product="${escapeAttr(p.stable_name)}" class="${p.is_deleted ? "row-deleted" : ""}">
+    <tr data-product="${p.id}">
       <td class="mono">${escapeHtml(p.family)}</td>
       <td class="wrap">
         ${escapeHtml(p.name)}
-        ${p.has_override ? '<span class="override-badge">Override</span>' : ""}
-        ${p.is_custom ? '<span class="custom-badge">Custom</span>' : ""}
         ${p.is_addon ? '<span class="addon-badge">Add-on</span>' : ""}
-        ${p.is_deleted ? '<span class="deleted-badge">Deleted</span>' : ""}
-        ${p.name !== p.stable_name ? `<span class="rename-hint" title="Original catalog name — still recognized in old pastes and saved proposals">was: ${escapeHtml(p.stable_name)}</span>` : ""}
       </td>
       <td class="mono">${escapeHtml(p.buying_model)}</td>
       <td>${numInput(p, "base_rate")}</td>
       <td>${numInput(p, "minimum_spend")}</td>
       <td>${numInput(p, "estimated_cpm_for_imps")}</td>
       <td>
-        <button class="btn-save-row" data-action="save" data-product="${escapeAttr(p.stable_name)}" ${p.is_deleted ? "disabled" : ""}>Save</button>
-        <button class="btn-revert" data-action="revert" data-product="${escapeAttr(p.stable_name)}"
-                ${p.has_override ? "" : "disabled"}>Revert</button>
-        <button class="btn-secondary" data-action="edit" data-product="${escapeAttr(p.stable_name)}" ${p.is_deleted ? "disabled" : ""}>✎ Edit</button>
-        ${p.is_deleted
-          ? `<button class="btn-secondary" data-action="restore" data-product="${escapeAttr(p.stable_name)}">↺ Restore</button>`
-          : `<button class="btn-delete-row" data-action="delete" data-product="${escapeAttr(p.stable_name)}" data-custom="${p.is_custom ? "1" : "0"}">Delete</button>`}
+        <button class="btn-save-row" data-action="save" data-product="${p.id}">Save</button>
+        <button class="btn-secondary" data-action="edit" data-product="${p.id}">✎ Edit</button>
+        <button class="btn-secondary" data-action="duplicate" data-product="${p.id}" title="Start a new product from a copy of this one">⧉ Duplicate</button>
+        <button class="btn-delete-row" data-action="delete" data-product="${p.id}">Delete</button>
       </td>
     </tr>
   `).join("");
 
-  body.querySelectorAll('[data-action="save"]').forEach(btn => {
-    btn.addEventListener("click", () => onSaveRate(btn.dataset.product));
+  // Numbers typed into a row but not saved yet survive a re-render (a filter keystroke, another row's save…).
+  const dirty = adminState.dirtyRates || (adminState.dirtyRates = {});
+  body.querySelectorAll("tr[data-product]").forEach(row => {
+    const id = row.dataset.product;
+    row.querySelectorAll("input[data-field]").forEach(inp => {
+      if (dirty[id] && Object.prototype.hasOwnProperty.call(dirty[id], inp.dataset.field)) inp.value = dirty[id][inp.dataset.field];
+      inp.addEventListener("input", () => {
+        const saved = inp.getAttribute("value") || "";
+        dirty[id] = dirty[id] || {};
+        if (inp.value === saved) delete dirty[id][inp.dataset.field]; else dirty[id][inp.dataset.field] = inp.value;
+        if (!Object.keys(dirty[id]).length) delete dirty[id];
+      });
+    });
   });
-  body.querySelectorAll('[data-action="revert"]').forEach(btn => {
-    btn.addEventListener("click", () => onRevertRate(btn.dataset.product));
+  body.querySelectorAll('[data-action="save"]').forEach(btn => {
+    btn.addEventListener("click", () => onSaveRate(parseInt(btn.dataset.product)));
   });
   body.querySelectorAll('[data-action="edit"]').forEach(btn => {
-    btn.addEventListener("click", () => onOpenEditProduct(btn.dataset.product));
+    btn.addEventListener("click", () => openProductForm("edit", productById(btn.dataset.product)));
+  });
+  body.querySelectorAll('[data-action="duplicate"]').forEach(btn => {
+    btn.addEventListener("click", () => openProductForm("copy", productById(btn.dataset.product)));
   });
   body.querySelectorAll('[data-action="delete"]').forEach(btn => {
-    btn.addEventListener("click", () => onDeleteProduct(btn.dataset.product, btn.dataset.custom === "1"));
+    btn.addEventListener("click", () => onDeleteProduct(parseInt(btn.dataset.product)));
   });
-  body.querySelectorAll('[data-action="restore"]').forEach(btn => {
-    btn.addEventListener("click", () => onRestoreProduct(btn.dataset.product));
-  });
+}
+
+function productById(id) {
+  return adminState.rates.find(p => String(p.id) === String(id));
 }
 
 function numInput(product, field) {
   const value = product[field];
-  const catalogValue = product[`catalog_${field}`];
-  const isOverridden = product.has_override && value !== catalogValue;
-  return `<input type="number" step="0.01" min="0"
+  return `<input type="number" step="any" min="0"
             value="${value === null || value === undefined ? "" : value}"
             placeholder="NA"
-            class="${isOverridden ? "overridden" : ""}"
             data-field="${field}" />`;
 }
 
-async function onSaveRate(productName) {
-  const row = document.querySelector(`tr[data-product="${cssEscape(productName)}"]`);
+// The quick numbers right in the table row: rate, minimum spend, est. CPM.
+async function onSaveRate(productId) {
+  const row = document.querySelector(`tr[data-product="${productId}"]`);
   if (!row) return;
   const btn = row.querySelector('[data-action="save"]');
   btn.disabled = true;
   btn.textContent = "Saving…";
 
-  const payload = { product_name: productName };
+  const payload = {};
+  let invalid = null;
   row.querySelectorAll("input[data-field]").forEach(inp => {
     const v = inp.value.trim();
-    payload[inp.dataset.field] = v === "" ? null : parseFloat(v);
+    if (v === "" && inp.dataset.field === "minimum_spend") return;        // a blank minimum means "leave it"
+    const n = v === "" ? null : Number(v);
+    if (n !== null && (!Number.isFinite(n) || n < 0)) invalid = inp.dataset.field.replace(/_/g, " ");
+    payload[inp.dataset.field] = n;
   });
+  if (invalid) {
+    alert(`Save failed: ${invalid} must be a number of 0 or more.`);
+    btn.disabled = false;
+    btn.textContent = "Save";
+    return;
+  }
 
   try {
-    const res = await fetch("/api/admin/rates", {
-      method: "POST",
+    const res = await fetch(`/api/admin/products/${productId}`, {
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error(res.statusText);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(body.detail, res.statusText));
     btn.textContent = "Saved ✓";
-    await loadRates();  // refresh so the override badge / revert button update
-    // Re-apply the search filter after reload
-    renderRates(filterRates(document.getElementById("rates-search").value));
+    if (adminState.dirtyRates) delete adminState.dirtyRates[String(productId)];
+    await loadRates();
   } catch (e) {
     alert("Save failed: " + e.message);
     btn.disabled = false;
@@ -557,220 +593,173 @@ async function onSaveRate(productName) {
   }
 }
 
-async function onRevertRate(productName) {
-  if (!confirm(`Revert "${productName}" to its catalog default rate?`)) return;
+async function onDeleteProduct(productId) {
+  const p = productById(productId);
+  if (!p) return;
+  if (!confirm(`Delete "${p.name}"? It disappears from every list. Proposals that already use it keep working.`)) return;
   try {
-    await fetch(`/api/admin/rates/${encodeURIComponent(productName)}`, { method: "DELETE" });
-    await loadRates();
-    renderRates(filterRates(document.getElementById("rates-search").value));
-  } catch (e) {
-    alert("Revert failed: " + e.message);
-  }
-}
-
-async function onDeleteProduct(productName, isCustom) {
-  const confirmMsg = isCustom
-    ? `Permanently delete "${productName}"? This can't be undone.`
-    : `Delete "${productName}"? It'll be hidden from new proposals (and the catalog dropdown), but any proposal that already uses it keeps working, and you can restore it here later.`;
-  if (!confirm(confirmMsg)) return;
-  try {
-    const res = await fetch(`/api/admin/products/${encodeURIComponent(productName)}`, { method: "DELETE" });
+    const res = await fetch(`/api/admin/products/${productId}`, { method: "DELETE" });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
+      throw new Error(detailText(body.detail, res.statusText));
     }
+    if (adminState.dirtyRates) delete adminState.dirtyRates[String(productId)];
     await loadRates();
-    renderRates(filterRates(document.getElementById("rates-search").value));
   } catch (e) {
     alert("Delete failed: " + e.message);
   }
 }
 
-async function onRestoreProduct(productName) {
-  try {
-    const res = await fetch(`/api/admin/products/${encodeURIComponent(productName)}/restore`, { method: "POST" });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
-    }
-    await loadRates();
-    renderRates(filterRates(document.getElementById("rates-search").value));
-  } catch (e) {
-    alert("Restore failed: " + e.message);
-  }
-}
-
 // --------------------------------------------------------------------------
-// Add a new product
+// One form for adding, editing and duplicating
 // --------------------------------------------------------------------------
 
-function wireAddProduct() {
-  const panel = document.getElementById("add-product-panel");
-  const form = document.getElementById("add-product-form");
-  const cancelBtn = document.getElementById("add-product-cancel-btn");
+const PRODUCT_FORM_FIELDS = [
+  // [element id, product key, kind]
+  ["pf-family", "family", "text"], ["pf-name", "name", "text"], ["pf-short-label", "short_label", "text"],
+  ["pf-buying-model", "buying_model", "text"], ["pf-base-rate", "base_rate", "number"],
+  ["pf-min-spend", "minimum_spend", "number"], ["pf-est-cpm", "estimated_cpm_for_imps", "number"],
+  ["pf-sizes", "sizes", "text"], ["pf-tech-platform", "tech_platform", "text"],
+  ["pf-description", "proposal_description", "text"], ["pf-notes", "notes", "text"],
+  ["pf-is-addon", "is_addon", "bool"],
+  ["pf-flight-min", "minimum_flight_days_min", "number"], ["pf-flight-max", "minimum_flight_days_max", "number"],
+  ["pf-wide-orbit", "wide_orbit_code", "text"],
+  ["pf-margin-upper", "margin_upper", "number"], ["pf-margin-lower", "margin_lower", "number"],
+  ["pf-sla-data", "sla_data_days", "number"], ["pf-sla-creative", "sla_creative_days", "number"],
+  ["pf-sla-activate", "sla_activate_days", "number"], ["pf-sla-total", "sla_total_days", "number"],
+  ["pf-estimated-impressions", "estimated_impressions", "bool"],
+  ["pf-discloses-impressions", "discloses_impressions", "bool"],
+  ["pf-national-supported", "national_supported", "bool"],
+];
+
+function wireProductForm() {
+  const form = document.getElementById("product-form");
   if (!form) return;
-
-  form.addEventListener("submit", onAddProduct);
-  cancelBtn.addEventListener("click", () => {
-    form.reset();
-    document.getElementById("add-product-error").classList.add("hidden");
-    panel.open = false;
-  });
+  form.addEventListener("submit", onSubmitProduct);
+  // A field the browser refuses (a negative, a margin over 1…) may sit inside the collapsed Advanced section —
+  // open it, or the message would point at something the planner can't see.
+  form.addEventListener("invalid", (ev) => {
+    const adv = ev.target.closest && ev.target.closest(".pf-advanced");
+    if (adv) adv.open = true;
+  }, true);
+  document.getElementById("product-cancel-btn").addEventListener("click", closeProductForm);
+  document.getElementById("add-product-btn").addEventListener("click", () => openProductForm("add"));
 }
 
-async function onAddProduct(e) {
-  e.preventDefault();
-  const errEl = document.getElementById("add-product-error");
-  errEl.classList.add("hidden");
+function closeProductForm() {
+  adminState.productFormToken = Symbol();                                   // a response still in flight is stale now
+  const form = document.getElementById("product-form");
+  form.dataset.mode = "add";
+  form.dataset.productId = "";
+  document.getElementById("product-panel-title").textContent = "+ Add a product";
+  document.getElementById("product-submit-btn").textContent = "Add Product";
+  document.getElementById("product-submit-btn").disabled = false;
+  document.getElementById("product-panel").open = false;
+  document.getElementById("product-form-error").classList.add("hidden");
+}
 
-  const val = id => document.getElementById(id).value.trim();
-  const numOrNull = id => {
-    const v = val(id);
-    return v === "" ? null : parseFloat(v);
+// mode: "add" (blank), "edit" (a product), "copy" (a new product that starts as a copy of one).
+function openProductForm(mode, product) {
+  const form = document.getElementById("product-form");
+  form.reset();
+  adminState.productFormToken = Symbol();
+  document.querySelectorAll(".pf-advanced").forEach(d => { d.open = false; });
+  form.dataset.mode = mode;
+  form.dataset.productId = product ? String(product.id) : "";
+  const titles = {
+    add: "+ Add a product",
+    edit: `✎ Edit ${product ? product.name : ""}`,
+    copy: `⧉ New product — a copy of ${product ? product.name : ""}`,
   };
-
-  const payload = {
-    family: val("np-family"),
-    name: val("np-name"),
-    short_label: val("np-short-label") || null,
-    buying_model: val("np-buying-model"),
-    base_rate: numOrNull("np-base-rate"),
-    minimum_spend: numOrNull("np-min-spend"),
-    estimated_cpm_for_imps: numOrNull("np-est-cpm"),
-    sizes: val("np-sizes") || null,
-    tech_platform: val("np-tech-platform") || null,
-    proposal_description: val("np-description") || null,
-    notes: val("np-notes") || null,
-    is_addon: document.getElementById("np-is-addon").checked,
-  };
-
-  const submitBtn = e.target.querySelector('button[type="submit"]');
-  submitBtn.disabled = true;
-  submitBtn.textContent = "Adding…";
-
-  try {
-    const res = await fetch("/api/admin/products", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
-    }
-    e.target.reset();
-    document.getElementById("add-product-panel").open = false;
-    await loadRates();
-    renderRates(filterRates(document.getElementById("rates-search").value));
-  } catch (err) {
-    errEl.textContent = err.message;
-    errEl.classList.remove("hidden");
-  } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = "Add Product";
-  }
-}
-
-// --------------------------------------------------------------------------
-// Edit an existing product (built-in or custom) — every field, not just
-// the 3 the inline rate-table row edits. Reuses the add-product panel's
-// visual pattern (a second <details> form) rather than a modal.
-// --------------------------------------------------------------------------
-
-function wireEditProduct() {
-  const panel = document.getElementById("edit-product-panel");
-  const form = document.getElementById("edit-product-form");
-  const cancelBtn = document.getElementById("edit-product-cancel-btn");
-  if (!form) return;
-
-  form.addEventListener("submit", onSaveEditProduct);
-  cancelBtn.addEventListener("click", () => {
-    panel.open = false;
-    document.getElementById("edit-product-error").classList.add("hidden");
+  document.getElementById("product-panel-title").textContent = titles[mode];
+  document.getElementById("product-submit-btn").textContent = mode === "edit" ? "Save Changes" : "Add Product";
+  document.getElementById("product-submit-btn").disabled = false;
+  PRODUCT_FORM_FIELDS.forEach(([id, key, kind]) => {
+    const el = document.getElementById(id);
+    let value = product ? product[key] : undefined;
+    if (mode === "add") value = key === "discloses_impressions" || key === "national_supported" ? true : undefined;
+    if (kind === "bool") el.checked = !!value;
+    else el.value = value === null || value === undefined ? "" : value;
   });
-}
+  if (mode === "copy") document.getElementById("pf-name").value = `${product.name} (copy)`;
+  if (mode === "add") document.getElementById("pf-buying-model").value = "Fixed";
+  document.getElementById("product-form-error").classList.add("hidden");
 
-function onOpenEditProduct(stableName) {
-  const p = adminState.rates.find(r => r.stable_name === stableName);
-  if (!p) return;
-
-  document.getElementById("edit-product-name-label").textContent = `— ${p.name}`;
-  document.getElementById("edit-product-form").dataset.productName = p.stable_name;
-  document.getElementById("ep-family").value = p.family || "";
-  document.getElementById("ep-name").value = p.name || "";
-  document.getElementById("ep-short-label").value = p.short_label || "";
-  document.getElementById("ep-buying-model").value = p.buying_model || "Fixed";
-  document.getElementById("ep-base-rate").value = p.base_rate ?? "";
-  document.getElementById("ep-min-spend").value = p.minimum_spend ?? "";
-  document.getElementById("ep-est-cpm").value = p.estimated_cpm_for_imps ?? "";
-  document.getElementById("ep-sizes").value = p.sizes || "";
-  document.getElementById("ep-tech-platform").value = p.tech_platform || "";
-  document.getElementById("ep-description").value = p.proposal_description || "";
-  document.getElementById("ep-notes").value = p.notes || "";
-  document.getElementById("ep-is-addon").checked = !!p.is_addon;
-  document.getElementById("edit-product-error").classList.add("hidden");
-
-  const panel = document.getElementById("edit-product-panel");
+  const panel = document.getElementById("product-panel");
   panel.open = true;
   panel.scrollIntoView({ behavior: "smooth", block: "center" });
+  const nameEl = document.getElementById("pf-name");
+  nameEl.focus();
+  if (mode === "copy") nameEl.select();
 }
 
-async function onSaveEditProduct(e) {
+function productFormPayload() {
+  const payload = {};
+  PRODUCT_FORM_FIELDS.forEach(([id, key, kind]) => {
+    const el = document.getElementById(id);
+    if (kind === "bool") payload[key] = el.checked;
+    else if (kind === "number") {
+      const v = el.value.trim();
+      payload[key] = v === "" ? null : parseFloat(v);
+    } else payload[key] = el.value.trim();
+  });
+  // blank flight days mean "leave as is", not "zero"
+  ["minimum_flight_days_min", "minimum_flight_days_max"].forEach(k => { if (payload[k] === null) delete payload[k]; });
+  return payload;
+}
+
+async function onSubmitProduct(e) {
   e.preventDefault();
-  const errEl = document.getElementById("edit-product-error");
+  const form = e.target;
+  const mode = form.dataset.mode || "add";
+  const errEl = document.getElementById("product-form-error");
   errEl.classList.add("hidden");
+  const payload = productFormPayload();
+  if (mode === "copy") payload.copy_from_id = parseInt(form.dataset.productId);
 
-  const val = id => document.getElementById(id).value.trim();
-  // Empty = "leave as the catalog default" (same convention the single-
-  // field rate editor already uses), not "override to blank" — so an
-  // untouched field never accidentally stamps an empty-string override.
-  const strOrNull = id => val(id) || null;
-  const numOrNull = id => {
-    const v = val(id);
-    return v === "" ? null : parseFloat(v);
-  };
-
-  const productName = e.target.dataset.productName;
-  const payload = {
-    product_name: productName,
-    new_name: strOrNull("ep-name"),
-    family: strOrNull("ep-family"),
-    short_label: strOrNull("ep-short-label"),
-    buying_model: strOrNull("ep-buying-model"),
-    base_rate: numOrNull("ep-base-rate"),
-    minimum_spend: numOrNull("ep-min-spend"),
-    estimated_cpm_for_imps: numOrNull("ep-est-cpm"),
-    sizes: strOrNull("ep-sizes"),
-    tech_platform: strOrNull("ep-tech-platform"),
-    proposal_description: strOrNull("ep-description"),
-    notes: strOrNull("ep-notes"),
-    is_addon: document.getElementById("ep-is-addon").checked,
-  };
-
-  const submitBtn = e.target.querySelector('button[type="submit"]');
+  const submitBtn = document.getElementById("product-submit-btn");
+  const idleLabel = submitBtn.textContent;
+  const token = adminState.productFormToken = Symbol();
   submitBtn.disabled = true;
-  submitBtn.textContent = "Saving…";
-
+  submitBtn.textContent = mode === "edit" ? "Saving…" : "Adding…";
   try {
-    const res = await fetch("/api/admin/products/edit", {
-      method: "POST",
+    const res = await fetch(mode === "edit" ? `/api/admin/products/${form.dataset.productId}` : "/api/admin/products", {
+      method: mode === "edit" ? "PUT" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
-    }
-    document.getElementById("edit-product-panel").open = false;
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(body.detail, res.statusText));
+    if (adminState.productFormToken === token) closeProductForm();         // not if the planner moved on meanwhile
+    showProductNotice(mode, body);
     await loadRates();
-    renderRates(filterRates(document.getElementById("rates-search").value));
   } catch (err) {
-    errEl.textContent = err.message;
-    errEl.classList.remove("hidden");
+    if (adminState.productFormToken === token) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("hidden");
+    }
   } finally {
-    submitBtn.disabled = false;
-    submitBtn.textContent = "Save Changes";
+    // Only the form this request belongs to gets its button back; one the planner reopened is already reset.
+    if (adminState.productFormToken === token) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = idleLabel;
+    }
   }
+}
+
+// What happened to the Restricted Verticals approvals when a product was duplicated.
+function showProductNotice(mode, body) {
+  const el = document.getElementById("product-notice");
+  if (!el) return;
+  if (mode !== "copy" || !body || !body.product) { el.classList.add("hidden"); return; }
+  const n = body.restrictions_inherited || 0;
+  const from = escapeHtml(body.product.copied_from || "The original");
+  let html;
+  if (body.restrictions_warning) html = `<span class="bur-error">${escapeHtml(body.restrictions_warning)}</span>`;
+  else if (n > 0) html = `<strong>${escapeHtml(body.product.name)}</strong> added. It inherits ${n} Restricted Verticals approval${n === 1 ? "" : "s"} from ${from}.`;
+  else html = `<strong>${escapeHtml(body.product.name)}</strong> added. ${from} isn't mapped in Restricted Verticals, so the copy isn't either.`;
+  el.innerHTML = html;
+  el.classList.remove("hidden");
 }
 
 // --------------------------------------------------------------------------
@@ -867,7 +856,7 @@ function renderMarketConfig() {
     `${list.length} market${list.length === 1 ? "" : ""}`.trim();
 
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="7" class="admin-empty">No markets configured yet.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="8" class="admin-empty">No markets configured yet.</td></tr>`;
     return;
   }
 
@@ -878,6 +867,7 @@ function renderMarketConfig() {
       <td><input type="text" data-field="address_line2" value="${escapeAttr(m.address_line2)}" placeholder="City, State ZIP" /></td>
       <td><input type="text" data-field="dsc_email" value="${escapeAttr(m.dsc_email)}" placeholder="dsc@entravision.com" /></td>
       <td><input type="text" data-field="dsm_email" value="${escapeAttr(m.dsm_email)}" placeholder="dsm@entravision.com" /></td>
+      <td><input type="text" data-field="research_emails" value="${escapeAttr((m.research_emails || []).join(", "))}" placeholder="research@entravision.com, …" /></td>
       <td><input type="text" data-field="ccs" value="${escapeAttr((m.ccs || []).join(", "))}" placeholder="name@entravision.com, …" /></td>
       <td>
         <button class="btn-save-row" data-action="save-market" data-market="${escapeAttr(m.market_key)}">Save</button>
@@ -903,8 +893,8 @@ async function onSaveMarket(marketKey) {
 
   const payload = { market_key: marketKey };
   row.querySelectorAll("input[data-field]").forEach(inp => {
-    if (inp.dataset.field === "ccs") {
-      payload.ccs = inp.value.split(",").map(s => s.trim()).filter(Boolean);
+    if (inp.dataset.field === "ccs" || inp.dataset.field === "research_emails") {
+      payload[inp.dataset.field] = inp.value.split(/[,;\n]/).map(s => s.trim()).filter(Boolean);
     } else {
       payload[inp.dataset.field] = inp.value.trim();
     }
@@ -1327,6 +1317,182 @@ function wireDisclaimers() {
 
 
 // --------------------------------------------------------------------------
+// FAQ — the rows of the exports' "Process FAQs" tab (app/services/faq_entries.py):
+// the FAQ table and the "Category and product restrictions" block under it.
+// --------------------------------------------------------------------------
+
+const FAQ_BLOCK_LABELS = { faq: "Process FAQ", restriction: "Restriction" };
+
+function isWebLink(url) {
+  return /^https?:\/\//i.test(url || "");
+}
+
+async function loadFaq() {
+  try {
+    const res = await fetch("/api/admin/faq");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    adminState.faq = data.entries || [];
+    adminState.faqLoaded = true;
+    const link = document.getElementById("faq-guidelines-link");
+    if (link && data.guidelines_url && isWebLink(data.guidelines_url)) link.href = data.guidelines_url;
+    renderFaq();
+  } catch (e) {
+    document.getElementById("faq-body").innerHTML =
+      `<tr><td colspan="6" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderFaq() {
+  const body = document.getElementById("faq-body");
+  const entries = adminState.faq;
+  document.getElementById("faq-count").textContent = `${entries.length} row${entries.length === 1 ? "" : "s"}`;
+  if (!entries.length) {
+    body.innerHTML = `<tr><td colspan="6" class="admin-empty">No rows yet.</td></tr>`;
+    return;
+  }
+  // First / last of each block can't move further up / down.
+  const bySection = {};
+  entries.forEach(e => { (bySection[e.section] = bySection[e.section] || []).push(e.id); });
+  body.innerHTML = entries.map(e => {
+    const ids = bySection[e.section];
+    const first = ids[0] === e.id, last = ids[ids.length - 1] === e.id;
+    const linkCell = e.link_url
+      ? (isWebLink(e.link_url)
+          ? `<a href="${escapeAttr(e.link_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(e.link_url)}</a>`
+          : escapeHtml(e.link_url))
+      : `<span class="faq-nolink" title="Without a link the title is plain text in the export">no link yet</span>`;
+    return `
+      <tr data-faq="${e.id}">
+        <td class="mono">${escapeHtml(FAQ_BLOCK_LABELS[e.section] || e.section)}</td>
+        <td class="wrap"><strong>${escapeHtml(e.services)}</strong></td>
+        <td class="wrap">${escapeHtml(e.question)}</td>
+        <td class="wrap">${escapeHtml(e.link_title)}</td>
+        <td class="wrap faq-link-cell">${linkCell}</td>
+        <td class="faq-actions">
+          <button class="btn-secondary" data-action="up" data-faq="${e.id}" title="Move up" ${first ? "disabled" : ""}>↑</button>
+          <button class="btn-secondary" data-action="down" data-faq="${e.id}" title="Move down" ${last ? "disabled" : ""}>↓</button>
+          <button class="btn-secondary" data-action="edit" data-faq="${e.id}">✎ Edit</button>
+          <button class="btn-delete-row" data-action="delete" data-faq="${e.id}">Delete</button>
+        </td>
+      </tr>`;
+  }).join("");
+  body.querySelectorAll("[data-action]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = parseInt(btn.dataset.faq);
+      if (btn.dataset.action === "edit") openFaqForm(adminState.faq.find(x => x.id === id));
+      else if (btn.dataset.action === "delete") onDeleteFaq(id);
+      else onMoveFaq(id, btn.dataset.action);
+    });
+  });
+}
+
+function wireFaq() {
+  const form = document.getElementById("faq-form");
+  if (!form) return;
+  form.addEventListener("submit", onSubmitFaq);
+  document.getElementById("faq-cancel-btn").addEventListener("click", closeFaqForm);
+  document.getElementById("add-faq-btn").addEventListener("click", () => openFaqForm());
+}
+
+function closeFaqForm() {
+  adminState.faqFormToken = Symbol();
+  adminState.faqEditingId = null;
+  document.getElementById("faq-panel-title").textContent = "+ Add an FAQ row";
+  document.getElementById("faq-submit-btn").textContent = "Add Row";
+  document.getElementById("faq-submit-btn").disabled = false;
+  document.getElementById("faq-panel").open = false;
+  document.getElementById("faq-error").classList.add("hidden");
+}
+
+// No entry = add a new row; an entry = edit it.
+function openFaqForm(entry) {
+  const form = document.getElementById("faq-form");
+  form.reset();
+  adminState.faqFormToken = Symbol();
+  adminState.faqEditingId = entry ? entry.id : null;
+  document.getElementById("faq-section").value = entry ? entry.section : "faq";
+  document.getElementById("faq-services").value = entry ? entry.services : "";
+  document.getElementById("faq-question").value = entry ? entry.question : "";
+  document.getElementById("faq-link-title").value = entry ? entry.link_title : "";
+  document.getElementById("faq-link-url").value = entry ? entry.link_url : "";
+  document.getElementById("faq-panel-title").textContent = entry ? "✎ Edit FAQ row" : "+ Add an FAQ row";
+  document.getElementById("faq-submit-btn").textContent = entry ? "Save Changes" : "Add Row";
+  document.getElementById("faq-submit-btn").disabled = false;
+  document.getElementById("faq-error").classList.add("hidden");
+  const panel = document.getElementById("faq-panel");
+  panel.open = true;
+  panel.scrollIntoView({ behavior: "smooth", block: "center" });
+  document.getElementById("faq-services").focus();
+}
+
+async function onSubmitFaq(e) {
+  e.preventDefault();
+  const errEl = document.getElementById("faq-error");
+  errEl.classList.add("hidden");
+  const editingId = adminState.faqEditingId;
+  const payload = {
+    section: document.getElementById("faq-section").value,
+    services: document.getElementById("faq-services").value.trim(),
+    question: document.getElementById("faq-question").value.trim(),
+    link_title: document.getElementById("faq-link-title").value.trim(),
+    link_url: document.getElementById("faq-link-url").value.trim(),
+  };
+  const submitBtn = document.getElementById("faq-submit-btn");
+  const idleLabel = submitBtn.textContent;
+  const token = adminState.faqFormToken = Symbol();
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Saving…";
+  try {
+    const res = await fetch(editingId ? `/api/admin/faq/${editingId}` : "/api/admin/faq", {
+      method: editingId ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(body.detail, res.statusText));
+    if (adminState.faqFormToken === token) closeFaqForm();        // not if the admin moved on meanwhile
+    await loadFaq();
+  } catch (err) {
+    if (adminState.faqFormToken === token) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("hidden");
+    }
+  } finally {
+    if (adminState.faqFormToken === token) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = idleLabel;
+    }
+  }
+}
+
+async function onDeleteFaq(id) {
+  const entry = adminState.faq.find(x => x.id === id);
+  if (!entry) return;
+  if (!confirm(`Delete this row?\n\n${entry.services}`)) return;
+  try {
+    const res = await fetch(`/api/admin/faq/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+    if (adminState.faqEditingId === id) closeFaqForm();
+    await loadFaq();
+  } catch (err) {
+    alert("Delete failed: " + err.message);
+  }
+}
+
+async function onMoveFaq(id, direction) {
+  try {
+    const res = await fetch(`/api/admin/faq/${id}/move`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ direction }),
+    });
+    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+    await loadFaq();
+  } catch (err) {
+    alert("Move failed: " + err.message);
+  }
+}
+
+// --------------------------------------------------------------------------
 // Restrictions — Entravision's "Restricted Verticals by Platforms" sheet,
 // ingested as the Roadblocks step's source of truth (app/services/
 // restrictions.py). Sync/upload replaces everything; the per-vertical forms
@@ -1348,11 +1514,11 @@ async function loadRestrictions() {
 function applyRestrictionsPayload(data) {
   adminState.restrictions = data;
   // Parser warnings only come back from a sync/upload; later saves keep showing the last ones.
-  if (data.synced) adminState.restrictionWarnings = data.warnings || [];
+  if (data.synced || data.created) adminState.restrictionWarnings = data.warnings || [];
   const warnEl = document.getElementById("rs-warnings");
   const warnings = adminState.restrictionWarnings || [];
   warnEl.innerHTML = warnings.length
-    ? `<strong>Worth a look after this sync</strong><ul>${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>`
+    ? `<strong>Worth a look</strong><ul>${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>`
     : "";
   warnEl.classList.toggle("hidden", !warnings.length);
   document.getElementById("rs-url").value = data.sheet_url || "";
@@ -1378,22 +1544,45 @@ function renderRestrictions() {
             <textarea rows="2" data-rs-item="${escapeHtml(item)}" placeholder="No catalog product matched — type product names, comma separated">${escapeHtml((c.product_map[item] || []).join(", "))}</textarea>
           </label>`).join("")}
       </div>` : "";
-    const body = `<details class="rs-body"><summary>Sheet text (what the AI reads)</summary><pre>${escapeHtml(c.body)}</pre></details>`;
+    // A category added by hand has its own editable text; a sheet tab shows the sheet's text read-only.
+    const body = c.is_manual
+      ? `<div class="rs-own">
+           <label class="rs-field">Type
+             <select data-rs-kind>
+               ${Object.entries(RS_KIND_LABEL).map(([k, label]) => `<option value="${k}" ${k === c.kind ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+             </select>
+           </label>
+           <label class="rs-field">One-line summary
+             <input type="text" data-rs-summary maxlength="500" value="${escapeHtml(c.summary)}" />
+           </label>
+           <label class="rs-field">Details / rules for the AI
+             <textarea rows="5" data-rs-body maxlength="20000">${escapeHtml(c.body)}</textarea>
+           </label>
+           ${c.kind === "allowlist" ? `<label class="rs-field">Approved products <small>(one per line)</small>
+             <textarea rows="4" data-rs-items>${escapeHtml(c.items.join("\n"))}</textarea>
+           </label>` : ""}
+         </div>`
+      : `<details class="rs-body"><summary>Sheet text (what the AI reads)</summary><pre>${escapeHtml(c.body)}</pre></details>`;
+    const notes = `<label class="rs-field">Extra notes for the AI <small>(rules you add on top${c.is_manual ? "" : " of the sheet text"} — the Roadblocks AI reads them too; kept when the sheet is synced)</small>
+        <textarea rows="3" data-rs-notes maxlength="6000" placeholder="e.g. Ads must carry the TTB responsible-drinking line; no creative aimed at under-21s.">${escapeHtml(c.extra_notes || "")}</textarea>
+      </label>`;
     return `
-    <article class="dz-card" data-rs-category="${escapeHtml(c.name)}">
+    <article class="dz-card" data-rs-category="${escapeHtml(c.name)}" ${c.is_manual ? 'data-rs-manual="1"' : ""}>
       <header class="dz-card-head">
         <h3>${escapeHtml(c.name)}</h3>
-        <span class="dz-meta">${escapeHtml(RS_KIND_LABEL[c.kind] || c.kind)}</span>
+        <span class="dz-meta">${c.is_manual ? "Added by hand · " : ""}${escapeHtml(RS_KIND_LABEL[c.kind] || c.kind)}</span>
       </header>
-      <p class="rs-summary">${escapeHtml(c.summary)}</p>
+      ${c.is_manual ? "" : `<p class="rs-summary">${escapeHtml(c.summary)}</p>`}
       <label class="rs-field">Suggested when the plan mentions <small>(comma separated — whole words, case-insensitive)</small>
         <input type="text" data-rs-keywords value="${escapeHtml(c.keywords.join(", "))}" />
       </label>
       ${mapping}
       ${body}
+      ${notes}
       <div class="dz-actions">
         <span class="add-product-error hidden" data-rs-card-error></span>
         <span class="rs-unknown hidden" data-rs-unknown></span>
+        ${c.is_manual ? `<button type="button" class="btn-delete-row" data-rs-delete>Delete category</button>` : ""}
         <button type="button" class="btn-secondary" data-rs-save>Save changes</button>
       </div>
     </article>`;
@@ -1401,6 +1590,9 @@ function renderRestrictions() {
 
   list.querySelectorAll("[data-rs-save]").forEach(btn => {
     btn.addEventListener("click", () => saveRestriction(btn.closest("[data-rs-category]"), known));
+  });
+  list.querySelectorAll("[data-rs-delete]").forEach(btn => {
+    btn.addEventListener("click", () => deleteRestriction(btn.closest("[data-rs-category]")));
   });
 }
 
@@ -1434,11 +1626,28 @@ async function saveRestriction(card, known) {
   });
   unknownEl.classList.toggle("hidden", !unknown.length);
   unknownEl.textContent = unknown.length ? `Not catalog products: ${unknown.join(", ")}` : "";
+  const payload = {
+    keywords: card.querySelector("[data-rs-keywords]").value,
+    product_map: productMap,
+    extra_notes: card.querySelector("[data-rs-notes]").value,
+  };
+  if (card.dataset.rsManual) {                       // a hand-added category: its own text is editable too
+    payload.kind = card.querySelector("[data-rs-kind]").value;
+    payload.summary = card.querySelector("[data-rs-summary]").value;
+    payload.body = card.querySelector("[data-rs-body]").value;
+    const itemsEl = card.querySelector("[data-rs-items]");
+    payload.items = itemsEl ? itemsEl.value.split("\n").map(x => x.trim()).filter(Boolean) : [];
+    if (payload.kind === "allowlist" && !itemsEl) {  // switched to "approved products" just now: ask for the list first
+      errEl.textContent = "Save once to switch the type, then list the approved products.";
+      errEl.classList.remove("hidden");
+      payload.items = null;
+    }
+  }
   try {
     const res = await fetch(`/api/admin/restrictions/${encodeURIComponent(name)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ keywords: card.querySelector("[data-rs-keywords]").value, product_map: productMap }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
@@ -1457,7 +1666,79 @@ async function saveRestriction(card, known) {
   }
 }
 
+async function deleteRestriction(card) {
+  const name = card.dataset.rsCategory;
+  if (!confirm(`Delete the category "${name}"? Step 07 will no longer offer it and the AI won't read its rules.`)) return;
+  const errEl = card.querySelector("[data-rs-card-error]");
+  try {
+    const res = await fetch(`/api/admin/restrictions/${encodeURIComponent(name)}`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    applyRestrictionsPayload(data);
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.remove("hidden");
+  }
+}
+
+// The "Add a category" form: type decides whether the rules text or the approved-products list is asked for.
+function wireAddRestriction() {
+  const form = document.getElementById("rs-add-form");
+  if (!form) return;
+  const kindEl = document.getElementById("rs-add-kind");
+  const errEl = document.getElementById("rs-add-error");
+  const syncType = () => {
+    const allow = kindEl.value === "allowlist";
+    document.getElementById("rs-add-items-wrap").classList.toggle("hidden", !allow);
+    document.getElementById("rs-add-body-req").classList.toggle("hidden", kindEl.value !== "guidance");
+  };
+  kindEl.addEventListener("change", syncType);
+  syncType();
+  document.getElementById("rs-add-cancel").addEventListener("click", () => {
+    form.reset();
+    syncType();
+    errEl.classList.add("hidden");
+    document.getElementById("rs-add-panel").open = false;
+  });
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    errEl.classList.add("hidden");
+    const btn = document.getElementById("rs-add-submit");
+    const idle = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Adding…";
+    try {
+      const res = await fetch("/api/admin/restrictions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: document.getElementById("rs-add-name").value,
+          kind: kindEl.value,
+          keywords: document.getElementById("rs-add-keywords").value,
+          summary: document.getElementById("rs-add-summary").value,
+          body: document.getElementById("rs-add-body").value,
+          items: kindEl.value === "allowlist" ? document.getElementById("rs-add-items").value : "",
+          extra_notes: document.getElementById("rs-add-notes").value,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+      form.reset();
+      syncType();
+      document.getElementById("rs-add-panel").open = false;
+      applyRestrictionsPayload(data);
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("hidden");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = idle;
+    }
+  });
+}
+
 function wireRestrictions() {
+  wireAddRestriction();
   const syncBtn = document.getElementById("rs-sync-btn");
   if (!syncBtn) return;
   const errEl = document.getElementById("rs-error");

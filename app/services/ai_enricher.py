@@ -4,9 +4,12 @@ AI enrichment for the Entravision Proposal Builder.
 Uses OpenAI gpt-5.1 (see _SEARCH_MODEL/_FALLBACK_MODEL below) to generate in
 a single API call:
   - Campaign name (short, memorable, title-cased)
-  - Per-product blurbs: one short plain paragraph on what the product is and
-    does (25-55 words; at most one short channel fact, never audience/geo/
-    language/variant talk — see PRODUCT BLURB RULES in _build_prompt)
+  - Per-product blurbs: one short plain paragraph on what the product does
+    for this client (25-55 words) plus, whenever search finds one, ONE sourced
+    statistic; never targeting/language/variant talk, and no audience / market
+    / performance claim without a number AND a named source, never Wikipedia —
+    see PRODUCT BLURB RULES in _build_prompt, enforced again in code by
+    claim_rules.py + source_rules.py on whatever the model returns
   - Internal AE email (professional, friendly)
   - Client-facing email body (for the Word doc)
 
@@ -14,6 +17,8 @@ All features degrade gracefully when OPENAI_API_KEY is not set.
 """
 from __future__ import annotations
 
+import dataclasses
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -21,7 +26,12 @@ from datetime import datetime, date
 from typing import Optional
 
 from app.catalog import by_name as _catalog_by_name
+from app.services import email_totals
+from app.services import claim_rules
 from app.services import llm_utils
+from app.services import period_copy
+from app.services import source_rules
+from app.services.line_modifier import line_modifier_of
 from app.services.text_utils import normalize_newlines as _normalize_newlines, split_sentences, strip_variant_pricing
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 
@@ -96,6 +106,9 @@ class ProposalEnrichment:
     client_email_body: str = ""
     used_web_search: bool = False
     error: Optional[str] = None
+    # Dollar amounts in the emails that match none of the plan's computed figures even after the automatic
+    # correction pass (see _verify_email_figures) — shown to the planner instead of shipping them silently.
+    figure_warnings: list[str] = field(default_factory=list)
 
     def blurb_for(self, product_name: str) -> Optional[str]:
         for pb in self.product_blurbs:
@@ -279,7 +292,8 @@ _REVISE_MAX_COMPLETION_TOKENS = 16000
 
 
 def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional[dict] = None,
-                    tiers: Optional[list] = None) -> ProposalEnrichment:
+                    tiers: Optional[list] = None, time_unit: str = "month",
+                    totals: Optional["email_totals.EmailTotals"] = None) -> ProposalEnrichment:
     """
     Call OpenAI to generate all AI enrichment for a proposal — campaign
     name, per-product blurbs (short plain descriptions), and both emails.
@@ -303,6 +317,18 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     which doesn't vary by tier); this only changes how the emails are
     structured, so they lay out each option explicitly instead of
     describing a single plan.
+
+    time_unit: the proposal's billing period ("week"/"month"/"quarter"/"full_flight").
+    For "full_flight" every line's dollar figure is the flat total for the whole flight
+    (single billing period), so the prompt says so and the emails must never present
+    it as a monthly rate or multiply it by a month count. Week / month / quarter each get
+    their own "per week / month / quarter" wording.
+
+    totals: the deterministic dollar figures (email_totals.compute_email_totals) for the
+    CURRENT plan — every option, add-on and per-period amount, equal to the Excel export.
+    They go into the prompt as the only amounts the model may state, and the emails it
+    writes are checked against them afterwards (see _verify_email_figures). When omitted
+    they are derived here from `line_items` / `tiers`, with no add-ons or option dates.
     """
     api_key = os.getenv("OPENAI_API_KEY")
     if not _HAS_OPENAI:
@@ -317,7 +343,10 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
         )
 
     client = _OpenAI(api_key=api_key)
-    prompt = _build_prompt(request, line_items, strategy_brief=strategy_brief, tiers=tiers)
+    if totals is None:
+        totals = email_totals.totals_from_legacy(request, line_items, tiers, time_unit)
+    prompt = _build_prompt(request, line_items, strategy_brief=strategy_brief, tiers=tiers, time_unit=time_unit,
+                           totals=totals)
     truncated = ProposalEnrichment(
         campaign_name=_fallback_campaign_name(request),
         error="Content generation was cut off before it finished, even after an automatic retry.",
@@ -346,12 +375,172 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
                 f"Live web search failed ({search_exc}); this used the model's general "
                 "knowledge instead — verify stats before relying on them."
             )
+        _verify_email_figures(client, result, totals, prompt)
         return result
-    return _parse_response(raw, request, line_items, used_web_search=True, client=client)
+    result = _parse_response(raw, request, line_items, used_web_search=True, client=client)
+    _verify_email_figures(client, result, totals, prompt)
+    return result
 
 
 def _fallback_campaign_name(request) -> str:
     return request.client_name or "Campaign"
+
+
+# The Full Flight billing rule, said ONCE so the original email prompt (_build_prompt) and the planner's revision
+# prompt (reprompt_emails) can never drift: without it a "mention the cost per month" revision request could
+# reintroduce the monthly wording the first pass was told never to use.
+_FULL_FLIGHT_RULE_TEXT = (
+    "this is a FULL-FLIGHT proposal — the whole flight is billed as ONE period, not month by month. "
+    "Every dollar figure and every impression figure above is a flat total for the ENTIRE flight. Never write one as "
+    "per month, monthly, each month or a run rate, and never multiply or divide one by a number of months"
+)
+
+# Same idea for Weekly and Quarterly plans: one rule, shared by the email prompt and the revision prompt, so a
+# per-week / per-quarter figure is never worded (or multiplied) as a monthly one.
+_PERIOD_RULE_TEXT = {
+    "week": (
+        "this proposal is priced PER WEEK (7-day weeks counted from launch). A \"per week\" figure is one week's budget: "
+        "never call it monthly and never multiply it by a number of months"
+    ),
+    "quarter": (
+        "this proposal is priced PER QUARTER (3-month blocks counted from launch). A \"per quarter\" figure is one "
+        "quarter's budget: never call it monthly and never multiply it by a number of months"
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Dollar-figure verification
+#
+# The prompts hand the model the plan's figures (email_totals.render_prompt_block) and forbid it from doing any
+# arithmetic of its own — but "forbid" is an instruction, not a guarantee. This is the backstop: every dollar amount in
+# the finished emails is checked against those same figures; a mismatch gets ONE corrective pass (the offending
+# sentences plus the right figures go back to the model), and whatever still doesn't match is reported to the planner
+# instead of shipping silently. It can never block or blank an email: any failure here just leaves the emails as written.
+# ---------------------------------------------------------------------------
+
+_figure_logger = logging.getLogger(__name__ + ".figures")
+
+_EMAIL_FIELDS = ("internal_email_subject", "internal_email_body", "client_email_subject", "client_email_body")
+_EMAIL_FIELD_LABELS = {
+    "internal_email_subject": "internal email subject", "internal_email_body": "internal email",
+    "client_email_subject": "client email subject", "client_email_body": "client email",
+}
+_SCOPE_FIELDS = {
+    "both": _EMAIL_FIELDS,
+    "internal": ("internal_email_subject", "internal_email_body"),
+    "client": ("client_email_subject", "client_email_body"),
+}
+_PLACEHOLDERS = ("{{PROPOSAL_LINE}}", "{{PLANNER_SIGNATURE}}")
+_MAX_FIGURE_WARNINGS = 6
+
+
+def _figure_issues(emails: dict, totals, context: str) -> list:
+    """Dollar amounts in the four email fields that match none of `totals`' figures (nor a figure the context text
+    itself legitimately contained — a rate-card price in the prompt, or one the planner typed in their request)."""
+    extra = email_totals.amounts_in_text(context or "")
+    try:
+        # the rate card's own prices (a product's minimum spend, its rate) are fair to quote for a product in the plan
+        for opt in totals.options:
+            for line in opt.lines:
+                p = _catalog_by_name(line.product_name)
+                if p is not None:
+                    extra += [float(v) for v in (getattr(p, "minimum_spend", None), getattr(p, "base_rate", None))
+                              if isinstance(v, (int, float))]
+    except Exception:
+        _figure_logger.exception("couldn't read the rate card's prices for the figure check")
+    return email_totals.check_texts({k: emails.get(k) or "" for k in _EMAIL_FIELDS}, totals, extra)
+
+
+def _repair_email_figures(client, totals, emails: dict, issues: list, scope: str):
+    """One corrective call: the sentences with a wrong amount + the right figures. Returns the four email fields, or
+    None when the answer can't be trusted (unparseable, a placeholder lost, an email gutted)."""
+    wrong = "\n".join(
+        f"- {email_totals.format_issue(dataclasses.replace(i, where=_EMAIL_FIELD_LABELS.get(i.where, i.where)))}"
+        for i in issues[:12])
+    scope_note = {
+        "internal": " Return the CLIENT-FACING email's subject and body EXACTLY as shown, character-for-character unchanged.",
+        "client": " Return the INTERNAL email's subject and body EXACTLY as shown, character-for-character unchanged.",
+    }.get(scope, "")
+    prompt = (
+        "You are correcting dollar amounts in two already-drafted emails for a digital media proposal. A system check "
+        "compared every dollar amount in them with the plan's authoritative figures and found amounts that do not match. "
+        "Respond ONLY with valid JSON — no preamble, no markdown fences.\n\n"
+        + email_totals.render_prompt_block(totals)
+        + "\n## AMOUNTS THAT DO NOT MATCH THE PLAN\n" + wrong + "\n\n"
+        "## CURRENT INTERNAL EMAIL (to the AE)\nSubject: " + (emails.get("internal_email_subject") or "")
+        + "\n---\n" + (emails.get("internal_email_body") or "") + "\n---\n\n"
+        "## CURRENT CLIENT-FACING EMAIL\nSubject: " + (emails.get("client_email_subject") or "")
+        + "\n---\n" + (emails.get("client_email_body") or "") + "\n---\n\n"
+        "## YOUR TASK\n"
+        "Rewrite ONLY the sentences that contain a mismatching amount so that every dollar amount in them comes from the "
+        "authoritative figures above — use the figure the sentence is clearly describing (the option's TOTAL INVESTMENT for "
+        "an overall total, the per-period or per-line figure for those). If no listed figure fits what the sentence says, "
+        "reword it without a dollar amount. Do not calculate any new figure." + scope_note + " Everything else stays "
+        "character-for-character the same, including every line starting with \"Proposal:\", \"Presentation:\" or "
+        "\"Google Drive Link:\", every {{PLACEHOLDER}} token, and the sign-off lines.\n\n"
+        "Respond with this exact JSON structure:\n"
+        "{\"internal_email_subject\": \"...\", \"internal_email_body\": \"...\", "
+        "\"client_email_subject\": \"...\", \"client_email_body\": \"...\"}"
+    )
+    raw = llm_utils.chat_text(client, model=_REVISE_MODEL, prompt=prompt,
+                              max_completion_tokens=_REVISE_MAX_COMPLETION_TOKENS)
+    data = llm_utils.parse_json_object(raw, expect_any=("internal_email_body", "client_email_body"), client=client)
+    fixed = {}
+    for key in _EMAIL_FIELDS:
+        value = data.get(key)
+        fixed[key] = _normalize_newlines(value) if isinstance(value, str) and value.strip() else emails.get(key, "")
+    allowed_fields = _SCOPE_FIELDS.get(scope, _EMAIL_FIELDS)
+    for key in _EMAIL_FIELDS:
+        if key not in allowed_fields:
+            fixed[key] = emails.get(key, "")
+    for key in ("internal_email_body", "client_email_body"):
+        old, new = emails.get(key) or "", fixed[key]
+        if any(p in old and p not in new for p in _PLACEHOLDERS) or (len(old) > 200 and len(new) < len(old) * 0.5):
+            _figure_logger.warning("figure correction pass discarded: it damaged %s", key)
+            return None
+    return fixed
+
+
+def _check_and_repair_emails(client, totals, context: str, emails: dict, scope: str = "both") -> tuple[dict, list]:
+    """(emails, warnings): `emails` with any mismatching amounts corrected where possible (only in the fields the
+    scope allows to change), `warnings` the formatted amounts that still don't match the plan — in either email."""
+    issues = _figure_issues(emails, totals, context)
+    if not issues:
+        return emails, []
+    in_scope = _SCOPE_FIELDS.get(scope, _EMAIL_FIELDS)
+    fixable = [i for i in issues if i.where in in_scope]
+    best = emails
+    if fixable and client is not None:
+        try:
+            repaired = _repair_email_figures(client, totals, emails, fixable, scope)
+        except Exception as exc:         # a truncated / failed correction pass must not cost the planner the emails
+            _figure_logger.warning("figure correction pass failed: %s", exc)
+            repaired = None
+        if repaired:
+            after = _figure_issues(repaired, totals, context)
+            if sum(1 for i in after if i.where in in_scope) < len(fixable):
+                best, issues = repaired, after
+    shown = [dataclasses.replace(i, where=_EMAIL_FIELD_LABELS.get(i.where, i.where)) for i in issues]
+    warnings = [email_totals.format_issue(i) for i in shown[:_MAX_FIGURE_WARNINGS]]
+    if len(shown) > _MAX_FIGURE_WARNINGS:
+        warnings.append(f"…and {len(shown) - _MAX_FIGURE_WARNINGS} more")
+    return best, warnings
+
+
+def _verify_email_figures(client, result: "ProposalEnrichment", totals, context: str) -> None:
+    """Checks (and, once, corrects) the two emails of a freshly generated enrichment IN PLACE; sets
+    result.figure_warnings. Never raises."""
+    try:
+        if totals is None or not (result.internal_email_body or result.client_email_body):
+            return
+        emails = {k: getattr(result, k, "") or "" for k in _EMAIL_FIELDS}
+        fixed, warnings = _check_and_repair_emails(client, totals, context, emails, "both")
+        for key in _EMAIL_FIELDS:
+            setattr(result, key, fixed[key])
+        result.figure_warnings = warnings
+    except Exception:
+        _figure_logger.exception("email figure verification failed; leaving the emails as written")
 
 
 def reprompt_emails(
@@ -364,6 +553,8 @@ def reprompt_emails(
     current_client_body: str,
     reprompt: str,
     scope: str = "both",
+    time_unit: str = "month",
+    totals: Optional["email_totals.EmailTotals"] = None,
 ) -> dict:
     """
     Step 07 — revise the internal + client-facing emails in place, based on
@@ -371,6 +562,17 @@ def reprompt_emails(
     shorter", "emphasize the Q4 start date"), WITHOUT touching campaign_name,
     product blurbs, or the already-generated Excel file/title — those are
     fixed by the time the planner is reviewing emails at this step.
+
+    time_unit: the proposal's billing period. The revision prompt carries the same
+    billing rule as the original email prompt (flat flight totals for "full_flight",
+    "per week" / "per quarter" wording for those units, never monthly).
+
+    totals: the deterministic dollar figures (email_totals.compute_email_totals) for the
+    plan AS IT IS NOW — the caller builds them from the current wizard state, so a
+    revision also refreshes any figure the plan has moved away from. Derived here from
+    `line_items` alone (one option, no add-ons) when omitted. The revised emails are
+    checked against them, and the result carries `figure_warnings` for any amount that
+    still doesn't match (see _check_and_repair_emails).
 
     scope: "both" (default) revises both emails, the original behavior.
     "internal"/"client" revises only that one — enforced as a hard
@@ -402,7 +604,14 @@ def reprompt_emails(
         return _unchanged("OPENAI_API_KEY not set — reprompt skipped.")
 
     client = _OpenAI(api_key=api_key)
-    total_budget = sum(li.monthly_budget * li.months for li in line_items)
+    if totals is None:
+        totals = email_totals.totals_from_legacy(request, line_items, None, time_unit)
+    # One overall figure only when there is ONE option: several are alternatives, and their sum means nothing.
+    investment_line = (
+        "" if totals.multi_option
+        else f"- Total Net Investment: {email_totals.fmt_money(totals.options[0].total_net)}\n"
+    )
+    figures_block = email_totals.render_prompt_block(totals)
 
     # Built as its own plain variable, not inline in the f-string below —
     # an inline dict-literal/ternary with its own quotes nested inside an
@@ -415,13 +624,37 @@ def reprompt_emails(
         "client": "Revise ONLY the CLIENT-FACING email to incorporate the planner's requested change. Return the INTERNAL email's subject and body EXACTLY as shown above, character-for-character unchanged — the planner only asked to change the client-facing one this time.",
     }.get(scope, "Revise BOTH emails to incorporate the planner's requested change.")
 
+    # Empty for every unit but Full Flight, so those prompts stay byte-identical. Built here (outside the f-string) for the
+    # same quoting reason as scope_instruction above, and placed in the instructions — never inside the JSON exemplar.
+    resolved_unit = period_copy.resolve_time_unit(time_unit, where="email reprompt prompt")
+    if resolved_unit == period_copy.FULL_FLIGHT:
+        billing_note = (
+            f"CRITICAL — BILLING PERIOD: {_FULL_FLIGHT_RULE_TEXT}. If the planner's requested change asks for a per-month "
+            "figure, give the flat flight total instead.\n\n"
+        )
+    elif resolved_unit in _PERIOD_RULE_TEXT:
+        billing_note = (
+            f"CRITICAL — BILLING PERIOD: {_PERIOD_RULE_TEXT[resolved_unit]}. If the planner's requested change asks for a "
+            f"monthly figure, give the per-{email_totals.unit_noun(resolved_unit)} figure from the AUTHORITATIVE FIGURES instead.\n\n"
+        )
+    else:
+        billing_note = ""
+    # The plan may have moved since the current text was written (the planner can edit line items after Generate), so
+    # a revision is also the moment stale figures get refreshed, in whichever email(s) it is revising.
+    figures_note = (
+        "CRITICAL — DOLLAR FIGURES: every dollar amount in the email(s) you return must come from the AUTHORITATIVE FIGURES "
+        "above, exactly as listed — never calculate, add, average or round one yourself. The plan may have changed since the "
+        "current text was written, so in the email(s) you are revising, replace any dollar amount that no longer matches "
+        "those figures, even if the planner's request doesn't mention it.\n\n"
+    )
+
     prompt = f"""You are revising two already-drafted emails for a digital media proposal, based on the planner's final review feedback. Respond ONLY with valid JSON — no preamble, no markdown fences.
 
 ## PROPOSAL CONTEXT
 - Client: {request.client_name or "TBD"}
 - Campaign: {campaign_name or "TBD"}
-- Total Net Investment: ${total_budget:,.0f}
-
+{investment_line}
+{figures_block}
 ## CURRENT INTERNAL EMAIL (to the AE)
 Subject: {current_internal_subject}
 ---
@@ -446,7 +679,7 @@ CRITICAL — PRESERVE THESE LINES VERBATIM, EXACTLY AS WRITTEN, WHEREVER THEY AP
 Any line starting with "Proposal:", "Presentation:", or "Google Drive Link:" is a system-inserted reference line, not AI-authored content — copy it into your revised email character-for-character, in the same position relative to the surrounding text. Never reword, remove, or relocate these lines even if the requested change is about tone or structure elsewhere in the email.
 The INTERNAL email's final two lines (a "{{Name}}, part of your digital strategy team" line followed by an email address line) are the real planner's system-inserted signature, not AI-authored content — keep them character-for-character, at the very end, exactly as given. Never invent a different sign-off in their place.
 
-Respond with this exact JSON structure:
+{figures_note}{billing_note}Respond with this exact JSON structure:
 {{
   "internal_email_subject": "revised subject",
   "internal_email_body": "revised full internal email body",
@@ -460,6 +693,7 @@ Respond with this exact JSON structure:
                                   max_completion_tokens=_REVISE_MAX_COMPLETION_TOKENS)
         data = llm_utils.parse_json_object(
             raw, expect_any=("internal_email_body", "client_email_body"), client=client)
+        source_rules.scrub_model_output(data)       # Wikipedia is never a citation (see source_rules)
         result = {
             "internal_email_subject": data.get("internal_email_subject") or current_internal_subject,
             "internal_email_body": _normalize_newlines(data.get("internal_email_body") or current_internal_body),
@@ -477,6 +711,15 @@ Respond with this exact JSON structure:
         elif scope == "client":
             result["internal_email_subject"] = current_internal_subject
             result["internal_email_body"] = current_internal_body
+        # Every dollar amount in BOTH emails (the one left alone may be stale) against the plan's figures; the planner's
+        # own request text counts as a legitimate source for a figure they typed.
+        result["figure_warnings"] = []
+        try:
+            fixed, warnings = _check_and_repair_emails(client, totals, reprompt, {k: result[k] for k in _EMAIL_FIELDS}, scope)
+            result.update(fixed)
+            result["figure_warnings"] = warnings
+        except Exception:
+            _figure_logger.exception("email figure verification failed; leaving the revision as written")
         return result
     except llm_utils.ResponseTruncated:
         return _unchanged("The revision was cut off before it finished — emails left unchanged. Try again.")
@@ -524,7 +767,12 @@ Revise the outline to incorporate the planner's requested change. Keep
 its section headers and overall structure, and keep every real number,
 date, product name, and client detail EXACTLY as given — never invent or
 alter a figure that's already in the outline. Change only what the
-planner actually asked for.
+planner actually asked for. Do not add any statistic or source that isn't
+already in the outline.
+
+{source_rules.NO_WIKIPEDIA_RULE} If the outline already cites Wikipedia,
+remove that citation (and any market statistic that rested only on it —
+never a budget, date or flight figure) rather than repeating it.
 
 Respond with this exact JSON structure:
 {{"outline": "the full revised outline text"}}"""
@@ -536,7 +784,8 @@ Respond with this exact JSON structure:
         revised = data.get("outline")
         if not revised or not isinstance(revised, str):
             return _unchanged("No structured response received — outline left unchanged.")
-        return {"outline": _normalize_newlines(revised), "error": None}
+        # Code layer behind the no-Wikipedia rule in the prompt (a no-op when it never appears).
+        return {"outline": source_rules.strip_wikipedia(_normalize_newlines(revised)), "error": None}
     except llm_utils.ResponseTruncated:
         return _unchanged("The revision was cut off before it finished — outline left unchanged. Try again.")
     except Exception as exc:
@@ -556,6 +805,11 @@ def _estimate_monthly_impressions(line_items) -> Optional[int]:
     guess, since a wrong impressions figure in a seller-facing email is
     worse than no figure at all. Returns None if nothing in the set
     supports an impressions estimate (e.g. all CPP, or no rate on file).
+
+    The figure covers ONE billing period of the line items it is given (the
+    name predates the Weekly/Quarterly/Full Flight toggle). In Full Flight each
+    line's monthly_budget is the whole-flight dollar amount, so the result is
+    the whole-flight estimate — _build_prompt labels it accordingly.
     """
     total = 0.0
     found_any = False
@@ -586,7 +840,21 @@ def _format_impressions(n: Optional[int]) -> str:
 
 
 def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
-                  tiers: Optional[list] = None) -> str:
+                  tiers: Optional[list] = None, time_unit: str = "month",
+                  totals: Optional["email_totals.EmailTotals"] = None) -> str:
+    # Full Flight = one billing period for the whole flight: every figure below is a flat flight total, so none
+    # of it may be worded "/month x N months", and the impressions figure is the whole-flight estimate.
+    # Week / Quarter are worded per week / per quarter (never "/month"); every dollar amount the emails may state is
+    # computed in email_totals (the AUTHORITATIVE FIGURES block below), not left to the model.
+    time_unit = period_copy.resolve_time_unit(time_unit, where="proposal enrichment prompt")
+    full_flight = time_unit == period_copy.FULL_FLIGHT
+    unit_noun = email_totals.unit_noun(time_unit)
+    imps_label = "total flight impressions" if full_flight else f"{email_totals.unit_adjective(time_unit)} impressions"
+    multi_option = bool(tiers and len(tiers) > 1)
+    if totals is None or totals.multi_option != multi_option or (multi_option and len(totals.options) != len(tiers)):
+        totals = email_totals.totals_from_legacy(request, line_items, tiers, time_unit)
+    figures_block = email_totals.render_prompt_block(totals)
+
     # Ground each product in what it ACTUALLY is (the catalog's own rate-
     # card description), not just its name + budget — the model had
     # nothing else to go on before this beyond the product's name and the
@@ -610,13 +878,36 @@ def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
             "\n    What this actually is: (no rate-card description on file — describe it in one plain, generic sentence from its "
             "name and its Knowledge Base row only; invent no specifics)"
         )
+        if multi_option:
+            # This list is the UNION of the options' products, so any one amount shown here would belong to just one of
+            # them; each option's own per-product amounts are in the AUTHORITATIVE FIGURES block.
+            return f"  - {li.product_name}: (the amount differs by option — see AUTHORITATIVE FIGURES){desc_line}"
+        if full_flight:
+            return (
+                f"  - {li.product_name}: ${li.monthly_budget * li.months:,.0f} flat for the whole flight "
+                f"(single billing period — not a monthly rate){desc_line}"
+            )
+        if getattr(li, "monthly_allocations", None):
+            # A customised Step 06 split: monthly_budget is only the average of unequal periods.
+            return (
+                f"  - {li.product_name}: ${li.monthly_budget * li.months:,.0f} total over "
+                f"{email_totals.periods_phrase(li.months, time_unit)} (differs by {unit_noun} — see AUTHORITATIVE FIGURES){desc_line}"
+            )
         return (
-            f"  - {li.product_name}: ${li.monthly_budget:,.0f}/month × {li.months} months "
+            f"  - {li.product_name}: ${li.monthly_budget:,.0f}/{unit_noun} × {email_totals.periods_phrase(li.months, time_unit)} "
             f"= ${li.monthly_budget * li.months:,.0f} total{desc_line}"
         )
 
     items_text = "\n".join(_product_line(li) for li in line_items)
-    total_budget = sum(li.monthly_budget * li.months for li in line_items)
+    # The overall figure is the workbook's own grand total for the (one) option — add-ons included, the same number
+    # the Excel shows. With several options there is no overall figure: they are alternatives.
+    if multi_option:
+        total_budget_text = "see each option below — they are ALTERNATIVES, never added together"
+    else:
+        opt0 = totals.options[0]
+        total_budget_text = f"${opt0.total_net:,.0f}" + (
+            f" ({email_totals.fmt_money(opt0.media_net)} media + {email_totals.fmt_money(opt0.addons_net)} one-time add-ons)"
+            if opt0.addons else "")
     total_impressions = _estimate_monthly_impressions(line_items)
 
     # Multiple budget options ("tiers") — each becomes a lettered "Proposal
@@ -625,18 +916,16 @@ def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
     tiers_block = ""
     if tiers and len(tiers) > 1:
         option_lines = []
-        for t in tiers:
+        for t, opt in zip(tiers, totals.options):
             t_items = t.get("line_items") or []
-            t_total = sum(li.monthly_budget * li.months for li in t_items)
-            t_monthly = sum(li.monthly_budget for li in t_items)
             t_imps = _estimate_monthly_impressions(t_items)
-            imps_str = f", {_format_impressions(t_imps)} monthly impressions" if t_imps else ""
-            products_str = ", ".join(li.product_name for li in t_items) or "(no products)"
-            option_name = (t.get("name") or "").strip() or f"Option {t.get('label', '?')}"
-            option_lines.append(
-                f"  - {option_name}: ${t_monthly:,.0f}/month "
-                f"(${t_total:,.0f} total flight{imps_str}) — {products_str}"
-            )
+            imps_str = f", {_format_impressions(t_imps)} {imps_label}" if t_imps else ""
+            # a line the planner gave a note reads "Display [line note: Hispanic]" — so two lines of one product differ
+            products_str = ", ".join(
+                email_totals.label_for(li.product_name, line_modifier_of(li)) for li in t_items) or "(no products)"
+            # the option's own headline figures come from email_totals (add-ons, per-period amounts and the unit's
+            # wording included), never from arithmetic done here
+            option_lines.append(f"{email_totals.option_summary_line(opt, imps_str)} — {products_str}")
         tiers_block = f"""
 ## MULTIPLE BUDGET OPTIONS — THIS PROPOSAL HAS {len(tiers)} DISTINCT OPTIONS
 The client is being presented {len(tiers)} alternative budget/product-mix
@@ -647,7 +936,7 @@ as a single plan — both emails must clearly lay out EACH option separately
 (its own heading, budget, and product mix) so the reader can compare them
 side by side. **Use the exact option name given below as its heading** —
 never the generic "Option A"/"Option B" unless that's literally what's
-given (no planner name set). The monthly impressions figures below (where
+given (no planner name set). The {imps_label} figures below (where
 given) are pre-computed from real rates — use them verbatim if you
 reference impressions; never compute or guess your own.
 {chr(10).join(option_lines)}
@@ -699,7 +988,7 @@ reference impressions; never compute or guess your own.
     if strategy_brief and strategy_brief.get("recommended_tactics"):
         tactic_lines = [
             f"  - {t.get('product_family', '')}: {t.get('rationale', '')} "
-            f"Data: {t.get('data_point', '')} ({t.get('citation', '')})"
+            + (f"Data: {t.get('data_point', '')} ({t.get('citation', '')})" if t.get("data_point") else "")
             for t in strategy_brief["recommended_tactics"]
             if not curated_families or t.get("product_family", "") in curated_families
         ]
@@ -726,6 +1015,30 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
         "Please see your requested plan in the link below:"
     )
 
+    # The two period-sensitive lines of PROPOSAL CONTEXT, and the Full Flight rule. Built out here (not inline in
+    # the big f-string) so the month wording stays visibly the original text, and so the Full Flight rule lives in
+    # the RULES block — never inside the JSON exemplar's strings, where a stray quote or brace breaks the JSON.
+    flight_period = "single flight, billed as one period" if full_flight else period_copy.months_phrase(request.total_months or 3)
+    if time_unit in _PERIOD_RULE_TEXT:
+        # a weekly / quarterly plan is priced in those units, not in the calendar months the flight spans
+        flight_period += (f", priced per {unit_noun}" if multi_option
+                          else f", priced as {email_totals.periods_phrase(totals.options[0].n_periods, time_unit)}")
+    total_imps_note = (
+        f" ({_format_impressions(total_impressions)} {imps_label} — pre-computed from real rates, use verbatim, never recompute)"
+        if total_impressions and not tiers_block else ""
+    )
+    if full_flight:
+        billing_rule = f"- Billing period: {_FULL_FLIGHT_RULE_TEXT}\n"
+    elif time_unit in _PERIOD_RULE_TEXT:
+        billing_rule = f"- Billing period: {_PERIOD_RULE_TEXT[time_unit]}\n"
+    else:
+        billing_rule = ""
+    figures_rule = (
+        "- Dollar figures: state ONLY amounts listed in AUTHORITATIVE FIGURES, exactly as written — never calculate, add, "
+        "average or round a figure yourself, and never invent one; if you need a number that isn't listed, describe it "
+        "in words. A system check compares every dollar amount in both emails with those figures\n"
+    )
+
     # Built as its own variable (not inline in the JSON block below) so its
     # own quoting doesn't have to fight the surrounding f-string's quoting —
     # a dash-based structure instead of numbered steps, so the optional
@@ -737,7 +1050,7 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
         f'— A short transition line introducing the deliverable link(s) below, e.g. \\"{deliverable_example}\\". This request is {"a Full Presentation, so it DOES include a separate presentation deck" if is_full_presentation else "NOT a Full Presentation — do not mention a presentation, deck, or slides; there is only the one proposal/plan deliverable"}. '
         "— Immediately after that, on its own line, the literal placeholder text '{{PROPOSAL_LINE}}' (exactly these characters, nothing else on that line — it will be replaced with the real proposal name(s) and Drive link(s)). "
         "— One sentence noting the client-facing talking points are attached separately below, ready to copy and send once reviewed. "
-        f"— A detailed strategy paragraph (2-4 sentences) that names the specific target audience/demo/geo by name, states the actual dollar budget split{' across every option and market/segment' if tiers_block else ''} using the REAL numbers given above (never invent or alter them), and names the recommended tactic/product-family strategy with a concrete reason grounded in the data above — never a generic restatement like 'reach the target audience.' If the context above shows a real constraint that shaped this mix (a minimum-spend limit, an inventory or reach ceiling, a channel deliberately weighted down or up to fit the budget), say so plainly and explain the trade-off, the way the VOICE example does — that reads as real judgment, not a generic pitch. "
+        f"— A detailed strategy paragraph (2-4 sentences) that names the specific target audience/demo/geo by name, states the actual dollar budget split{' across every option and market/segment' if tiers_block else ''} using the REAL numbers given above, copied exactly from the AUTHORITATIVE FIGURES block (never invent, alter or recompute them), and names the recommended tactic/product-family strategy with a concrete reason grounded in the data above — never a generic restatement like 'reach the target audience.' If the context above shows a real constraint that shaped this mix (a minimum-spend limit, an inventory or reach ceiling, a channel deliberately weighted down or up to fit the budget), say so plainly and explain the trade-off, the way the VOICE example does — that reads as real judgment, not a generic pitch. "
         "— ONLY when the context above gives a real, specific basis for it (a stated timeline, seasonality, or creative consideration — never invented), a short paragraph with concrete creative/execution guidance: how messaging should evolve over the flight, or which ad lengths/formats suit which objective. Skip this paragraph entirely when there's no real basis for it above — never invent a campaign calendar or creative plan that isn't grounded in the given context. "
         + ("— A paragraph that explicitly recommends WHICH option the client should run when budget allows, and why (grounded in the reach/frequency tradeoff or channel-fragmentation risk visible in the data above), plus what to do if the client stays at the lower option instead. "
            if tiers_block else "")
@@ -774,8 +1087,8 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
 - Seller (AE): {request.requested_by or request.salesperson_email or "TBD"}
 - AE Email: {request.salesperson_email or "TBD"}
 - Campaign Goal: {request.campaign_goal or "Awareness"}
-- Flight: {request.start_date or "TBD"} → {request.end_date or "TBD"} ({request.total_months or 3} months)
-- Total Net Investment: ${total_budget:,.0f}{f" (~{_format_impressions(total_impressions)} monthly impressions — pre-computed from real rates, use verbatim, never recompute)" if total_impressions and not tiers_block else ""}
+- Flight: {request.start_date or "TBD"} → {request.end_date or "TBD"} ({flight_period})
+- Total Net Investment: {total_budget_text}{total_imps_note}
 - Request Type: {request.request_type or "Proposal"}
 - AE Comments: {request.salesperson_comments or "None"}
 - Question Details: {getattr(request, "question_details", "") or "None"}
@@ -787,6 +1100,7 @@ Overall direction: {strategy_brief.get('strategy_summary', '')}
 ## and language each already have their own column in the proposal):
 {target_block}
 {strategy_block}{tiers_block}
+{figures_block}
 ## PRODUCTS IN THIS PROPOSAL (union across every option, if more than one)
 {items_text}
 
@@ -804,19 +1118,31 @@ available, using general market benchmark").
 Each blurb becomes the short DESCRIPTION cell for that product in the proposal
 spreadsheet, sitting beside separate columns that already show the target
 audience, geography, flight dates, sizes and rates. So a blurb must add what
-those columns don't: plainly what this product is and does, in terms a client
-who has never bought it would understand (the rate-card sentence is printed directly above your blurb in the same cell, so do not restate it — say what the buyer actually gets and how it reaches people) — and, ONLY when one genuinely helps,
-a single short, real fact about the channel itself (how people use the medium,
-why the format works). Never a fact about this client's audience or market.
+those columns don't, in this order and nothing more:
+1. What this product does for THIS client's goal — plainly, in terms a client
+   who has never bought it would understand (the rate-card sentence is printed directly above your blurb in the same cell, so do not restate it — say what the buyer actually gets and how it reaches people), made specific to the client's business and Campaign Goal above where that helps. Don't repeat the targeting values themselves.
+2. Then, whenever your search finds one, ONE concrete statistic that backs that
+   use: a real number with its named source, written "[number and what it
+   measures] (Publisher, Year)." Prefer a number about this client's audience
+   or category when you can find one; otherwise a number about the channel
+   itself. If your search turns up nothing specific and sourced, stop after
+   sentence 1.
+Be straight to the point: no scene-setting and no adjectives that only sound good.
 
-## YOU HAVE LIVE WEB SEARCH — USE IT WHEN A STAT GENUINELY HELPS, DON'T FORCE IT
-This is a real capability, not a hypothetical. For the emails, search for a
-real external stat when it would strengthen a point rather than writing a
-number that merely sounds plausible. For a product blurb a plain description
-with no stat at all is the NORMAL, good outcome. If the client's website is
-given above, search it too so the emails reflect what the client actually
-does, not an assumption from the name. A citation you can't actually verify
-via search should not be presented as sourced data.
+## YOU HAVE LIVE WEB SEARCH — USE IT TO FIND THE ONE STAT, NEVER TO INVENT ONE
+This is a real capability, not a hypothetical. For each product blurb, run a
+quick search for the single most specific, recent (2023–2026) number behind
+that product's use, and write it ONLY if you actually found it; a blurb with
+no stat is the right outcome only when search found nothing specific and
+sourced. For the emails, search for a real external stat when it would
+strengthen a point rather than writing a number that merely sounds plausible.
+If the client's website is given above, search it too so the emails reflect
+what the client actually does, not an assumption from the name. A citation you
+can't actually verify via search should not be presented as sourced data.
+Cite the primary source: a research firm's study, an industry-body or
+government-agency report, a company's own filing or published data, or the
+news outlet that reported it.
+{source_rules.NO_WIKIPEDIA_RULE}
 
 {HOUSE_VOICE_GUIDE}
 
@@ -824,6 +1150,31 @@ The voice guide above governs the EMAILS. Product blurbs are the one deliberate
 exception: they are a short, plain product description (see PRODUCT BLURB RULES
 below), not a reasoned argument — don't apply the budget-split / trade-off
 reasoning to them.
+
+## NO UNFOUNDED CLAIMS — THE RULE THAT DECIDES WHETHER A BLURB SENTENCE STAYS
+Any statement about what an audience does, wants, prefers or trusts, how big or
+fast-growing a market or channel is, or how well something performs MUST carry
+BOTH a specific number AND a named source ("(Publisher, Year)") in that same
+sentence. If you can't give both, leave the statement out completely — do not
+soften it with "always", "often", "typically", "usually", "many", "most",
+"increasingly", "tend to", "popular" or "trusted", and don't dress it up with
+adjectives like "highly engaged" or "powerful". A sweeping line about a group
+("Hispanics always...", "Latino families love...") is never acceptable, sourced
+or not, unless the sentence states the actual figure. Describing what the
+product itself is or does (how it works, what the buyer gets) is not a claim
+and needs no source. Never write a number you did not find in a source. Plain
+text only: no URLs, links, markdown or footnote numbers — just the
+"(Publisher, Year)" at the end of the sentence it supports.
+BAD (sweeping audience claim, no number, no source — leave it out entirely):
+"Hispanics are always researching for news on YouTube."
+BAD (vague quantifiers and filler adjectives): "Many Latino families
+increasingly rely on streaming audio." / "Podcasts are a trusted, highly
+engaging channel."
+BAD (a number nobody can check — no named source): "[A percentage] of Hispanics
+watch YouTube every week."
+GOOD (the stat is specific and sourced, so it stays — the brackets are slots,
+never copy a figure or a source from these examples): "[N]% of [specific group]
+[specific, measured behavior] ([Publisher], [Year])."
 
 BAD blurb (too long, and repeats what the targeting columns already say): "For
 Hispanic adults 25-54 in Los Angeles, premium CTV matters because ... (Source,
@@ -837,15 +1188,17 @@ BAD blurb (fluent but WRONG PRODUCT — reject this just as hard): a confident
 paragraph about podcast listenership written under a Meta/Facebook product's
 name. Every product's own "What this actually is" line above is the one and
 only source for what that product does.
-GOOD blurb (plain, no stat — an equally good outcome): "Banner ads shown across
-a network of websites and apps, retargeting local shoppers as they browse so
-your offer stays in front of them after they leave your site."
+GOOD blurb (plain, no stat — right ONLY when your search found no specific
+sourced number): "Banner ads shown across a network of websites and apps,
+retargeting local shoppers as they browse so your offer stays in front of them
+after they leave your site."
 GOOD blurb (plain, a different family): "Text ads that appear on Google when
 people search for what you offer, so your business shows up at the moment
 they're ready to call or visit."
-GOOD blurb (one relevant channel fact, only when it genuinely helps): "[One or
-two plain sentences on what the product is and does.] [One short, real, searched
-fact about the channel itself.] (Source, Year)"
+GOOD blurb (the target shape whenever search supports it — what it does for
+this client, then ONE sourced stat): "[One plain sentence on what the product
+does for this client's goal.] [N]% of [specific group] [specific, measured
+behavior] ([Publisher], [Year])."
 
 Do NOT close a blurb with a generic "Entravision's [X] advantage/expertise
 makes this the right execution/choice for this client" sentence — cut it
@@ -860,7 +1213,7 @@ Return this exact JSON structure (no deviation):
   "product_blurbs": [
     {{
       "product_name": "exact product name as listed above",
-      "blurb": "[One or two plain sentences: what this product is and does, grounded in its own 'What this actually is' line above but adding what the buyer gets and how it reaches people — not a restatement of that line. Optionally end with ONE short, real fact about the channel itself — only if it genuinely helps the client — as (Source, Year). No audience, geo, language, variant or format talk.]"
+      "blurb": "[One or two plain sentences: the first says what this product does for this client's goal, grounded in its own 'What this actually is' line above and adding what the buyer gets and how it reaches people — not a restatement of that line. The second, whenever your search found one, is ONE concrete statistic written as '[number and what it measures] (Publisher, Year).' — never a general statement without a number and a named source. No targeting values, language, variant or format talk.]"
     }}
   ],
   "internal_email_subject": "Digital Strategy Pack: [Client] ([Month Year] Campaign)",
@@ -871,16 +1224,18 @@ Return this exact JSON structure (no deviation):
 
 RULES:
 PRODUCT BLURB RULES (for the product_blurbs field only — these override anything above that sounds longer or more elaborate when you write a blurb; the emails follow the voice and statistics guidance above):
-- Each product blurb is ONE short paragraph, 25–55 words, plain and concrete, no filler: what the product is and what it does. Add a single short channel fact only if it genuinely helps the client; otherwise stop after the description. A blurb with no stat and no citation is the normal outcome
+- Each product blurb is ONE short paragraph, 25–55 words, plain and concrete, no filler: sentence 1 is what the product does for this client's goal; sentence 2, whenever your search finds one, is ONE concrete statistic with its named source (Publisher, Year). If search finds no specific, sourced number, stop after sentence 1 — never pad with a general statement instead
+- NO UNFOUNDED CLAIMS: any statement about what an audience does, wants, prefers or trusts, how big or fast-growing a market or channel is, or how well something performs must carry a specific number AND a named source in the same sentence — otherwise leave it out entirely rather than softening it (no "always", "often", "typically", "many", "most", "increasingly", "popular", "trusted", "highly engaged"). Describing what the product itself does needs no source. Plain text only: no URLs, links or footnote numbers
+- Never cite Wikipedia in a blurb or an email (see the SOURCE RULE above): cite the primary source it points to, or leave the number out
 - A blurb must tell the reader something the product name and the other columns don't already say — what the buyer actually gets and how it reaches people, in plain words. Don't just restate the name ("Search - SEM is search engine marketing") or copy the rate-card description line word for word
 - Do NOT repeat the audience, geography, language, demographic, behavioral or contextual targeting, flight dates, budget, sizes or placement in a blurb — those already have their own columns in the proposal
 - In a blurb, describe ONLY the product as named. Never mention variants, tiers, versions or format options (e.g. "Hispanic version", "standard vs. custom", "skippable vs. non-skippable"), and never recommend one over another. If the description above lists several, describe the product generally and don't enumerate them
 - Never make claims about the language of the content, sites, apps, stations or publishers a product runs on (e.g. "Spanish-language sites", "English-only inventory") unless the product's own name states it. Targeting a language audience is not the same as the inventory being in that language
-- In a blurb, any fact must be about the channel/format itself (never the client's audience or market), found via search, with a real named source and year — if you can't find one, leave it out
+- In a blurb, the one fact must be a real number found via search, with a named primary source and year in the same sentence — about the channel/format or about how people use it (prefer this client's own audience or category when you find one). Never state anything about an audience, a market or performance without BOTH the number and the source; if you can't find them, leave it out
 - Never close a blurb with a generic "Entravision's [X] expertise/advantage makes this the right execution/choice for this client" sentence — cut it outright rather than reword it. A sentence that would read the same with the product name swapped out doesn't belong
 - Before writing each blurb, re-read that product's own "What this actually is" line above and its own row in the Entravision Knowledge Base. They are the ONLY source of truth for what the product does — not the product's name alone, not another product's blurb, not a family that merely sounds adjacent. Use the Knowledge Base row only to decide WHICH capability applies; never copy its numbers, audience, language or geography wording into a blurb (the rows describe Entravision's network, and those details have their own columns or belong in the emails)
-- Every citation must name a real, specific, searchable source (publisher + year) you actually found via search — never a vague placeholder like "Industry Report, 2025." If you can't find a specific real source, leave the number out
-- A blurb must accurately describe the NAMED product's own format/category, grounded in ITS OWN description above — e.g. never describe audio/podcast/streaming content for an email, display, or search product, or vice versa, even if that content is sitting elsewhere in this prompt for a different product. Base every blurb on that product's own description and knowledge-base row only — never on the Target Audience section, and never borrow a rationale, stat, or example written for a different product family
+- Every citation must name a real, specific, searchable source (publisher + year) you actually found via search — never a vague placeholder like "Industry Report, 2025" or the template words "(Source, Year)". If you can't find a specific real source, leave the number out
+- A blurb must accurately describe the NAMED product's own format/category, grounded in ITS OWN description above — e.g. never describe audio/podcast/streaming content for an email, display, or search product, or vice versa, even if that content is sitting elsewhere in this prompt for a different product. Base what a blurb says the product does on that product's own description and knowledge-base row only — never on the Target Audience section (it can guide which stat you look for, never what the product is) — and never borrow a rationale, stat, or example written for a different product family
 - A product's blurb stays the SAME regardless of which option(s) it appears in — write it once per product, not once per option
 
 EMAIL AND OUTPUT RULES:
@@ -888,7 +1243,7 @@ EMAIL AND OUTPUT RULES:
 - Client email: professional but readable; absolutely no internal document references
 - Do not mention a presentation, deck, or any deliverable that isn't actually part of this request (see Request Type above) — only reference what's really being delivered
 - Campaign name: no quotes, no special characters, and must NOT contain the client/advertiser's name (it's combined with the client name separately downstream — including it here would repeat it)
-- Respond ONLY with the JSON object, starting with {{ and ending with }}"""
+{figures_rule}{billing_rule}- Respond ONLY with the JSON object, starting with {{ and ending with }}"""
 
 
 # ---------------------------------------------------------------------------
@@ -925,8 +1280,8 @@ _LANGUAGE_CLAIM = re.compile(
 _LANGUAGE_IN_NAME = re.compile(r"\b(?:spanish|english)\b", re.IGNORECASE)
 def _split_sentences(text: str) -> list[str]:
     """Sentences of a blurb — abbreviation-aware, with a citation kept together with the sentence it supports
-    (so dropping, keeping and word-counting treat the pair as one unit)."""
-    return [seg.strip() for seg in split_sentences(text) if seg.strip()]
+    (so dropping, keeping and word-counting treat the pair as one unit, whatever the citation's length or shape)."""
+    return [seg.strip() for seg in source_rules.glue_citation_segments(split_sentences(text)) if seg.strip()]
 
 
 # One-word values that are ordinary descriptive words, not places or audiences, never count as a repeat.
@@ -963,13 +1318,29 @@ def _compile_avoid(phrases) -> Optional["re.Pattern"]:
 
 def _blurb_sentence_ok(sentence: str, product_name: str, avoid: Optional["re.Pattern"] = None) -> bool:
     name = (product_name or "").lower()
-    if avoid is not None and avoid.search(sentence.lower()):
+    if source_rules.is_citation_only(sentence):
+        return False        # a bare "(Nielsen, 2025)" left with nothing to support
+    if source_rules.has_unfilled_slot(sentence):
+        return False        # "[N]% of [specific group] ... ([Publisher], [Year])" copied from the prompt's template
+    # A SOURCED statistic is research, not a restatement of the plan's targeting: "62% of Hispanic adults ... (Nielsen,
+    # 2025)" may name the audience even when the request's own demo is worded the same way.
+    sourced_stat = claim_rules.has_statistic(sentence) and source_rules.has_named_citation(sentence)
+    if avoid is not None and not sourced_stat and avoid.search(sentence.lower()):
         return False
+    # "skippable" / "non-skippable" is allowed only for the product whose own name says that one — a skippable
+    # product's blurb mentioning the non-skippable format (or the reverse) is the format menu the prompt forbids.
+    name_non = bool(re.search(r"\bnon-?skippable\b", name))
+    name_skip = not name_non and bool(re.search(r"\bskippable\b", name))
     for m in _BLURB_FORBIDDEN.finditer(sentence):
-        if "skippable" in m.group(0).lower() and "skippable" in name:
+        word = m.group(0).lower()
+        if "skippable" in word and (name_non if word.startswith("non") else name_skip):
             continue
         return False
     if _LANGUAGE_CLAIM.search(sentence) and not _LANGUAGE_IN_NAME.search(name):
+        return False
+    # The "no unfounded claims" rule: a sweeping audience / behavior / market / performance statement with no
+    # statistic AND named source, or a statistic with no named source, is dropped (see claim_rules).
+    if claim_rules.is_unsupported_claim(sentence):
         return False
     return True
 
@@ -977,11 +1348,20 @@ def _blurb_sentence_ok(sentence: str, product_name: str, avoid: Optional["re.Pat
 def _tighten_blurb(text: str, product_name: str = "", avoid: Optional["re.Pattern"] = None) -> str:
     """Enforces the blurb rules the prompt asks for: drops sentences that
     mention variants / language-of-inventory claims / skippable-format menus
-    or repeat the request's own geo / demo (together with the citation that
-    supported them), then keeps leading
+    or repeat the request's own geo / demo, and sentences that make an
+    unfounded audience / behavior / market claim or carry a statistic with no
+    named source (each together with the citation that supported it), then keeps leading
     sentences up to _BLURB_MAX_WORDS. Returns "" if every sentence was
-    disallowed (the export then shows just the catalog text)."""
+    disallowed (the export then shows just the catalog text).
+
+    Sources are cleaned first: Wikipedia is never a citation (its support is stripped, and a sentence whose
+    statistic rested on it goes), links become plain text for the cell, and template / vague citations
+    ("(Source, Year)", "(Industry Report, 2025)") are removed."""
     text = (text or "").strip()
+    if not text:
+        return ""
+    text = source_rules.flatten_links(source_rules.strip_wikipedia(text))
+    text = source_rules.strip_unspecific_citations(source_rules.strip_footnote_markers(text))
     if not text:
         return ""
     kept = [s for s in _split_sentences(text) if _blurb_sentence_ok(s, product_name, avoid)]
@@ -1007,6 +1387,10 @@ def _parse_response(raw: str, request, line_items, used_web_search: bool = False
             used_web_search=used_web_search,
             error=str(exc),
         )
+
+    # Wikipedia is never a citation, anywhere in what the model wrote (blurbs, emails, campaign name): see
+    # source_rules. A no-op on text that never mentions it.
+    source_rules.scrub_model_output(data)
 
     blurbs = []
     avoid = _compile_avoid(_targeting_phrases(request))

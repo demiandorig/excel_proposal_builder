@@ -320,13 +320,27 @@ Client name: ...
           <label>Start date <input data-field="start_date" type="date" /></label>
           <label>End date <input data-field="end_date" type="date" /></label>
           <label>Months
-            <input data-field="total_months" type="number" min="1" readonly title="Computed from the Start/End dates above" />
+            <input data-field="total_months" type="number" min="1" readonly title="Computed from the Start/End dates above: the calendar months the flight touches. In Full Flight the export shows no month count." />
           </label>
           <div class="months-mismatch-flag hidden" id="total-months-mismatch-flag">
             <span class="months-mismatch-text"></span>
             <button type="button" class="months-fix-btn" id="total-months-fix-btn">Fix</button>
           </div>
-          <label>Monthly budget
+          <!-- The proposal-wide billing period (the same setting as Step 04's
+               Weekly/Monthly/Quarterly/Full Flight pill). Deliberately NO
+               data-field: it is not a request field, and data-field elements
+               are copied into state.parsed and blanked on reset. Wired in
+               wireEvents(); kept in sync by _applyTimeUnitLabels(). -->
+          <label>Billing period
+            <select id="step02-billing-period" title="How this proposal is billed and shown in the export. Full flight bills the whole flight as one period — no monthly breakdown.">
+              <option value="week">Weekly</option>
+              <option value="month" selected>Monthly</option>
+              <option value="quarter">Quarterly</option>
+              <option value="full_flight">Full Flight</option>
+            </select>
+          </label>
+          <p class="field-hint hidden" id="step02-billing-period-hint">Billed as one period for the whole flight — the export shows one total per line and no month count. The budget below (and Tier #1–#4) is the flight's total, used exactly as typed — nothing is multiplied by months.</p>
+          <label><span id="step02-budget-label">Monthly budget</span>
             <input data-field="monthly_budget" type="number" step="0.01" min="0" />
           </label>
         </fieldset>
@@ -338,7 +352,7 @@ Client name: ...
         </fieldset>
 
         <fieldset class="span-2">
-          <legend>Tiered Budget <small>(optional — alternate monthly options)</small></legend>
+          <legend>Tiered Budget <small id="step02-tier-note">(optional — alternate monthly options)</small></legend>
           <label class="checkbox-label">
             <input type="checkbox" data-field="tiered_budget" /> This request has tiered budget options
           </label>
@@ -525,8 +539,9 @@ Client name: ...
           <button type="button" class="time-unit-slider-option" data-unit="week">Weekly</button>
           <button type="button" class="time-unit-slider-option active" data-unit="month">Monthly</button>
           <button type="button" class="time-unit-slider-option" data-unit="quarter">Quarterly</button>
+          <button type="button" class="time-unit-slider-option" data-unit="full_flight">Full Flight</button>
         </div>
-        <p class="time-unit-toggle-hint">Changes how totals, avails, the Step 06 breakdown, and the export all read — everywhere this proposal says "month."</p>
+        <p class="time-unit-toggle-hint">Changes how totals, avails, the Step 06 breakdown, and the export all read — everywhere this proposal says "month." Full Flight bills the whole flight as one period: no monthly split, each line's budget is its flight total, and it only has to clear the product's monthly minimum once.</p>
       </div>
 
       <div class="curation-toolbar">
@@ -540,15 +555,18 @@ Client name: ...
         <button class="btn-secondary" id="recommend-btn" title="Builds a brand-new product mix from the confirmed strategy brief — replaces the current lines">🔄 Generate New Product Mix</button>
         <div class="spacer"></div>
         <div class="totals-display">
+          <!-- In Full Flight the monthly and flight totals are the same number, so the
+               "Flight total" cells (flight-total-cell / flight-total-gross-cell) are hidden
+               (#step-4.ff-mode) and the first cell is relabelled "Full-Flight total". -->
           <div class="totals-row">
-            <div><span class="label" id="monthly-total-label">Monthly total</span><span class="value" id="monthly-total">$0</span></div>
-            <div><span class="label">Flight total</span><span class="value" id="flight-total">$0</span></div>
+            <div id="monthly-total-cell"><span class="label" id="monthly-total-label">Monthly total</span><span class="value" id="monthly-total">$0</span></div>
+            <div id="flight-total-cell"><span class="label" id="flight-total-label">Flight total</span><span class="value" id="flight-total">$0</span></div>
           </div>
           <div class="totals-gross hidden" id="totals-gross-wrap">
             <div class="totals-divider"></div>
             <div class="totals-row">
-              <div><span class="label" id="monthly-total-gross-label">Monthly total (Gross)</span><span class="value" id="monthly-total-gross">$0</span></div>
-              <div><span class="label">Flight total (Gross)</span><span class="value" id="flight-total-gross">$0</span></div>
+              <div id="monthly-total-gross-cell"><span class="label" id="monthly-total-gross-label">Monthly total (Gross)</span><span class="value" id="monthly-total-gross">$0</span></div>
+              <div id="flight-total-gross-cell"><span class="label" id="flight-total-gross-label">Flight total (Gross)</span><span class="value" id="flight-total-gross">$0</span></div>
             </div>
           </div>
         </div>
@@ -585,13 +603,13 @@ Client name: ...
               <th>Product</th>
               <th>Model</th>
               <th>Rate</th>
-              <th>Min</th>
+              <th id="col-min-header">Min</th>
               <th id="col-budget-header">Monthly $</th>
               <th class="col-share-header" title="Each paid line's share of the plan's total (read-only). Use ✎ Edit mix % to set the shares for the whole plan at once.">% of total</th>
               <th id="col-months-header">Months</th>
               <th>Target override</th>
               <th>Objective</th>
-              <th>Planner note</th>
+              <th title="Written to the export's Planner Notes column. (The Line note under each product name is different: it prints in purple under the product name in the export.)">Planner note</th>
               <th></th>
             </tr>
           </thead>
@@ -653,6 +671,13 @@ Client name: ...
         <span id="mb-step-name">Monthly Breakdown</span> is entered separately per option — you're editing <strong id="tier-switcher-active-label-monthly">Option A</strong> below. Switch tabs above before generating, or that option's export has none.
       </p>
 
+      <!-- Full Flight only (shown by renderMonthlyBreakdown, hidden otherwise): the whole
+           flight is ONE period, so the breakdown machinery below is replaced by this note. -->
+      <div id="mb-fullflight-note" class="mb-empty-state mb-fullflight-note hidden">
+        <p><strong>Full-Flight billing:</strong> each line is billed as one period — nothing to split.</p>
+        <p class="mb-fullflight-detail" id="mb-fullflight-detail"></p>
+      </div>
+
       <div id="mb-no-dates" class="mb-empty-state hidden">
         <p id="mb-no-dates-text">Monthly Breakdown needs a campaign flight to divide into months. Set Start/End dates back in Step 02 (or a per-option override in Step 04), then come back here.</p>
       </div>
@@ -664,7 +689,16 @@ Client name: ...
             <button type="button" class="tier-tab" data-mode="even" id="mb-mode-even-btn">Even across months</button>
             <button type="button" class="tier-tab" data-mode="prorated">Prorated by days</button>
           </div>
-          <span class="tier-switcher-hint">Only affects NEW defaults (checkbox, reset, a newly-added line) — never rewrites a line you've already customized.</span>
+          <!-- MASTER redistribute: applies the selected default to every line (both views). Label/enabled state are
+               kept by _mbRenderApplyControls(); the click is onMbApplyAll(). -->
+          <button type="button" class="btn-secondary mb-apply-all-btn" id="mb-apply-all-btn">↺ Apply even split to all lines</button>
+          <span class="tier-switcher-hint" id="mb-mode-hint">Switching the split sets the default for new lines and per-line resets. Use Apply to redistribute every line you already have — each line's total stays the same.</span>
+          <!-- Raised by flipping the toggle while some line still holds the other split (or custom numbers). -->
+          <div class="mb-mode-notice hidden" id="mb-mode-notice" role="status">
+            <span id="mb-notice-text"></span>
+            <button type="button" class="mb-notice-link" id="mb-notice-apply-btn">Apply to all lines</button>
+            <button type="button" class="mb-notice-dismiss" id="mb-notice-dismiss-btn" aria-label="Dismiss this hint" title="Dismiss">✕</button>
+          </div>
         </div>
         <div class="mb-plan-summary" id="mb-plan-summary">
           <!-- plan-level "total spend by month" bar — rendered by renderMonthlyBreakdown() -->
@@ -740,19 +774,31 @@ Client name: ...
         <p class="lede">Entravision Intelligence searches the web for current platform ad policies — targeting restrictions, common rejection reasons, category requirements — for each product in this mix, grounded in the client context from Steps 02–03. Download the report to keep on hand for launch.</p>
       </div>
 
-      <!-- Which of Entravision's restricted verticals apply to this client. The
-           "Restricted Verticals by Platforms" sheet decides what's allowed on
-           each product; the planner (not the AI) confirms which verticals apply. -->
-      <div class="restricted-verticals hidden" id="restricted-verticals">
-        <div class="rv-head">
-          <strong>Restricted verticals for this client</strong>
-          <small>Entravision's "Restricted Verticals by Platforms" sheet decides what's allowed on each product — tick any that apply.</small>
+      <!-- Where Entravision's platform ad guidelines live: a callout at the very top of the step. -->
+      <div class="rb-guidelines" id="rb-guidelines">
+        <div class="rb-guidelines-text">
+          <strong>Platform ad guidelines</strong>
+          <span>Entravision's platform ad guidelines live in our guidelines repo. Open it to check the rules for each product in this mix alongside this report.</span>
         </div>
-        <div class="rv-chips" id="rv-chips"></div>
-        <p class="rv-note hidden" id="rv-note"></p>
+        <a class="btn-secondary rb-guidelines-link" id="rb-guidelines-link" href="https://entravision-digital-ad-guidelines.netlify.app/" target="_blank" rel="noopener noreferrer">See latest information about Entravision's Ad Guidelines ↗</a>
       </div>
 
-      <div id="roadblocks-loading" class="strategy-loading hidden">
+      <!-- Which restricted category applies to this client — asked FIRST: picking one (or "None") starts the
+           check, so no AI run is spent before it is known. The "Restricted Verticals by Platforms" sheet decides
+           what's allowed on each product; the planner (not the AI) confirms which category applies. The chips are
+           built from the sheet's own category list (see _renderRvChips), "None" last. -->
+      <div class="restricted-verticals hidden" id="restricted-verticals">
+        <div class="rv-head">
+          <strong id="rv-prompt">Does this client fall in a restricted category?</strong>
+          <small>Pick one to run the check. Entravision's "Restricted Verticals by Platforms" sheet decides what's allowed on each product.</small>
+        </div>
+        <div class="rv-chips" id="rv-chips" role="radiogroup" aria-labelledby="rv-prompt"></div>
+        <p class="rv-suggest hidden" id="rv-suggest"></p>
+        <p class="rv-note hidden" id="rv-note"></p>
+        <button type="button" class="btn-secondary hidden" id="rv-retry">Try again</button>
+      </div>
+
+      <div id="roadblocks-loading" class="strategy-loading hidden" role="status" aria-live="polite">
         <div class="strategy-spinner"></div>
         <span id="roadblocks-loading-text">Searching platform policies…</span>
       </div>
@@ -801,8 +847,7 @@ Client name: ...
         <label><input type="checkbox" data-tab="wsections" /> Proposal A (wsections)</label>
         <label><input type="checkbox" data-tab="gross" /> Proposal A (Gross)</label>
         <label><input type="checkbox" data-tab="avails_only" /> Avails-Only</label>
-        <label><input type="checkbox" data-tab="dooh_summary" /> DOOH Summary</label>
-        <label><input type="checkbox" data-tab="dooh_screenlist" /> DOOH Screenlist</label>
+        <label><input type="checkbox" data-tab="dooh" /> DOOH Deliverables <small>(DOOH Summary pivot + DOOH Screenlist)</small></label>
       </fieldset>
 
       <div class="panel-actions">
@@ -837,6 +882,16 @@ Client name: ...
         <div id="ai-content" class="ai-content hidden">
 
           <div id="enrichment-search-note" class="search-note hidden"></div>
+
+          <!-- The plan was edited after these emails were written (shown by app.js's _refreshEmailStaleNote) -->
+          <div id="email-stale-note" class="search-note email-figures-note hidden">
+            ⚠ The plan has changed since these emails were written, so the dollar figures in them (and in the files above) may be out of date.
+            Update the emails' figures here, or click Generate again to rebuild the files too.
+            <button class="btn-secondary" id="email-refresh-figures-btn" type="button">↺ Update the figures in the emails</button>
+          </div>
+
+          <!-- Dollar amounts the automatic check couldn't match to the plan's figures (filled in by app.js) -->
+          <div id="email-figures-warning" class="search-note email-figures-note hidden"></div>
 
           <div class="ai-section">
             <div class="ai-section-head">
@@ -899,6 +954,7 @@ Client name: ...
           <div class="ai-section-head">
             <h3>Gamma Outline — Media Strategy Co-Pilot</h3>
             <div class="ai-section-actions">
+              <button class="btn-primary" id="gamma-create-btn" title="Builds the presentation in Gamma from this outline and opens it there">Create in Gamma ↗</button>
               <button class="btn-copy" data-copy-target="gamma-outline-body">Copy</button>
               <a class="btn-secondary" id="gamma-gpt-link"
                  href="https://chatgpt.com/g/g-68c0554e8ef08191bec6b1fd5d043eee-media-strategy-co-pilot-for-digital-sales-planners"
@@ -908,7 +964,8 @@ Client name: ...
                  target="_blank" rel="noopener">↗ Open Planning Gemini Co-Pilot</a>
             </div>
           </div>
-          <p class="gamma-outline-hint">Copy the outline below, then paste it into either co-pilot (opens in a new tab) to build the Gamma presentation.</p>
+          <p class="gamma-outline-hint">"Create in Gamma" builds the presentation from this outline and opens it in Gamma, where you finish it by hand (it uses Gamma credits). Refine the outline first if you want. Or copy it and paste it into either co-pilot (opens in a new tab).</p>
+          <p class="gamma-create-status hidden" id="gamma-create-status" role="status"></p>
           <pre class="email-body" id="gamma-outline-body"></pre>
 
           <!-- Reprompt area — the ONLY AI call in this whole section; the

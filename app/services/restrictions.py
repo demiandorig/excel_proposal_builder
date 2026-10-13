@@ -73,11 +73,14 @@ class Category:
     summary: str = ""
     body: str = ""                                          # the tab's text, verbatim — what the model reads
     product_map: dict[str, list[str]] = field(default_factory=dict)   # sheet item -> catalog product names
+    is_manual: bool = False                                 # added by an admin in the app, not a tab of the sheet
+    extra_notes: str = ""                                   # rules an admin added on top of the text above (the model reads them too)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name, "kind": self.kind, "keywords": list(self.keywords), "items": list(self.items),
             "summary": self.summary, "body": self.body, "product_map": {k: list(v) for k, v in self.product_map.items()},
+            "is_manual": self.is_manual, "extra_notes": self.extra_notes,
         }
 
 
@@ -152,8 +155,8 @@ def match_catalog_products(item: str, products: Optional[Iterable] = None) -> li
     matching FEWER products: an unmatched product reads "not on the approved
     list" (visible, fixable in Admin), whereas a wrongly matched one would
     read ALLOWED."""
-    from app.catalog import CATALOG
-    products = list(products if products is not None else CATALOG)
+    from app.catalog import effective_catalog
+    products = list(products if products is not None else effective_catalog())
     t = _norm(item)
     low = lambda p: p.name.lower()
     geo = bool(re.search(r"geo ?fenc", t))      # "Geo Fence", "Geofencing", "Geo-Fencing", "Geo Fencing"
@@ -521,11 +524,30 @@ def _parse_tab(name: str, rows: list[list[str]], warnings: Optional[list[str]] =
 # Persistence (fail-safe: Roadblocks must never break because of this table)
 # ---------------------------------------------------------------------------
 
+_LEGACY_COLUMNS = "name, kind, keywords, items, summary, body, product_map"
+_CATEGORY_COLUMNS = _LEGACY_COLUMNS + ", is_manual, extra_notes"
+_manual_columns_known = False
+
+
+def _has_manual_columns(conn) -> bool:
+    """Whether restriction_categories has the is_manual / extra_notes columns (the startup schema bootstrap adds them).
+    Until it does, everything here keeps working exactly as it did without hand-added categories."""
+    global _manual_columns_known
+    if _manual_columns_known:
+        return True
+    row = conn.execute(
+        "SELECT 1 AS ok FROM information_schema.columns WHERE table_name = 'restriction_categories' AND column_name = 'is_manual' LIMIT 1"
+    ).fetchone()
+    _manual_columns_known = bool(row)
+    return _manual_columns_known
+
+
 def _row_to_category(row: dict) -> Category:
     return Category(
         name=row["name"], kind=row["kind"], keywords=list(row["keywords"] or []), items=list(row["items"] or []),
         summary=row["summary"] or "", body=row["body"] or "",
         product_map={k: list(v) for k, v in (row["product_map"] or {}).items()},
+        is_manual=bool(row.get("is_manual", False)), extra_notes=row.get("extra_notes") or "",
     )
 
 
@@ -536,15 +558,21 @@ def load_state() -> dict[str, Any]:
     so a caller about to overwrite the stored rows can tell the two apart."""
     try:
         with get_connection() as conn:
-            rows = conn.execute(
-                "SELECT name, kind, keywords, items, summary, body, product_map FROM restriction_categories ORDER BY name"
-            ).fetchall()
+            columns = _CATEGORY_COLUMNS if _has_manual_columns(conn) else _LEGACY_COLUMNS
+            rows = conn.execute(f"SELECT {columns} FROM restriction_categories ORDER BY name").fetchall()
             sync = conn.execute(
                 "SELECT sheet_url, source_title, synced_at, synced_by FROM restriction_sync WHERE id = 'default'"
             ).fetchone()
-        if rows:
-            return {"categories": [_row_to_category(r) for r in rows], "using_builtin": False,
+        categories = [_row_to_category(r) for r in rows]
+        if any(not c.is_manual for c in categories):
+            return {"categories": categories, "using_builtin": False,
                     "sync": dict(sync) if sync else None, "error": False}
+        if categories:
+            # Only hand-added categories are stored: the built-in snapshot (Political, Cannabis) still applies, and
+            # they come on top of it.
+            taken = {c.name.casefold() for c in builtin_categories()}
+            return {"categories": builtin_categories() + [c for c in categories if c.name.casefold() not in taken],
+                    "using_builtin": True, "sync": None, "error": False}
     except Exception as exc:  # noqa: BLE001
         log.warning("restrictions tables unavailable, using built-in snapshot: %s", exc)
         return {"categories": builtin_categories(), "using_builtin": True, "sync": None, "error": True,
@@ -563,22 +591,41 @@ def carry_over_admin_edits(new: list[Category], previous: list[Category]) -> Non
             continue
         if old.keywords:
             cat.keywords = list(old.keywords)
+        if old.extra_notes and not cat.extra_notes:
+            cat.extra_notes = old.extra_notes
         if cat.kind == "allowlist" and old.kind == "allowlist":
             for item in cat.items:
                 if item in old.product_map and old.product_map[item]:
                     cat.product_map[item] = list(old.product_map[item])
 
 
-def replace_all(categories: list[Category], *, sheet_url: str, source_title: str, synced_by: str) -> None:
+def replace_all(categories: list[Category], *, sheet_url: str, source_title: str, synced_by: str) -> list[str]:
+    """Store `categories` (the sheet's tabs) as THE sheet rows. Categories an admin added by hand are kept - except
+    one a sheet tab now has the same name as: the sheet wins, and that name is returned so the caller can say so."""
     from psycopg.types.json import Jsonb
+    clashes: list[str] = []
     with get_connection() as conn:
-        conn.execute("DELETE FROM restriction_categories")
+        modern = _has_manual_columns(conn)
+        if modern:
+            keys = {c.name.casefold() for c in categories}
+            clashes = [r["name"] for r in conn.execute("SELECT name FROM restriction_categories WHERE is_manual").fetchall()
+                       if r["name"].casefold() in keys]
+            conn.execute("DELETE FROM restriction_categories WHERE NOT is_manual OR name = ANY(%s::text[])", (clashes,))
+        else:
+            conn.execute("DELETE FROM restriction_categories")
         for c in categories:
-            conn.execute(
-                """INSERT INTO restriction_categories (name, kind, keywords, items, summary, body, product_map)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                (c.name, c.kind, c.keywords, c.items, c.summary, c.body, Jsonb(c.product_map)),
-            )
+            if modern:
+                conn.execute(
+                    """INSERT INTO restriction_categories (name, kind, keywords, items, summary, body, product_map, is_manual, extra_notes)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE, %s)""",
+                    (c.name, c.kind, c.keywords, c.items, c.summary, c.body, Jsonb(c.product_map), c.extra_notes or ""),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO restriction_categories (name, kind, keywords, items, summary, body, product_map)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (c.name, c.kind, c.keywords, c.items, c.summary, c.body, Jsonb(c.product_map)),
+                )
         conn.execute(
             """INSERT INTO restriction_sync (id, sheet_url, source_title, synced_at, synced_by)
                VALUES ('default', %s, %s, now(), %s)
@@ -586,24 +633,216 @@ def replace_all(categories: list[Category], *, sheet_url: str, source_title: str
                                               synced_at = now(), synced_by = EXCLUDED.synced_by""",
             (sheet_url, source_title, synced_by),
         )
+    return clashes
 
 
-def update_category(name: str, *, keywords: Any, product_map: dict[str, Any]) -> Optional[Category]:
-    """Admin edits: the trigger keywords and the sheet-item -> catalog-product
-    mapping (the two things the sync can only guess at)."""
+# ---------------------------------------------------------------------------
+# Admin edits, and categories an admin adds by hand
+# ---------------------------------------------------------------------------
+
+MAX_NOTES_CHARS = 6000
+MAX_MANUAL_BODY_CHARS = 20000
+MAX_MANUAL_ITEMS = 100
+KIND_LABELS = {
+    "guidance": "Guidance - rules the AI should apply",
+    "blanket_hold": "Not accepted on any product",
+    "allowlist": "Approved products only",
+}
+_CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_SCHEMA_HINT = ("The database doesn't have the columns for hand-added categories yet - restart the app (it adds them at "
+                "startup) or apply the latest schema.sql, then try again.")
+
+
+def clean_notes(text: Any) -> str:
+    """Free text an admin typed (extra rules, details): no control characters, trimmed, bounded."""
+    out = _CONTROL.sub("", str(text or "").replace("\r\n", "\n").replace("\r", "\n")).strip()
+    if len(out) > MAX_NOTES_CHARS:
+        raise ValueError(f"That's too long - keep the extra notes under {MAX_NOTES_CHARS:,} characters.")
+    return out
+
+
+def _clean_line(text: Any, limit: int, label: str) -> str:
+    out = re.sub(r"\s+", " ", _CONTROL.sub("", str(text or ""))).strip()
+    if len(out) > limit:
+        raise ValueError(f"{label} is too long (max {limit} characters).")
+    return out
+
+
+def clean_manual_fields(*, name: Any, kind: Any, keywords: Any = None, summary: Any = "", body: Any = "",
+                        items: Any = None) -> dict[str, Any]:
+    """The validated fields of a hand-added category (ValueError carries a planner-readable message). Defaults fill
+    the parts an admin can leave out: the trigger keywords come from the name, the summary from the details."""
+    from app.disclaimers import normalize_keywords
+    clean_name = _clean_line(name, 80, "The name")
+    if not clean_name:
+        raise ValueError("Give the category a name.")
+    kind = str(kind or "guidance").strip().lower()
+    if kind not in KINDS:
+        raise ValueError("Type must be guidance, not accepted, or approved products only.")
+    details = _CONTROL.sub("", str(body or "").replace("\r\n", "\n").replace("\r", "\n")).strip()
+    if len(details) > MAX_MANUAL_BODY_CHARS:
+        raise ValueError(f"The details are too long (max {MAX_MANUAL_BODY_CHARS:,} characters).")
+    one_line = _clean_line(summary, 500, "The summary")
+    if isinstance(items, str):
+        items = items.splitlines()
+    clean_items: list[str] = []
+    for raw in items or []:
+        item = _clean_line(raw, MAX_ITEM_CHARS, "A product entry")
+        if item and item not in clean_items:
+            clean_items.append(item)
+    if len(clean_items) > MAX_MANUAL_ITEMS:
+        raise ValueError(f"Too many products (max {MAX_MANUAL_ITEMS}).")
+    if kind == "allowlist":
+        if not clean_items:
+            raise ValueError("List at least one approved product (one per line).")
+        one_line = one_line or f"{clean_name} ads are only accepted for the products listed below."
+        details = details or (one_line + "\n" + "\n".join(clean_items))
+    else:
+        clean_items = []
+        if kind == "guidance" and not details:
+            raise ValueError("Add the details the AI should apply (the restriction, requirement or advice).")
+        if kind == "blanket_hold" and not (one_line or details):
+            raise ValueError("Say why it isn't accepted (a summary or details).")
+        one_line = one_line or (details.splitlines()[0][:200] if details else f"Entravision isn't accepting {clean_name} ads on digital products.")
+        details = details or one_line
+    kws = normalize_keywords(keywords) if keywords else []
+    return {"name": clean_name, "kind": kind, "keywords": kws or default_keywords(clean_name), "summary": one_line,
+            "body": details, "items": clean_items}
+
+
+def create_manual_category(*, name: Any, kind: Any, keywords: Any = None, summary: Any = "", body: Any = "",
+                           items: Any = None, extra_notes: Any = "") -> tuple[Category, list[str]]:
+    """Add a category (a restricted vertical, with its rules) directly in the app. It shows up in Step 07's chooser,
+    is matched by its keywords, and the Roadblocks AI reads it like a sheet tab. (Category, warnings). ValueError for
+    something fixable; RuntimeError when the table can't be read."""
+    from psycopg.types.json import Jsonb
+    fields = clean_manual_fields(name=name, kind=kind, keywords=keywords, summary=summary, body=body, items=items)
+    notes = clean_notes(extra_notes)
+    state = load_state()
+    if state.get("error"):
+        raise RuntimeError("Couldn't read the restrictions table - try again in a moment.")
+    if fields["name"].casefold() in {c.name.casefold() for c in state["categories"]}:
+        raise ValueError(f"There is already a category called \"{fields['name']}\" (from the sheet or added by hand).")
+    product_map = auto_product_map(fields["items"]) if fields["kind"] == "allowlist" else {}
+    with get_connection() as conn:
+        if not _has_manual_columns(conn):
+            raise ValueError(_SCHEMA_HINT)
+        conn.execute(
+            """INSERT INTO restriction_categories (name, kind, keywords, items, summary, body, product_map, is_manual, extra_notes)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, %s)""",
+            (fields["name"], fields["kind"], fields["keywords"], fields["items"], fields["summary"], fields["body"],
+             Jsonb(product_map), notes),
+        )
+    cat = Category(name=fields["name"], kind=fields["kind"], keywords=fields["keywords"], items=fields["items"],
+                   summary=fields["summary"], body=fields["body"], product_map=product_map, is_manual=True, extra_notes=notes)
+    return cat, mapping_warnings([cat])
+
+
+def update_category(name: str, *, keywords: Any, product_map: dict[str, Any], extra_notes: Any = None,
+                    kind: Any = None, summary: Any = None, body: Any = None, items: Any = None) -> Optional[Category]:
+    """Admin edits: the trigger keywords, the sheet-item -> catalog-product mapping (the two things the sync can only
+    guess at) and the extra notes the AI reads on top of the sheet text. For a category added by hand its type,
+    summary, details and approved products can be edited too (ValueError for a sheet tab, whose text comes from the
+    sheet). None = leave as is."""
     from app.disclaimers import normalize_keywords
     from psycopg.types.json import Jsonb
     kws = normalize_keywords(keywords)
     if not kws:
-        raise ValueError("Keep at least one keyword — otherwise this vertical could never be suggested.")
+        raise ValueError("Keep at least one keyword - otherwise this vertical could never be suggested.")
     clean_map = {str(k): [str(n).strip() for n in (v or []) if str(n).strip()] for k, v in (product_map or {}).items()}
+    notes = None if extra_notes is None else clean_notes(extra_notes)
+    own_fields = any(v is not None for v in (kind, summary, body, items))
     with get_connection() as conn:
+        modern = _has_manual_columns(conn)
+        if (notes is not None or own_fields) and not modern:
+            raise ValueError(_SCHEMA_HINT)
+        current = conn.execute(f"SELECT {_CATEGORY_COLUMNS if modern else _LEGACY_COLUMNS} FROM restriction_categories WHERE name = %s",
+                               (name,)).fetchone()
+        if current is None:
+            return None
+        existing = _row_to_category(current)
+        sets = ["keywords = %s", "product_map = %s", "updated_at = now()"]
+        params: list[Any] = [kws, Jsonb(clean_map)]
+        if notes is not None:
+            sets.append("extra_notes = %s")
+            params.append(notes)
+        if own_fields:
+            if not existing.is_manual:
+                raise ValueError("A tab of the sheet keeps the sheet's own text - edit it in the sheet and sync. "
+                                 "You can still add extra notes, keywords and product mappings here.")
+            fields = clean_manual_fields(
+                name=existing.name, kind=existing.kind if kind is None else kind, keywords=kws,
+                summary=existing.summary if summary is None else summary, body=existing.body if body is None else body,
+                items=existing.items if items is None else items)
+            if fields["kind"] == "allowlist":
+                # keep the mappings an admin already corrected for products that are still listed
+                for item in fields["items"]:
+                    if not clean_map.get(item):
+                        clean_map[item] = existing.product_map.get(item) or match_catalog_products(item)
+                clean_map = {k: v for k, v in clean_map.items() if k in fields["items"]}
+            else:
+                clean_map = {}
+            params[1] = Jsonb(clean_map)
+            sets += ["kind = %s", "summary = %s", "body = %s", "items = %s"]
+            params += [fields["kind"], fields["summary"], fields["body"], fields["items"]]
+        params.append(name)
         row = conn.execute(
-            """UPDATE restriction_categories SET keywords = %s, product_map = %s, updated_at = now()
-               WHERE name = %s RETURNING name, kind, keywords, items, summary, body, product_map""",
-            (kws, Jsonb(clean_map), name),
+            f"UPDATE restriction_categories SET {', '.join(sets)} WHERE name = %s RETURNING {_CATEGORY_COLUMNS if modern else _LEGACY_COLUMNS}",
+            params,
         ).fetchone()
     return _row_to_category(row) if row else None
+
+
+def delete_manual_category(name: str) -> bool:
+    """Delete a category added by hand. False when there is no such category; ValueError for a sheet tab (it would
+    come straight back on the next sync - remove the tab from the sheet instead)."""
+    with get_connection() as conn:
+        if not _has_manual_columns(conn):
+            raise ValueError(_SCHEMA_HINT)
+        row = conn.execute("SELECT is_manual FROM restriction_categories WHERE name = %s", (name,)).fetchone()
+        if row is None:
+            return False
+        if not row["is_manual"]:
+            raise ValueError("That category comes from the sheet. To remove it, delete its tab in the sheet and sync again.")
+        conn.execute("DELETE FROM restriction_categories WHERE name = %s AND is_manual", (name,))
+    return True
+
+
+def inherit_product_approvals(source_name: str, new_name: str, edited_by: str) -> int:
+    """A copy of a product is approved wherever the original is: add `new_name` to every sheet entry of every
+    approved-products list that already maps `source_name`. Returns how many entries it was added to. Persists the
+    built-in snapshot first if that's still what applies (the same step editing a mapping takes)."""
+    from psycopg.types.json import Jsonb
+    state = load_state()
+    if state.get("error"):
+        return 0
+    sources = {source_name}
+    try:
+        from app.catalog import name_variants
+        sources |= name_variants(source_name)
+    except Exception:  # noqa: BLE001
+        pass
+    changed: dict[str, dict[str, list[str]]] = {}
+    for cat in state["categories"]:
+        if cat.kind != "allowlist":
+            continue
+        product_map = {k: list(v) for k, v in (cat.product_map or auto_product_map(cat.items)).items()}
+        touched = False
+        for item, names in product_map.items():
+            if sources & set(names) and new_name not in names:
+                names.append(new_name)
+                touched = True
+        if touched:
+            changed[cat.name] = product_map
+    if not changed:
+        return 0
+    if state["using_builtin"]:
+        seed_builtin_into_db(edited_by)
+    with get_connection() as conn:
+        for cat_name, product_map in changed.items():
+            conn.execute("UPDATE restriction_categories SET product_map = %s, updated_at = now() WHERE name = %s",
+                         (Jsonb(product_map), cat_name))
+    return sum(1 for pm in changed.values() for names in pm.values() if new_name in names)
 
 
 def seed_builtin_into_db(synced_by: str) -> None:
@@ -667,7 +906,7 @@ def _worst(statuses: list[str]) -> str:
 
 
 def evaluate_product(product_name: str, family: Optional[str], categories: list[Category],
-                     aliases: Optional[Iterable[str]] = None, custom: bool = False) -> dict[str, Any]:
+                     aliases: Optional[Iterable[str]] = None) -> dict[str, Any]:
     """{"verdict": allowed|not_allowed|guidance|n/a|none, "checks": [...]} for
     one product against the confirmed verticals. `aliases` are the other names
     the product answers to (its renamed display name / stable raw name) — the
@@ -689,13 +928,14 @@ def evaluate_product(product_name: str, family: Optional[str], categories: list[
             listed = next((item for item, mapped in product_map.items() if names & set(mapped)), None)
             if listed:
                 checks.append({"category": cat.name, "status": "allowed", "note": f"Approved on the sheet as: {listed}"})
-            elif custom or family is None:
+            elif family is None:
                 checks.append({"category": cat.name, "status": "guidance",
-                               "note": f"A custom product the {cat.name} sheet doesn't list — confirm with Sales Planning "
-                                       "(or map it in Admin → Restrictions)."})
+                               "note": f"Not in the product list, so the {cat.name} sheet can't be checked against it — "
+                                       "confirm with Sales Planning."})
             else:
                 checks.append({"category": cat.name, "status": "not_allowed",
-                               "note": f"Not on the approved product list for {cat.name} ads."})
+                               "note": f"Not on the approved product list for {cat.name} ads "
+                                       "(if it should be, map it in Admin → Restrictions)."})
         else:
             checks.append({"category": cat.name, "status": "guidance", "note": cat.summary})
     return {"verdict": _worst([c["status"] for c in checks]), "checks": checks}
@@ -704,20 +944,17 @@ def evaluate_product(product_name: str, family: Optional[str], categories: list[
 def build_matrix(product_names: list[str], category_names: Optional[list[str]]) -> dict[str, Any]:
     """Everything Roadblocks needs: the confirmed Category objects, a verdict
     per product, and where the data came from."""
-    from app.catalog import CATALOG, by_name, name_variants
+    from app.catalog import by_name, name_variants
     state = load_state()
     wanted = {n.strip().lower() for n in (category_names or []) if n and n.strip()}
     selected = [c for c in state["categories"] if c.name.lower() in wanted]
     found = {c.name.lower() for c in selected}
     unresolved = sorted(n for n in (category_names or []) if n and n.strip() and n.strip().lower() not in found)
-    builtin_names = {p.name for p in CATALOG}
     verdicts: dict[str, dict] = {}
     for name in dict.fromkeys(product_names):
         product = by_name(name)
         variants = name_variants(name)
-        verdicts[name] = evaluate_product(
-            name, product.family if product else None, selected,
-            aliases=variants, custom=product is not None and not (variants & builtin_names))
+        verdicts[name] = evaluate_product(name, product.family if product else None, selected, aliases=variants)
     sync = state["sync"] or {}
     return {
         "categories": selected, "verdicts": verdicts, "using_builtin": state["using_builtin"],
@@ -737,10 +974,12 @@ def matrix_prompt_block(matrix: dict[str, Any]) -> str:
             "unless a platform's own current policy says so, and never cite Entravision internal flags."
         )
     when = f" (synced {matrix['synced_at'][:10]})" if matrix.get("synced_at") else " (built-in snapshot — not yet synced)" if matrix.get("using_builtin") else ""
+    added = any(c.is_manual or c.extra_notes for c in cats)
     lines = [
         f"## RESTRICTED VERTICALS MATRIX — AUTHORITATIVE{when}",
-        "Source: Entravision's own \"Restricted Verticals by Platforms\" sheet. The planner confirmed this client falls under: "
-        + ", ".join(c.name for c in cats) + ".",
+        "Source: Entravision's own \"Restricted Verticals by Platforms\" sheet"
+        + (", plus rules an Entravision admin added in the app (marked below; they carry the same authority as the sheet)" if added else "")
+        + ". The planner confirmed this client falls under: " + ", ".join(c.name for c in cats) + ".",
         "This sheet is the ONLY source of truth for whether those verticals are allowed on a product. RULES:",
         "- A product marked ALLOWED below IS allowed. Never say or imply it is not allowed, not feasible, prohibited or restricted for that vertical.",
         "- A product marked NOT ACCEPTED is not accepted by Entravision for that vertical — state that plainly with the reason given; do not debate or soften it.",
@@ -757,5 +996,7 @@ def matrix_prompt_block(matrix: dict[str, Any]) -> str:
     lines.append("Sheet text per vertical (verbatim; very long tabs are trimmed):")
     for c in cats:
         body = c.body if len(c.body) <= MAX_BODY_IN_PROMPT else c.body[:MAX_BODY_IN_PROMPT].rsplit(" ", 1)[0] + " …"
-        lines.append(f"### {c.name}\n{body}")
+        lines.append(f"### {c.name}{' (added in the app by an Entravision admin)' if c.is_manual else ''}\n{body}")
+        if c.extra_notes:
+            lines.append(f"Additional rules an Entravision admin added for {c.name} (apply them like the text above):\n{c.extra_notes}")
     return "\n".join(lines)

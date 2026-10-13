@@ -323,13 +323,22 @@ PRODUCT_ALIASES: dict[str, str] = {
     "preroll": "Video - Pre-roll (OLV)",
     "video pre-roll": "Video - Pre-roll (OLV)",
     # YouTube
-    "youtube ads": "YouTube Ads",
-    "youtube video ads": "YouTube Ads",
-    "youtube preroll": "YouTube Ads",
-    "youtube pre-roll": "YouTube Ads",
-    "youtube trueview": "YouTube Ads",
-    "trueview": "YouTube Ads",
-    "youtube discovery": "YouTube Ads",
+    "youtube ads": "YouTube Ads - Skippable",
+    "youtube video ads": "YouTube Ads - Skippable",
+    "youtube preroll": "YouTube Ads - Skippable",
+    "youtube pre-roll": "YouTube Ads - Skippable",
+    "youtube trueview": "YouTube Ads - Skippable",
+    "trueview": "YouTube Ads - Skippable",
+    "youtube discovery": "YouTube Ads - Skippable",
+    "youtube skippable": "YouTube Ads - Skippable",
+    "youtube ads skippable": "YouTube Ads - Skippable",
+    "youtube non-skippable": "YouTube Ads - Non-Skippable",
+    "youtube nonskippable": "YouTube Ads - Non-Skippable",
+    "youtube non skippable": "YouTube Ads - Non-Skippable",
+    "youtube ads non-skippable": "YouTube Ads - Non-Skippable",
+    "youtube bumper": "YouTube Ads - Non-Skippable",
+    "youtube bumper ads": "YouTube Ads - Non-Skippable",
+    "bumper ads": "YouTube Ads - Non-Skippable",
     # CTV / OTT / Entravision Plus
     "connected tv (ott) - entravision plus": "Entravision Plus CTV/OTT - English Content",
     "connected tv (ott)": "Entravision Plus CTV/OTT - English Content",
@@ -484,11 +493,20 @@ def _match_product(raw: str, catalog_names: list[str], db_aliases: Optional[dict
         if cn.lower() == r:
             return cn
 
-    # 2. alias (static, hand-curated)
-    for alias, canonical in PRODUCT_ALIASES.items():
-        if alias in r:
-            if canonical in catalog_names:
-                return canonical
+    # 2. alias (static, hand-curated). Longest alias first, so "youtube non-skippable" is tried before the bare
+    # "youtube ads"; and a YouTube phrase naming the non-skippable / bumper formats goes to that product however
+    # the words are ordered ("YouTube Ads - non skippable", "bumper ads on YouTube"). A target an admin has since
+    # renamed is followed through the recorded renames.
+    def _current(canonical: str) -> str:
+        return (db_aliases or {}).get(canonical, canonical)
+
+    if "youtube" in r and re.search(r"\b(?:non[\s-]?skippable|un[\s-]?skippable|bumper)", r):
+        target = _current("YouTube Ads - Non-Skippable")
+        if target in catalog_names:
+            return target
+    for alias, canonical in sorted(PRODUCT_ALIASES.items(), key=lambda kv: -len(kv[0])):
+        if alias in r and _current(canonical) in catalog_names:
+            return _current(canonical)
 
     # 2b. alias (DB-driven — an admin renamed this product at some point;
     # see catalog.py's record_product_alias/all_product_aliases). Exact
@@ -791,6 +809,49 @@ REQUEST_TYPE_AVAILS_ONLY = {
 }
 
 
+# "DOOH Deliverables": the DOOH Summary and DOOH Screenlist sheets are always built together, so the export-tab
+# dicts carry ONE key for them (dooh_pivot.DOOH_TAB_KEY). Older saved drafts / API callers still send the two keys it
+# replaced (dooh_pivot.LEGACY_DOOH_TAB_KEYS).
+from app.services.dooh_pivot import DOOH_TAB_KEY, LEGACY_DOOH_TAB_KEYS  # noqa: E402 — constants only, no heavy imports
+
+
+def normalize_tab_keys(tabs: Optional[dict]) -> dict:
+    """A copy of an export-tab dict (force_tabs from a client or a reopened draft, or a classification) with the two
+    legacy DOOH keys folded into the single "dooh" key: either legacy key being true means both sheets. An explicit
+    "dooh" in the dict wins over the legacy keys. Every other key (including the client's "_v" marker) passes through."""
+    tabs = dict(tabs or {})
+    legacy = [k for k in LEGACY_DOOH_TAB_KEYS if k in tabs]
+    if legacy:
+        folded = any([bool(tabs.pop(k)) for k in legacy])      # a list, not a generator: every legacy key must be popped
+        tabs.setdefault(DOOH_TAB_KEY, folded)
+    return tabs
+
+
+def _has_dooh_product(products_selected: list[str]) -> bool:
+    """Whether any selected product is a DOOH one. A name is resolved through the product list (current names and
+    former names alike) and judged by its FAMILY — the only DOOH product is called "Digital Out of Home", which a plain
+    name check on "DOOH" never matched. A name that does not resolve falls back to the old name check."""
+    try:
+        from app.catalog import by_name        # lazy: the parser stays importable without the catalog/database layer
+    except Exception:  # noqa: BLE001
+        by_name = None
+    for name in products_selected:
+        product = None
+        if by_name is not None:
+            try:
+                product = by_name(name)
+            except Exception:  # noqa: BLE001 — a product-list hiccup must not break tab classification
+                product = None
+        if product is not None:
+            if product.family == "DOOH":
+                return True
+            continue
+        lowered = (name or "").lower()
+        if "dooh" in lowered or "out-of-home" in lowered or "out of home" in lowered:
+            return True
+    return False
+
+
 def classify_output_tabs(request_type: str, products_selected: list[str], has_agency_fee: bool) -> dict:
     """
     Decide which Excel tabs to produce based on the parsed request.
@@ -800,12 +861,11 @@ def classify_output_tabs(request_type: str, products_selected: list[str], has_ag
         wsections (bool)      - Proposal A (wsections) — used when complexity is high
         gross (bool)          - Proposal A (Gross) — used when there's an agency fee
         avails_only (bool)    - Avails-Only tab only
-        dooh_summary (bool)
-        dooh_screenlist (bool)
+        dooh (bool)           - "DOOH Deliverables": the DOOH Summary + DOOH Screenlist sheets, always together
     """
     rt = (request_type or "").strip().lower()
 
-    has_dooh = any("DOOH" in p or "Out-of-Home" in p for p in products_selected)
+    has_dooh = _has_dooh_product(products_selected)
     is_avails_only = rt in REQUEST_TYPE_AVAILS_ONLY
 
     if is_avails_only:
@@ -814,8 +874,7 @@ def classify_output_tabs(request_type: str, products_selected: list[str], has_ag
             "wsections": False,
             "gross": False,
             "avails_only": True,
-            "dooh_summary": has_dooh,
-            "dooh_screenlist": has_dooh,
+            DOOH_TAB_KEY: has_dooh,
         }
 
     # Default proposal output: always emit Net.
@@ -827,6 +886,5 @@ def classify_output_tabs(request_type: str, products_selected: list[str], has_ag
         "wsections": complex_plan,
         "gross": has_agency_fee,
         "avails_only": False,
-        "dooh_summary": has_dooh,
-        "dooh_screenlist": has_dooh,
+        DOOH_TAB_KEY: has_dooh,
     }

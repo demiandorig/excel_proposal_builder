@@ -119,7 +119,7 @@
   font-size: 12px;
 }
 
-/* Rate override inputs */
+/* Inline number inputs in the products table */
 .admin-table input[type="number"] {
   width: 100px;
   padding: 5px 8px;
@@ -132,7 +132,7 @@
 .admin-table input[type="number"]:focus { outline: none; border-color: var(--accent); }
 
 /* Market config inputs (address lines, CC list) — same visual language as
-   the rate override number inputs above, just wider for free text. */
+   the product table's number inputs above, just wider for free text. */
 .admin-table input[type="text"] {
   width: 100%;
   min-width: 140px;
@@ -145,11 +145,6 @@
   box-sizing: border-box;
 }
 .admin-table input[type="text"]:focus { outline: none; border-color: var(--accent); }
-.admin-table input.overridden {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  font-weight: 600;
-}
 .admin-table input.na-field {
   background: var(--paper-warm);
   color: var(--ink-faint);
@@ -163,29 +158,6 @@
   white-space: nowrap;
 }
 .reopen-link:hover { text-decoration: underline; }
-.override-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  margin-left: 6px;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--accent);
-  background: var(--accent-soft);
-  border-radius: 20px;
-}
-.btn-revert {
-  background: transparent;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  color: var(--ink-faint);
-  cursor: pointer;
-  font-size: 11px;
-  padding: 4px 10px;
-}
-.btn-revert:hover { color: var(--red); border-color: var(--red); }
 .btn-save-row {
   background: var(--accent);
   border: 1px solid var(--accent);
@@ -209,19 +181,6 @@
   margin-left: 4px;
 }
 .btn-delete-row:hover { background: var(--red-soft); }
-.custom-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  margin-left: 6px;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--green);
-  background: var(--green-soft);
-  border-radius: 20px;
-}
 .addon-badge {
   display: inline-block;
   padding: 2px 8px;
@@ -235,29 +194,6 @@
   background: var(--amber-soft);
   border-radius: 20px;
 }
-.deleted-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  margin-left: 6px;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--red);
-  background: var(--red-soft);
-  border-radius: 20px;
-}
-.rename-hint {
-  display: inline-block;
-  margin-left: 6px;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  color: var(--ink-faint);
-  cursor: help;
-}
-tr.row-deleted { opacity: 0.55; }
-tr.row-deleted td { background: var(--paper-warm); }
 
 /* Add-product panel */
 .add-product-panel {
@@ -532,3 +468,20 @@ tr.row-deleted td { background: var(--paper-warm); }
 .rs-unknown { font-size: 11.5px; color: var(--amber); margin-right: auto; }
 .rs-body summary { cursor: pointer; font-size: 12px; color: var(--ink-soft); }
 .rs-body pre { white-space: pre-wrap; font-family: var(--font-mono); font-size: 11.5px; background: var(--paper-warm); padding: 10px 12px; border-radius: var(--radius); max-height: 260px; overflow: auto; }
+
+.pf-advanced { margin: 6px 0 12px; }
+.pf-advanced > summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+
+/* FAQ tab */
+.faq-nolink { color: var(--ink-faint); font-style: italic; font-size: 12px; }
+.faq-link-cell a { word-break: break-all; }
+.faq-actions { white-space: nowrap; }
+.faq-actions button { margin-right: 4px; }
+.faq-actions button:disabled { opacity: 0.4; cursor: default; }
+
+/* Restrictions: a category added by hand has its own editable text */
+.rs-own { display: flex; flex-direction: column; gap: 10px; margin: 10px 0; }
+.rs-own select, .rs-own input[type="text"], .rs-own textarea { width: 100%; box-sizing: border-box; }
+
+/* Markets: eight columns now (research assignees added) - slightly narrower inputs so the table still fits without scrolling */
+#markets-table input[type="text"] { min-width: 116px; }

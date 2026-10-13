@@ -6,8 +6,13 @@ Generates 6 worksheets:
   - Proposal A (Gross)     (Net + Gross, used when has_agency=True)
   - Proposal A (wsections) (sectionable variant for complex proposals)
   - Avails-Only            (potential reach without a billable plan)
-  - DOOH Summary           (DOOH-specific rollup)
-  - DOOH Screenlist        (DOOH-specific screen-level detail)
+  - DOOH Summary           ("DOOH Deliverables", always built together with the
+                            Screenlist: a pre-made PIVOT TABLE over the Screenlist
+                            table — Venue Type > Network, screens / max avails /
+                            max spend; the pivot parts are injected after the save,
+                            see dooh_pivot.add_dooh_pivot)
+  - DOOH Screenlist        (the other half of "DOOH Deliverables": the 40-column
+                            inventory table the planner pastes into, one sample row)
   - Process FAQs           (resource links)
 """
 
@@ -26,10 +31,12 @@ from openpyxl.worksheet.formula import ArrayFormula
 from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.comments import Comment
 
-from app.catalog import CATALOG, Product, families, by_family
+from app.catalog import Product, effective_catalog, families, by_family
 from app.services.notion_parser import compose_target_fallback
 from app.services import monthly_allocation as _monthly_allocation
+from app.services import dooh_pivot as _dooh
 from app.services.text_utils import strip_variant_pricing
+from app.services.line_modifier import clean_line_modifier
 
 # Try to import Image support for logo embedding (optional)
 try:
@@ -843,7 +850,8 @@ def build_target_cell_value(target_override: Optional[str], target_secondary: Op
 _OBJECTIVE_SUBLINE_FONT = InlineFont(b=False, color=DARK_GREY)
 
 
-def build_product_name_cell_value(product_name: str, fallback_label: str, objective: Optional[str] = None):
+def build_product_name_cell_value(product_name: str, fallback_label: str, objective: Optional[str] = None,
+                                  line_modifier: Optional[str] = None):
     """
     Build column C's product-name cell value: the product name (inherits
     the cell's own BODY_BOLD font — see the note on the newline placement
@@ -853,16 +861,75 @@ def build_product_name_cell_value(product_name: str, fallback_label: str, object
     short_label when it's None (an older/manual request that never sent
     one), matching what this cell showed before the objective field existed.
 
+    `line_modifier`: the planner's optional Step 04 line note — added as a
+    third line in small purple type (see _LINE_MODIFIER_FONT). None/blank
+    returns exactly the two-line value above, unchanged.
+
     Same newline-placement fix as build_target_cell_value, above: the "\n"
     is folded into the START of the colored TextBlock's own text rather
     than passed as its own bare-string item, which openpyxl does not
     reliably preserve.
     """
     sub_line = objective or fallback_label
+    note = clean_line_modifier(line_modifier)
+    if not note:
+        # no line note: byte-for-byte what this cell has always held
+        return CellRichText(
+            product_name,
+            TextBlock(_OBJECTIVE_SUBLINE_FONT, f"\n{sub_line}"),
+        )
     return CellRichText(
         product_name,
         TextBlock(_OBJECTIVE_SUBLINE_FONT, f"\n{sub_line}"),
+        TextBlock(_LINE_MODIFIER_FONT, f"\n{note}"),
     )
+
+
+# Step 04's optional per-line "line note" ("Hispanic, Phoenix only") is the LAST line of a line's name cell: small, in the
+# brand purple (ENTRAVISION_PURPLE — the title bar / header band purple), directly under the product name and the
+# objective. rFont/sz are spelled out because a rich-text run only inherits what it leaves out and a smaller size is the
+# whole point; the colour is the one the app's own UI calls --accent. A line with no note never reaches any of this.
+_LINE_MODIFIER_FONT = InlineFont(rFont="Arial", sz=8, color=ENTRAVISION_PURPLE)
+
+
+def build_name_cell_with_note(plain_text: str, line_modifier: Optional[str] = None):
+    """A plain "Name\\nObjective" style cell (Avails-Only, Monthly Breakdown): the text unchanged when the line has no
+    note — the very same string, so such a cell is exactly what it always was — else the text followed by the purple
+    note as a last line."""
+    note = clean_line_modifier(line_modifier)
+    if not note:
+        return plain_text
+    return CellRichText(plain_text, TextBlock(_LINE_MODIFIER_FONT, f"\n{note}"))
+
+
+def _wrapped_lines(text: str, chars_per_line: float) -> int:
+    chars_per_line = max(int(chars_per_line), 8)
+    return sum(-(-max(len(part), 1) // chars_per_line) for part in (text or "").split("\n"))
+
+
+def line_modifier_row_height(name_text: str, note: str, col_width: float) -> float:
+    """The row height (points) a name cell needs once a line note is its last line: `name_text` (the product name and
+    its objective lines, 10pt) wrapped in a `col_width`-wide column, plus the note at 8pt. Deliberately a touch generous
+    (a clipped line is worse than a little air). Only ever used to GROW a row that already has a height."""
+    name_lines = _wrapped_lines(name_text, col_width * 1.05)
+    # One character per column-width unit for the 8pt note: measured in Excel, ordinary text fits ~1.3 characters per unit,
+    # but an unbroken run of wide letters (an all-caps note, "xxxx…") fits only ~1.15 — a 100-character note must never be
+    # clipped, so it is booked as the worst case (three lines in a 38-wide column) rather than the average (two).
+    note_lines = _wrapped_lines(note, col_width * 1.0)
+    return round(name_lines * 13 + note_lines * 10.5 + 7, 1)
+
+
+def fit_row_to_line_modifier(ws: Worksheet, row: int, name_text: str, line_modifier: Optional[str], col: str = "C") -> None:
+    """Grow `row` (never shrink it) so a line note in column `col` is fully visible. A no-op for a line without a note,
+    so every such row keeps exactly the height it had before this feature."""
+    note = clean_line_modifier(line_modifier)
+    if not note:
+        return
+    width = ws.column_dimensions[col].width or 10
+    needed = line_modifier_row_height(name_text, note, width)
+    current = ws.row_dimensions[row].height
+    if current is None or current < needed:
+        ws.row_dimensions[row].height = needed
 
 
 # -----------------------------------------------------------------------------
@@ -882,7 +949,19 @@ _UNIT_LABELS = {
     "week": {"noun": "Week", "noun_plural": "Weeks", "adjective": "Weekly", "input_label": "Weeks:"},
     "month": {"noun": "Month", "noun_plural": "Months", "adjective": "Monthly", "input_label": "Months:"},
     "quarter": {"noun": "Quarter", "noun_plural": "Quarters", "adjective": "Quarterly", "input_label": "Quarters:"},
+    # Full Flight: the whole flight is ONE period — nothing is multiplied by a month count, so the sheet shows no
+    # "Months:" label or cell at all. The first total row is a "SUBTOTAL DIGITAL" (the add-ons block and the plain
+    # "TOTAL DIGITAL — CAMPAIGN" grand-total row, with no "N-MONTH" suffix, follow it).
+    # banner_label: the breakdown block's title. The planner's own hand-edited export kept "MONTHLY BREAKDOWN (GROSS)"
+    # over the single full-flight column (headed by the flight's date span), so Full Flight says "MONTHLY" too.
+    "full_flight": {"noun": "Flight", "noun_plural": "Flights", "adjective": "Full-Flight", "input_label": "",
+                    "total_row_label": "SUBTOTAL DIGITAL", "campaign_label": "TOTAL DIGITAL — CAMPAIGN",
+                    "banner_label": "MONTHLY BREAKDOWN"},
 }
+
+
+def is_full_flight(time_unit: Optional[str]) -> bool:
+    return time_unit == "full_flight"
 
 
 def _unit_labels(time_unit: str) -> dict:
@@ -908,7 +987,16 @@ _BILLING_CADENCE_NOTE_BASE = (
 )
 
 
+_FULL_FLIGHT_NOTE = (
+    "Full-flight plan: the entire flight is treated as a single period — each amount shown is that line's "
+    "full-flight total, with no monthly split."
+)
+
+
 def _billing_cadence_note(time_unit: str) -> str:
+    if time_unit == "full_flight":
+        # Finance policy, unchanged by the billing period: billing is always invoiced on a monthly (30-day) cycle.
+        return _FULL_FLIGHT_NOTE + " " + _BILLING_CADENCE_NOTE_BASE
     if time_unit == "week":
         return (_BILLING_CADENCE_NOTE_BASE + " This plan is entered and paced by week, but each month's "
                 "invoice totals whatever weeks fall in that calendar month.")
@@ -927,7 +1015,11 @@ def _billing_cadence_note(time_unit: str) -> str:
 # used for minimum-spend scaling elsewhere — explicit planner preference
 # for this specific comparison (mirrors app.js's own
 # _SOV_MONTHLY_EQUIVALENT_SCALE — keep both in sync if this ever changes).
-SOV_MONTHLY_EQUIVALENT_SCALE = {"week": 4.0, "month": 1.0, "quarter": 1.0 / 3.0}
+#
+# "full_flight" is 1.0: the whole flight is ONE period, so its (whole-flight)
+# budget is compared with the monthly ceiling exactly as it stands — no
+# division by the calendar months the flight touches.
+SOV_MONTHLY_EQUIVALENT_SCALE = {"week": 4.0, "month": 1.0, "quarter": 1.0 / 3.0, "full_flight": 1.0}
 
 
 def _sov_monthly_equivalent_budget(budget: float, time_unit: str) -> float:
@@ -993,13 +1085,8 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
 
     _write_meta_block(ws, "Digital Plan / Avails")
 
-    # Months input cell (I10) — blue = planner can adjust
-    ws["H10"] = labels["input_label"]
-    ws["H10"].alignment = RIGHT
-    ws["H10"].font = BODY_BOLD
-    ws["I10"] = total_months
-    ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
-    ws["I10"].alignment = CENTER
+    # Months input cell (I10) — blue = planner can adjust (not written at all in Full Flight)
+    _write_months_input(ws, labels, total_months, time_unit)
 
     # Avails section banner — merged across rows 15-16, not just row 16.
     # _write_meta_block knocks both those rows down to a 6pt spacer, which
@@ -1074,7 +1161,7 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     # Totals
     last_data_row = row - 1
     total_row = row + 1
-    ws[f"C{total_row}"] = f"TOTAL DIGITAL {labels['adjective'].upper()}"
+    ws[f"C{total_row}"] = labels.get("total_row_label") or f"TOTAL DIGITAL {labels['adjective'].upper()}"
     ws[f"C{total_row}"].font = TOTAL_FONT
     ws[f"C{total_row}"].fill = TOTAL_FILL
     ws[f"L{total_row}"] = f"=ROUNDDOWN(SUM(L19:L{last_data_row}),0)"
@@ -1110,6 +1197,26 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     # editable on-screen — this only governs Print / Export-to-PDF.
     ws.print_area = f"A1:L{ws.max_row}"
     return ws
+
+
+def _write_months_input(ws: Worksheet, labels: dict, total_months: int, time_unit: str) -> None:
+    """The "Months:" label (H10) and value (I10) — the planner-adjustable multiplier the grand-total formulas read
+    (blue). In Full Flight the plan is one period and no formula reads it, so neither the label nor the cell is
+    written: a "Months: 1" that does nothing would only confuse the reader."""
+    if is_full_flight(time_unit):
+        return
+    ws["H10"] = labels["input_label"]
+    ws["H10"].alignment = RIGHT
+    ws["H10"].font = BODY_BOLD
+    _write_months_cell(ws, total_months, time_unit)
+
+
+def _write_months_cell(ws: Worksheet, total_months: int, time_unit: str) -> None:
+    """The "Months:" value (I10): the planner-adjustable multiplier the grand-total formulas read (blue). Not used
+    in Full Flight (see _write_months_input)."""
+    ws["I10"] = total_months
+    ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
+    ws["I10"].alignment = CENTER
 
 
 def _banner_row_height(text: str, width_chars: float) -> float:
@@ -1231,25 +1338,34 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     # blank or non-numeric shows a safe number in both the label and the
     # multiplication below, instead of concatenating raw garbage text into
     # the label or breaking the dollar total's arithmetic.
-    safe_months = f'IF(ISNUMBER({months_cell}),{months_cell},3)'
-    campaign_unit_suffix = f"-{_unit_labels(time_unit)['noun'].upper()} CAMPAIGN"
-    ws[f"C{grand_row}"] = f'="TOTAL DIGITAL — "&{safe_months}&"{campaign_unit_suffix}"'
+    #
+    # Full Flight: the plan is ONE period, so nothing is multiplied — no
+    # months factor in any formula (and the row doesn't read I10 at all):
+    # the campaign row is the TOTAL DIGITAL row plus any paid add-ons.
+    if is_full_flight(time_unit):
+        months_factor = ""
+        ws[f"C{grand_row}"] = _unit_labels(time_unit)["campaign_label"]
+    else:
+        safe_months = f'IF(ISNUMBER({months_cell}),{months_cell},3)'
+        months_factor = f"*{safe_months}"
+        campaign_unit_suffix = f"-{_unit_labels(time_unit)['noun'].upper()} CAMPAIGN"
+        ws[f"C{grand_row}"] = f'="TOTAL DIGITAL — "&{safe_months}&"{campaign_unit_suffix}"'
     ws[f"C{grand_row}"].font = TOTAL_FONT
     ws[f"C{grand_row}"].fill = TOTAL_FILL
     # Impressions grand total — same monthly-figure * months-in-campaign
     # logic as the dollar totals below (no addons term: add-ons don't carry
     # impressions). Previously missing entirely, so the campaign-total row
     # showed a dollar figure with no impressions to back it up.
-    ws[f"I{grand_row}"] = f"=ROUNDDOWN(I{total_row}*{safe_months},0)"
+    ws[f"I{grand_row}"] = f"=ROUNDDOWN(I{total_row}{months_factor},0)"
     _format_imps_cell(ws[f"I{grand_row}"])
     ws[f"I{grand_row}"].font = TOTAL_FONT
     ws[f"I{grand_row}"].fill = TOTAL_FILL
-    ws[f"L{grand_row}"] = f"=ROUNDDOWN(L{total_row}*{safe_months}{addons_sum_term},0)"
+    ws[f"L{grand_row}"] = f"=ROUNDDOWN(L{total_row}{months_factor}{addons_sum_term},0)"
     _format_money_cell(ws[f"L{grand_row}"])
     ws[f"L{grand_row}"].font = TOTAL_FONT
     ws[f"L{grand_row}"].fill = TOTAL_FILL
     if gross:
-        ws[f"N{grand_row}"] = f"=ROUNDDOWN(N{total_row}*{safe_months}{addons_sum_term_gross},0)"
+        ws[f"N{grand_row}"] = f"=ROUNDDOWN(N{total_row}{months_factor}{addons_sum_term_gross},0)"
         _format_money_cell(ws[f"N{grand_row}"])
         ws[f"N{grand_row}"].font = TOTAL_FONT
         ws[f"N{grand_row}"].fill = TOTAL_FILL
@@ -1437,17 +1553,15 @@ def build_proposal_a_gross(wb: Workbook, products: list,
 
     _write_meta_block(ws, "Digital Plan / Avails (Gross)")
 
-    # Months input
-    ws["H10"] = labels["input_label"]
-    ws["H10"].alignment = RIGHT
-    ws["H10"].font = BODY_BOLD
-    ws["I10"] = total_months
-    ws["I10"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
-    ws["I10"].alignment = CENTER
+    # Months input (not written at all in Full Flight)
+    _write_months_input(ws, labels, total_months, time_unit)
 
-    # Agency fee input (I14)
-    ws["C14"] = "Agency Fee:"
-    ws["C14"].font = BODY_BOLD
+    # Agency fee input (I14), with its legend right beside it (H14, the same label/value pairing as "Months:" at
+    # H10/I10) so a reader can tell what the highlighted % is. C14 is the rate-basis sentence, written by the
+    # generator's _populate_meta.
+    ws["H14"] = "Agency Comm:"
+    ws["H14"].alignment = RIGHT
+    ws["H14"].font = BODY_BOLD
     ws["I14"] = 0.15
     ws["I14"].number_format = "0%"
     ws["I14"].font = Font(name="Arial", size=11, bold=True, color="FF0000FF")
@@ -1497,7 +1611,7 @@ def build_proposal_a_gross(wb: Workbook, products: list,
 
     last_data_row = row - 1
     total_row = row + 1
-    ws[f"C{total_row}"] = f"TOTAL DIGITAL {labels['adjective'].upper()}"
+    ws[f"C{total_row}"] = labels.get("total_row_label") or f"TOTAL DIGITAL {labels['adjective'].upper()}"
     ws[f"C{total_row}"].font = TOTAL_FONT
     ws[f"C{total_row}"].fill = TOTAL_FILL
     ws[f"L{total_row}"] = f"=ROUNDDOWN(SUM(L19:L{last_data_row}),0)"
@@ -1514,11 +1628,10 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     _format_imps_cell(ws[f"I{total_row}"])
     ws[f"I{total_row}"].font = TOTAL_FONT
     ws[f"I{total_row}"].fill = TOTAL_FILL
-    # eCPM — the Net sheet has always had this; the Gross sheet never did.
-    # Uses the GROSS dollar total (N) since that's this sheet's own primary
-    # billed figure, the same way the Net sheet's eCPM uses its own L.
+    # eCPM — always calculated from the NET budget (L), never the gross one: the agency commission is not media
+    # cost, so the Gross sheet shows the same eCPM as the Net sheet (net budget / impressions x 1000).
     ws[f"J{total_row}"] = '="eCPM:"'
-    ws[f"K{total_row}"] = f"=IFERROR(N{total_row}/I{total_row}*1000,\"\")"
+    ws[f"K{total_row}"] = f"=IFERROR(L{total_row}/I{total_row}*1000,\"\")"
     _format_money_cell(ws[f"K{total_row}"])
     _box_range(ws, total_row, total_row, "C", "N")
     _fill_box_range(ws, total_row, total_row, "C", "N", TOTAL_FILL)
@@ -1533,6 +1646,12 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     # matching comment (NET BUDGET/L) for why.
     ws.print_area = f"A1:N{ws.max_row}"
     return ws
+
+
+def _avails_only_sov_header(time_unit: str) -> str:
+    """The Avails-Only SOV column header: in Full Flight the budget column is the whole-flight budget, and that is
+    what is compared with the (monthly) ceiling."""
+    return "% of Avails Reached with\nFull-Flight Budget" if is_full_flight(time_unit) else "% of Avails Reached with\nMinimum Monthly Budget"
 
 
 def build_avails_only(wb: Workbook, products: list, *,
@@ -1603,11 +1722,11 @@ def build_avails_only(wb: Workbook, products: list, *,
         ("F", "BUY TYPE"),
         ("G", "CPM"),
         ("H", "Est. CPM"),
-        ("I", "Minimum Monthly\nRequired Budget"),
+        ("I", "Full-Flight\nBudget" if is_full_flight(time_unit) else "Minimum Monthly\nRequired Budget"),
         ("J", "Max. Recommended\nMonthly Imps"),
         ("K", "Max. Recommended\nMonthly Spend"),
         ("L", "Est. Monthly Uniques"),
-        ("M", "% of Avails Reached with\nMinimum Monthly Budget"),
+        ("M", _avails_only_sov_header(time_unit)),
         ("O", "Planner Notes"),
     ])
     ws.row_dimensions[10].height = 40
@@ -1629,7 +1748,10 @@ def build_avails_only(wb: Workbook, products: list, *,
         # `services_label`). This sheet used to show ONLY the objective
         # (short_label) with no product name at all — e.g. just "Awareness"
         # with nothing saying which actual product that was.
-        ws[f"C{row}"] = f"{p.name}\n{p.short_label}"
+        # The planner's optional Step 04 line note, if any, is a purple third line under them
+        # (build_name_cell_with_note returns the very same string when there is none).
+        line_note = clean_line_modifier(getattr(li, "line_modifier", None)) if li else ""
+        ws[f"C{row}"] = build_name_cell_with_note(f"{p.name}\n{p.short_label}", line_note)
         ws[f"C{row}"].font = BODY_BOLD
         ws[f"C{row}"].alignment = LEFT
         ws[f"C{row}"].border = THIN_BORDER
@@ -1791,6 +1913,8 @@ def build_avails_only(wb: Workbook, products: list, *,
         ws[f"O{row}"].alignment = LEFT
 
         ws.row_dimensions[row].height = max(30, _estimate_row_height(target_text, col_width=22, min_height=30))
+        # room for the purple line note under the name + objective (only grows a row whose line HAS a note)
+        fit_row_to_line_modifier(ws, row, f"{p.name}\n{p.short_label}", line_note)
         row += 1
 
     # "Ticket" outline around the whole line-item block for visual grouping
@@ -1840,114 +1964,161 @@ def build_avails_only(wb: Workbook, products: list, *,
     return ws
 
 
+DOOH_SUMMARY_INSTRUCTION = (
+    "Paste the inventory export into the DOOH Screenlist tab, then Data > Refresh All. "
+    "Minimum of 20 screens required."
+)
+
+# Column number formats of the DOOH Screenlist (everything not listed stays General).
+_DOOH_COUNT_FORMAT = "#,##0"
+_DOOH_MONEY_FORMAT = '"$"#,##0.00'
+_DOOH_COLUMN_FORMATS = {
+    "cpm": "#,##0.00",
+    "latitude": "0.000000", "longitude": "0.000000",
+    "four_week_impressions": _DOOH_COUNT_FORMAT, "bidstream_impressions": _DOOH_COUNT_FORMAT,
+    "bidstream_inferred_impressions": _DOOH_COUNT_FORMAT,
+    "impression_multiplier": "0.0000",
+    _dooh.MAX_AVAILS_COLUMN: _DOOH_COUNT_FORMAT,
+    _dooh.MAX_SPEND_COLUMN: _DOOH_MONEY_FORMAT,
+}
+# Columns whose sample value is short but whose real values are not (a column is otherwise sized from the header and
+# the sample cell): addresses, venue names and URLs are the long ones in a real export.
+_DOOH_COLUMN_MIN_WIDTH = {"address": 34, "venue_type": 28, "venue_name": 26, "asset_image_url": 30, "county": 20,
+                          "dma": 16, "adunit_id": 38, "adunit_name": 26, "network": 16, "publisher": 14}
+
+
+def _dooh_column_width(name: str, sample) -> float:
+    shown = f"{sample:,}" if isinstance(sample, (int, float)) and not isinstance(sample, bool) else str(sample)
+    wanted = max(len(name) * 1.15 + 4,            # bold header text + the filter button
+                 min(len(shown), 40) + 3)         # the sample's own text, capped (an image URL is not a column of its own)
+    return round(max(wanted, _DOOH_COLUMN_MIN_WIDTH.get(name, 0)), 1)
+
+
 def build_dooh_summary(wb: Workbook, client_name: str = "") -> Worksheet:
-    """DOOH Summary — clean header + placeholder pivot table referencing the Screenlist tab."""
-    ws = wb.create_sheet("DOOH Summary")
-    ws.sheet_view.showGridLines = False  # clean white margins outside the boxed tables
+    """DOOH Summary — a clean title, one instruction line and the pre-made pivot table over the Screenlist.
 
-    widths = {"A": 1.5, "B": 32, "C": 24, "D": 14, "E": 22, "F": 22}
-    _apply_col_widths(ws, widths)
+    No proposal/meta header (no Entravision contact block, no client address) and no CPM assumption: the CPM lives
+    per row on the Screenlist. The pivot itself cannot be written by openpyxl; this function writes the CELLS a pivot
+    with the one sample row renders to (so the sheet is right in a viewer that never refreshes it — Protected View, a
+    preview pane), and dooh_pivot.add_dooh_pivot() attaches the real pivot table to them after the workbook is saved.
+    """
+    ws = wb.create_sheet(_dooh.DOOH_SUMMARY_SHEET)
+    ws.sheet_view.showGridLines = False  # clean white margins around the pivot
+    # One generous row height for the whole sheet, so the pivot's rows are evenly spaced however many it grows to.
+    ws.sheet_format.defaultRowHeight = _dooh.SUMMARY_ROW_HEIGHT
+    ws.sheet_format.customHeight = True
 
-    _write_meta_block(ws, f"DOOH Summary{' — ' + client_name if client_name else ''}")
+    _apply_col_widths(ws, {"A": 2.5, **dict(zip("BCDEF", _dooh.SUMMARY_COLUMN_WIDTHS))})
+    for r in range(_dooh.PIVOT_FIRST_ROW, _dooh.PIVOT_FIRST_ROW + _dooh.SUMMARY_PRESIZED_ROWS):
+        # Excel autofits a row it renders pivot lines into; a set height keeps them evenly spaced as the pivot grows.
+        ws.row_dimensions[r].height = _dooh.SUMMARY_ROW_HEIGHT
 
-    ws["B4"] = "DOOH Screen Summary"
-    ws["B4"].font = BODY_BOLD
+    # Title bar across the pivot's width (the same purple bar the proposal sheets carry, minus the contact block).
+    ws.row_dimensions[1].height = 10
+    ws.row_dimensions[2].height = 36
+    for col in "BCDEF":
+        ws[f"{col}2"].fill = TITLE_FILL
+    ws["B2"] = f"DOOH Summary{' — ' + client_name if client_name else ''}"
+    ws["B2"].font = TITLE_FONT
+    ws["B2"].alignment = Alignment(horizontal="left", vertical="center", indent=1)
 
-    ws["B6"] = "Screens are sourced from the DOOH Screenlist tab."
-    ws["B6"].font = NOTE_FONT
+    ws.row_dimensions[3].height = 8
+    ws["B4"] = DOOH_SUMMARY_INSTRUCTION
+    ws["B4"].font = NOTE_FONT
+    ws["B4"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    ws.merge_cells("B4:F4")
+    ws.row_dimensions[4].height = 20
+    ws.row_dimensions[5].height = 10
 
-    ws["B7"] = "Minimum of 20 screens required."
-    ws["B7"].font = BODY_BOLD
-
-    # DOOH CPM assumption (planner input)
-    ws["E9"] = "DOOH CPM Assumption:"
-    ws["E9"].font = BODY_BOLD
-    ws["E9"].alignment = RIGHT
-    ws["F9"] = 25.0
-    _format_money_cell(ws["F9"], blue_input=True)
-
-    _set_header(ws, 11, [
-        ("B", "Venue Type"),
-        ("C", "City"),
-        ("D", "# Screens"),
-        ("E", "Est. Monthly Max. Avails"),
-        ("F", "Est. Monthly Max. Spend"),
-    ])
-
-    # Two placeholder rows (planner replaces with pivot data from Screenlist)
-    for r in (12, 13):
-        ws[f"B{r}"] = "—"
-        ws[f"C{r}"] = "—"
-        ws[f"D{r}"] = 0
-        ws[f"E{r}"] = 0
-        ws[f"F{r}"] = f"=IFERROR(E{r}*F$9/1000,0)"
-        for col in ("B", "C", "D", "E", "F"):
-            ws[f"{col}{r}"].border = THIN_BORDER
-        _format_imps_cell(ws[f"D{r}"])
-        _format_imps_cell(ws[f"E{r}"])
-        _format_money_cell(ws[f"F{r}"])
-
-    # Grand total
-    gt_row = 15
-    ws[f"B{gt_row}"] = "Grand Total"
-    ws[f"B{gt_row}"].font = TOTAL_FONT
-    ws[f"B{gt_row}"].fill = TOTAL_FILL
-    ws[f"D{gt_row}"] = "=SUM(D12:D14)"
-    ws[f"E{gt_row}"] = "=SUM(E12:E14)"
-    ws[f"F{gt_row}"] = "=SUM(F12:F14)"
-    for col in ("D", "E", "F"):
-        ws[f"{col}{gt_row}"].fill = TOTAL_FILL
-        ws[f"{col}{gt_row}"].font = TOTAL_FONT
-    _format_imps_cell(ws[f"D{gt_row}"])
-    _format_imps_cell(ws[f"E{gt_row}"])
-    _format_money_cell(ws[f"F{gt_row}"])
-
-    ws[f"B{gt_row + 2}"] = (
-        "Paste inventory export from TTD/DOOH platform into the DOOH Screenlist tab. "
-        "Update rows 12–14 above with rolled-up venue counts and avails."
-    )
-    ws[f"B{gt_row + 2}"].font = NOTE_FONT
-    ws.merge_cells(f"B{gt_row + 2}:F{gt_row + 2}")
-
+    # The pivot's own cells (what Excel shows once it has rendered the sample row). Values only, plus the number
+    # formats: the look comes from the pivot style once Excel renders the pivot, and any direct fill/border left
+    # behind here would stay put under the pivot when it grows or shrinks.
+    value_formats = {2: _DOOH_COUNT_FORMAT, 3: _DOOH_COUNT_FORMAT, 4: _DOOH_MONEY_FORMAT}   # by position: screens, avails, spend
+    for r, (kind, values) in enumerate(_dooh.pivot_preview_rows(), start=_dooh.PIVOT_FIRST_ROW):
+        for pos, value in enumerate(values):
+            if value is None:
+                continue
+            cell = ws.cell(row=r, column=_dooh.PIVOT_FIRST_COL + pos, value=value)
+            if kind != "header":
+                cell.number_format = value_formats.get(pos, "General")
     return ws
 
 
 def build_dooh_screenlist(wb: Workbook) -> Worksheet:
-    """DOOH Screenlist — pasted in by Ad Ops from the inventory platform."""
-    ws = wb.create_sheet("DOOH Screenlist")
-    ws.sheet_view.showGridLines = False  # clean white margins outside the boxed tables
-    headers = [
-        "id", "name", "asset_name", "publisher_code", "status", "integration_type",
-        "publisher", "network", "media_type", "venue_type", "venue_name", "city",
-        "postal_code", "county", "state", "dma", "country", "latitude", "longitude",
-        "address", "four_week_impressions", "impression_multiplier", "bidstream_impressions",
-        "screen_count", "min_duration", "max_duration", "supports_video", "supports_banner",
-        "supports_audio", "slot_dimensions", "preferred_ad_format", "ad_formats",
-        "restrictions", "languages", "asset_image_url", "programmatic_platform_key",
-        "programmatic_platform_industry_key",
-    ]
-    for i, h in enumerate(headers, start=1):
-        c = ws.cell(row=1, column=i)
-        c.value = h
-        c.font = H_HEADER
-        c.fill = H_HEADER_FILL
-        c.alignment = CENTER
-        c.border = HEADER_BORDER
-    for i in range(1, len(headers) + 1):
-        ws.column_dimensions[get_column_letter(i)].width = 18
-    ws.row_dimensions[1].height = 26
+    """DOOH Screenlist — the inventory table the planner pastes the platform export into.
+
+    Row 1 is the fixed 40-column header (dooh_pivot.DOOH_SCREENLIST_COLUMNS) plus two calculated helper columns
+    (max_avails, max_spend) to their right; row 2 is one sample screen. Everything is ONE Excel table named
+    DOOHScreenlist, so rows pasted or added below extend the table and fill the helper columns down by themselves,
+    and the DOOH Summary pivot (which reads the table) picks them up on refresh."""
+    from openpyxl.worksheet.filters import AutoFilter
+    from openpyxl.worksheet.table import Table, TableColumn, TableFormula, TableStyleInfo
+
+    ws = wb.create_sheet(_dooh.DOOH_SCREENLIST_SHEET)
+    columns = _dooh.DOOH_ALL_COLUMNS
+    n_inventory = len(_dooh.DOOH_SCREENLIST_COLUMNS)
+    last_col = get_column_letter(len(columns))
+    sample = dict(zip(_dooh.DOOH_SCREENLIST_COLUMNS, _dooh.DOOH_SAMPLE_ROW))
+
+    for i, name in enumerate(columns, start=1):
+        header = ws.cell(row=1, column=i, value=name)
+        header.font = H_HEADER
+        # The two calculated columns get the brand colour so they read as "don't paste over these".
+        header.fill = H_HEADER_FILL if i <= n_inventory else HEADER_PURPLE_FILL
+        header.alignment = CENTER
+        header.border = HEADER_BORDER
+
+        body = ws.cell(row=2, column=i)
+        if i <= n_inventory:
+            value = sample[name]
+            if value != "":                      # "" = an empty cell, not an empty string
+                body.value = value
+        else:
+            body.value = "=" + _dooh.table_formula(name)
+        body.font = BODY_FONT
+        body.alignment = Alignment(horizontal="center" if isinstance(body.value, bool) else None, vertical="center")
+        body.number_format = _DOOH_COLUMN_FORMATS.get(name, "General")
+        column = ws.column_dimensions[get_column_letter(i)]
+        column.width = _dooh_column_width(
+            name, sample.get(name, _dooh.SAMPLE_MAX_SPEND if name == _dooh.MAX_SPEND_COLUMN else _dooh.SAMPLE_MAX_AVAILS))
+        # The column's own format too, so a row typed or pasted below the table gets the same number format and font.
+        column.number_format = body.number_format
+        column.font = BODY_FONT
+    ws.row_dimensions[1].height = 28
+    ws.row_dimensions[2].height = 18
     ws.freeze_panes = "A2"
 
-    ws["B3"] = (
-        "Paste the inventory export from TTD / your DOOH platform below row 1. "
-        "The Summary tab will roll up by Venue Type + City."
+    ref = f"A1:{last_col}2"
+    table = Table(
+        displayName=_dooh.DOOH_TABLE_NAME, name=_dooh.DOOH_TABLE_NAME, ref=ref, autoFilter=AutoFilter(ref=ref),
+        tableColumns=[TableColumn(id=i, name=name) for i, name in enumerate(columns, start=1)],
+        tableStyleInfo=TableStyleInfo(name="TableStyleLight1", showRowStripes=True),
     )
-    ws["B3"].font = NOTE_FONT
+    for col in table.tableColumns[n_inventory:]:
+        col.calculatedColumnFormula = TableFormula(attr_text=_dooh.table_formula(col.name))
+    ws.add_table(table)
 
     return ws
 
 
-def build_process_faqs(wb: Workbook) -> Worksheet:
+def _faq_row_height(cells: list) -> float:
+    """Height for a wrapped FAQ row: the tallest of its (text, column width) cells, never under 30pt. Merged/wrapped
+    cells don't auto-fit in Excel, so it is estimated (Arial 10 fits ~1.1 characters per column-width unit)."""
+    lines = 1
+    for text, width in cells:
+        per_line = max(12, int(width * 1.1))
+        lines = max(lines, sum(max(1, -(-len(par) // per_line)) for par in str(text or "").split("\n")))
+    return max(30.0, 13.0 * lines + 6)
+
+
+def build_process_faqs(wb: Workbook, entries: Optional[list] = None) -> Worksheet:
+    """The "Process FAQs" tab. `entries` are the Admin -> FAQ rows (app/services/faq_entries.py): dicts with
+    section ("faq" | "restriction"), services, question, link_title and link_url, already in display order; None
+    means the built-in rows. A row's link title is written as a real hyperlink to its URL (plain text when it has
+    none). The header carries a link to Entravision's Ad Guidelines site."""
+    from app.services import faq_entries as _faq
+    if entries is None:
+        entries = _faq.default_entries()
     ws = wb.create_sheet("Process FAQs")
     ws.sheet_view.showGridLines = False  # clean white margins outside the boxed tables
     widths = {"A": 1.5, "B": 2.0, "C": 36, "D": 60, "E": 50}
@@ -1960,85 +2131,65 @@ def build_process_faqs(wb: Workbook) -> Worksheet:
     _write_meta_block(ws, "Process FAQs", include_billing=False,
                       include_campaign_meta=False, include_entravision_address=False)
 
+    # Header link to the live guidelines site (it feeds from the same sheet the Roadblocks step reads).
+    ws["C4"] = _faq.GUIDELINES_LINK_TITLE
+    ws["C4"].hyperlink = _faq.GUIDELINES_URL
+    ws["C4"].font = Font(name="Arial", size=11, bold=True, color="FF0066CC", underline="single")
+    ws["C4"].alignment = Alignment(horizontal="left", vertical="center")
+    ws.merge_cells("C4:E4")
+    ws.row_dimensions[4].height = 22
+
     _set_header(ws, 6, [
         ("C", "SERVICES"),
         ("D", "Frequently Asked Question"),
         ("E", "Resource Link"),
     ])
 
-    faqs = [
-        ("All Products",
-         "Where can I see the specs and best practices needed for my digital product?",
-         "Entravision's Digital Specs and Best Practices"),
-        ("All Products",
-         "Why should I install Entravision's GTM (Google Tag Manager) on my website?",
-         "Entravision's GTM Process"),
-        ("All Products",
-         "How can I install the provided GTM in my CMS?",
-         "Entravision's GTM Process for Most Common CMS Website Providers"),
-        ("Facebook & Instagram Ads on EVC Radio | Noticias Ya Pages",
-         "How do I accept an Entravision Meta Business Account request to initiate a brand partnership or post a co-branded ad?",
-         "How to Meta partnership for co-branded ads guide"),
-        ("TikTok Ads (Client's Handle) or TikTok Ads on EVC Radio | Noticias Ya Pages",
-         "How can I provide access to my TikTok Page to Run Ads?",
-         "How to TikTok Access Guide"),
-        ("TikTok Ads",
-         "How can I authorize Entravision's TikTok Business Center account via QR code?",
-         "How to TikTok Business Center Entravision Account (QR Code Method)"),
-    ]
+    wrap_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    link_font = Font(name="Arial", size=10, color="FF0066CC", underline="single")
+
+    def put_text(cell, text, font) -> None:
+        cell.value = _XML_ILLEGAL.sub("", str(text))
+        cell.data_type = "s"                      # text that starts with "=" must stay text, not become a formula
+        cell.font = font
+        cell.alignment = wrap_left
+
+    def put_row(row: int, entry: dict, *, bordered: bool) -> None:
+        put_text(ws[f"C{row}"], entry.get("services") or "", BODY_BOLD)
+        put_text(ws[f"D{row}"], entry.get("question") or "", BODY_FONT)
+        title = (entry.get("link_title") or "").strip()
+        url = (entry.get("link_url") or "").strip()
+        link_cell = ws[f"E{row}"]
+        if title or url:
+            put_text(link_cell, title or url, link_font if url else BODY_FONT)
+            if url:
+                link_cell.hyperlink = url
+        else:
+            link_cell.alignment = wrap_left
+        if bordered:
+            for col in "CDE":
+                ws[f"{col}{row}"].border = THIN_BORDER
+        ws.row_dimensions[row].height = _faq_row_height([
+            (entry.get("services"), widths["C"]), (entry.get("question"), widths["D"]), (title or url, widths["E"])])
+
+    faqs = [e for e in entries if e.get("section") != "restriction"]
+    restrictions = [e for e in entries if e.get("section") == "restriction"]
     row = 8
-    for svc, q, link in faqs:
-        ws[f"C{row}"] = svc
-        ws[f"C{row}"].font = BODY_BOLD
-        ws[f"C{row}"].alignment = LEFT
-        ws[f"C{row}"].border = THIN_BORDER
-        ws[f"D{row}"] = q
-        ws[f"D{row}"].font = BODY_FONT
-        ws[f"D{row}"].alignment = LEFT
-        ws[f"D{row}"].border = THIN_BORDER
-        ws[f"E{row}"] = link
-        ws[f"E{row}"].font = Font(name="Arial", size=10, color="FF0066CC", underline="single")
-        ws[f"E{row}"].alignment = LEFT
-        ws[f"E{row}"].border = THIN_BORDER
-        ws.row_dimensions[row].height = 30
+    for entry in faqs:
+        put_row(row, entry, bordered=True)
         row += 1
 
-    ws[f"C{row+1}"] = "CATEGORY AND PRODUCT RESTRICTIONS"
-    ws[f"C{row+1}"].font = BODY_BOLD
-    ws[f"C{row+1}"].fill = SUBTOTAL_FILL
-    ws.merge_cells(f"C{row+1}:E{row+1}")
-
-    cats = [
-        ("Healthcare Advertisers — Google Search and YouTube Ads",
-         "Filling out the Google healthcare advertising form is mandatory.",
-         "Apply for healthcare-related advertising"),
-        ("Consumer Finance Advertisers — Google Search and YouTube Ads",
-         "Related to: 36% APR, state licenses for Financial Verification, APR & Repayment disclosures above the fold, and \"Instant\" claims.",
-         "Consumer Finance Google Advertising Guidelines"),
-        ("Government and Advocacy — Google Search and YouTube Ads",
-         "Related to: Official Contracts, State License, SOS Filing, direct URL to government directories.",
-         "Government Google Advertising Guidelines"),
-        ("Alcohol — All products",
-         "Related to: Alcohol or alcohol consumption.",
-         "FTC & TTB Alcohol Advertising Guidelines"),
-        ("Loans — All products",
-         "Related to: Truth-in-lending compliance and disclosure requirements.",
-         "FTC Advertising Compliance Guide - Loan Campaigns"),
-    ]
-    row += 2
-    for svc, desc, link in cats:
-        ws[f"C{row}"] = svc
-        ws[f"C{row}"].font = BODY_BOLD
-        ws[f"C{row}"].alignment = LEFT
-        ws[f"D{row}"] = desc
-        ws[f"D{row}"].alignment = LEFT
-        ws[f"E{row}"] = link
-        ws[f"E{row}"].font = Font(name="Arial", size=10, color="FF0066CC", underline="single")
-        ws.row_dimensions[row].height = 30
-        row += 1
+    if restrictions:
+        ws[f"C{row+1}"] = "CATEGORY AND PRODUCT RESTRICTIONS"
+        ws[f"C{row+1}"].font = BODY_BOLD
+        ws[f"C{row+1}"].fill = SUBTOTAL_FILL
+        ws.merge_cells(f"C{row+1}:E{row+1}")
+        row += 2
+        for entry in restrictions:
+            put_row(row, entry, bordered=False)
+            row += 1
 
     return ws
-
 
 # ---------------------------------------------------------------------------
 # Monthly Breakdown — optional per-line-item distribution of a line item's
@@ -2150,16 +2301,26 @@ def _mb_cell_text(dollars: Optional[float], total: float) -> str:
 
 
 def write_monthly_breakdown_header(ws: Worksheet, row: int, months: list[dict], start_col: int,
-                                    time_unit: str = "month") -> None:
+                                    time_unit: str = "month", basis: Optional[str] = None) -> None:
     """Period labels, styled exactly like this sheet's own header row (row
     17 on Net/Gross — passing that same row number here just extends it
-    rightward, rather than inventing a second header style)."""
+    rightward, rather than inventing a second header style).
+
+    basis: "GROSS"/"NET" — appended to the banner ("MONTHLY BREAKDOWN
+    (GROSS)") so it's explicit which dollars the block shows. Every billing
+    period passes it; None leaves the bare banner."""
     banner_row = row - 1
     if banner_row >= 1:
-        ws.merge_cells(start_row=banner_row, start_column=start_col, end_row=banner_row,
-                        end_column=start_col + max(len(months) - 1, 0))
+        # A one-column block (Full Flight, a quarterly plan on a short flight, a one-month monthly
+        # plan) must NOT be "merged": a single-cell merge is invalid in Excel and can trigger its
+        # "we found a problem with some content" repair prompt.
+        if len(months) > 1:
+            ws.merge_cells(start_row=banner_row, start_column=start_col, end_row=banner_row,
+                            end_column=start_col + len(months) - 1)
         banner_cell = ws.cell(row=banner_row, column=start_col)
-        banner_cell.value = f"{_unit_labels(time_unit)['adjective'].upper()} BREAKDOWN"
+        labels = _unit_labels(time_unit)
+        banner_text = (labels.get("banner_label") or f"{labels['adjective'].upper()} BREAKDOWN") + (f" ({basis})" if basis else "")
+        banner_cell.value = banner_text
         banner_cell.font = SECTION_FONT
         banner_cell.fill = SECTION_FILL
         banner_cell.alignment = CENTER
@@ -2179,7 +2340,12 @@ def write_monthly_breakdown_header(ws: Worksheet, row: int, months: list[dict], 
         cell.fill = H_HEADER_FILL
         cell.alignment = CENTER
         cell.border = HEADER_BORDER
-        ws.column_dimensions[get_column_letter(col)].width = 15
+        # The Full-Flight label is a whole date span ("NOVEMBER 2026–JANUARY 2027"), far wider than a month name; and a
+        # ONE-column block (it isn't merged) must be wide enough for its own banner, which now carries the basis.
+        width = 26 if is_full_flight(time_unit) else 15
+        if len(months) == 1 and banner_row >= 1:
+            width = max(width, len(banner_text) + 2)
+        ws.column_dimensions[get_column_letter(col)].width = width
 
 
 def write_monthly_breakdown_row(ws: Worksheet, row: int, months: list[dict],
@@ -2211,18 +2377,55 @@ def write_monthly_breakdown_total_row(ws: Worksheet, row: int, months: list[dict
         cell.fill = TOTAL_FILL
 
 
+def write_full_flight_breakdown_row(ws: Worksheet, row: int, start_col: int, budget_col: str) -> None:
+    """Full Flight's single column for one line: the line's WHOLE amount at
+    100% — `$800 (100%)` — as a live formula over that row's own budget cell
+    (GROSS BUDGET on the Gross sheet, NET BUDGET on the Net sheet), so editing
+    the blue budget cell in Excel keeps this column honest instead of leaving
+    stale static text behind."""
+    ref = f"{budget_col}{row}"
+    cell = ws.cell(row=row, column=start_col)
+    cell.value = f'=IFERROR("$"&TEXT({ref},"#,##0")&IF({ref}>0," (100%)"," (0%)"),"—")'
+    cell.font = BODY_FONT
+    cell.alignment = CENTER
+    cell.border = THIN_BORDER
+
+
+def write_full_flight_breakdown_total(ws: Worksheet, total_row: int, start_col: int, budget_col: str) -> None:
+    """The column's total cell: a direct reference to the sheet's own TOTAL
+    DIGITAL cell, so it can never drift from it (no second rounding)."""
+    cell = ws.cell(row=total_row, column=start_col)
+    cell.value = f"={budget_col}{total_row}"
+    _format_money_cell(cell)
+    cell.font = TOTAL_FONT
+    cell.fill = TOTAL_FILL
+
+
+def breakdown_gross_factor(agency_fee: Optional[float]) -> float:
+    """The multiplier from a NET dollar to the GROSS dollar the Gross sheet shows for it: 1 / (1 - agency fee) — the very
+    markup that sheet's own GROSS BUDGET formula applies. 1.0 when no agency fee is selected (gross == net)."""
+    return 1.0 / (1.0 - agency_fee) if (agency_fee and 0 < agency_fee < 1) else 1.0
+
+
 def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
                                  months: list[dict], sheet_name: str = "Monthly Breakdown",
-                                 distribution_mode: str = "even", time_unit: str = "month") -> Worksheet:
+                                 distribution_mode: str = "even", time_unit: str = "month",
+                                 agency_fee: Optional[float] = None) -> Worksheet:
     """
     Standalone tab: one row per (non-Added-Value) line item that has a
     Breakdown, a "TOTAL PLAN SPEND BY {UNIT}" row at the bottom — plain
     grid, independent of the Net/Gross column layout entirely.
+
+    agency_fee: with an agency fee selected the tab is stated in GROSS dollars (each net amount marked up by
+    breakdown_gross_factor, exactly as the Gross sheet does) and titled "(Gross)"; with none it is NET and titled "(Net)".
     """
     labels = _unit_labels(time_unit)
+    factor = breakdown_gross_factor(agency_fee)
+    basis = "Gross" if factor != 1.0 else "Net"
     default_title = f"{labels['adjective']} Breakdown"
+    title = f"{default_title} ({basis})"
     ws = wb.create_sheet(sheet_name[:31])
-    ws["B2"] = f"{default_title} — {sheet_name}" if sheet_name not in ("Monthly Breakdown", default_title) else default_title
+    ws["B2"] = f"{title} — {sheet_name}" if sheet_name not in ("Monthly Breakdown", default_title) else title
     ws["B2"].font = TITLE_FONT
     ws.column_dimensions["A"].width = 2
     ws.column_dimensions["B"].width = 34
@@ -2249,21 +2452,30 @@ def build_monthly_breakdown_tab(wb: Workbook, products: list, line_items: list,
     for product, li in zip(products, line_items):
         if getattr(li, "is_added_value", False):
             continue
-        total = li.monthly_budget * li.months
-        allocations = li.monthly_allocations if li.monthly_allocations else None
+        total_net = li.monthly_budget * li.months
+        allocations_net = li.monthly_allocations if li.monthly_allocations else None
         # Every line item contributes to the plan-level total (an estimate,
         # in the planner's chosen distribution_mode, if it was never
         # individually customized) — see
         # monthly_allocation.compute_default_allocation(); mirrors exactly
         # what app.js's _mbEffectiveDistribution shows on-screen, so the
         # export's total always matches what the planner last saw.
-        distribution = allocations or _monthly_allocation.compute_default_allocation(total, months, distribution_mode)
+        distribution = allocations_net or _monthly_allocation.compute_default_allocation(total_net, months, distribution_mode)
         for m in months:
-            per_month_totals[m["key"]] += distribution.get(m["key"], 0.0)
+            per_month_totals[m["key"]] += distribution.get(m["key"], 0.0) * factor
+        # What the cells show is in the tab's basis (gross with an agency fee); the percentages are unchanged by it.
+        total = total_net * factor
+        allocations = {k: v * factor for k, v in allocations_net.items()} if allocations_net else None
 
-        name_cell = ws.cell(row=row, column=2, value=product.name)
+        # The planner's optional Step 04 line note, if any, is a purple second line under the name (the very same plain
+        # name cell, and an untouched row height, when there is none).
+        line_note = clean_line_modifier(getattr(li, "line_modifier", None))
+        name_cell = ws.cell(row=row, column=2, value=build_name_cell_with_note(product.name, line_note))
         name_cell.font = BODY_FONT
         name_cell.border = THIN_BORDER
+        if line_note:
+            name_cell.alignment = LEFT
+            fit_row_to_line_modifier(ws, row, product.name, line_note, col="B")
         write_monthly_breakdown_row(ws, row, months, allocations, total, start_col=3)
         any_row_written = True
         row += 1
@@ -2286,9 +2498,9 @@ def build_workbook(output_path: Path, families_to_include=None) -> None:
     default = wb.active
     wb.remove(default)
 
-    products = CATALOG
+    products = effective_catalog()
     if families_to_include:
-        products = [p for p in CATALOG if p.family in families_to_include]
+        products = [p for p in products if p.family in families_to_include]
 
     build_proposal_a(wb, products, with_sections=False)
     build_proposal_a(wb, products, with_sections=True)
@@ -2299,6 +2511,7 @@ def build_workbook(output_path: Path, families_to_include=None) -> None:
     build_process_faqs(wb)
 
     wb.save(output_path)
+    _dooh.add_dooh_pivot(output_path)     # the DOOH Summary's pivot table (openpyxl cannot write one) — after the last save
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ admin edit takes effect immediately with no restart.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from app.db import get_connection
@@ -36,22 +37,67 @@ _FALLBACK_DEFAULT = {
     "address_line2": "Burbank, CA 91504",
     "dsc_email": None,
     "dsm_email": None,
+    "research_emails": [],
     "ccs": [],
 }
 _FALLBACK_BASE_CCS = ["salesplanning@entravision.com"]
 _FALLBACK_T1_CCS = ["jwoods@entravision.com"]
 
 
+_research_column_known = False
+
+
+def _has_research_column(conn) -> bool:
+    """Whether market_config has the research_emails column (the startup schema bootstrap adds it). Until it does,
+    everything here keeps working exactly as it did before research assignees existed."""
+    global _research_column_known
+    if _research_column_known:
+        return True
+    row = conn.execute(
+        "SELECT 1 AS ok FROM information_schema.columns WHERE table_name = 'market_config' AND column_name = 'research_emails' LIMIT 1"
+    ).fetchone()
+    _research_column_known = bool(row)
+    return _research_column_known
+
+
+def research_column_available() -> bool:
+    with get_connection() as conn:
+        return _has_research_column(conn)
+
+
+def normalize_emails(raw) -> list[str]:
+    """A list of email addresses from what an admin typed (a list, or text separated by commas / semicolons / new
+    lines): trimmed, de-duplicated (case-insensitive, first spelling kept). ValueError for something that can't be an
+    address, so a typo is caught here instead of ending up in a CC line."""
+    parts: list[str] = []
+    for item in (raw if isinstance(raw, (list, tuple)) else [raw]):
+        parts += re.split(r"[,;\n]+", str(item or ""))
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        email = part.strip()
+        if not email:
+            continue
+        if not re.fullmatch(r"[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+", email) or len(email) > 254:
+            raise ValueError(f"'{email}' doesn't look like an email address.")
+        if email.lower() not in seen:
+            seen.add(email.lower())
+            out.append(email)
+    return out
+
+
 def load_market_config() -> dict:
     """{market_name_or_"__default__": {address_line1, address_line2,
-    dsc_email, dsm_email, ccs}}, plus a "__base_ccs__": [...] entry. Always
+    dsc_email, dsm_email, research_emails, ccs}}, plus a "__base_ccs__": [...] entry. Always
     includes both — seeded with the Burbank HQ address / no per-market CCs
     / just salesplanning@ as the base CC the first time this is ever read,
     so everything has a sane fallback even before an admin configures
     anything."""
     with get_connection() as conn:
+        modern = _has_research_column(conn)
         rows = conn.execute(
-            "SELECT market_key, address_line1, address_line2, dsc_email, dsm_email, ccs FROM market_config ORDER BY market_key"
+            "SELECT market_key, address_line1, address_line2, dsc_email, dsm_email, ccs"
+            + (", research_emails" if modern else "") + " FROM market_config ORDER BY market_key"
         ).fetchall()
     data = {}
     for row in rows:
@@ -64,6 +110,7 @@ def load_market_config() -> dict:
                 "address_line2": row["address_line2"],
                 "dsc_email": row["dsc_email"],
                 "dsm_email": row["dsm_email"],
+                "research_emails": list(row.get("research_emails") or []),
                 "ccs": list(row["ccs"] or []),
             }
     if DEFAULT_KEY not in data:
@@ -77,8 +124,10 @@ def load_market_config() -> dict:
 
 def save_market_config(config: dict) -> None:
     with get_connection() as conn:
+        modern = _has_research_column(conn)
         conn.execute("DELETE FROM market_config")
         for market_key, value in config.items():
+            research: list = []
             if market_key in (BASE_CCS_KEY, T1_CCS_KEY):
                 address_line1 = None
                 address_line2 = None
@@ -92,24 +141,38 @@ def save_market_config(config: dict) -> None:
                 dsc_email = entry.get("dsc_email")
                 dsm_email = entry.get("dsm_email")
                 ccs = list(entry.get("ccs") or [])
-            conn.execute(
-                """
-                INSERT INTO market_config
-                    (market_key, address_line1, address_line2, dsc_email, dsm_email, ccs)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (market_key, address_line1, address_line2, dsc_email, dsm_email, ccs),
-            )
+                research = list(entry.get("research_emails") or [])
+            if modern:
+                conn.execute(
+                    """
+                    INSERT INTO market_config
+                        (market_key, address_line1, address_line2, dsc_email, dsm_email, ccs, research_emails)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (market_key, address_line1, address_line2, dsc_email, dsm_email, ccs, research),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO market_config
+                        (market_key, address_line1, address_line2, dsc_email, dsm_email, ccs)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (market_key, address_line1, address_line2, dsc_email, dsm_email, ccs),
+                )
 
 
 def set_market_entry(market_key: str, fields: dict) -> dict:
     """Upsert one market's config (or "__default__"). `fields` may contain
-    any of address_line1/address_line2/dsc_email/dsm_email/ccs — only given
+    any of address_line1/address_line2/dsc_email/dsm_email/research_emails/ccs — only given
     keys are touched, the rest of that market's existing entry (if any) is
     preserved."""
+    if fields.get("research_emails") and not research_column_available():
+        raise ValueError("The database doesn't have the research-assignees column yet - restart the app (it adds it at "
+                         "startup) or apply the latest schema.sql, then try again.")
     config = load_market_config()
     entry = dict(config.get(market_key, {}))
-    for k in ("address_line1", "address_line2", "dsc_email", "dsm_email", "ccs"):
+    for k in ("address_line1", "address_line2", "dsc_email", "dsm_email", "research_emails", "ccs"):
         if k in fields:
             entry[k] = fields[k]
     config[market_key] = entry
@@ -221,8 +284,18 @@ def get_market_dsc_dsm(market: Optional[str]) -> tuple[Optional[str], Optional[s
     )
 
 
+def get_market_research_emails(market: Optional[str]) -> list[str]:
+    """The research assignees for this market, CC'd on the internal seller email like the DSC / DSM. Like them, a
+    market that doesn't set its own falls back to the default entry's."""
+    config = load_market_config()
+    key = _market_lookup_key(market, config)
+    entry = config.get(key, {})
+    default = config.get(DEFAULT_KEY, _FALLBACK_DEFAULT)
+    return list(entry.get("research_emails") or default.get("research_emails") or [])
+
+
 def get_all_ccs_for_market(market: Optional[str]) -> list[str]:
-    """Base CCs + this market's own CCs + this market's DSC/DSM (when set),
+    """Base CCs + this market's own CCs + this market's DSC/DSM (when set) + its research assignees,
     deduped (case-insensitive) while preserving first-seen order — what the
     seller-email mailto link actually uses. Product/renewal-based CCs are
     layered on top of this client-side (see app.js) since they depend on
@@ -230,7 +303,7 @@ def get_all_ccs_for_market(market: Optional[str]) -> list[str]:
     dsc_email, dsm_email = get_market_dsc_dsm(market)
     seen = set()
     combined = []
-    for email in get_base_ccs() + get_market_ccs(market) + [dsc_email, dsm_email]:
+    for email in get_base_ccs() + get_market_ccs(market) + [dsc_email, dsm_email] + get_market_research_emails(market):
         e = (email or "").strip()
         if e and e.lower() not in seen:
             seen.add(e.lower())

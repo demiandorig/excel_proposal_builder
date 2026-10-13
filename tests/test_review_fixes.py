@@ -143,24 +143,29 @@ def test_confirmed_verticals_missing_from_the_sheet_are_reported(builtin_state):
 # --- Restrictions: renamed / custom products ---------------------------------------------------------
 
 def test_a_renamed_product_keeps_its_sheet_verdict(monkeypatch, builtin_state):
+    # A rename in Admin -> Product Catalog changes the name and records the old one as an alias.
     monkeypatch.setattr("app.catalog.load_rate_overrides",
                         lambda: {"Video - Pre-roll (OLV)": {"name": "Pre-Roll Video (OLV)"}})
+    monkeypatch.setattr("app.catalog.all_product_aliases", lambda: {"Video - Pre-roll (OLV)": "Pre-Roll Video (OLV)"})
+    from app import catalog
+    catalog.invalidate_product_caches()
     matrix = rs.build_matrix(["Pre-Roll Video (OLV)", "Video - Pre-roll (OLV)"], ["Political"])
     assert matrix["verdicts"]["Pre-Roll Video (OLV)"]["verdict"] == "allowed"
     assert matrix["verdicts"]["Video - Pre-roll (OLV)"]["verdict"] == "allowed"
 
 
-def test_a_custom_product_the_sheet_doesnt_list_reads_as_guidance_not_a_hard_refusal(monkeypatch, builtin_state):
+def test_a_new_product_the_sheet_doesnt_list_reads_not_accepted_with_a_hint_to_map_it(monkeypatch, builtin_state):
     custom = Product(
-        family="Display", name="Custom Display Package", short_label="x", proposal_description="", sizes="",
+        family="Podcasts", name="Custom Display Package", short_label="x", proposal_description="", sizes="",
         buying_model="CPM", base_rate=5.0, estimated_impressions=False, discloses_impressions=True, minimum_spend=0.0,
         minimum_flight_days=(0, 0), sla_data_days=None, sla_creative_days=None, sla_activate_days=None,
         sla_total_days=None, media_allocation_pct=1.0, margin_upper=0.5, margin_lower=0.5, tech_platform="", wide_orbit_code="")
     monkeypatch.setattr("app.catalog.load_custom_products", lambda: [custom])
-    matrix = rs.build_matrix(["Custom Display Package"], ["Political"])
-    verdict = matrix["verdicts"]["Custom Display Package"]
-    assert verdict["verdict"] == "guidance"
-    assert "Sales Planning" in verdict["checks"][0]["note"]
+    from app import catalog
+    catalog.invalidate_product_caches()
+    verdict = rs.build_matrix(["Custom Display Package"], ["Political"])["verdicts"]["Custom Display Package"]
+    assert verdict["verdict"] == "not_allowed"                    # the sheet's rule applies to every product alike
+    assert "map it in Admin" in verdict["checks"][0]["note"]
 
 
 def test_services_and_measurement_are_exempt_from_guidance_tabs_too():

@@ -48,6 +48,11 @@ import app.services.drive_uploader as drive_mod
 with ExitStack() as stack:
     for mod in (catalog_mod, market_config_mod, auth_mod, drive_mod):
         stack.enter_context(patch.object(mod, "get_connection", _fake_connection))
+    # The product list is a database table now (seeded from CATALOG). The fake connection above would read as an EMPTY
+    # table, so make the catalog behave as it does with no database: fall back to the code seed list, exactly as the
+    # pytest suite's conftest does.
+    stack.enter_context(patch.object(catalog_mod, "_read_product_rows", lambda: None))
+    catalog_mod.invalidate_product_caches()
 
     from app.catalog import CATALOG
     from app.services.notion_parser import parse_notion

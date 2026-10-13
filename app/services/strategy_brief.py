@@ -23,6 +23,8 @@ except ImportError:
     _HAS_OPENAI = False
 
 from app.services import llm_utils
+from app.services import period_copy
+from app.services import source_rules
 from app.services.text_utils import normalize_newlines as _normalize_newlines
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 from app.catalog import by_name as _catalog_by_name
@@ -95,7 +97,7 @@ _TRUNCATED_MSG = "The brief was cut off before it finished, even after an automa
 
 
 async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "consistent",
-                         ad_presence: Optional[dict] = None) -> dict:
+                         ad_presence: Optional[dict] = None, time_unit: str = "month") -> dict:
     """
     Generate (or regenerate with reprompt) a strategic brief for this proposal.
 
@@ -116,6 +118,12 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
     "consistent" mode when products_selected is empty or maps to no
     recognizable family — "stay consistent with nothing selected" has no
     meaningful constraint to apply.
+
+    time_unit: the proposal's billing period ("week"/"month"/"quarter"/"full_flight").
+    Only changes how the Step 02 budget is worded to the model: the week/month/quarter
+    wording is "$X/month x N months = $T total flight"; "full_flight" states the
+    figure as the flat flight total (nothing is multiplied — Step 04 seeds it as typed)
+    and that it is billed as one period — see period_copy.budget_sentence.
 
     Grounded in live web search (Responses API + the web_search tool); falls back
     to a plain completion, with a disclaimer in `error`, if search fails.
@@ -148,7 +156,8 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
         # mode="new_mix", rather than constraining to an empty set.
 
     client = _OpenAI(api_key=api_key)
-    prompt = _build_prompt(request, reprompt, ad_intel=ad_intel, allowed_families=allowed_families)
+    prompt = _build_prompt(request, reprompt, ad_intel=ad_intel, allowed_families=allowed_families,
+                           time_unit=time_unit)
     # The OpenAI client is synchronous; off the event loop so one brief can't stall every other request.
     result = await asyncio.to_thread(_run_brief_call, client, prompt)
 
@@ -211,10 +220,11 @@ def _run_brief_call(client, prompt: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _build_prompt(request, reprompt: Optional[str], ad_intel: Optional[dict] = None,
-                   allowed_families: Optional[set] = None) -> str:
-    monthly = request.monthly_budget or 0
-    months = request.total_months or 3
-    total = monthly * months
+                   allowed_families: Optional[set] = None, time_unit: str = "month") -> str:
+    # One shared sentence (also what the Strategy Brief .docx prints) so the prompt and the document can't disagree.
+    # A missing month count falls back to 3 for the monthly wording, as it always has (Full Flight ignores it).
+    unit = period_copy.resolve_time_unit(time_unit, where="strategy brief prompt")
+    budget_line = period_copy.budget_sentence(request.monthly_budget or 0, request.total_months or 3, unit)
 
     # Build an explicit, labeled targeting block — this is the single most
     # important input to get right. Every downstream section must anchor to
@@ -273,7 +283,7 @@ or a negative.
 - Client: {request.client_name or "TBD"} | Website: {request.client_website or "N/A"}
 - Market: {request.salesperson_market or "TBD"}
 - Campaign Goal: {request.campaign_goal or "Brand Awareness"}
-- Budget: ${monthly:,.0f}/month × {months} months = ${total:,.0f} total flight
+- {budget_line}
 - Request Type: {request.request_type or "Proposal"}
 - AE Comments: {request.salesperson_comments or "None"}
 - Question Details: {getattr(request, "question_details", "") or "None"}
@@ -304,6 +314,8 @@ turns up nothing specific enough, say so explicitly in that field ("no
 audience-specific data found, using general market benchmark of X") rather
 than presenting an invented-sounding number as if it were verified.
 
+{source_rules.NO_WIKIPEDIA_RULE}
+
 ## CRITICAL RULE — SPECIFICITY OVER JARGON
 Every tactic's rationale and every key insight MUST explicitly name the
 targeting values above (the demo, geo, behavioral segment, or contextual
@@ -316,8 +328,9 @@ GOOD (specific, required style): "For {request.demo or 'this demo'} in
 during appointment-viewing hours when linear reach is declining."
 
 Every "citation" field must name a real, specific, searchable source
-(publisher + year) — never a vague placeholder like "Industry Report,
-2025." If you can't find a specific real source for a claim, don't
+(publisher + year) of a primary source — never Wikipedia, never a vague
+placeholder like "Industry Report, 2025." If you can't find a specific
+real source for a claim, don't
 present the claim as sourced data at all; fold it into the rationale as
 directional context instead.
 
@@ -410,18 +423,51 @@ def _parse(raw: str, used_web_search: bool = False, client=None) -> dict:
         t.setdefault("suggested_budget_pct", 0)
         for key in ("rationale", "data_point", "entravision_advantage"):
             t[key] = _normalize_newlines(str(t.get(key) or ""))
+        _drop_wikipedia_support(t)
+
+    def _clean(text):
+        # Wikipedia is never a citation (source_rules): free-form prose loses it, and a sentence whose statistic
+        # rested on it alone goes with it.
+        return source_rules.strip_wikipedia(_normalize_newlines(text))
+
+    insights = []
+    for item in data.get("key_insights") or []:
+        original = _normalize_newlines(item if isinstance(item, str) else str(item))
+        cleaned = _clean(item if isinstance(item, str) else str(item))
+        if cleaned or not original.strip():        # an insight the scrub emptied goes; one the model left empty stays as before
+            insights.append(cleaned)
 
     return {
-        "client_summary": _normalize_newlines(data.get("client_summary", "")),
-        "market_context": _normalize_newlines(data.get("market_context", "")),
-        "objectives_analysis": _normalize_newlines(data.get("objectives_analysis", "")),
-        "strategy_summary": _normalize_newlines(data.get("strategy_summary", "")),
+        "client_summary": _clean(data.get("client_summary", "")),
+        "market_context": _clean(data.get("market_context", "")),
+        "objectives_analysis": _clean(data.get("objectives_analysis", "")),
+        "strategy_summary": _clean(data.get("strategy_summary", "")),
         "recommended_tactics": tactics,
-        "key_insights": [_normalize_newlines(i if isinstance(i, str) else str(i))
-                         for i in (data.get("key_insights") or [])],
+        "key_insights": insights,
         "used_web_search": used_web_search,
         "error": None,
     }
+
+
+def _drop_wikipedia_support(t: dict) -> None:
+    """One tactic without any Wikipedia citation (see source_rules). A tactic whose citation was Wikipedia alone
+    loses its data point as well — the statistic's only source is gone, and the card must not show a number nobody
+    can check — and a data point with no text left takes its (now orphaned) citation with it. A data point whose
+    separate citation field names a real source keeps its figure even if its own text also mentioned Wikipedia."""
+    cite = t.get("citation")
+    cite_ok = False
+    wiki_only = False
+    if isinstance(cite, str):
+        cleaned = source_rules.strip_wikipedia_source(cite)
+        wiki_only = bool(cite.strip()) and not cleaned.strip()
+        cite_ok = bool(cleaned.strip())
+        cite = cleaned
+    had_data_point = bool((t.get("data_point") or "").strip())
+    data_point = "" if wiki_only else source_rules.strip_wikipedia(t.get("data_point") or "", supported_elsewhere=cite_ok)
+    t["data_point"] = data_point
+    t["citation"] = cite if (data_point.strip() or not had_data_point) else ""
+    for key in ("rationale", "entravision_advantage"):
+        t[key] = source_rules.strip_wikipedia(t.get(key) or "")
 
 
 def _error_brief(msg: str) -> dict:

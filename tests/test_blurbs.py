@@ -114,7 +114,10 @@ def test_prompt_demands_short_plain_blurbs_without_targeting_or_variants():
     assert "Do NOT repeat the audience, geography, language" in prompt
     assert "Never mention variants, tiers, versions or format options" in prompt
     assert "Never make claims about the language of the content, sites, apps, stations or publishers" in prompt
-    assert "never the client's audience or market" in prompt
+    # Updated (item 4, "more specific research"): the old rule barred ANY fact about the client's audience or market from a
+    # blurb. The rule now allows one such fact, but only as a real number with a named source — anything about an audience,
+    # a market or performance without BOTH is left out (enforced in code by claim_rules; see tests/test_ai_research_rules.py).
+    assert "Never state anything about an audience, a market or performance without BOTH the number and the source" in prompt
 
 
 def test_prompt_no_longer_forces_geo_demo_stats_or_hispanic_stats_into_every_blurb():

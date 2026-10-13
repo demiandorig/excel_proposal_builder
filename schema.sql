@@ -4,6 +4,7 @@
 -- "Development Database" had 0 tables at the time this was written).
 
 -- ---------------------------------------------------------------------------
+-- LEGACY (superseded by `products` at the end of this file; read only to seed it)
 -- rate_overrides — one row per BUILT-IN catalog product that has at least
 -- one field overridden. Mirrors app/catalog.py's _OVERRIDABLE_FIELDS
 -- exactly; add a column here if that tuple ever grows. Every column is
@@ -27,6 +28,7 @@ CREATE TABLE rate_overrides (
 );
 
 -- ---------------------------------------------------------------------------
+-- LEGACY (superseded by `products`; read only to seed it)
 -- custom_products — one row per admin-added product (full record, not a
 -- diff against anything). Column set matches app/catalog.py's Product
 -- dataclass field-for-field.
@@ -139,6 +141,9 @@ ON CONFLICT (market_key) DO NOTHING;
 -- ---------------------------------------------------------------------------
 ALTER TABLE market_config ADD COLUMN IF NOT EXISTS dsc_email TEXT;
 ALTER TABLE market_config ADD COLUMN IF NOT EXISTS dsm_email TEXT;
+-- research_emails: the market's research assignees (Admin -> Markets). They are CC'd on the Step 07 seller email for
+-- the market, like the DSC / DSM and the market's CC list. Several addresses, so a list like ccs.
+ALTER TABLE market_config ADD COLUMN IF NOT EXISTS research_emails TEXT[] NOT NULL DEFAULT '{}';
 
 -- ---------------------------------------------------------------------------
 -- Migration for an ALREADY-created rate_overrides table: adds rename +
@@ -392,8 +397,15 @@ CREATE TABLE IF NOT EXISTS restriction_categories (
     summary      TEXT NOT NULL DEFAULT '',
     body         TEXT NOT NULL DEFAULT '',
     product_map  JSONB NOT NULL DEFAULT '{}'::jsonb,
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    is_manual    BOOLEAN NOT NULL DEFAULT FALSE,
+    extra_notes  TEXT NOT NULL DEFAULT ''
 );
+-- is_manual: a category an admin added by hand in Admin -> Restrictions (not a sheet tab): a sheet sync never deletes
+-- it. extra_notes: rules an admin added to ANY category (sheet or hand-made); the Roadblocks AI reads them alongside
+-- the sheet text, and they survive a sync. For a table created before these columns existed:
+ALTER TABLE restriction_categories ADD COLUMN IF NOT EXISTS is_manual BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE restriction_categories ADD COLUMN IF NOT EXISTS extra_notes TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS restriction_sync (
     id            TEXT PRIMARY KEY DEFAULT 'default',
@@ -402,3 +414,98 @@ CREATE TABLE IF NOT EXISTS restriction_sync (
     synced_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     synced_by     TEXT
 );
+
+-- ---------------------------------------------------------------------------
+-- products — THE product list (Admin -> Products). Every product is an equal,
+-- fully editable row: there is no "original" catalog to revert to and no
+-- built-in/custom split. The first time the app reads an EMPTY table it seeds
+-- it from the rate card in app/catalog.py with every legacy override
+-- (rate_overrides), admin-added product (custom_products) and deletion folded
+-- in — those three older tables are only read for that, never written again,
+-- and can be dropped afterwards. is_deleted hides a row from every list but
+-- keeps it resolvable by name so an already-saved proposal never loses a line.
+-- sort_order is the display order. Idempotent like the other newer tables.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS products (
+    id                         BIGSERIAL PRIMARY KEY,
+    name                       TEXT NOT NULL UNIQUE,
+    sort_order                 INTEGER NOT NULL DEFAULT 0,
+    is_deleted                 BOOLEAN NOT NULL DEFAULT FALSE,
+    family                     TEXT NOT NULL,
+    short_label                TEXT NOT NULL DEFAULT 'Product',
+    proposal_description       TEXT NOT NULL DEFAULT '',
+    sizes                      TEXT NOT NULL DEFAULT 'Custom',
+    buying_model               TEXT NOT NULL CHECK (buying_model IN ('CPM', 'CPP', 'Fixed')),
+    base_rate                  NUMERIC(12, 2),
+    estimated_impressions      BOOLEAN NOT NULL DEFAULT FALSE,
+    discloses_impressions      BOOLEAN NOT NULL DEFAULT TRUE,
+    minimum_spend              NUMERIC(12, 2) NOT NULL DEFAULT 0,
+    minimum_flight_days_min    INTEGER NOT NULL DEFAULT 7,
+    minimum_flight_days_max    INTEGER NOT NULL DEFAULT 90,
+    sla_data_days              INTEGER,
+    sla_creative_days          INTEGER,
+    sla_activate_days          INTEGER,
+    sla_total_days             INTEGER,
+    media_allocation_pct       NUMERIC(5, 4) NOT NULL DEFAULT 0,
+    margin_upper               NUMERIC(5, 4) NOT NULL DEFAULT 0.5,
+    margin_lower               NUMERIC(5, 4) NOT NULL DEFAULT 0.3,
+    tech_platform              TEXT NOT NULL DEFAULT '',
+    wide_orbit_code            TEXT NOT NULL DEFAULT '',
+    billing_interval           TEXT NOT NULL DEFAULT 'Monthly',
+    billing_calendar           TEXT NOT NULL DEFAULT 'Standard/prorated',
+    billing_source             TEXT NOT NULL DEFAULT '1st Party Actual',
+    national_supported         BOOLEAN NOT NULL DEFAULT TRUE,
+    notes                      TEXT NOT NULL DEFAULT '',
+    estimated_cpm_for_imps     NUMERIC(12, 2),
+    hispanic_targeting_forced  BOOLEAN,
+    cannabis_policy            TEXT NOT NULL DEFAULT 'not_allowed'
+                                 CHECK (cannabis_policy IN ('allowed', 'custom_request_only', 'mh_only', 'not_allowed')),
+    political_policy           TEXT NOT NULL DEFAULT 'allowed'
+                                 CHECK (political_policy IN ('allowed', 'restricted', 'not_allowed')),
+    is_addon                   BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at                 TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                 TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS products_sort_idx ON products (sort_order, id);
+
+-- ---------------------------------------------------------------------------
+-- proposal_files — a shared copy of each generated proposal file's bytes
+-- (app/services/proposal_files.py). /api/generate writes the .xlsx to the LOCAL
+-- disk of whichever Autoscale instance served the request; the Google Drive
+-- upload can land on a different (or a freshly started) instance that has no
+-- such file, which used to surface as an intermittent HTTP 500. The bytes are
+-- kept here too so ANY instance can read them. One row per (proposal, kind),
+-- kind = 'xlsx' today. Idempotent, and every reader/writer is fail-safe if the
+-- table doesn't exist yet.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS proposal_files (
+    proposal_id  TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    filename     TEXT NOT NULL,
+    content      BYTEA NOT NULL,
+    size_bytes   INTEGER NOT NULL,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (proposal_id, kind)
+);
+
+-- ---------------------------------------------------------------------------
+-- faq_entries — the rows of the exports' "Process FAQs" tab, edited in Admin -> FAQ
+-- (app/services/faq_entries.py). section 'faq' = the FAQ table (SERVICES | Frequently
+-- Asked Question | Resource Link); 'restriction' = the "CATEGORY AND PRODUCT RESTRICTIONS"
+-- block under it. link_title is the clickable text, link_url where it goes ('' = plain
+-- text). An empty table is seeded with the built-in rows by the admin page; the export
+-- falls back to the same built-in rows when the table is empty or missing.
+-- Idempotent.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS faq_entries (
+    id          BIGSERIAL PRIMARY KEY,
+    section     TEXT NOT NULL DEFAULT 'faq' CHECK (section IN ('faq', 'restriction')),
+    services    TEXT NOT NULL,
+    question    TEXT NOT NULL,
+    link_title  TEXT NOT NULL DEFAULT '',
+    link_url    TEXT NOT NULL DEFAULT '',
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS faq_entries_sort_idx ON faq_entries (section, sort_order, id);

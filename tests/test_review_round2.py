@@ -156,8 +156,9 @@ def test_a_mapping_typed_under_an_intermediate_display_name_still_matches(monkey
                         lambda: {"Video - Pre-roll (OLV)": {"name": "Pre-roll C"}})
     monkeypatch.setattr("app.catalog.all_product_aliases",
                         lambda: {"Pre-roll B": "Pre-roll C", "Pre-roll A": "Pre-roll B"})
-    from app.catalog import name_variants
-    assert {"Video - Pre-roll (OLV)", "Pre-roll C", "Pre-roll B"} <= name_variants("Pre-roll C")
+    from app import catalog
+    catalog.invalidate_product_caches()
+    assert {"Pre-roll C", "Pre-roll B", "Pre-roll A"} <= catalog.name_variants("Pre-roll C")
 
 
 # --- Roadblocks: what the sheet may remove ----------------------------------------------------------------------------
