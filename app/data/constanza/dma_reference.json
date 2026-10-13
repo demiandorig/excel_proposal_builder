@@ -1,0 +1,2102 @@
+[
+  {
+    "rank": 1,
+    "dma": "New York",
+    "state": "NY",
+    "tv_hh": 7972763.82366138,
+    "population": 19692726.6444436,
+    "pct_us_population": 0.0608078049382065,
+    "pct_broadband": 0.926,
+    "tier": 1
+  },
+  {
+    "rank": 2,
+    "dma": "Los Angeles",
+    "state": "CA",
+    "tv_hh": 5912566.14374863,
+    "population": 16732562.1868086,
+    "pct_us_population": 0.0516673183933598,
+    "pct_broadband": 0.946,
+    "tier": 1
+  },
+  {
+    "rank": 3,
+    "dma": "Chicago",
+    "state": "IL",
+    "tv_hh": 3702832.1981883,
+    "population": 9071938.88556134,
+    "pct_us_population": 0.028012610956553,
+    "pct_broadband": 0.93,
+    "tier": 1
+  },
+  {
+    "rank": 4,
+    "dma": "Dallas-Ft. Worth",
+    "state": "TX",
+    "tv_hh": 3307437.90482625,
+    "population": 8963156.72207913,
+    "pct_us_population": 0.0276767100578499,
+    "pct_broadband": 0.932,
+    "tier": 1
+  },
+  {
+    "rank": 5,
+    "dma": "Philadelphia",
+    "state": "PA",
+    "tv_hh": 3187307.98794023,
+    "population": 7649539.17105654,
+    "pct_us_population": 0.0236204815198621,
+    "pct_broadband": 0.922,
+    "tier": 1
+  },
+  {
+    "rank": 6,
+    "dma": "Houston",
+    "state": "TX",
+    "tv_hh": 2947592.0163541,
+    "population": 7987974.36431962,
+    "pct_us_population": 0.024665512083061,
+    "pct_broadband": 0.932,
+    "tier": 1
+  },
+  {
+    "rank": 7,
+    "dma": "Atlanta",
+    "state": "GA",
+    "tv_hh": 2794456.71634914,
+    "population": 7265587.46250777,
+    "pct_us_population": 0.0224349036656287,
+    "pct_broadband": 0.928,
+    "tier": 1
+  },
+  {
+    "rank": 8,
+    "dma": "Washington, DC (Hagerstown)",
+    "state": "MD",
+    "tv_hh": 2665248.92095002,
+    "population": 6876342.21605104,
+    "pct_us_population": 0.0212329802627898,
+    "pct_broadband": 0.946,
+    "tier": 1
+  },
+  {
+    "rank": 9,
+    "dma": "San Francisco-Oakland-San Jose",
+    "state": "CA",
+    "tv_hh": 2575929.08058001,
+    "population": 7289879.29804143,
+    "pct_us_population": 0.0225099127399631,
+    "pct_broadband": 0.946,
+    "tier": 1
+  },
+  {
+    "rank": 10,
+    "dma": "Boston (Manchester)",
+    "state": "MA",
+    "tv_hh": 2618461.3729885,
+    "population": 6441414.97755172,
+    "pct_us_population": 0.0198899986047145,
+    "pct_broadband": 0.946,
+    "tier": 1
+  },
+  {
+    "rank": 11,
+    "dma": "Tampa-St. Pete (Sarasota)",
+    "state": "FL",
+    "tv_hh": 2250462.82013921,
+    "population": 5558643.16574385,
+    "pct_us_population": 0.0171641487462082,
+    "pct_broadband": 0.934,
+    "tier": 2
+  },
+  {
+    "rank": 12,
+    "dma": "Phoenix (Prescott)",
+    "state": "AZ",
+    "tv_hh": 2227119.70396266,
+    "population": 5656884.04806515,
+    "pct_us_population": 0.0174674999538397,
+    "pct_broadband": 0.933,
+    "tier": 2
+  },
+  {
+    "rank": 13,
+    "dma": "Seattle-Tacoma",
+    "state": "WA",
+    "tv_hh": 2125844.62180084,
+    "population": 5357128.44693812,
+    "pct_us_population": 0.016541905420814,
+    "pct_broadband": 0.954,
+    "tier": 2
+  },
+  {
+    "rank": 14,
+    "dma": "Detroit",
+    "state": "MI",
+    "tv_hh": 1966282.67012352,
+    "population": 4738741.23499769,
+    "pct_us_population": 0.0146324304334808,
+    "pct_broadband": 0.923,
+    "tier": 2
+  },
+  {
+    "rank": 15,
+    "dma": "Orlando-Daytona Bch-Melbrn",
+    "state": "FL",
+    "tv_hh": 1927448.39742182,
+    "population": 4760797.54163189,
+    "pct_us_population": 0.0147005365731579,
+    "pct_broadband": 0.934,
+    "tier": 2
+  },
+  {
+    "rank": 16,
+    "dma": "Minneapolis-St. Paul",
+    "state": "MN",
+    "tv_hh": 1911501.32065884,
+    "population": 4644948.20920099,
+    "pct_us_population": 0.014342813453558,
+    "pct_broadband": 0.935,
+    "tier": 2
+  },
+  {
+    "rank": 17,
+    "dma": "Denver",
+    "state": "CO",
+    "tv_hh": 1830033.43994024,
+    "population": 4465281.59345418,
+    "pct_us_population": 0.0137880333704595,
+    "pct_broadband": 0.953,
+    "tier": 2
+  },
+  {
+    "rank": 18,
+    "dma": "Miami-Ft. Lauderdale",
+    "state": "FL",
+    "tv_hh": 1851235.55467997,
+    "population": 4572551.82005953,
+    "pct_us_population": 0.0141192656641315,
+    "pct_broadband": 0.934,
+    "tier": 2
+  },
+  {
+    "rank": 19,
+    "dma": "Cleveland-Akron (Canton)",
+    "state": "OH",
+    "tv_hh": 1574789.02768507,
+    "population": 3747997.88589046,
+    "pct_us_population": 0.0115731827526455,
+    "pct_broadband": 0.922,
+    "tier": 2
+  },
+  {
+    "rank": 20,
+    "dma": "Sacramento-Stockton-Modesto",
+    "state": "CA",
+    "tv_hh": 1517626.76142287,
+    "population": 4294883.73482671,
+    "pct_us_population": 0.0132618736396926,
+    "pct_broadband": 0.946,
+    "tier": 2
+  },
+  {
+    "rank": 21,
+    "dma": "Charlotte",
+    "state": "NC",
+    "tv_hh": 1400201.97128126,
+    "population": 3430494.82963909,
+    "pct_us_population": 0.0105927870837062,
+    "pct_broadband": 0.923,
+    "tier": 2
+  },
+  {
+    "rank": 22,
+    "dma": "Raleigh-Durham (Fayetteville)",
+    "state": "NC",
+    "tv_hh": 1363545.98416027,
+    "population": 3340687.66119266,
+    "pct_us_population": 0.0103154777562808,
+    "pct_broadband": 0.923,
+    "tier": 2
+  },
+  {
+    "rank": 23,
+    "dma": "Portland, OR",
+    "state": "OR",
+    "tv_hh": 1294732.42293147,
+    "population": 3159147.11195279,
+    "pct_us_population": 0.00975491128390418,
+    "pct_broadband": 0.944,
+    "tier": 2
+  },
+  {
+    "rank": 24,
+    "dma": "St. Louis",
+    "state": "MO",
+    "tv_hh": 1290629.14079106,
+    "population": 3097509.93789855,
+    "pct_us_population": 0.0095645861286068,
+    "pct_broadband": 0.916,
+    "tier": 2
+  },
+  {
+    "rank": 25,
+    "dma": "Nashville",
+    "state": "TN",
+    "tv_hh": 1263786.58350019,
+    "population": 3121552.86124548,
+    "pct_us_population": 0.00963882660426165,
+    "pct_broadband": 0.915,
+    "tier": 2
+  },
+  {
+    "rank": 26,
+    "dma": "Indianapolis",
+    "state": "IN",
+    "tv_hh": 1248421.05832946,
+    "population": 3083600.01407377,
+    "pct_us_population": 0.00952163463946496,
+    "pct_broadband": 0.92,
+    "tier": 2
+  },
+  {
+    "rank": 27,
+    "dma": "Pittsburgh",
+    "state": "PA",
+    "tv_hh": 1183254.85900325,
+    "population": 2839811.6616078,
+    "pct_us_population": 0.00876885749231758,
+    "pct_broadband": 0.922,
+    "tier": 2
+  },
+  {
+    "rank": 28,
+    "dma": "Salt Lake City",
+    "state": "UT",
+    "tv_hh": 1178827.36691595,
+    "population": 3501117.27974036,
+    "pct_us_population": 0.010810857249791,
+    "pct_broadband": 0.955,
+    "tier": 2
+  },
+  {
+    "rank": 29,
+    "dma": "Baltimore",
+    "state": "MD",
+    "tv_hh": 1170195.27707982,
+    "population": 3019103.81486595,
+    "pct_us_population": 0.00932248129866581,
+    "pct_broadband": 0.946,
+    "tier": 2
+  },
+  {
+    "rank": 30,
+    "dma": "San Diego",
+    "state": "CA",
+    "tv_hh": 1130834.16321441,
+    "population": 3200260.68189679,
+    "pct_us_population": 0.00988186302535708,
+    "pct_broadband": 0.946,
+    "tier": 2
+  },
+  {
+    "rank": 31,
+    "dma": "San Antonio",
+    "state": "TX",
+    "tv_hh": 1110824.33055439,
+    "population": 3010333.93580239,
+    "pct_us_population": 0.00929540139728615,
+    "pct_broadband": 0.932,
+    "tier": 2
+  },
+  {
+    "rank": 32,
+    "dma": "Kansas City",
+    "state": "MO",
+    "tv_hh": 1047279.18096266,
+    "population": 2513470.03431038,
+    "pct_us_population": 0.00776116981278959,
+    "pct_broadband": 0.916,
+    "tier": 2
+  },
+  {
+    "rank": 33,
+    "dma": "Hartford & New Haven",
+    "state": "CT",
+    "tv_hh": 1074867.42113139,
+    "population": 2654922.53019454,
+    "pct_us_population": 0.00819795116526791,
+    "pct_broadband": 0.94,
+    "tier": 2
+  },
+  {
+    "rank": 34,
+    "dma": "Austin",
+    "state": "TX",
+    "tv_hh": 1085082.0607708,
+    "population": 2940572.38468887,
+    "pct_us_population": 0.0090799895414833,
+    "pct_broadband": 0.932,
+    "tier": 2
+  },
+  {
+    "rank": 35,
+    "dma": "Columbus, OH",
+    "state": "OH",
+    "tv_hh": 1031788.02443751,
+    "population": 2455655.49816127,
+    "pct_us_population": 0.00758264831598406,
+    "pct_broadband": 0.922,
+    "tier": 2
+  },
+  {
+    "rank": 36,
+    "dma": "Greenville-Spart-Ashevll-And",
+    "state": "SC",
+    "tv_hh": 1000734.79046132,
+    "population": 2491829.62824869,
+    "pct_us_population": 0.0076943479036481,
+    "pct_broadband": 0.916,
+    "tier": 2
+  },
+  {
+    "rank": 37,
+    "dma": "Cincinnati",
+    "state": "OH",
+    "tv_hh": 971241.816854573,
+    "population": 2311555.52411388,
+    "pct_us_population": 0.00713769199928495,
+    "pct_broadband": 0.922,
+    "tier": 2
+  },
+  {
+    "rank": 38,
+    "dma": "Milwaukee",
+    "state": "WI",
+    "tv_hh": 957331.183820542,
+    "population": 2249728.28197827,
+    "pct_us_population": 0.00694677994594011,
+    "pct_broadband": 0.924,
+    "tier": 2
+  },
+  {
+    "rank": 39,
+    "dma": "West Palm Beach-Ft. Pierce",
+    "state": "FL",
+    "tv_hh": 949114.487978882,
+    "population": 2344312.78530784,
+    "pct_us_population": 0.00723884087444866,
+    "pct_broadband": 0.934,
+    "tier": 2
+  },
+  {
+    "rank": 40,
+    "dma": "Las Vegas",
+    "state": "NV",
+    "tv_hh": 908253.903109073,
+    "population": 2334212.53099032,
+    "pct_us_population": 0.00720765299958221,
+    "pct_broadband": 0.94,
+    "tier": 2
+  },
+  {
+    "rank": 41,
+    "dma": "Jacksonville",
+    "state": "FL",
+    "tv_hh": 851395.583672086,
+    "population": 2102947.09167005,
+    "pct_us_population": 0.00649354448748832,
+    "pct_broadband": 0.934,
+    "tier": 2
+  },
+  {
+    "rank": 42,
+    "dma": "Harrisburg-Lncstr-Leb-York",
+    "state": "PA",
+    "tv_hh": 812915.915599799,
+    "population": 1950998.19743952,
+    "pct_us_population": 0.00602435203446894,
+    "pct_broadband": 0.922,
+    "tier": 2
+  },
+  {
+    "rank": 43,
+    "dma": "Grand Rapids-Kalmzoo-B.Crk",
+    "state": "MI",
+    "tv_hh": 811568.41800801,
+    "population": 1955879.8873993,
+    "pct_us_population": 0.00603942586635638,
+    "pct_broadband": 0.923,
+    "tier": 2
+  },
+  {
+    "rank": 44,
+    "dma": "Norfolk-Portsmth-Newpt Nws",
+    "state": "VA",
+    "tv_hh": 790231.350877879,
+    "population": 1999285.31772103,
+    "pct_us_population": 0.00617345448453188,
+    "pct_broadband": 0.938,
+    "tier": 2
+  },
+  {
+    "rank": 45,
+    "dma": "Birmingham (Ann and Tusc)",
+    "state": "AL",
+    "tv_hh": 782014.655036219,
+    "population": 1947216.49104019,
+    "pct_us_population": 0.00601267476553529,
+    "pct_broadband": 0.905,
+    "tier": 2
+  },
+  {
+    "rank": 46,
+    "dma": "Greensboro-H.Point-W.Salem",
+    "state": "NC",
+    "tv_hh": 777070.453346046,
+    "population": 1903822.61069781,
+    "pct_us_population": 0.00587868181174007,
+    "pct_broadband": 0.923,
+    "tier": 2
+  },
+  {
+    "rank": 47,
+    "dma": "Oklahoma City",
+    "state": "OK",
+    "tv_hh": 772734.145306305,
+    "population": 1939562.70471882,
+    "pct_us_population": 0.00598904116953453,
+    "pct_broadband": 0.908,
+    "tier": 2
+  },
+  {
+    "rank": 48,
+    "dma": "Albuquerque-Santa Fe",
+    "state": "NM",
+    "tv_hh": 717365.165312874,
+    "population": 1771891.9583228,
+    "pct_us_population": 0.00547130229950509,
+    "pct_broadband": 0.9,
+    "tier": 2
+  },
+  {
+    "rank": 49,
+    "dma": "Louisville",
+    "state": "KY",
+    "tv_hh": 711549.649390417,
+    "population": 1736181.14451262,
+    "pct_us_population": 0.00536103335404309,
+    "pct_broadband": 0.905,
+    "tier": 2
+  },
+  {
+    "rank": 50,
+    "dma": "New Orleans",
+    "state": "LA",
+    "tv_hh": 681641.281789208,
+    "population": 1717736.0301088,
+    "pct_us_population": 0.0053040779644223,
+    "pct_broadband": 0.898,
+    "tier": 2
+  },
+  {
+    "rank": 51,
+    "dma": "Memphis",
+    "state": "TN",
+    "tv_hh": 675065.898803712,
+    "population": 1667412.77004517,
+    "pct_us_population": 0.00514868825953003,
+    "pct_broadband": 0.915,
+    "tier": 3
+  },
+  {
+    "rank": 52,
+    "dma": "Providence-New Bedford",
+    "state": "RI",
+    "tv_hh": 671529.984070371,
+    "population": 1611671.96176889,
+    "pct_us_population": 0.00497657008321247,
+    "pct_broadband": 0.932,
+    "tier": 3
+  },
+  {
+    "rank": 53,
+    "dma": "Ft. Myers-Naples",
+    "state": "FL",
+    "tv_hh": 682808.944176077,
+    "population": 1686538.09211491,
+    "pct_us_population": 0.00520774401523086,
+    "pct_broadband": 0.934,
+    "tier": 3
+  },
+  {
+    "rank": 54,
+    "dma": "Fresno-Visalia",
+    "state": "CA",
+    "tv_hh": 644630.690038796,
+    "population": 1824304.85280979,
+    "pct_us_population": 0.00563314444161958,
+    "pct_broadband": 0.946,
+    "tier": 3
+  },
+  {
+    "rank": 55,
+    "dma": "Buffalo",
+    "state": "NY",
+    "tv_hh": 645471.609588559,
+    "population": 1594314.87568374,
+    "pct_us_population": 0.00492297434078342,
+    "pct_broadband": 0.926,
+    "tier": 3
+  },
+  {
+    "rank": 56,
+    "dma": "Richmond-Petersburg",
+    "state": "VA",
+    "tv_hh": 633607.551844312,
+    "population": 1603027.10616611,
+    "pct_us_population": 0.0049498762331071,
+    "pct_broadband": 0.938,
+    "tier": 3
+  },
+  {
+    "rank": 57,
+    "dma": "Mobile-Pensacola (Ft Walt)",
+    "state": "AL",
+    "tv_hh": 613303.903919914,
+    "population": 1527126.72076059,
+    "pct_us_population": 0.00471550869661484,
+    "pct_broadband": 0.905,
+    "tier": 3
+  },
+  {
+    "rank": 58,
+    "dma": "Little Rock-Pine Bluff",
+    "state": "AR",
+    "tv_hh": 598754.98255293,
+    "population": 1478924.80690574,
+    "pct_us_population": 0.00456666934956785,
+    "pct_broadband": 0.898,
+    "tier": 3
+  },
+  {
+    "rank": 59,
+    "dma": "Wilkes Barre-Scranton-Hztn",
+    "state": "PA",
+    "tv_hh": 596941.433162477,
+    "population": 1432659.43958995,
+    "pct_us_population": 0.00442380973028162,
+    "pct_broadband": 0.922,
+    "tier": 3
+  },
+  {
+    "rank": 60,
+    "dma": "Knoxville",
+    "state": "TN",
+    "tv_hh": 591784.468694654,
+    "population": 1461707.6376758,
+    "pct_us_population": 0.00451350564669292,
+    "pct_broadband": 0.915,
+    "tier": 3
+  },
+  {
+    "rank": 61,
+    "dma": "Tulsa",
+    "state": "OK",
+    "tv_hh": 583355.010075343,
+    "population": 1464221.07528911,
+    "pct_us_population": 0.00452126671639517,
+    "pct_broadband": 0.908,
+    "tier": 3
+  },
+  {
+    "rank": 62,
+    "dma": "Albany-Schenectady-Troy",
+    "state": "NY",
+    "tv_hh": 583162.510419373,
+    "population": 1440411.40073585,
+    "pct_us_population": 0.00444774647351477,
+    "pct_broadband": 0.926,
+    "tier": 3
+  },
+  {
+    "rank": 63,
+    "dma": "Lexington",
+    "state": "KY",
+    "tv_hh": 524470.378470253,
+    "population": 1279707.72346742,
+    "pct_us_population": 0.00395152073308645,
+    "pct_broadband": 0.905,
+    "tier": 3
+  },
+  {
+    "rank": 64,
+    "dma": "Dayton",
+    "state": "OH",
+    "tv_hh": 504754.361074605,
+    "population": 1201315.37935756,
+    "pct_us_population": 0.00370945845012545,
+    "pct_broadband": 0.922,
+    "tier": 3
+  },
+  {
+    "rank": 65,
+    "dma": "Tucson (Sierra Vista)",
+    "state": "AZ",
+    "tv_hh": 504207.256789217,
+    "population": 1280686.43224461,
+    "pct_us_population": 0.00395454282004726,
+    "pct_broadband": 0.933,
+    "tier": 3
+  },
+  {
+    "rank": 66,
+    "dma": "Spokane",
+    "state": "WA",
+    "tv_hh": 502788.838271544,
+    "population": 1267027.87244429,
+    "pct_us_population": 0.00391236750044473,
+    "pct_broadband": 0.954,
+    "tier": 3
+  },
+  {
+    "rank": 67,
+    "dma": "Des Moines-Ames",
+    "state": "IA",
+    "tv_hh": 486872.15619109,
+    "population": 1149018.28861097,
+    "pct_us_population": 0.00354797389035011,
+    "pct_broadband": 0.92,
+    "tier": 3
+  },
+  {
+    "rank": 68,
+    "dma": "Green Bay-Appleton",
+    "state": "WI",
+    "tv_hh": 485271.369578289,
+    "population": 1140387.71850898,
+    "pct_us_population": 0.00352132415145193,
+    "pct_broadband": 0.924,
+    "tier": 3
+  },
+  {
+    "rank": 69,
+    "dma": "Honolulu",
+    "state": "HI",
+    "tv_hh": 476710.200668051,
+    "population": 1368158.27591731,
+    "pct_us_population": 0.00422464106005586,
+    "pct_broadband": 0.938,
+    "tier": 3
+  },
+  {
+    "rank": 70,
+    "dma": "Roanoke-Lynchburg",
+    "state": "VA",
+    "tv_hh": 466051.798663826,
+    "population": 1179111.05061948,
+    "pct_us_population": 0.00364089524325893,
+    "pct_broadband": 0.938,
+    "tier": 3
+  },
+  {
+    "rank": 71,
+    "dma": "Wichita-Hutchinson Plus",
+    "state": "KS",
+    "tv_hh": 465028.511018934,
+    "population": 1143970.13710658,
+    "pct_us_population": 0.00353238605340299,
+    "pct_broadband": 0.928,
+    "tier": 3
+  },
+  {
+    "rank": 72,
+    "dma": "Flint-Saginaw-Bay City",
+    "state": "MI",
+    "tv_hh": 464744.827315399,
+    "population": 1120035.03383011,
+    "pct_us_population": 0.00345847850786654,
+    "pct_broadband": 0.923,
+    "tier": 3
+  },
+  {
+    "rank": 73,
+    "dma": "Omaha",
+    "state": "NE",
+    "tv_hh": 464106.538982447,
+    "population": 1123137.82433752,
+    "pct_us_population": 0.00346805939949953,
+    "pct_broadband": 0.923,
+    "tier": 3
+  },
+  {
+    "rank": 74,
+    "dma": "Springfield, MO",
+    "state": "MO",
+    "tv_hh": 460256.54586305,
+    "population": 1104615.71007132,
+    "pct_us_population": 0.00341086624734353,
+    "pct_broadband": 0.916,
+    "tier": 3
+  },
+  {
+    "rank": 75,
+    "dma": "Huntsville-Decatur (Flor)",
+    "state": "AL",
+    "tv_hh": 458179.575890744,
+    "population": 1140867.14396795,
+    "pct_us_population": 0.00352280453607911,
+    "pct_broadband": 0.905,
+    "tier": 3
+  },
+  {
+    "rank": 76,
+    "dma": "Columbia, SC",
+    "state": "SC",
+    "tv_hh": 456366.026500291,
+    "population": 1136351.40598572,
+    "pct_us_population": 0.00350886070192485,
+    "pct_broadband": 0.916,
+    "tier": 3
+  },
+  {
+    "rank": 77,
+    "dma": "Madison",
+    "state": "WI",
+    "tv_hh": 449051.039573437,
+    "population": 1055269.94299758,
+    "pct_us_population": 0.00325849487526677,
+    "pct_broadband": 0.924,
+    "tier": 3
+  },
+  {
+    "rank": 78,
+    "dma": "Portland-Auburn",
+    "state": "ME",
+    "tv_hh": 444805.91558126,
+    "population": 1023053.6058369,
+    "pct_us_population": 0.00315901628191298,
+    "pct_broadband": 0.928,
+    "tier": 3
+  },
+  {
+    "rank": 79,
+    "dma": "Rochester, NY",
+    "state": "NY",
+    "tv_hh": 441594.210794816,
+    "population": 1090737.70066319,
+    "pct_us_population": 0.00336801330451562,
+    "pct_broadband": 0.926,
+    "tier": 3
+  },
+  {
+    "rank": 80,
+    "dma": "Harlingen-Wslco-Brnsvl-McA",
+    "state": "TX",
+    "tv_hh": 433873.961434341,
+    "population": 1175798.43548706,
+    "pct_us_population": 0.00363066644871746,
+    "pct_broadband": 0.932,
+    "tier": 3
+  },
+  {
+    "rank": 81,
+    "dma": "Toledo",
+    "state": "OH",
+    "tv_hh": 429628.837442164,
+    "population": 1022516.63311235,
+    "pct_us_population": 0.00315735820107527,
+    "pct_broadband": 0.922,
+    "tier": 3
+  },
+  {
+    "rank": 82,
+    "dma": "Charleston-Huntington",
+    "state": "WV",
+    "tv_hh": 427713.972443306,
+    "population": 1009404.9749662,
+    "pct_us_population": 0.00311687162116367,
+    "pct_broadband": 0.895,
+    "tier": 3
+  },
+  {
+    "rank": 83,
+    "dma": "Waco-Temple-Bryan",
+    "state": "TX",
+    "tv_hh": 425120.292868133,
+    "population": 1152075.99367264,
+    "pct_us_population": 0.00355741556576183,
+    "pct_broadband": 0.932,
+    "tier": 3
+  },
+  {
+    "rank": 84,
+    "dma": "Savannah",
+    "state": "GA",
+    "tv_hh": 405454.933276688,
+    "population": 1054182.82651939,
+    "pct_us_population": 0.00325513804368401,
+    "pct_broadband": 0.928,
+    "tier": 3
+  },
+  {
+    "rank": 85,
+    "dma": "Charleston, SC",
+    "state": "SC",
+    "tv_hh": 405221.907377356,
+    "population": 1009002.54936962,
+    "pct_us_population": 0.00311562899907171,
+    "pct_broadband": 0.916,
+    "tier": 3
+  },
+  {
+    "rank": 86,
+    "dma": "Chattanooga",
+    "state": "TN",
+    "tv_hh": 396518.896615351,
+    "population": 979401.674639918,
+    "pct_us_population": 0.00302422651077933,
+    "pct_broadband": 0.915,
+    "tier": 3
+  },
+  {
+    "rank": 87,
+    "dma": "Colorado Springs-Pueblo",
+    "state": "CO",
+    "tv_hh": 393844.164553455,
+    "population": 960979.761510429,
+    "pct_us_population": 0.00296734276276455,
+    "pct_broadband": 0.953,
+    "tier": 3
+  },
+  {
+    "rank": 88,
+    "dma": "Syracuse",
+    "state": "NY",
+    "tv_hh": 392121.799210567,
+    "population": 968540.844050099,
+    "pct_us_population": 0.00299069010518672,
+    "pct_broadband": 0.926,
+    "tier": 3
+  },
+  {
+    "rank": 89,
+    "dma": "El Paso (Las Cruces)",
+    "state": "TX",
+    "tv_hh": 390146.144846666,
+    "population": 1057296.05253446,
+    "pct_us_population": 0.00326475115839744,
+    "pct_broadband": 0.932,
+    "tier": 3
+  },
+  {
+    "rank": 90,
+    "dma": "Paducah-Cape Girard-Harsbg",
+    "state": "KY",
+    "tv_hh": 383499.840935286,
+    "population": 935739.611882097,
+    "pct_us_population": 0.00288940545510158,
+    "pct_broadband": 0.905,
+    "tier": 3
+  },
+  {
+    "rank": 91,
+    "dma": "Shreveport",
+    "state": "LA",
+    "tv_hh": 379963.926201945,
+    "population": 957509.094028901,
+    "pct_us_population": 0.002956625929335,
+    "pct_broadband": 0.898,
+    "tier": 3
+  },
+  {
+    "rank": 92,
+    "dma": "Champaign&Sprngfld-Decatur",
+    "state": "IL",
+    "tv_hh": 376407.748346923,
+    "population": 922198.983449962,
+    "pct_us_population": 0.00284759428759247,
+    "pct_broadband": 0.93,
+    "tier": 3
+  },
+  {
+    "rank": 93,
+    "dma": "Burlington-Plattsburgh",
+    "state": "VT",
+    "tv_hh": 374705.646125716,
+    "population": 854328.873166633,
+    "pct_us_population": 0.00263802288076,
+    "pct_broadband": 0.925,
+    "tier": 3
+  },
+  {
+    "rank": 94,
+    "dma": "Cedar Rapids-Wtrlo-IWC&Dub",
+    "state": "IA",
+    "tv_hh": 368920.52488578,
+    "population": 870652.438730442,
+    "pct_us_population": 0.00268842728684463,
+    "pct_broadband": 0.92,
+    "tier": 3
+  },
+  {
+    "rank": 95,
+    "dma": "Baton Rouge",
+    "state": "LA",
+    "tv_hh": 360440.408462267,
+    "population": 908309.829324913,
+    "pct_us_population": 0.00280470693176605,
+    "pct_broadband": 0.898,
+    "tier": 3
+  },
+  {
+    "rank": 96,
+    "dma": "Ft. Smith-Fay-Sprngdl-Rgrs",
+    "state": "AR",
+    "tv_hh": 357046.335580693,
+    "population": 881904.448884313,
+    "pct_us_population": 0.00272317158868525,
+    "pct_broadband": 0.898,
+    "tier": 3
+  },
+  {
+    "rank": 97,
+    "dma": "Myrtle Beach-Florence",
+    "state": "SC",
+    "tv_hh": 352233.844181447,
+    "population": 877062.272011804,
+    "pct_us_population": 0.00270821976651983,
+    "pct_broadband": 0.916,
+    "tier": 3
+  },
+  {
+    "rank": 98,
+    "dma": "Boise",
+    "state": "ID",
+    "tv_hh": 349792.138018883,
+    "population": 909459.558849094,
+    "pct_us_population": 0.00280825710183139,
+    "pct_broadband": 0.938,
+    "tier": 3
+  },
+  {
+    "rank": 99,
+    "dma": "Jackson, MS",
+    "state": "MS",
+    "tv_hh": 343632.149027848,
+    "population": 869389.337040454,
+    "pct_us_population": 0.00268452704273072,
+    "pct_broadband": 0.886,
+    "tier": 3
+  },
+  {
+    "rank": 100,
+    "dma": "South Bend-Elkhart",
+    "state": "IN",
+    "tv_hh": 336165.188688386,
+    "population": 830328.016060313,
+    "pct_us_population": 0.00256391229853229,
+    "pct_broadband": 0.92,
+    "tier": 3
+  },
+  {
+    "rank": 101,
+    "dma": "Tri-Cities, TN-VA",
+    "state": "TN",
+    "tv_hh": 335881.504984851,
+    "population": 829627.317312583,
+    "pct_us_population": 0.0025617486594618,
+    "pct_broadband": 0.915,
+    "tier": 4
+  },
+  {
+    "rank": 102,
+    "dma": "Greenville-N.Bern-Washngtn",
+    "state": "NC",
+    "tv_hh": 323551.395441941,
+    "population": 792700.918832755,
+    "pct_us_population": 0.00244772619439776,
+    "pct_broadband": 0.923,
+    "tier": 4
+  },
+  {
+    "rank": 103,
+    "dma": "Reno",
+    "state": "NV",
+    "tv_hh": 319498.771105734,
+    "population": 821111.841741736,
+    "pct_us_population": 0.00253545431298468,
+    "pct_broadband": 0.94,
+    "tier": 4
+  },
+  {
+    "rank": 104,
+    "dma": "Davenport-R.Island-Moline",
+    "state": "IA",
+    "tv_hh": 308850.500662349,
+    "population": 728887.181563145,
+    "pct_us_population": 0.00225068018048971,
+    "pct_broadband": 0.92,
+    "tier": 4
+  },
+  {
+    "rank": 105,
+    "dma": "Tallahassee-Thomasville",
+    "state": "FL",
+    "tv_hh": 307523.266192242,
+    "population": 759582.467494837,
+    "pct_us_population": 0.00234546202523661,
+    "pct_broadband": 0.934,
+    "tier": 4
+  },
+  {
+    "rank": 106,
+    "dma": "Tyler-Longview(Lfkn&Ncgd)",
+    "state": "TX",
+    "tv_hh": 301819.19743903,
+    "population": 817930.025059771,
+    "pct_us_population": 0.00252562940190765,
+    "pct_broadband": 0.932,
+    "tier": 4
+  },
+  {
+    "rank": 107,
+    "dma": "Lincoln & Hastings-Krny",
+    "state": "NE",
+    "tv_hh": 300400.778921357,
+    "population": 726969.884989685,
+    "pct_us_population": 0.00224475989336276,
+    "pct_broadband": 0.923,
+    "tier": 4
+  },
+  {
+    "rank": 108,
+    "dma": "Augusta-Aiken",
+    "state": "GA",
+    "tv_hh": 294899.341384956,
+    "population": 766738.287600886,
+    "pct_us_population": 0.00236755798589446,
+    "pct_broadband": 0.928,
+    "tier": 4
+  },
+  {
+    "rank": 109,
+    "dma": "Evansville",
+    "state": "IN",
+    "tv_hh": 294615.657681422,
+    "population": 727700.674473112,
+    "pct_us_population": 0.00224701644752925,
+    "pct_broadband": 0.92,
+    "tier": 4
+  },
+  {
+    "rank": 110,
+    "dma": "Ft. Wayne",
+    "state": "IN",
+    "tv_hh": 294342.105538728,
+    "population": 727025.000680657,
+    "pct_us_population": 0.0022449300812827,
+    "pct_broadband": 0.92,
+    "tier": 4
+  },
+  {
+    "rank": 111,
+    "dma": "Sioux Falls (Mitchell)",
+    "state": "SD",
+    "tv_hh": 290370.533689245,
+    "population": 693985.575517295,
+    "pct_us_population": 0.00214290993156559,
+    "pct_broadband": 0.915,
+    "tier": 4
+  },
+  {
+    "rank": 112,
+    "dma": "Johnstown-Altoona-St Colge",
+    "state": "PA",
+    "tv_hh": 289276.325118469,
+    "population": 694263.180284325,
+    "pct_us_population": 0.00214376712807415,
+    "pct_broadband": 0.922,
+    "tier": 4
+  },
+  {
+    "rank": 113,
+    "dma": "Fargo-Valley City",
+    "state": "ND",
+    "tv_hh": 272853.064995989,
+    "population": 624833.518840815,
+    "pct_us_population": 0.00192938009136718,
+    "pct_broadband": 0.91,
+    "tier": 4
+  },
+  {
+    "rank": 114,
+    "dma": "Yakima-Pasco-Rchlnd-Knnwck",
+    "state": "WA",
+    "tv_hh": 271556.225208403,
+    "population": 684321.687525175,
+    "pct_us_population": 0.00211306948201387,
+    "pct_broadband": 0.954,
+    "tier": 4
+  },
+  {
+    "rank": 115,
+    "dma": "Springfield-Holyoke",
+    "state": "MA",
+    "tv_hh": 270725.43721948,
+    "population": 665984.575559922,
+    "pct_us_population": 0.00205644758563327,
+    "pct_broadband": 0.946,
+    "tier": 4
+  },
+  {
+    "rank": 116,
+    "dma": "Traverse City-Cadillac",
+    "state": "MI",
+    "tv_hh": 270472.148198467,
+    "population": 651837.877158306,
+    "pct_us_population": 0.00201276497669563,
+    "pct_broadband": 0.923,
+    "tier": 4
+  },
+  {
+    "rank": 117,
+    "dma": "Lansing",
+    "state": "MI",
+    "tv_hh": 269327.281823489,
+    "population": 649078.749194608,
+    "pct_us_population": 0.00200424525679877,
+    "pct_broadband": 0.923,
+    "tier": 4
+  },
+  {
+    "rank": 118,
+    "dma": "Youngstown",
+    "state": "OH",
+    "tv_hh": 266460.050105622,
+    "population": 634174.919251381,
+    "pct_us_population": 0.00195822475387996,
+    "pct_broadband": 0.922,
+    "tier": 4
+  },
+  {
+    "rank": 119,
+    "dma": "Macon",
+    "state": "GA",
+    "tv_hh": 261799.532118984,
+    "population": 680678.783509358,
+    "pct_us_population": 0.00210182081133449,
+    "pct_broadband": 0.928,
+    "tier": 4
+  },
+  {
+    "rank": 120,
+    "dma": "Eugene",
+    "state": "OR",
+    "tv_hh": 259388.220638941,
+    "population": 632907.258359015,
+    "pct_us_population": 0.00195431043172119,
+    "pct_broadband": 0.944,
+    "tier": 4
+  },
+  {
+    "rank": 121,
+    "dma": "Montgomery-Selma",
+    "state": "AL",
+    "tv_hh": 252377.180537302,
+    "population": 628419.179537883,
+    "pct_us_population": 0.00194045200437235,
+    "pct_broadband": 0.905,
+    "tier": 4
+  },
+  {
+    "rank": 122,
+    "dma": "Peoria-Bloomington",
+    "state": "IL",
+    "tv_hh": 249509.948819436,
+    "population": 611299.374607618,
+    "pct_us_population": 0.00188758894596629,
+    "pct_broadband": 0.93,
+    "tier": 4
+  },
+  {
+    "rank": 123,
+    "dma": "Santa Barbra-Sntmra-Slobs",
+    "state": "CA",
+    "tv_hh": 249185.738872539,
+    "population": 705195.641009286,
+    "pct_us_population": 0.00217752471539361,
+    "pct_broadband": 0.946,
+    "tier": 4
+  },
+  {
+    "rank": 124,
+    "dma": "Lafayette, LA",
+    "state": "LA",
+    "tv_hh": 248436.003370341,
+    "population": 626058.728493259,
+    "pct_us_population": 0.00193316333128613,
+    "pct_broadband": 0.898,
+    "tier": 4
+  },
+  {
+    "rank": 125,
+    "dma": "Bakersfield",
+    "state": "CA",
+    "tv_hh": 247524.162894694,
+    "population": 700493.380991985,
+    "pct_us_population": 0.00216300493278232,
+    "pct_broadband": 0.946,
+    "tier": 4
+  },
+  {
+    "rank": 126,
+    "dma": "Wilmington",
+    "state": "NC",
+    "tv_hh": 243370.222950082,
+    "population": 596257.046227701,
+    "pct_us_population": 0.00184114078332953,
+    "pct_broadband": 0.923,
+    "tier": 4
+  },
+  {
+    "rank": 127,
+    "dma": "Columbus, GA (Opelika, AL)",
+    "state": "GA",
+    "tv_hh": 237534.443905944,
+    "population": 617589.554155453,
+    "pct_us_population": 0.00190701195517558,
+    "pct_broadband": 0.928,
+    "tier": 4
+  },
+  {
+    "rank": 128,
+    "dma": "Monterey-Salinas",
+    "state": "CA",
+    "tv_hh": 233988.397611762,
+    "population": 662187.165241287,
+    "pct_us_population": 0.00204472182565624,
+    "pct_broadband": 0.946,
+    "tier": 4
+  },
+  {
+    "rank": 129,
+    "dma": "La Crosse-Eau Claire",
+    "state": "WI",
+    "tv_hh": 227068.541557688,
+    "population": 533611.072660568,
+    "pct_us_population": 0.00164770062597534,
+    "pct_broadband": 0.924,
+    "tier": 4
+  },
+  {
+    "rank": 130,
+    "dma": "Corpus Christi",
+    "state": "TX",
+    "tv_hh": 212539.883312386,
+    "population": 575983.083776565,
+    "pct_us_population": 0.00177853822065185,
+    "pct_broadband": 0.932,
+    "tier": 4
+  },
+  {
+    "rank": 131,
+    "dma": "Salisbury",
+    "state": "MD",
+    "tv_hh": 201547.139800424,
+    "population": 519991.620685093,
+    "pct_us_population": 0.00160564606471307,
+    "pct_broadband": 0.946,
+    "tier": 4
+  },
+  {
+    "rank": 132,
+    "dma": "Amarillo",
+    "state": "TX",
+    "tv_hh": 201405.297948656,
+    "population": 545808.357440859,
+    "pct_us_population": 0.00168536377578121,
+    "pct_broadband": 0.932,
+    "tier": 4
+  },
+  {
+    "rank": 133,
+    "dma": "Wausau-Rhinelander",
+    "state": "WI",
+    "tv_hh": 196683.990596975,
+    "population": 462207.377902892,
+    "pct_us_population": 0.00142721810869441,
+    "pct_broadband": 0.924,
+    "tier": 4
+  },
+  {
+    "rank": 134,
+    "dma": "Columbus-Tupelo-W Pnt-Hstn",
+    "state": "MS",
+    "tv_hh": 193462.15424969,
+    "population": 489459.250251717,
+    "pct_us_population": 0.00151136727543542,
+    "pct_broadband": 0.886,
+    "tier": 4
+  },
+  {
+    "rank": 135,
+    "dma": "Columbia-Jefferson City",
+    "state": "MO",
+    "tv_hh": 192874.52372094,
+    "population": 462898.856930257,
+    "pct_us_population": 0.00142935327882977,
+    "pct_broadband": 0.916,
+    "tier": 4
+  },
+  {
+    "rank": 136,
+    "dma": "Chico-Redding",
+    "state": "CA",
+    "tv_hh": 190797.553748634,
+    "population": 539957.077108635,
+    "pct_us_population": 0.00166729601302266,
+    "pct_broadband": 0.946,
+    "tier": 4
+  },
+  {
+    "rank": 137,
+    "dma": "Rockford",
+    "state": "IL",
+    "tv_hh": 183290.06716581,
+    "population": 449060.664556235,
+    "pct_us_population": 0.00138662328426021,
+    "pct_broadband": 0.93,
+    "tier": 4
+  },
+  {
+    "rank": 138,
+    "dma": "Duluth-Superior",
+    "state": "MN",
+    "tv_hh": 182074.279864948,
+    "population": 442440.500071824,
+    "pct_us_population": 0.00136618133744933,
+    "pct_broadband": 0.935,
+    "tier": 4
+  },
+  {
+    "rank": 139,
+    "dma": "Medford-Klamath Falls",
+    "state": "OR",
+    "tv_hh": 179318.495316327,
+    "population": 437537.128571839,
+    "pct_us_population": 0.00135104055663751,
+    "pct_broadband": 0.944,
+    "tier": 4
+  },
+  {
+    "rank": 140,
+    "dma": "Lubbock",
+    "state": "TX",
+    "tv_hh": 178730.864787577,
+    "population": 484360.643574334,
+    "pct_us_population": 0.00149562364145864,
+    "pct_broadband": 0.932,
+    "tier": 4
+  },
+  {
+    "rank": 141,
+    "dma": "Topeka",
+    "state": "KS",
+    "tv_hh": 178568.759814129,
+    "population": 439279.149142757,
+    "pct_us_population": 0.00135641962115139,
+    "pct_broadband": 0.928,
+    "tier": 4
+  },
+  {
+    "rank": 142,
+    "dma": "Monroe-El Dorado",
+    "state": "LA",
+    "tv_hh": 173553.637198073,
+    "population": 437355.165739143,
+    "pct_us_population": 0.00135047868622533,
+    "pct_broadband": 0.898,
+    "tier": 4
+  },
+  {
+    "rank": 143,
+    "dma": "Beaumont-Port Arthur",
+    "state": "TX",
+    "tv_hh": 172662.059844107,
+    "population": 467914.18217753,
+    "pct_us_population": 0.00144483975385398,
+    "pct_broadband": 0.932,
+    "tier": 4
+  },
+  {
+    "rank": 144,
+    "dma": "Odessa-Midland",
+    "state": "TX",
+    "tv_hh": 171618.509077534,
+    "population": 465086.159600116,
+    "pct_us_population": 0.00143610729905719,
+    "pct_broadband": 0.932,
+    "tier": 4
+  },
+  {
+    "rank": 145,
+    "dma": "Palm Springs",
+    "state": "CA",
+    "tv_hh": 169257.855401693,
+    "population": 478999.730786791,
+    "pct_us_population": 0.00147907005063491,
+    "pct_broadband": 0.946,
+    "tier": 4
+  },
+  {
+    "rank": 146,
+    "dma": "Anchorage",
+    "state": "AK",
+    "tv_hh": 167930.620931585,
+    "population": 456771.288933912,
+    "pct_us_population": 0.00141043238655341,
+    "pct_broadband": 0.935,
+    "tier": 4
+  },
+  {
+    "rank": 147,
+    "dma": "Minot-Bsmrck-Dcknsn(Wlstn)",
+    "state": "ND",
+    "tv_hh": 166015.755932727,
+    "population": 380176.081085945,
+    "pct_us_population": 0.00117391935602624,
+    "pct_broadband": 0.91,
+    "tier": 4
+  },
+  {
+    "rank": 148,
+    "dma": "Panama City",
+    "state": "FL",
+    "tv_hh": 165245.757308848,
+    "population": 408157.020552854,
+    "pct_us_population": 0.00126031975856123,
+    "pct_broadband": 0.934,
+    "tier": 4
+  },
+  {
+    "rank": 149,
+    "dma": "Sioux City",
+    "state": "IA",
+    "tv_hh": 159592.346359839,
+    "population": 376637.93740922,
+    "pct_us_population": 0.00116299416753293,
+    "pct_broadband": 0.92,
+    "tier": 4
+  },
+  {
+    "rank": 150,
+    "dma": "Wichita Falls & Lawton",
+    "state": "TX",
+    "tv_hh": 158741.295249235,
+    "population": 430188.910125428,
+    "pct_us_population": 0.00132835050248704,
+    "pct_broadband": 0.932,
+    "tier": 4
+  },
+  {
+    "rank": 151,
+    "dma": "Joplin-Pittsburg",
+    "state": "MO",
+    "tv_hh": 157282.350488201,
+    "population": 377477.641171682,
+    "pct_us_population": 0.00116558703054858,
+    "pct_broadband": 0.916,
+    "tier": 5
+  },
+  {
+    "rank": 152,
+    "dma": "Albany, GA",
+    "state": "GA",
+    "tv_hh": 155104.064907489,
+    "population": 403270.568759472,
+    "pct_us_population": 0.00124523122293807,
+    "pct_broadband": 0.928,
+    "tier": 5
+  },
+  {
+    "rank": 153,
+    "dma": "Rochestr-Mason City-Austin",
+    "state": "MN",
+    "tv_hh": 154729.19715639,
+    "population": 375991.949090028,
+    "pct_us_population": 0.00116099946500062,
+    "pct_broadband": 0.935,
+    "tier": 5
+  },
+  {
+    "rank": 154,
+    "dma": "Erie",
+    "state": "PA",
+    "tv_hh": 153239.857712834,
+    "population": 367775.658510802,
+    "pct_us_population": 0.00113562895111101,
+    "pct_broadband": 0.922,
+    "tier": 5
+  },
+  {
+    "rank": 155,
+    "dma": "Idaho Fals-Pocatllo(Jcksn)",
+    "state": "ID",
+    "tv_hh": 150129.468534795,
+    "population": 390336.618190467,
+    "pct_us_population": 0.00120529337393013,
+    "pct_broadband": 0.938,
+    "tier": 5
+  },
+  {
+    "rank": 156,
+    "dma": "Bangor",
+    "state": "ME",
+    "tv_hh": 148994.733720657,
+    "population": 342687.887557511,
+    "pct_us_population": 0.00105816216299142,
+    "pct_broadband": 0.928,
+    "tier": 5
+  },
+  {
+    "rank": 157,
+    "dma": "Gainesville",
+    "state": "FL",
+    "tv_hh": 148488.155678631,
+    "population": 366765.744526219,
+    "pct_us_population": 0.00113251050775435,
+    "pct_broadband": 0.934,
+    "tier": 5
+  },
+  {
+    "rank": 158,
+    "dma": "Biloxi-Gulfport",
+    "state": "MS",
+    "tv_hh": 146867.105944148,
+    "population": 371573.778038695,
+    "pct_us_population": 0.00114735690100612,
+    "pct_broadband": 0.886,
+    "tier": 5
+  },
+  {
+    "rank": 159,
+    "dma": "Terre Haute",
+    "state": "IN",
+    "tv_hh": 144536.846950829,
+    "population": 357006.011968548,
+    "pct_us_population": 0.00110237410641536,
+    "pct_broadband": 0.92,
+    "tier": 5
+  },
+  {
+    "rank": 160,
+    "dma": "Sherman-Ada",
+    "state": "TX",
+    "tv_hh": 142064.746105743,
+    "population": 384995.461946563,
+    "pct_us_population": 0.00118880078796741,
+    "pct_broadband": 0.932,
+    "tier": 5
+  },
+  {
+    "rank": 161,
+    "dma": "Missoula",
+    "state": "MT",
+    "tv_hh": 140119.486424363,
+    "population": 329280.793097254,
+    "pct_us_population": 0.00101676332577364,
+    "pct_broadband": 0.92,
+    "tier": 5
+  },
+  {
+    "rank": 162,
+    "dma": "Binghamton",
+    "state": "NY",
+    "tv_hh": 134435.680792833,
+    "population": 332056.131558297,
+    "pct_us_population": 0.00102533310094108,
+    "pct_broadband": 0.926,
+    "tier": 5
+  },
+  {
+    "rank": 163,
+    "dma": "Wheeling-Steubenville",
+    "state": "WV",
+    "tv_hh": 128214.902436755,
+    "population": 302587.169750741,
+    "pct_us_population": 0.000934337937412978,
+    "pct_broadband": 0.895,
+    "tier": 5
+  },
+  {
+    "rank": 164,
+    "dma": "Yuma-El Centro",
+    "state": "AZ",
+    "tv_hh": 126300.037437897,
+    "population": 320802.095092258,
+    "pct_us_population": 0.00099058254219164,
+    "pct_broadband": 0.933,
+    "tier": 5
+  },
+  {
+    "rank": 165,
+    "dma": "Billings",
+    "state": "MT",
+    "tv_hh": 121700.308816302,
+    "population": 285995.725718309,
+    "pct_us_population": 0.000883106367982141,
+    "pct_broadband": 0.92,
+    "tier": 5
+  },
+  {
+    "rank": 166,
+    "dma": "Abilene-Sweetwater",
+    "state": "TX",
+    "tv_hh": 121598.993207897,
+    "population": 329533.2715934,
+    "pct_us_population": 0.00101754293661281,
+    "pct_broadband": 0.932,
+    "tier": 5
+  },
+  {
+    "rank": 167,
+    "dma": "Bluefield-Beckley-Oak Hill",
+    "state": "WV",
+    "tv_hh": 120899.915509901,
+    "population": 285323.800603366,
+    "pct_us_population": 0.000881031577016916,
+    "pct_broadband": 0.895,
+    "tier": 5
+  },
+  {
+    "rank": 168,
+    "dma": "Hattiesburg-Laurel",
+    "state": "MS",
+    "tv_hh": 115661.898555353,
+    "population": 292624.603345043,
+    "pct_us_population": 0.000903575219500954,
+    "pct_broadband": 0.886,
+    "tier": 5
+  },
+  {
+    "rank": 169,
+    "dma": "Rapid City",
+    "state": "SD",
+    "tv_hh": 111507.958610741,
+    "population": 266504.02107967,
+    "pct_us_population": 0.000822919284955022,
+    "pct_broadband": 0.915,
+    "tier": 5
+  },
+  {
+    "rank": 170,
+    "dma": "Dothan",
+    "state": "AL",
+    "tv_hh": 110200.987262314,
+    "population": 274400.458283161,
+    "pct_us_population": 0.000847302145787155,
+    "pct_broadband": 0.905,
+    "tier": 5
+  },
+  {
+    "rank": 171,
+    "dma": "Utica",
+    "state": "NY",
+    "tv_hh": 103504.025546731,
+    "population": 255654.943100427,
+    "pct_us_population": 0.000789419169433571,
+    "pct_broadband": 0.926,
+    "tier": 5
+  },
+  {
+    "rank": 172,
+    "dma": "Clarksburg-Weston",
+    "state": "WV",
+    "tv_hh": 102450.343219318,
+    "population": 241782.809997589,
+    "pct_us_population": 0.000746584371641251,
+    "pct_broadband": 0.895,
+    "tier": 5
+  },
+  {
+    "rank": 173,
+    "dma": "Harrisonburg",
+    "state": "VA",
+    "tv_hh": 102247.712002507,
+    "population": 258686.711366343,
+    "pct_us_population": 0.000798780756412371,
+    "pct_broadband": 0.938,
+    "tier": 5
+  },
+  {
+    "rank": 174,
+    "dma": "Jackson, TN",
+    "state": "TN",
+    "tv_hh": 101052.187823326,
+    "population": 249598.903923616,
+    "pct_us_population": 0.00077071914603861,
+    "pct_broadband": 0.915,
+    "tier": 5
+  },
+  {
+    "rank": 175,
+    "dma": "Quincy-Hannibal-Keokuk",
+    "state": "IL",
+    "tv_hh": 100961.003775761,
+    "population": 247354.459250616,
+    "pct_us_population": 0.000763788680982422,
+    "pct_broadband": 0.93,
+    "tier": 5
+  },
+  {
+    "rank": 176,
+    "dma": "Charlottesville",
+    "state": "VA",
+    "tv_hh": 100565.872902981,
+    "population": 254431.658444543,
+    "pct_us_population": 0.000785641873578002,
+    "pct_broadband": 0.938,
+    "tier": 5
+  },
+  {
+    "rank": 177,
+    "dma": "Lake Charles",
+    "state": "LA",
+    "tv_hh": 98448.376687313,
+    "population": 248089.909252029,
+    "pct_us_population": 0.000766059626039203,
+    "pct_broadband": 0.898,
+    "tier": 5
+  },
+  {
+    "rank": 178,
+    "dma": "Elmira (Corning)",
+    "state": "NY",
+    "tv_hh": 95267.0665833904,
+    "population": 235309.654460974,
+    "pct_us_population": 0.000726596363565375,
+    "pct_broadband": 0.926,
+    "tier": 5
+  },
+  {
+    "rank": 179,
+    "dma": "Watertown",
+    "state": "NY",
+    "tv_hh": 94578.1204462351,
+    "population": 233607.957502201,
+    "pct_us_population": 0.000721341811537038,
+    "pct_broadband": 0.926,
+    "tier": 5
+  },
+  {
+    "rank": 180,
+    "dma": "Bowling Green",
+    "state": "KY",
+    "tv_hh": 94547.7257637136,
+    "population": 230696.450863461,
+    "pct_us_population": 0.000712351572096797,
+    "pct_broadband": 0.905,
+    "tier": 5
+  },
+  {
+    "rank": 181,
+    "dma": "Marquette",
+    "state": "MI",
+    "tv_hh": 90728.1273268383,
+    "population": 218654.78685768,
+    "pct_us_population": 0.000675168952888423,
+    "pct_broadband": 0.923,
+    "tier": 5
+  },
+  {
+    "rank": 182,
+    "dma": "Jonesboro",
+    "state": "AR",
+    "tv_hh": 90576.1539142305,
+    "population": 223723.100168149,
+    "pct_us_population": 0.000690819046078321,
+    "pct_broadband": 0.898,
+    "tier": 5
+  },
+  {
+    "rank": 183,
+    "dma": "Alexandria, LA",
+    "state": "LA",
+    "tv_hh": 86837.6079640794,
+    "population": 218830.77206948,
+    "pct_us_population": 0.000675712365419575,
+    "pct_broadband": 0.898,
+    "tier": 5
+  },
+  {
+    "rank": 184,
+    "dma": "Laredo",
+    "state": "TX",
+    "tv_hh": 85864.9781233897,
+    "population": 232694.090714386,
+    "pct_us_population": 0.00071851994565852,
+    "pct_broadband": 0.932,
+    "tier": 5
+  },
+  {
+    "rank": 185,
+    "dma": "Butte-Bozeman",
+    "state": "MT",
+    "tv_hh": 84689.7170658896,
+    "population": 199020.835104841,
+    "pct_us_population": 0.000614542634862031,
+    "pct_broadband": 0.92,
+    "tier": 5
+  },
+  {
+    "rank": 186,
+    "dma": "Bend, OR",
+    "state": "OR",
+    "tv_hh": 84254.0599497473,
+    "population": 205579.906277383,
+    "pct_us_population": 0.000634795935871942,
+    "pct_broadband": 0.944,
+    "tier": 5
+  },
+  {
+    "rank": 187,
+    "dma": "Grand Junction-Montrose",
+    "state": "CO",
+    "tv_hh": 82156.8268557601,
+    "population": 200462.657528055,
+    "pct_us_population": 0.000618994738334004,
+    "pct_broadband": 0.953,
+    "tier": 5
+  },
+  {
+    "rank": 188,
+    "dma": "Twin Falls",
+    "state": "ID",
+    "tv_hh": 78083.9393978719,
+    "population": 203018.242434467,
+    "pct_us_population": 0.000626885951739741,
+    "pct_broadband": 0.938,
+    "tier": 5
+  },
+  {
+    "rank": 189,
+    "dma": "Lafayette, IN",
+    "state": "IN",
+    "tv_hh": 75601.706991945,
+    "population": 186736.216270104,
+    "pct_us_population": 0.000576609812285954,
+    "pct_broadband": 0.92,
+    "tier": 5
+  },
+  {
+    "rank": 190,
+    "dma": "Lima",
+    "state": "OH",
+    "tv_hh": 70546.0581325265,
+    "population": 167899.618355413,
+    "pct_us_population": 0.000518445587880841,
+    "pct_broadband": 0.922,
+    "tier": 5
+  },
+  {
+    "rank": 191,
+    "dma": "Great Falls",
+    "state": "MT",
+    "tv_hh": 67263.4324201987,
+    "population": 158069.066187467,
+    "pct_us_population": 0.000488090507578541,
+    "pct_broadband": 0.92,
+    "tier": 5
+  },
+  {
+    "rank": 192,
+    "dma": "Meridian",
+    "state": "MS",
+    "tv_hh": 65510.6723947891,
+    "population": 165742.001158816,
+    "pct_us_population": 0.000511783231367657,
+    "pct_broadband": 0.886,
+    "tier": 5
+  },
+  {
+    "rank": 193,
+    "dma": "Cheyenne-Scottsbluff",
+    "state": "WY",
+    "tv_hh": 61751.8633229569,
+    "population": 146351.916075408,
+    "pct_us_population": 0.000451909932317938,
+    "pct_broadband": 0.902,
+    "tier": 5
+  },
+  {
+    "rank": 194,
+    "dma": "Parkersburg",
+    "state": "WV",
+    "tv_hh": 61458.0480585819,
+    "population": 145040.993418253,
+    "pct_us_population": 0.000447862025155838,
+    "pct_broadband": 0.895,
+    "tier": 5
+  },
+  {
+    "rank": 195,
+    "dma": "Greenwood-Greenville",
+    "state": "MS",
+    "tv_hh": 60769.1019214267,
+    "population": 153745.82786121,
+    "pct_us_population": 0.000474741079762327,
+    "pct_broadband": 0.886,
+    "tier": 5
+  },
+  {
+    "rank": 196,
+    "dma": "Eureka",
+    "state": "CA",
+    "tv_hh": 60455.0235353707,
+    "population": 171087.716605099,
+    "pct_us_population": 0.000528289895375224,
+    "pct_broadband": 0.946,
+    "tier": 5
+  },
+  {
+    "rank": 197,
+    "dma": "San Angelo",
+    "state": "TX",
+    "tv_hh": 57790.4230343144,
+    "population": 156612.046422992,
+    "pct_us_population": 0.000483591477290407,
+    "pct_broadband": 0.932,
+    "tier": 5
+  },
+  {
+    "rank": 198,
+    "dma": "Casper-Riverton",
+    "state": "WY",
+    "tv_hh": 57608.0549391851,
+    "population": 136531.090205869,
+    "pct_us_population": 0.000421584885177982,
+    "pct_broadband": 0.902,
+    "tier": 5
+  },
+  {
+    "rank": 199,
+    "dma": "Mankato",
+    "state": "MN",
+    "tv_hh": 56929.2403628704,
+    "population": 138338.054081775,
+    "pct_us_population": 0.000427164483619597,
+    "pct_broadband": 0.935,
+    "tier": 5
+  },
+  {
+    "rank": 200,
+    "dma": "Ottumwa-Kirksville",
+    "state": "IA",
+    "tv_hh": 47638.5990721154,
+    "population": 112427.093810192,
+    "pct_us_population": 0.000347155826291254,
+    "pct_broadband": 0.92,
+    "tier": 5
+  },
+  {
+    "rank": 201,
+    "dma": "St. Joseph",
+    "state": "MO",
+    "tv_hh": 45044.9194969428,
+    "population": 108107.806792663,
+    "pct_us_population": 0.000333818599447242,
+    "pct_broadband": 0.916,
+    "tier": 5
+  },
+  {
+    "rank": 202,
+    "dma": "Fairbanks",
+    "state": "AK",
+    "tv_hh": 36544.5399517483,
+    "population": 99401.1486687553,
+    "pct_us_population": 0.000306933913622814,
+    "pct_broadband": 0.935,
+    "tier": 5
+  },
+  {
+    "rank": 203,
+    "dma": "Victoria",
+    "state": "TX",
+    "tv_hh": 33363.2298478256,
+    "population": 90414.3528876075,
+    "pct_us_population": 0.000279184210153806,
+    "pct_broadband": 0.932,
+    "tier": 5
+  },
+  {
+    "rank": 204,
+    "dma": "Zanesville",
+    "state": "OH",
+    "tv_hh": 32876.9149274808,
+    "population": 78247.0575274042,
+    "pct_us_population": 0.000241613662598496,
+    "pct_broadband": 0.922,
+    "tier": 5
+  },
+  {
+    "rank": 205,
+    "dma": "Helena",
+    "state": "MT",
+    "tv_hh": 28479.817522696,
+    "population": 66927.5711783356,
+    "pct_us_population": 0.000206661005694123,
+    "pct_broadband": 0.92,
+    "tier": 5
+  },
+  {
+    "rank": 206,
+    "dma": "Presque Isle",
+    "state": "ME",
+    "tv_hh": 27233.6355393123,
+    "population": 62637.3617404182,
+    "pct_us_population": 0.000193413565491699,
+    "pct_broadband": 0.928,
+    "tier": 5
+  },
+  {
+    "rank": 207,
+    "dma": "Juneau",
+    "state": "AK",
+    "tv_hh": 26017.8482384501,
+    "population": 70768.5472085843,
+    "pct_us_population": 0.000218521289210808,
+    "pct_broadband": 0.935,
+    "tier": 5
+  },
+  {
+    "rank": 208,
+    "dma": "Alpena",
+    "state": "MI",
+    "tv_hh": 16220.6289056693,
+    "population": 39091.7156626629,
+    "pct_us_population": 0.00012070859783075,
+    "pct_broadband": 0.923,
+    "tier": 5
+  },
+  {
+    "rank": 209,
+    "dma": "North Platte",
+    "state": "NE",
+    "tv_hh": 14559.0529278243,
+    "population": 35232.9080853348,
+    "pct_us_population": 0.000108793253516434,
+    "pct_broadband": 0.923,
+    "tier": 5
+  },
+  {
+    "rank": 210,
+    "dma": "Glendive",
+    "state": "MT",
+    "tv_hh": 4427.49208730635,
+    "population": 10404.6064051699,
+    "pct_us_population": 3.21276625714449e-05,
+    "pct_broadband": 0.92,
+    "tier": 5
+  }
+]

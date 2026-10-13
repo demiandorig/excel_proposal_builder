@@ -1,0 +1,14 @@
+{
+  "_source": "U.S. Census Bureau, 2020 Census (Hispanic or Latino population, percent of total) — https://en.wikipedia.org/wiki/List_of_U.S._states_by_Hispanic_and_Latino_population. A rough state-level proxy only, used to re-weight DMA shares for Hispanic-targeting products in the absence of any DMA-level demographic breakout in the source CTV avails workbook. Refresh from a newer ACS release if precision matters.",
+  "AL": 0.053, "AK": 0.068, "AZ": 0.307, "AR": 0.085, "CA": 0.394,
+  "CO": 0.219, "CT": 0.173, "DE": 0.105, "DC": 0.113, "FL": 0.265,
+  "GA": 0.105, "HI": 0.095, "ID": 0.130, "IL": 0.182, "IN": 0.082,
+  "IA": 0.068, "KS": 0.130, "KY": 0.046, "LA": 0.062, "ME": 0.020,
+  "MD": 0.118, "MA": 0.126, "MI": 0.056, "MN": 0.061, "MS": 0.036,
+  "MO": 0.049, "MT": 0.042, "NE": 0.120, "NV": 0.287, "NH": 0.043,
+  "NJ": 0.216, "NM": 0.477, "NY": 0.195, "NC": 0.107, "ND": 0.043,
+  "OH": 0.044, "OK": 0.119, "OR": 0.139, "PA": 0.081, "RI": 0.166,
+  "SC": 0.069, "SD": 0.044, "TN": 0.069, "TX": 0.393, "UT": 0.151,
+  "VT": 0.024, "VA": 0.105, "WA": 0.137, "WV": 0.019, "WI": 0.076,
+  "WY": 0.102
+}

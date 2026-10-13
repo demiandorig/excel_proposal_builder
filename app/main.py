@@ -18,6 +18,7 @@ import csv
 import io
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -88,6 +89,10 @@ from app.services import schema_bootstrap
 from app.services import gamma_client
 from app.services import monthly_allocation
 from app.services import notion_client
+from app.services import constanza_geo
+from app.services import constanza_forecast_map as forecast_map_svc
+from app.services.constanza_engine import estimate_avails
+from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, parse_audience_text
 from app.services.line_modifier import clean_line_modifier_or_none
 
 
@@ -596,6 +601,12 @@ class AvailsEntry(BaseModel):
     # directly instead — still written as a real %, still gets the same
     # traffic-light conditional formatting as a computed SOV.
     sov_pct_freeform: Optional[float] = None
+    # Set only when max_imps/est_uniques came from Constanza's "Apply" —
+    # which geo/method/DMAs produced this figure (app/services/
+    # constanza_engine.py), so a reopened proposal can show the planner
+    # what it was actually calculated from instead of just a bare number
+    # indistinguishable from any other "Est." value. None otherwise.
+    geo_resolution: Optional[dict] = None
 
 
 class TierModel(BaseModel):
@@ -825,6 +836,57 @@ class RoadblocksRequest(BaseModel):
     categories: Optional[list[str]] = None
 
 
+class ConstanzaResolveRequest(BaseModel):
+    geo_text: str
+    # "dma" | "state" | "zip" | "county" | "congressional_district" |
+    # "city" | "country" | None. Lets the UI's geography-type selector
+    # force a specific resolver (see constanza_geo.resolve_geo's own
+    # docstring for why this matters — "Sacramento" is genuinely ambiguous
+    # between the DMA and the city without it). None keeps the default
+    # DMA/state-first behavior, for backward compatibility with every
+    # existing saved proposal's plain geo text.
+    geo_type_hint: Optional[str] = None
+
+
+class ConstanzaAudienceSpecModel(BaseModel):
+    age_min: Optional[int] = None
+    age_max: Optional[int] = None
+    gender: Optional[str] = None
+    interest_terms: list[str] = []
+
+
+class ConstanzaEstimateRequest(BaseModel):
+    product_name: str
+    geo_text: str
+    geo_type_hint: Optional[str] = None
+    months: int = 1
+    # Only used for products with no workbook-modeled platform (VIX 360,
+    # Netflix — see constanza_forecast_map.DEFAULT_PLATFORM_PRODUCTS and Admin -> Forecast): the
+    # planner's own national monthly total, apportioned by DMA population
+    # share. Ignored for platform-modeled products.
+    national_monthly_total: Optional[float] = None
+    # When present, routes through constanza_audience.py's age/gender/
+    # interest layer instead of the plain geo/platform estimate.
+    audience: Optional[ConstanzaAudienceSpecModel] = None
+
+
+class ConstanzaParseAudienceRequest(BaseModel):
+    text: str
+
+
+class ForecastMapUpdateRequest(BaseModel):
+    """Admin -> Forecast: one product's choice (see constanza_forecast_map.clean_config for the rules)."""
+    product_name: str
+    enabled: bool
+    method: str
+    platform: Optional[str] = None
+    hispanic_weighted: bool = False
+
+
+class ForecastMapProductRequest(BaseModel):
+    product_name: str
+
+
 class DriveUploadRequest(BaseModel):
     proposal_id: str
     seller_email: str = ""
@@ -927,7 +989,10 @@ async def me(request: Request) -> dict:
 async def get_catalog() -> dict:
     """Return the product list (as the admin has it in Admin -> Product Catalog), grouped by family."""
     grouped: dict[str, list] = {}
-    for p in effective_catalog():
+    products = effective_catalog()
+    # Which products show Constanza's "Auto-calculate avails" button on Step 05, and what it computes (Admin -> Forecast).
+    forecast = forecast_map_svc.forecast_for_products(products)
+    for p in products:
         grouped.setdefault(p.family, []).append({
             "name": p.name,
             "short_label": p.short_label,
@@ -942,6 +1007,7 @@ async def get_catalog() -> dict:
             "notes": p.notes,
             "wide_orbit_code": p.wide_orbit_code,
             "is_addon": p.is_addon,
+            "forecast": forecast.get(p.name),
         })
     return {
         "families": families(),
@@ -1190,6 +1256,228 @@ async def recommend(body: RecommendRequest) -> dict:
     items = recommend_line_items(req, body.monthly_budget, strategy_brief=body.strategy_brief,
                                  time_unit=body.time_unit)
     return {"line_items": [asdict(li) for li in items]}
+
+
+def _serialize_geo_resolution(resolution) -> dict:
+    return {
+        "method": resolution.method,
+        "geo_confidence": resolution.geo_confidence,
+        "resolved": resolution.resolved,
+        "unmatched_tokens": resolution.unmatched_tokens,
+        "unmatched_details": resolution.unmatched_details,
+        "notes": resolution.notes,
+        "ambiguous": resolution.ambiguous,
+        "areas": [
+            {
+                "dma": a.dma, "area_population": a.area_population, "dma_share": a.dma_share,
+                "source_type": a.source_type, "apportionment": a.apportionment,
+                "state": a.state, "label": a.label,
+            }
+            for a in resolution.areas
+        ],
+        # Back-compat for any caller still reading the Phase 1 shape.
+        "dmas": resolution.dmas,
+    }
+
+
+_CONSTANZA_MAX_TEXT = 2000        # characters of geography / audience text
+_CONSTANZA_MAX_MONTHS = 120
+_CONSTANZA_MAX_INTERESTS = 10
+
+
+def _check_constanza_text(label: str, text: str) -> None:
+    if len(text or "") > _CONSTANZA_MAX_TEXT:
+        raise HTTPException(status_code=422, detail=f"{label} is too long (at most {_CONSTANZA_MAX_TEXT:,} characters).")
+
+
+def _check_constanza_estimate_input(body: "ConstanzaEstimateRequest") -> None:
+    """Plain-language 422s for input no real line can have — an absurd month count or total used to reach the math (and a
+    month count of 10**400 raised a 500); text is capped because the geography matcher runs regexes over it."""
+    _check_constanza_text("Geography", body.geo_text)
+    if not (1 <= body.months <= _CONSTANZA_MAX_MONTHS):
+        raise HTTPException(status_code=422, detail=f"Months must be between 1 and {_CONSTANZA_MAX_MONTHS}.")
+    total = body.national_monthly_total
+    if total is not None and not (math.isfinite(total) and 0 <= total <= 1e13):
+        raise HTTPException(status_code=422, detail="The monthly impressions total must be a number between 0 and 10 trillion.")
+    a = body.audience
+    if a is not None:
+        for name, value in (("Minimum age", a.age_min), ("Maximum age", a.age_max)):
+            if value is not None and not (0 <= value <= 120):
+                raise HTTPException(status_code=422, detail=f"{name} must be between 0 and 120.")
+        if a.age_min is not None and a.age_max is not None and a.age_min > a.age_max:
+            raise HTTPException(status_code=422, detail="Minimum age can't be above maximum age.")
+        if len(a.interest_terms) > _CONSTANZA_MAX_INTERESTS or any(len(t) > 100 for t in a.interest_terms):
+            raise HTTPException(status_code=422, detail=f"Give at most {_CONSTANZA_MAX_INTERESTS} interests, each under 100 characters.")
+
+
+# These handlers are plain `def` on purpose: they do blocking work (loading the large bundled data files, regex geography
+# matching, and a model call per interest phrase), so FastAPI runs them in its thread pool instead of freezing the event
+# loop — and with it every other request and login — for the duration.
+@app.post("/api/constanza/resolve")
+def constanza_resolve(body: ConstanzaResolveRequest) -> dict:
+    """Resolve a campaign's free-text geo (ProposalRequest.geo / TierModel.geo)
+    into a structured, area-weighted geography — DMA/state (default),
+    or ZIP/county/congressional-district/city/country when
+    `geo_type_hint` says so — for the planner to confirm/edit before any
+    avails math runs against it. See app/services/constanza_geo.py."""
+    _check_constanza_text("Geography", body.geo_text)
+    resolution = constanza_geo.resolve_geo(body.geo_text, geo_type_hint=body.geo_type_hint)
+    return _serialize_geo_resolution(resolution)
+
+
+def _geo_warning_notes(resolution) -> list[str]:
+    """Caveats from geo resolution that belong next to the numbers: advisory
+    notes, plus — for a list that only partly resolved — exactly which inputs
+    are NOT in the total (and why, when known), so a dropped item is never silent."""
+    notes = list(resolution.notes)
+    if resolution.unmatched_tokens:
+        reasons = {d["input"]: d["reason"] for d in resolution.unmatched_details}
+        dropped = "; ".join(f"{t!r}" + (f" ({reasons[t]})" if t in reasons else "") for t in resolution.unmatched_tokens)
+        notes.insert(0, f"NOT INCLUDED in this estimate — couldn't be matched: {dropped}")
+    return notes
+
+
+def _geo_failure_detail(geo_text: str, resolution) -> str:
+    if resolution.ambiguous:
+        which = ", ".join(repr(a["input"]) for a in resolution.ambiguous)
+        return f"{which} could mean more than one place — pick one and retry."
+    if resolution.unmatched_details:
+        return " ".join(d["reason"] for d in resolution.unmatched_details)
+    return f"Could not resolve geo {geo_text!r} — check the spelling or choose the geography type."
+
+
+def _serialize_avails_estimate(estimate, resolution) -> dict:
+    return {
+        "product_name": estimate.product_name,
+        "platform": estimate.platform,
+        "confidence": estimate.confidence,
+        "geo_method": estimate.geo_method,
+        "geo_confidence": estimate.geo_confidence,
+        "months": estimate.months,
+        "imps_low": estimate.imps_low,
+        "imps_mid": estimate.imps_mid,
+        "imps_high": estimate.imps_high,
+        "est_uniques": estimate.est_uniques,
+        "notes": _geo_warning_notes(resolution) + list(estimate.notes),
+        "unmatched_geo_tokens": resolution.unmatched_tokens,
+        "unmatched_geo_details": resolution.unmatched_details,
+        "ambiguous": resolution.ambiguous,
+        "by_area": [
+            {
+                "area_label": a.area_label, "dma": a.dma, "weight": a.weight,
+                "imps_low": a.imps_low, "imps_mid": a.imps_mid, "imps_high": a.imps_high,
+                "unique_viewers": a.unique_viewers, "unique_hh": a.unique_hh,
+            }
+            for a in estimate.by_area
+        ],
+    }
+
+
+@app.post("/api/constanza/estimate")
+def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
+    """DMA-weighted avails estimate for one product over a resolved geo —
+    Project Constanza's "Stanza" engine (app/services/constanza_engine.py).
+    A fast starting point pre-filled from bundled CTV-avails-by-DMA data,
+    not a live platform pull — the planner can still confirm/refine
+    against Roku Ads Manager / Amazon DSP / Madhive / The Trade Desk. When
+    `audience` is given, routes through constanza_audience.py's age/
+    gender/interest layer on top of this same geo/platform estimate."""
+    _check_constanza_estimate_input(body)
+    resolution = constanza_geo.resolve_geo(body.geo_text, geo_type_hint=body.geo_type_hint)
+    if resolution.ambiguous or not resolution.resolved:
+        raise HTTPException(status_code=422, detail=_geo_failure_detail(body.geo_text, resolution))
+    estimate = estimate_avails(
+        body.product_name, resolution, months=body.months,
+        national_monthly_total=body.national_monthly_total,
+    )
+    if estimate is None:
+        if resolution.geo_confidence == "low_confidence_international":
+            detail = (
+                "There is no platform avails data outside the U.S. — enter a budget or impression total for the "
+                "line and Constanza will spread it across the selected countries by population share "
+                "(low confidence)."
+            )
+        else:
+            detail = (
+                f"{body.product_name!r} has no modeled CTV platform and no "
+                "national_monthly_total was given to apportion by population share."
+            )
+        raise HTTPException(status_code=422, detail=detail)
+
+    if body.audience is None:
+        return _serialize_avails_estimate(estimate, resolution)
+
+    audience_estimate = estimate_audience(estimate, AudienceSpec(
+        age_min=body.audience.age_min, age_max=body.audience.age_max,
+        gender=body.audience.gender, interest_terms=body.audience.interest_terms,
+    ))
+    return {
+        **_serialize_avails_estimate(estimate, resolution),
+        "audience": {
+            "imps_low": audience_estimate.imps_low, "imps_mid": audience_estimate.imps_mid,
+            "imps_high": audience_estimate.imps_high,
+            "underlying_population": audience_estimate.underlying_population,
+            "reliability_floor_population": audience_estimate.reliability_floor_population,
+            "below_reliability_threshold": audience_estimate.below_reliability_threshold,
+            "confidence_tier": audience_estimate.confidence_tier,
+            "cuts_applied": audience_estimate.cuts_applied,
+            "search_multiplier_applied": audience_estimate.search_multiplier_applied,
+            "interests": [
+                {
+                    "input_text": i.input_text, "category": i.category, "supported": i.supported,
+                    "source": i.source, "source_date": i.source_date,
+                }
+                for i in audience_estimate.interests
+            ],
+            "notes": audience_estimate.notes,
+            "by_area": [
+                {
+                    "area_label": a.area_label, "dma": a.dma, "weight": a.weight,
+                    "imps_low": a.imps_low, "imps_mid": a.imps_mid, "imps_high": a.imps_high,
+                    "underlying_population": a.underlying_population,
+                }
+                for a in audience_estimate.by_area
+            ],
+        },
+    }
+
+
+@app.post("/api/constanza/parse-audience")
+def constanza_parse_audience(body: ConstanzaParseAudienceRequest) -> dict:
+    """Free text -> structured AudienceSpec (the LLM step — see
+    constanza_audience.py's module docstring for the hard rule that the
+    LLM only classifies/extracts here, never generates a number). Kept
+    separate from /estimate so the UI can show the parsed structure for
+    the planner to confirm/edit before any estimate runs."""
+    _check_constanza_text("The description", body.text)
+    spec = parse_audience_text(body.text)
+    return {
+        "age_min": spec.age_min, "age_max": spec.age_max, "gender": spec.gender,
+        "interest_terms": spec.interest_terms, "geo_text": spec.geo_text,
+        "geo_type_hint": spec.geo_type_hint,
+    }
+
+
+@app.get("/api/constanza/interest-taxonomy")
+async def constanza_interest_taxonomy() -> dict:
+    """The known, sourced interest categories constanza_audience.py can
+    apply a real incidence rate for — drives the UI's "browse supported
+    interests" picker so free text isn't the only way in."""
+    return {
+        "categories": [
+            {"category": c["category"], "label": c["label"], "source": c["source"], "source_date": c["source_date"]}
+            for c in load_interest_taxonomy()
+        ],
+    }
+
+
+@app.get("/api/constanza/platform-products")
+async def constanza_platform_products() -> dict:
+    """Which catalog products Constanza platform-models directly (vs. falling
+    back to a generic population-share estimate) — the LIVE mapping, i.e. the
+    built-in default with every Admin -> Forecast override applied. (The
+    Avails step itself reads each product's `forecast` from /api/catalog.)"""
+    return {"platform_modeled_products": forecast_map_svc.live_platform_products()}
 
 
 def _sync_monthly_budgets_to_allocations(tiers: list[dict]) -> None:
@@ -3197,6 +3485,10 @@ async def admin_create_product(body: ProductRequest, request: Request) -> dict:
             logging.getLogger(__name__).exception("couldn't copy restriction approvals to %r", created["name"])
             warning = ("The product was added, but copying its Restricted Verticals approvals failed — "
                        "map it in Admin → Restrictions or it will read as not accepted.")
+        try:      # a copy of a forecast-enabled product forecasts the same way (best effort, like the approvals)
+            forecast_map_svc.inherit_config(created["copied_from"], created["name"], request.state.user["email"])
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).exception("couldn't copy the forecast mapping to %r", created["name"])
     return {"added": True, "product": created, "restrictions_inherited": inherited, "restrictions_warning": warning}
 
 
@@ -3225,6 +3517,56 @@ async def admin_delete_product(product_id: int) -> dict:
     if name is None:
         raise HTTPException(status_code=404, detail="Product not found.")
     return {"deleted": True, "name": name}
+
+
+# ---------------------------------------------------------------------------
+# Admin -> Forecast: which products get Constanza's "Auto-calculate avails" button (Step 05) and what it computes.
+# See app/services/constanza_forecast_map.py. Admin-only through the blanket /api/admin/* rule.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/admin/forecast-map")
+async def admin_get_forecast_map() -> dict:
+    """Every live product with its effective forecast config, the platform coverage and the totals."""
+    return forecast_map_svc.admin_payload()
+
+
+@app.put("/api/admin/forecast-map")
+async def admin_set_forecast_map(body: ForecastMapUpdateRequest, request: Request) -> dict:
+    """Save one product's choice (enabled / what it computes / which platform / Hispanic weighting)."""
+    try:
+        forecast_map_svc.set_override(body.product_name, body.model_dump(exclude={"product_name"}), request.state.user["email"])
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"saved": True, **forecast_map_svc.admin_payload()}
+
+
+@app.post("/api/admin/forecast-map/reset")
+async def admin_reset_forecast_map(body: ForecastMapProductRequest) -> dict:
+    """Put one product back on its built-in default."""
+    try:
+        forecast_map_svc.clear_override(body.product_name)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"reset": True, **forecast_map_svc.admin_payload()}
+
+
+@app.post("/api/admin/forecast-map/add-product")
+async def admin_add_forecast_platform_product(body: ForecastMapProductRequest) -> dict:
+    """Add one of the built-in platform SKUs (Hulu, Peacock, ...) that exists in the code seed but was never in a
+    database that was seeded before it was added. Its rate is a PLACEHOLDER — the response says so."""
+    try:
+        created = forecast_map_svc.add_missing_platform_product(body.product_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"added": True, "product": created, **forecast_map_svc.admin_payload()}
 
 
 # CSV columns shared by the export and the bulk upload, so a planner can export -> edit in Excel -> re-upload.
