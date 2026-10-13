@@ -256,13 +256,17 @@ def _resolve_county(token: str, relaxed: bool = False) -> GeoResolution | None:
     if not candidates:
         return None
     if len(candidates) > 1:
+        county_acs = _load_acs("acs_age_sex_county.json")
         return GeoResolution(
             input_text=token, method="unresolved", areas=[], geo_confidence="unresolved",
             ambiguous=[{
                 "input": token,
                 "candidates": [
-                    {"label": f"{full}, {abbr}", "source_type": "county", "resolve_hint": f"{full}, {abbr}"}
-                    for _, abbr, full in sorted(candidates, key=lambda c: (c[1], c[2]))
+                    {"label": f"{full}, {abbr}", "source_type": "county", "geo_type": "county", "resolve_hint": f"{full}, {abbr}",
+                     "population": round(pop), "state": abbr}
+                    for pop, abbr, full in sorted(
+                        ((_population_for(county_acs.get(fips)), abbr, full) for fips, abbr, full in candidates),
+                        key=lambda c: (-c[0], c[1], c[2]))
                 ],
             }],
         )
@@ -429,7 +433,8 @@ def _resolve_city(token: str, relaxed: bool = False) -> GeoResolution | None:
                 "input": token,
                 "candidates": [
                     {"label": f"{disp}, {abbr} (pop. {_population_for(acs_place.get(gid)):,.0f})",
-                     "source_type": "city", "resolve_hint": f"{disp}, {abbr}"}
+                     "source_type": "city", "geo_type": "city", "resolve_hint": f"{disp}, {abbr}",
+                     "population": round(_population_for(acs_place.get(gid))), "state": abbr}
                     for gid, abbr, disp in ranked
                 ],
             }],

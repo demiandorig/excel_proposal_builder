@@ -1295,11 +1295,15 @@ def _serialize_geo_resolution(resolution) -> dict:
         "unmatched_details": resolution.unmatched_details,
         "notes": resolution.notes,
         "ambiguous": resolution.ambiguous,
+        # How the typed words were read ("Adams County Washinton" -> "Adams County, WA") and what else the planner can pick:
+        # did-you-mean candidates, larger containing areas, "use the larger area only".
+        "interpretations": resolution.interpretations,
+        "suggestions": resolution.suggestions,
         "areas": [
             {
                 "dma": a.dma, "area_population": a.area_population, "dma_share": a.dma_share,
                 "source_type": a.source_type, "apportionment": a.apportionment,
-                "state": a.state, "label": a.label,
+                "state": a.state, "label": a.label, "geo_id": a.geo_id,
             }
             for a in resolution.areas
         ],
@@ -1371,9 +1375,11 @@ def _geo_failure_detail(geo_text: str, resolution) -> str:
     if resolution.ambiguous:
         which = ", ".join(repr(a["input"]) for a in resolution.ambiguous)
         return f"{which} could mean more than one place — pick one and retry."
+    guesses = [sg["label"] for sg in resolution.suggestions if sg.get("kind") == "did_you_mean"][:3]
+    maybe = f" Did you mean {', '.join(guesses)}?" if guesses else ""
     if resolution.unmatched_details:
-        return " ".join(d["reason"] for d in resolution.unmatched_details)
-    return f"Could not resolve geo {geo_text!r} — check the spelling or choose the geography type."
+        return " ".join(d["reason"] for d in resolution.unmatched_details) + maybe
+    return f"Could not resolve geo {geo_text!r} — check the spelling or choose the geography type." + maybe
 
 
 def _serialize_avails_estimate(estimate, resolution) -> dict:
@@ -1394,6 +1400,8 @@ def _serialize_avails_estimate(estimate, resolution) -> dict:
         "unmatched_geo_tokens": resolution.unmatched_tokens,
         "unmatched_geo_details": resolution.unmatched_details,
         "ambiguous": resolution.ambiguous,
+        "geo_interpretations": resolution.interpretations,
+        "geo_suggestions": resolution.suggestions,
         "by_area": [
             {
                 "area_label": a.area_label, "dma": a.dma, "weight": a.weight,
