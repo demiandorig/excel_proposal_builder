@@ -168,6 +168,48 @@ Flight dates are **not** checked against the window: seasons repeat each year an
 
 ## How an estimate is built
 
+### Paid Meta auction planning (Step 05)
+
+The three paid Facebook & Instagram Ads SKUs have a separate full-flight planning card. It does **not** populate
+`max_imps` or `max_spend`: those fields describe a monthly inventory ceiling and feed SOV, while auction delivery
+depends on spend and targeting. Branded-content/Page SKUs are excluded.
+
+The confirmed retail CPM assumptions are Awareness **$12**, Traffic/Conversion **$18**, and Lead Gen/Calls **$35**.
+Retail spend is **2× platform media spend**, so the assumed media CPM is half the retail CPM. For a line's entire flight,
+the card shows `retail_budget ÷ retail_CPM × 1,000` as **budget-based impressions**. It also shows a separate
+`eligible_audience × 5.5` scenario (and 9–10 frequency scenarios), plus the retail and media spend those audience
+scenarios would imply at the planning CPM. These illustrative costs assume every eligible account is reached;
+they are not a delivery or spend guarantee. A combined model is
+shown **only when a planner enters a historically supported reach share**:
+
+```
+modeled impressions = min(budget-based impressions, audience midpoint × reach share × full-flight frequency)
+modeled reach       = modeled impressions ÷ full-flight frequency
+```
+
+The result and its assumptions are saved with the proposal as `avails_data[line_id].meta_forecast`. A changed budget,
+product, CPM, geography, or targeting label marks the saved result stale in the card. It never enters the exported
+inventory avails cells or SOV calculation. The Awareness catalog seed and an exact-value migration change the old $13
+default to $12 while preserving any admin-edited CPM.
+
+The card works with a manually entered eligible-audience size. For a live Meta audience range, put
+`META_AD_ACCOUNT_ID` and `META_ACCESS_TOKEN` in **Replit Secrets** (optionally set `META_GRAPH_API_VERSION`; see
+`.env.example`). Search Meta geographies, choose the exact returned key, and optionally add age/gender. The backend
+calls Meta's account-scoped `reachestimate`; it does not guess a geography or turn Meta's eligible-audience range into
+delivered reach. Planners must check any interests, behavioral targeting, exclusions, placements, and account-specific
+restrictions in Ads Manager before using a live result, since those are not yet represented in this card. API errors
+are explicit; manual entry remains available. No token is sent to the browser.
+
+YouTube continues to require a separate `ReachPlanService` integration and Google allowlisting. It will produce a
+budget-based campaign forecast, also separate from the inventory ceiling. Product formats and supported geographies
+must be discovered through the live Google service before mapping the two YouTube catalog SKUs. On a Replit development
+clone with the existing `GOOGLE_ADS_*` secrets set, install the optional `google-ads` Python package and run
+`python scripts/probe_youtube_reach_plan.py --location-id 2840`. This read-only probe confirms service access and prints
+the available US product codes. If Google denies the service, ask the Google representative to approve both the developer
+token and OAuth project's access to `ReachPlanService`; access to ordinary Google Ads APIs is insufficient. The two catalog
+SKUs combine formats (skippable in-stream/discovery and non-skippable :15/bumper), so choose their mapping from the live
+codes before using `GenerateReachForecast`. No YouTube estimate is shown in the proposal until that mapping is validated.
+
 For each resolved area the most direct row wins:
 
 1. a **ZIP** area uses its series' own ZIP row; a ZIP with no row is zero (and listed in a note);
