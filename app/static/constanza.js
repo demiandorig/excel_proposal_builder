@@ -124,7 +124,8 @@
     geo: "", geoType: "", flight: 1, unit: "months", total: "",
     ageMin: "", ageMax: "", gender: "", interests: [],
     lineId: null, needTotal: false,
-    resolve: null, result: null, busy: false, resSeq: 0, taxonomy: null,
+    resolve: null, result: null, busy: false, resSeq: 0, pullSeq: 0, taxonomy: null,
+    resultCtx: null,                  // what the shown result was pulled for: the geography as typed and the areas it resolved to
   };
   let resolveTimer = null, interestTimer = null, pickerActive = -1, pickerItems = [], interestHits = [], interestActive = -1;
 
@@ -180,27 +181,79 @@
     return out.join("");
   }
 
-  // Remove the typed items the planner chose to drop ("Othello, WA" when "Adams County, WA" is kept). Returns null when an item
-  // cannot be found in the text, so the caller can fall back to the replacement instead of guessing at an edit.
-  function removeGeoItems(text, items) {
-    let out = text;
-    for (const item of items || []) {
-      const re = new RegExp(item.trim().split(/\s*,\s*/).map(escRe).join("\\s*,\\s*"), "i");
-      if (!re.test(out)) return null;
-      out = out.replace(re, "");
+  // ---- editing ONE whole item of a typed geography list ------------------------------------------------------------------
+  // Items are separated by ; | a new line, the words and / or / plus, & + or a comma. An item that is itself written with a
+  // comma ("Othello, WA") is found as a whole. Matching is by WHOLE items, never by substring: "Orange" is not found inside
+  // "Orange County", "90210" not inside "902101", and "Othello" is not taken out of "Othello, WA" (the state after it belongs
+  // to it).
+  const US_STATES = ["alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "district of columbia",
+    "florida", "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland", "massachusetts",
+    "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey", "new mexico", "new york",
+    "north carolina", "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee",
+    "texas", "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming"];
+  const looksLikeState = (piece) => /^[A-Z]{2}$/.test(String(piece).trim()) || US_STATES.indexOf(String(piece).trim().toLowerCase()) >= 0;
+  const SEP = "[;|\\n,&+]";
+  const CONJ = "\\s(?:and|or|plus)\\s";
+
+  function itemRegex(item) {
+    const body = item.trim().split(/\s*,\s*/).map((part) => part.split(/\s+/).map(escRe).join("\\s+")).join("\\s*,\\s*");
+    return new RegExp("(^|" + SEP + "|" + CONJ + ")(\\s*)(" + body + ")(?=\\s*$|\\s*" + SEP + "|\\s+(?:and|or|plus)\\s)", "gi");
+  }
+
+  // `replacement` null removes the item. Returns the new text, or null when the item is not in the text as a whole item.
+  function editGeoItem(text, item, replacement) {
+    if (!item || !item.trim()) return null;
+    const re = itemRegex(item);
+    const lastPart = item.trim().split(/\s*,\s*/).pop();
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const end = re.lastIndex;
+      if (!looksLikeState(lastPart)) {
+        const next = /^\s*,\s*([^,;|\n&+]+)/.exec(text.slice(end));
+        if (next && looksLikeState(next[1])) continue;            // "Othello" in "Othello, WA" is not the whole item
+      }
+      return text.slice(0, m.index) + m[1] + m[2] + (replacement == null ? "" : replacement) + text.slice(end);
     }
-    return out
-      .replace(/\s*(?:,|;|\band\b|&)\s*(?=(?:,|;|\band\b|&|$))/gi, "")
-      .replace(/^\s*(?:,|;|\band\b|&)\s*/i, "")
-      .replace(/\s*(?:,|;|\band\b|&)\s*$/i, "")
-      .replace(/\s{2,}/g, " ")
+    return null;
+  }
+
+  // Remove the separators a removal leaves behind: "; ; B", a list that now starts or ends with "and".
+  function tidyList(text) {
+    const sep = "(?:[;|,&+]|\\band\\b|\\bor\\b|\\bplus\\b)";
+    return text
+      // a separator followed by another (or by the end) goes; if that would glue two words together, one space stays
+      .replace(new RegExp("\\s*" + sep + "\\s*(?=" + sep + "|$)", "gi"), (m, offset, whole) => {
+        const before = whole[offset - 1], after = whole[offset + m.length];
+        return before && after && /\w/.test(before) && /\w/.test(after) ? " " : "";
+      })
+      .replace(new RegExp("^\\s*" + sep + "\\s*", "i"), "")
+      .replace(/[ \t]{2,}/g, " ")
       .trim();
   }
 
+  // Remove the typed items the planner chose to drop ("Othello, WA" when "Adams County, WA" is kept) - every copy of each (the same
+  // place can be typed twice). Returns null when none of them is in the text, so the caller can fall back.
+  function removeGeoItems(text, items) {
+    let out = text, removed = 0;
+    for (const item of items || []) {
+      for (let guard = 0; guard < 20; guard++) {
+        const next = editGeoItem(out, item, null);
+        if (next === null) break;
+        out = tidyList(next);
+        removed++;
+      }
+    }
+    return removed ? out : null;
+  }
+
+  // Swap one item for the planner's pick. An item that cannot be found never wipes the list: a single typed item is replaced, and
+  // a list gets the place added.
   function replaceItem(text, item, replacement) {
-    if (typeof _replaceGeoItem === "function") return _replaceGeoItem(text, item, replacement);
-    const re = new RegExp(item.trim().split(/\s*,\s*/).map(escRe).join("\\s*,\\s*"), "i");
-    return re.test(text) ? text.replace(re, () => replacement) : replacement;
+    const next = editGeoItem(text, item, replacement);
+    if (next !== null) return next;
+    const isList = /[;|\n&+]|\b(?:and|or|plus)\b/i.test(text) || (text.match(/,/g) || []).length > 1;
+    if (!isList) return replacement;
+    return editGeoItem(text, replacement, replacement) !== null ? text : `${text.replace(/[;\s]+$/, "")}; ${replacement}`;
   }
 
   // ctx: { getText(), setText(next, {geoType}) }
@@ -392,7 +445,8 @@
             <span class="cz-pname" id="cz-pname">Loading products…</span><span aria-hidden="true">▾</span>
           </button>
           <div class="cz-picker-pop hidden" id="cz-picker-pop">
-            <input type="search" class="cz-input cz-picker-search" id="cz-picker-search" placeholder="Search products…" autocomplete="off" aria-label="Search products" />
+            <input type="search" class="cz-input cz-picker-search" id="cz-picker-search" placeholder="Search products…" autocomplete="off" aria-label="Search products"
+                   role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="cz-picker-list" aria-haspopup="listbox" />
             <div class="cz-picker-list" id="cz-picker-list" role="listbox" aria-label="Products"></div>
           </div>
         </div>
@@ -452,7 +506,8 @@
         </div>
         <div class="cz-field" style="margin-bottom:0">
           <label class="cz-label" for="cz-interest-q"><span>Interests</span><span class="cz-hint" id="cz-interest-hint"></span></label>
-          <input type="search" class="cz-input" id="cz-interest-q" placeholder="Search — soccer, dentist, new parents…" autocomplete="off" />
+          <input type="search" class="cz-input" id="cz-interest-q" placeholder="Search — soccer, dentist, new parents…" autocomplete="off"
+                 role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="cz-interest-results" aria-haspopup="listbox" />
           <div class="cz-interest-results hidden" id="cz-interest-results" role="listbox" aria-label="Matching audiences"></div>
           <div class="cz-chips" id="cz-interest-chips"></div>
           <p class="cz-note" id="cz-interest-note"></p>
@@ -460,8 +515,9 @@
         </div>
       </details>
     </div>
-    <div class="cz-result" id="cz-result" aria-live="polite"></div>
+    <div class="cz-result" id="cz-result"></div>
   </div>
+  <div class="cz-sr" id="cz-status" role="status" aria-live="polite"></div>
   <footer class="cz-foot">
     <button type="button" class="cz-reset" id="cz-reset">Reset</button>
     <button type="button" class="btn-primary" id="cz-go">Pull avails →</button>
@@ -491,7 +547,9 @@
   function whenCatalogReady(fn, tries) {
     tries = tries || 0;
     if (typeof state !== "undefined" && state.catalog) return fn();
-    if (tries < 50) setTimeout(() => whenCatalogReady(fn, tries + 1), 200);
+    if (tries < 50) { setTimeout(() => whenCatalogReady(fn, tries + 1), 200); return; }
+    $("cz-pname").textContent = "Products couldn’t be loaded";
+    $("cz-product-note").innerHTML = `<p class="cz-note cz-warn">The product list isn’t available. Reload the page, or check your connection.</p>`;
   }
 
   function refreshProducts() {
@@ -542,9 +600,9 @@
       const opts = groups[c].map((p) => {
         const idx = pickerItems.push(p) - 1;
         const meta = [seriesMeta(p.series), isLiveSports(p.series) && p.series.period_label ? p.series.period_label : ""].filter(Boolean).join(" · ");
-        return `<div class="cz-option" role="option" data-idx="${idx}" aria-selected="${p.name === S.product}"><span class="cz-option-name">${esc(p.name)}</span><span class="cz-option-meta">${esc(meta)}</span></div>`;
+        return `<div class="cz-option" role="option" id="cz-opt-${idx}" data-idx="${idx}" aria-selected="${p.name === S.product}"><span class="cz-option-name">${esc(p.name)}</span><span class="cz-option-meta">${esc(meta)}</span></div>`;
       }).join("");
-      return `<div class="cz-group-label">${esc(CHANNEL_LABEL[c])}</div>${opts}`;
+      return `<div class="cz-group-label" role="presentation">${esc(CHANNEL_LABEL[c])}</div>${opts}`;
     }).join("");
     $("cz-picker-list").innerHTML = html || `<div class="cz-empty">No product matches “${esc($("cz-picker-search").value)}”.</div>`;
     pickerActive = Math.max(0, pickerItems.findIndex((p) => p.name === S.product));
@@ -556,6 +614,8 @@
     opts.forEach((o) => o.classList.toggle("cz-active", Number(o.dataset.idx) === pickerActive));
     const cur = $("cz-picker-list").querySelector(`.cz-option[data-idx="${pickerActive}"]`);
     if (cur && scroll) cur.scrollIntoView({ block: "nearest" });
+    const search = $("cz-picker-search");
+    if (cur) search.setAttribute("aria-activedescendant", cur.id); else search.removeAttribute("aria-activedescendant");
   }
 
   function openPicker() {
@@ -571,6 +631,7 @@
     if ($("cz-picker-pop").classList.contains("hidden")) return;
     $("cz-picker-pop").classList.add("hidden");
     $("cz-product-btn").setAttribute("aria-expanded", "false");
+    $("cz-picker-search").removeAttribute("aria-activedescendant");
     if (refocus) $("cz-product-btn").focus();
   }
 
@@ -578,7 +639,9 @@
     S.product = name;
     store.set({ product: name });
     updateProductUI();
+    updateFlightHint();
     closePicker(true);
+    markStale();
   }
 
   // ---- geography
@@ -586,13 +649,14 @@
     S.geo = text;
     $("cz-geo").value = text;
     if (meta && meta.geoType !== undefined && meta.geoType !== S.geoType) setGeoType(meta.geoType, true);
+    markStale();
     resolveSoon(0);
   }
 
   function setGeoType(type, silent) {
     S.geoType = type;
     $("cz-geotype").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.type === type)));
-    if (!silent) resolveSoon(0);
+    if (!silent) { markStale(); resolveSoon(0); }
   }
 
   function resolveSoon(ms) {
@@ -652,14 +716,21 @@
     } catch (e) { return null; }
   }
 
+  function updateFlightHint() {
+    const weekly = (productByName(S.product) || {}).series;
+    $("cz-flight-hint").textContent = S.unit === "days" ? `≈ ${(S.flight / 7).toFixed(1)} weeks` : `≈ ${(S.flight * 4.348).toFixed(1)} weeks`;
+    if (!weekly || weekly.unit !== "weekly") $("cz-flight-hint").textContent = S.unit === "days" ? `≈ ${(S.flight / 30.4375).toFixed(1)} months` : "";
+  }
+
+  // Commits a value: clamps it, writes it into the box and updates the hint. Used by the +/- buttons, the unit switch, "use the
+  // proposal's dates" and when the box loses focus - NOT while the planner is typing (see the input handler).
   function setFlight(value, unit) {
     S.unit = unit || S.unit;
     S.flight = Math.max(1, Math.round(Number(value) || 1));
     $("cz-flight").value = S.flight;
     $("cz-unit").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.unit === S.unit)));
-    const weekly = (productByName(S.product) || {}).series;
-    $("cz-flight-hint").textContent = S.unit === "days" ? `≈ ${(S.flight / 7).toFixed(1)} weeks` : `≈ ${(S.flight * 4.348).toFixed(1)} weeks`;
-    if (!weekly || weekly.unit !== "weekly") $("cz-flight-hint").textContent = S.unit === "days" ? `≈ ${(S.flight / 30.4375).toFixed(1)} months` : "";
+    updateFlightHint();
+    markStale();
   }
 
   function refreshContextChip() {
@@ -709,25 +780,49 @@
     $("cz-interest-q").value = "";
     hideInterestResults();
     refreshAudienceUI();
+    markStale();
   }
 
   function hideInterestResults() {
     $("cz-interest-results").classList.add("hidden");
+    $("cz-interest-q").setAttribute("aria-expanded", "false");
+    $("cz-interest-q").removeAttribute("aria-activedescendant");
     interestHits = []; interestActive = -1;
+  }
+
+  function markInterestActive() {
+    $("cz-interest-results").querySelectorAll(".cz-interest-item").forEach((el, i) => el.classList.toggle("cz-active", i === interestActive));
+    const input = $("cz-interest-q");
+    if (interestActive >= 0 && interestHits[interestActive]) input.setAttribute("aria-activedescendant", `cz-int-${interestActive}`);
+    else input.removeAttribute("aria-activedescendant");
   }
 
   async function searchInterests() {
     const q = $("cz-interest-q").value.trim();
     if (!q) { hideInterestResults(); return; }
-    const r = await api(`/api/constanza/interests?q=${encodeURIComponent(q)}&limit=8`);
+    let r;
+    try {
+      r = await api(`/api/constanza/interests?q=${encodeURIComponent(q)}&limit=8`);
+    } catch (e) {
+      r = { ok: false, data: {} };
+    }
     if ($("cz-interest-q").value.trim() !== q) return;
+    if (!r.ok) {
+      interestHits = []; interestActive = -1;
+      const failed = $("cz-interest-results");
+      failed.classList.remove("hidden");
+      failed.innerHTML = `<div class="cz-empty">The audience search isn’t available right now. Try again in a moment.</div>`;
+      return;
+    }
     interestHits = (r.data.results || []);
     interestActive = interestHits.length ? 0 : -1;
     const box = $("cz-interest-results");
     box.classList.remove("hidden");
+    $("cz-interest-q").setAttribute("aria-expanded", "true");
     box.innerHTML = interestHits.length
-      ? interestHits.map((h, i) => `<div class="cz-interest-item ${h.supported ? "" : "cz-norate"} ${i === interestActive ? "cz-active" : ""}" role="option" data-i="${i}" title="${esc(h.supported ? `${h.source || ""}${h.source_date ? ", " + h.source_date : ""} — ${h.confidence} confidence` : "No defensible public rate was found for this audience")}"><span>${esc(h.label)} <span class="cz-grp">${esc(groupLabel(h.group))}</span></span><span class="cz-rate">${h.supported ? Math.round(h.rate_all * 100) + "% of adults" : "no public rate"}</span></div>`).join("")
+      ? interestHits.map((h, i) => `<div class="cz-interest-item ${h.supported ? "" : "cz-norate"} ${i === interestActive ? "cz-active" : ""}" role="option" id="cz-int-${i}" data-i="${i}" title="${esc(h.supported ? `${h.source || ""}${h.source_date ? ", " + h.source_date : ""} — ${h.confidence} confidence` : "No defensible public rate was found for this audience")}"><span>${esc(h.label)} <span class="cz-grp">${esc(groupLabel(h.group))}</span></span><span class="cz-rate">${h.supported ? Math.round(h.rate_all * 100) + "% of adults" : "no public rate"}</span></div>`).join("")
       : `<div class="cz-empty">Nothing matches “${esc(q)}”. Try a simpler word, or browse the list below.</div>`;
+    markInterestActive();
   }
 
   function groupLabel(key) {
@@ -735,11 +830,14 @@
     return g ? g.label : "";
   }
 
+  // A failed request is NOT remembered: the next open of "Browse every audience" tries again.
   async function loadTaxonomy() {
     if (S.taxonomy) return S.taxonomy;
-    const r = await api("/api/constanza/interest-taxonomy");
-    S.taxonomy = r.ok ? r.data : { groups: [] };
-    return S.taxonomy;
+    try {
+      const r = await api("/api/constanza/interest-taxonomy");
+      if (r.ok) { S.taxonomy = r.data; return S.taxonomy; }
+    } catch (e) { /* offline: fall through to the unavailable message */ }
+    return { groups: [] };
   }
 
   async function renderBrowse() {
@@ -751,6 +849,20 @@
   }
 
   // ---- results
+  // The form changed after this result was pulled: say so on the card (the numbers are still the ones for what it names).
+  function markStale() {
+    if (!S.result || !$("cz-result")) return;
+    const box = $("cz-result");
+    if (box.querySelector(".cz-stale")) return;
+    box.insertAdjacentHTML("afterbegin", `<p class="cz-stale">The form has changed since this was pulled — pull again to update.</p>`);
+  }
+
+  // A short status line for screen readers (the result pane itself is not a live region: it would be read out in full).
+  function announce(text) {
+    const el = $("cz-status");
+    if (el) el.textContent = text;
+  }
+
   function renderResultWelcome() {
     $("cz-result").innerHTML = `<p class="cz-welcome">Pick a product and a place, then <strong>Pull avails</strong>.<br>Numbers come with the data they were modeled from.</p>`;
   }
@@ -772,10 +884,11 @@
 
   function summaryText(data) {
     const m = summarize(data);
-    const areas = (S.resolve && S.resolve.areas || []).map((a) => a.label || a.dma).filter(Boolean);
+    const asked = S.resultCtx || { geo: S.geo.trim(), areas: [] };        // what THIS result was pulled for, not what the form says now
+    const areas = asked.areas;
     const lines = [
       `Constanza estimate — ${data.product_name}`,
-      `Geography: ${S.geo.trim()}${areas.length ? ` (${areas.slice(0, 6).join("; ")}${areas.length > 6 ? `; +${areas.length - 6} more` : ""})` : ""}`,
+      `Geography: ${asked.geo}${areas.length ? ` (${areas.slice(0, 6).join("; ")}${areas.length > 6 ? `; +${areas.length - 6} more` : ""})` : ""}`,
       `Flight: ${m.months} month${m.months === 1 ? "" : "s"}${m.weeks ? ` (~${m.weeks.toFixed(1)} weeks)` : ""}`,
       `${m.aud ? "Audience impressions" : "Impressions"} per month (low / mid / high): ${num(m.month.low)} / ${num(m.month.mid)} / ${num(m.month.high)}`,
       `Flight total (low / mid / high): ${num(m.total.low)} / ${num(m.total.mid)} / ${num(m.total.high)}`,
@@ -810,6 +923,7 @@
     $("cz-result").innerHTML = `
       <div class="cz-card-head">
         <div class="cz-card-title">${esc(data.product_name)}</div>
+        ${S.resultCtx && S.resultCtx.geo ? `<div class="cz-card-geo">${esc(S.resultCtx.geo)}</div>` : ""}
         <div class="cz-badges">${badgesHtml(data)}</div>
       </div>
       <div class="cz-headline">
@@ -826,8 +940,9 @@
       ${provenanceHtml(data)}
       <div class="cz-actions">${inserts}<button type="button" class="btn-secondary" id="cz-copy">Copy summary</button></div>`;
     $("cz-result").querySelectorAll(".cz-insert").forEach((btn) => btn.addEventListener("click", () => {
-      applyConstanzaEstimate(btn.dataset.lid, m.month.mid, m.uniques, typeof _constanzaGeoInfo === "function" ? _constanzaGeoInfo(data) : null);
-      btn.textContent = "✓ Inserted into Avails";
+      const stillThere = typeof state !== "undefined" && (state.lineItems || []).some((li) => li.id === btn.dataset.lid);
+      const done = stillThere && applyConstanzaEstimate(btn.dataset.lid, m.month.mid, m.uniques, typeof _constanzaGeoInfo === "function" ? _constanzaGeoInfo(data) : null) !== false;
+      btn.textContent = done ? "✓ Inserted into Avails" : "That line is no longer in the proposal";
       btn.disabled = true;
     }));
     const tog = $("cz-toggle-areas");
@@ -840,6 +955,7 @@
 
   function renderError(message) {
     $("cz-result").innerHTML = `<div class="cz-error"><strong>Couldn’t pull avails</strong>${esc(message)}</div>`;
+    announce(`Couldn’t pull avails: ${message}`);
   }
 
   function scrollToResult() {
@@ -883,12 +999,16 @@
     if (!S.geo.trim()) { renderError("Type a geography first — a TV market, county, city, ZIP or “National”."); setMood("oops", 3000); $("cz-geo").focus(); return; }
     setBusy(true); setMood("thinking");
     S.showAllAreas = false;
+    const mine = ++S.pullSeq;                     // Reset (or a newer pull) makes this answer stale: it must not repaint the dock
+    const asked = { geo: S.geo.trim(), areas: ((S.resolve && S.resolve.areas) || []).map((a) => a.label || a.dma).filter(Boolean) };
     let r;
     try {
       r = await api("/api/constanza/estimate", requestBody());
     } catch (e) {
+      if (mine !== S.pullSeq) return;
       setBusy(false); renderError(String(e)); setMood("oops"); return;
     }
+    if (mine !== S.pullSeq) return;
     setBusy(false);
     if (!r.ok) {
       const msg = errorText(r.data, `The request failed (${r.status}).`);
@@ -900,14 +1020,38 @@
       return;
     }
     S.result = r.data;
+    S.resultCtx = asked;
     renderResult(r.data);
+    announce(`Pulled ${r.data.product_name}: ${num(summarize(r.data).month.mid)} impressions per month.`);
     $("constanza-bubble").classList.add("cz-has-result");
     setMood("happy", 3200);
     scrollToResult();
   }
 
+  // Forget the previous request's geography type, audience, total and result (a line's own request starts from nothing).
+  function clearRequestState() {
+    S.pullSeq++; S.resSeq++;
+    clearTimeout(resolveTimer);
+    setBusy(false);
+    Object.assign(S, { geoType: "", total: "", ageMin: "", ageMax: "", gender: "", interests: [], needTotal: false, result: null, resultCtx: null });
+    setGeoType("", true);
+    $("cz-total").value = ""; $("cz-age-min").value = ""; $("cz-age-max").value = ""; $("cz-interest-q").value = "";
+    $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === "")));
+    refreshAudienceUI(); hideInterestResults(); renderResultWelcome(); updateTotalField();
+    $("constanza-bubble").classList.remove("cz-has-result");
+  }
+
+  // A new proposal begins: nothing of the old one (its geography, its lines, a result for them) may survive in the dock.
+  function onProposalReset() {
+    if (!$("constanza-bubble")) return;
+    resetForm();
+  }
+
   function resetForm() {
-    Object.assign(S, { geo: "", geoType: "", flight: 1, unit: "months", total: "", ageMin: "", ageMax: "", gender: "", interests: [], needTotal: false, resolve: null, result: null, lineId: null });
+    S.pullSeq++; S.resSeq++;                      // discard any pull or resolve still in flight
+    clearTimeout(resolveTimer);
+    setBusy(false);
+    Object.assign(S, { geo: "", geoType: "", flight: 1, unit: "months", total: "", ageMin: "", ageMax: "", gender: "", interests: [], needTotal: false, resolve: null, result: null, resultCtx: null, lineId: null });
     $("cz-geo").value = ""; $("cz-total").value = ""; $("cz-age-min").value = ""; $("cz-age-max").value = ""; $("cz-interest-q").value = "";
     setGeoType("", true); setFlight(1, "months");
     $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === "")));
@@ -935,6 +1079,7 @@
         $("cz-product-note").innerHTML = `<p class="cz-note cz-warn">“${esc(opts.product)}” has no Constanza data enabled — pick another product, or turn it on in Admin → Forecast.</p>`;
       }
     });
+    if (opts.lineId || opts.geo != null) clearRequestState();      // a line's own request, not whatever the dock held before
     S.lineId = opts.lineId || null;
     const typedAlready = S.geo.trim() !== "" && !opts.geo;
     if (opts.geo != null) { S.geo = opts.geo; $("cz-geo").value = opts.geo; }
@@ -991,13 +1136,18 @@
     });
 
     // geography
-    $("cz-geo").addEventListener("input", (e) => { S.geo = e.target.value; resolveSoon(); });
+    $("cz-geo").addEventListener("input", (e) => { S.geo = e.target.value; markStale(); resolveSoon(); });
     $("cz-geo").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); clearTimeout(resolveTimer); pull(); } });
     $("cz-geotype").addEventListener("click", (e) => { const b = e.target.closest("button[data-type]"); if (b) setGeoType(b.dataset.type); });
     $("cz-geo-chips").addEventListener("click", (e) => { const b = e.target.closest("[data-example]"); if (b) setGeo(b.dataset.example); });
 
     // flight
-    $("cz-flight").addEventListener("input", (e) => setFlight(e.target.value));
+    // While typing, only the state follows: clearing the box and typing a new number must not be rewritten under the cursor.
+    $("cz-flight").addEventListener("input", (e) => {
+      const n = Math.round(Number(e.target.value));
+      if (Number.isFinite(n) && n >= 1) { S.flight = n; updateFlightHint(); markStale(); }
+    });
+    $("cz-flight").addEventListener("change", (e) => setFlight(e.target.value));
     $("cz-flight").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); pull(); } });
     $("cz-flight-dec").addEventListener("click", () => setFlight(S.flight - 1));
     $("cz-flight-inc").addEventListener("click", () => setFlight(S.flight + 1));
@@ -1008,17 +1158,18 @@
       setFlight(conv, b.dataset.unit);
     });
     $("cz-use-dates").addEventListener("click", (e) => setFlight(Number(e.target.dataset.days), "days"));
-    $("cz-total").addEventListener("input", (e) => { S.total = e.target.value; });
+    $("cz-total").addEventListener("input", (e) => { S.total = e.target.value; markStale(); });
 
     // audience
-    $("cz-age-min").addEventListener("input", (e) => { S.ageMin = e.target.value; refreshAudienceUI(); });
-    $("cz-age-max").addEventListener("input", (e) => { S.ageMax = e.target.value; refreshAudienceUI(); });
+    $("cz-age-min").addEventListener("input", (e) => { S.ageMin = e.target.value; refreshAudienceUI(); markStale(); });
+    $("cz-age-max").addEventListener("input", (e) => { S.ageMax = e.target.value; refreshAudienceUI(); markStale(); });
     $("cz-gender").addEventListener("click", (e) => {
       const b = e.target.closest("button[data-g]");
       if (!b) return;
       S.gender = b.dataset.g;
       $("cz-gender").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
       refreshAudienceUI();
+      markStale();
     });
     $("cz-interest-q").addEventListener("input", () => { clearTimeout(interestTimer); interestTimer = setTimeout(searchInterests, 180); });
     $("cz-interest-q").addEventListener("keydown", (e) => {
@@ -1026,7 +1177,7 @@
         if (!interestHits.length) return;
         e.preventDefault();
         interestActive = (interestActive + (e.key === "ArrowDown" ? 1 : -1) + interestHits.length) % interestHits.length;
-        $("cz-interest-results").querySelectorAll(".cz-interest-item").forEach((el, i) => el.classList.toggle("cz-active", i === interestActive));
+        markInterestActive();
       } else if (e.key === "Enter") {
         e.preventDefault();
         if (interestHits[interestActive]) addInterest(interestHits[interestActive]);
@@ -1038,7 +1189,7 @@
     });
     $("cz-interest-chips").addEventListener("click", (e) => {
       const x = e.target.closest("[data-rm]");
-      if (x) { S.interests.splice(Number(x.dataset.rm), 1); refreshAudienceUI(); }
+      if (x) { S.interests.splice(Number(x.dataset.rm), 1); refreshAudienceUI(); markStale(); }
     });
     $("cz-browse").addEventListener("toggle", (e) => { if (e.target.open) renderBrowse(); });
     $("cz-browse-body").addEventListener("click", (e) => {
@@ -1070,12 +1221,12 @@
 
   // ------------------------------------------------------------------ public surface
   window.Constanza = {
-    open, close, toggle, isOpen: () => S.open, hintOnce, setMood,
+    open, close, toggle, isOpen: () => S.open, hintOnce, setMood, onProposalReset, replaceGeoItem: replaceItem,
     renderCard, renderCardError, mountGeoHelp, summarize, badgesHtml, iconHtml: () => MINI_ICON, compact, lineLabel,
     periodLineHtml: (series) => (isLiveSports(series) && series.period_label ? `<p class="cz-period-line">📅 Live sports period: ${esc(series.period_label)}</p>` : ""),
     _state: S,
     // Pure helpers, exposed so tests/test_constanza_frontend.py can run them without a browser.
-    _pure: { compact, removeGeoItems, replaceItem, summarize, normGeo, geoHelpHtml, badgesHtml, lineLabel, seriesMeta, notesOf },
+    _pure: { compact, editGeoItem, tidyList, removeGeoItems, replaceItem, summarize, normGeo, geoHelpHtml, badgesHtml, lineLabel, seriesMeta, notesOf },
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount);

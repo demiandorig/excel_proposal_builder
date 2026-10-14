@@ -204,3 +204,116 @@ def test_product_meta_names_the_basis_and_unit():
 def test_notes_that_repeat_the_unmatched_warning_are_not_shown_twice():
     out = run("""return JSON.stringify(P.notesOf({ notes: ["NOT INCLUDED in this estimate - couldn't be matched: 'x'", "A real note"] }));""")
     assert out == ["A real note"]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Review fixes: each of these was a confirmed defect found by an independent review of the branch
+# ---------------------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text,drop,expected", [
+    ("Orange County, CA, Orange, NJ", ["Orange"], None),                    # "Orange" is not an item here: "Orange County" is, and "Orange, NJ"
+    ("902101, 90210", ["90210"], "902101"),                                 # never inside a longer ZIP
+    ("90210, 902101", ["90210"], "902101"),
+    ("Othello, WA; Othello WA; Adams County, WA", ["Othello, WA", "Othello WA"], "Adams County, WA"),   # every copy of the same place
+    ("Othello, WA; Adams County, WA; Othello, WA", ["Othello, WA"], "Adams County, WA"),
+    ("Springfield Gardens, NY; Springfield", ["Springfield"], "Springfield Gardens, NY"),
+    ("Adams County, WA, Othello, WA", ["Othello, WA"], "Adams County, WA"),
+    ("Spokane and Othello, WA or Pasco, WA", ["Othello, WA"], "Spokane or Pasco, WA"),
+])
+def test_dropping_items_matches_whole_items_never_substrings(text, drop, expected):
+    assert run(f"return JSON.stringify(P.removeGeoItems({json.dumps(text)}, {json.dumps(drop)}));") == expected
+
+
+@pytest.mark.parametrize("text,item,replacement,expected", [
+    ("Springfield Gardens, NY, Springfield", "Springfield", "Springfield, MO", "Springfield Gardens, NY, Springfield, MO"),
+    ("Plano, TX; Travus Co., TX", "Travus Co., TX", "Travis County, TX", "Plano, TX; Travis County, TX"),
+    ("Dallas, TX; Adams Cty, WA", "adams  cty, wa", "Adams County, WA", "Dallas, TX; Adams County, WA"),         # case and spacing
+    ("Adams Count", "Adams Count", "Adams County, WA", "Adams County, WA"),
+    ("Plano, TX; Travus County, TX", "Travus Co., TX", "Travis County, TX", "Plano, TX; Travus County, TX; Travis County, TX"),   # not found: the list is kept
+    ("Plano, TX; Travis County, TX", "Travus Co., TX", "Travis County, TX", "Plano, TX; Travis County, TX"),       # ... and never duplicated
+    ("Adams Count", "Something else", "Adams County, WA", "Adams County, WA"),                                    # a single typed item is the item
+])
+def test_replacing_an_item_never_wipes_the_rest_of_the_list(text, item, replacement, expected):
+    assert run(f"return JSON.stringify(P.replaceItem({json.dumps(text)}, {json.dumps(item)}, {json.dumps(replacement)}));") == expected
+
+
+def test_an_item_that_is_a_prefix_of_one_with_a_state_is_not_that_item():
+    """'Othello' is not an item of 'Othello, WA': the state after it belongs to it."""
+    assert run("""return JSON.stringify([P.editGeoItem("Othello, WA", "Othello", null), P.editGeoItem("Othello, WA; Pasco", "Othello", null),
+        P.editGeoItem("Othello, WA", "Othello, WA", null)]);""") == [None, None, ""]
+
+
+def test_the_card_flow_uses_the_same_whole_item_replacement():
+    fns = "\n".join(H._extract_fn(APP_JS, n) for n in ("escapeHtml", "_replaceGeoItem"))
+    body = ("var console = { warn: function () {}, log: function () {}, error: function () {} };\nvar window = {};\n"
+            "var document = { readyState: 'loading', addEventListener: function () {}, getElementById: function () { return null; }, querySelectorAll: function () { return []; } };\n"
+            "var state = { catalog: null };\n" + fns + "\n" + CZ_JS + "\n"
+            "var Constanza = window.Constanza;\n"
+            "return JSON.stringify(_replaceGeoItem('Orange County, CA; Orange, NJ', 'Orange, NJ', 'Orange, CA'));")
+    assert json.loads(H._run_js(body)) == "Orange County, CA; Orange, CA"
+
+
+def test_an_insert_into_a_line_that_no_longer_exists_writes_nothing():
+    fns = H._extract_fn(APP_JS, "applyConstanzaEstimate")
+    body = ("var state = { lineItems: [{ id: 'a', product_name: 'P' }], availsData: {}, productIndex: {} };\n"
+            "function renderAvailsGrid() { state.rendered = true; }\nfunction _effectiveProduct() { return {}; }\nfunction calcMaxSpendFromImps() { return null; }\n"
+            + fns + "\n"
+            "var gone = applyConstanzaEstimate('zzz', 1000, null, null);\n"
+            "var ok = applyConstanzaEstimate('a', 1000.4, 50, { method: 'dma' });\n"
+            "return JSON.stringify({ gone: gone, ok: ok, keys: Object.keys(state.availsData), imps: state.availsData.a.max_imps, uniques: state.availsData.a.est_uniques });")
+    assert json.loads(H._run_js(body)) == {"gone": False, "ok": True, "keys": ["a"], "imps": 1000, "uniques": 50}
+
+
+def _between(src: str, start: str, end: str) -> str:
+    return src.split(start, 1)[1].split(end, 1)[0]
+
+
+def test_the_flight_box_does_not_rewrite_itself_while_the_planner_types():
+    """Clearing the box and typing 6 used to give 16: the empty box was rewritten to '1' on the first keystroke."""
+    handler = _between(CZ_JS, '$("cz-flight").addEventListener("input"', '$("cz-flight").addEventListener("change"')
+    assert "setFlight(" not in handler and "$(\"cz-flight\").value" not in handler
+    assert 'addEventListener("change", (e) => setFlight(e.target.value))' in CZ_JS
+
+
+def test_an_answer_that_arrives_after_reset_or_a_newer_pull_is_dropped():
+    pull = _between(CZ_JS, "async function pull()", "function clearRequestState()")
+    assert "const mine = ++S.pullSeq" in pull and pull.count("if (mine !== S.pullSeq) return;") >= 2
+    reset = _between(CZ_JS, "function resetForm()", "// ---- open / close")
+    assert "S.pullSeq++" in reset and "S.resSeq++" in reset and "clearTimeout(resolveTimer)" in reset and "setBusy(false)" in reset
+
+
+def test_opening_the_dock_for_a_line_starts_that_lines_request_clean_and_a_new_proposal_clears_the_dock():
+    open_fn = _between(CZ_JS, "  function open(opts) {", "  function close() {")
+    assert "if (opts.lineId || opts.geo != null) clearRequestState();" in open_fn
+    clear = _between(CZ_JS, "function clearRequestState()", "function onProposalReset()")
+    for field in ("geoType", "ageMin", "gender", "interests", "needTotal", "result"):
+        assert field in clear, field
+    assert "Constanza.onProposalReset()" in APP_JS and "state.constanzaGeoOverride = {}" in APP_JS
+
+
+def test_the_summary_describes_what_the_result_was_pulled_for_not_what_the_form_says_now():
+    assert "S.resultCtx = asked;" in CZ_JS and "const asked = S.resultCtx ||" in _between(CZ_JS, "function summaryText(", "function renderResult(")
+    assert "markStale()" in CZ_JS and "The form has changed since this was pulled" in CZ_JS
+
+
+def test_a_failed_audience_request_is_not_remembered_and_never_an_unhandled_rejection():
+    load = _between(CZ_JS, "async function loadTaxonomy()", "async function renderBrowse()")
+    assert "try {" in load and "if (r.ok) { S.taxonomy = r.data; return S.taxonomy; }" in load       # only a good answer is cached
+    search = _between(CZ_JS, "async function searchInterests()", "function groupLabel(")
+    assert "try {" in search and "isn’t available right now" in search
+    assert "Products couldn’t be loaded" in CZ_JS                                                          # the catalog never arrived
+
+
+def test_the_pickers_are_comboboxes_with_an_active_descendant_and_the_result_is_not_a_live_region():
+    for field in ('id="cz-picker-search"', 'id="cz-interest-q"'):
+        tag = CZ_JS.split(field, 1)[1].split("/>", 1)[0]
+        assert 'role="combobox"' in tag and "aria-controls=" in tag and "aria-autocomplete=\"list\"" in tag, field
+    assert 'id="cz-opt-${idx}"' in CZ_JS and 'id="cz-int-${i}"' in CZ_JS and "aria-activedescendant" in CZ_JS
+    assert 'class="cz-group-label" role="presentation"' in CZ_JS
+    assert '<div class="cz-result" id="cz-result"></div>' in CZ_JS and 'id="cz-status" role="status" aria-live="polite"' in CZ_JS
+
+
+def test_picking_the_right_county_replaces_the_whole_phrase_it_was_read_from_and_nothing_else():
+    text = "Dallas; Kansas City, MO and surrounding areas in Johnson County; Austin"
+    out = run(f"return JSON.stringify(P.replaceItem({json.dumps(text)}, 'Kansas City, MO and surrounding areas in Johnson County', 'Johnson County, KS'));")
+    assert out == "Dallas; Johnson County, KS; Austin"

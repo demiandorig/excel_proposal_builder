@@ -326,3 +326,11 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 .constanza-result .cz-card-actions { margin-top: 10px; align-items: center; }
 .constanza-result .cz-audience-box { background: var(--paper-card); }
 .constanza-result .cz-using { margin: 0 0 8px; }
+
+/* ------------------------------------------------------------------ status for screen readers, stale banner */
+.cz-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.cz-stale {
+  margin: 0 0 10px; padding: 7px 10px; border-radius: 8px; font-size: 12px; line-height: 1.35;
+  background: var(--amber-soft); color: #8a3b00; border: 1px solid #f5cba7;
+}
+.cz-card-geo { font-size: 12px; color: var(--ink-soft); margin-top: 2px; overflow-wrap: anywhere; }

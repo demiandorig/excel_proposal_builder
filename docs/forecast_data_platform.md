@@ -175,6 +175,42 @@ Then × months (or weeks), with the planning range from the row (legacy series) 
 its series, version, data basis, unit and period, and notes in plain language. For the seven original model series the
 database path reproduces the old bundled-workbook numbers **exactly** (a test compares them across 14 geographies).
 
+**A state asked for as a whole** ("Texas", "WA") resolves to the markets homed in it, but a state is more than that: Wyoming's
+own row in the Madhive exports is nearly twice what its two home markets hold (the rest is served from Denver, Billings and
+Salt Lake City). When the series carries state rows, the markets are scaled so they add up to the platform's own state total
+and a note says so (`whole_states` on the resolution, `_state_scales` in the engine). A ZIP, county or city inside the state
+is never scaled.
+
+**A baseline-proxy product** (a Netflix targeted variant, VIX 360) forecasts from another product's series; the link's stored
+caveat ("this targeted variant will deliver fewer impressions") travels with the product's config into every estimate.
+
+**Audience gender** is validated (`male`, `female`, `all`; "Male" and "women" are understood, anything else is a 422, never read
+as "everyone" while counted as an applied cut). An interest with no sourced male/female split applies its all-adults rate to a
+gender cut and the estimate says so.
+
+## Geography matching
+
+Free text goes through `app/services/constanza_geo_text.py` (the forgiving layer) before the strict matchers in
+`constanza_geo.py`. Every change is reported back as an interpretation; a guess is never silent, and a suggestion is always a
+real place the resolver accepts.
+
+* **"City, ST" is the city** when a real place of that name exists in that state ("Richmond, CA", "Washington, PA",
+  "Kansas City, KS"): never "the Richmond market plus every California market". A list written the old way ("Los Angeles, NV",
+  "Washington, Oregon", "CA, NV, AZ") is still a list; "D.C." is read as DC.
+* **Containers** ("X and surrounding areas in Johnson County", "Plano in Collin County") mean the larger area. A county name
+  that exists in several states is narrowed to the one in the same TV market as the place named inside it; when two fit
+  (Johnson County, KS and MO both lie in Kansas City's market) the planner picks, and the inner place's state is never assumed.
+  A container that cannot be matched falls back to the place inside it.
+* **Lists** with "and" / "or" / "&", a state written once at the end ("Austin and Round Rock, TX"), plural counties
+  ("Los Angeles and Orange counties, CA") and lists where only part resolved are all read; "or" is read like "and" (the places
+  are added) and says so.
+* **Suggestions name what was typed.** `replaces` and `drop_inputs` are the text in the box ("Travus Co., TX"), not the tidied
+  item, so a click edits that item only; the UI edits by whole items, never by substring.
+* **Overlap offers are offers.** A city or ZIP listed beside a county it *may* sit inside (same state, same market, smaller)
+  is offered as "Drop X — it may be inside Y"; the bundled data cannot prove containment (Fremont and Berkeley share a market
+  with Santa Clara County but are in Alameda County), so it never says so.
+* **"All its TV markets"** is offered only for a state that has one homed in it (not NJ, DE, NH or DC).
+
 ## Indexes (measured)
 
 The rule: **add an index only when `EXPLAIN (ANALYZE, BUFFERS)` shows a need.** The queries are the exact strings in
@@ -228,6 +264,11 @@ the typed text inside a name ("dental"), shared words, and near-spellings ("fitn
   (`verification`): 39 sourced and 15 derived rates survived, many after corrections (for example the video-game rate was
   replaced because the cited page did not carry it and its base was not adults); **36 audiences have no defensible public
   number** and ship blank. Rebuild with `python scripts/audience_taxonomy/build.py --research DIR`.
+* **Matching never guesses.** A segment's rate is applied only when the match is strong: an exact name or team wording, a
+  keyword phrase, or the typed text inside a name. One shared common word ("pet OWNERS" against "small business OWNERS") is
+  shown as a suggestion, never applied; neither is a bare role word ("owners", "shoppers") or two segments that fit equally well
+  ("insurance": auto or health?). A label may not promise more than its number measures: the two segments the independent
+  review caught (a 9% "politically engaged" and a 33% "religious") now say what they are.
 * **Confidence feeds the range.** Each applied interest widens the low/high band by its grade (high 15%, moderate 25%, low
   40%), combined with the other factors by root-sum-of-squares. Interests are multiplied as if independent, and the result
   says so.
@@ -255,7 +296,20 @@ are unchanged.
 
 A connection the server dropped while idle is replaced, not lent. When the database is unreachable the first call fails fast
 and further calls fail instantly for 5 seconds, so every fail-open path (offline product list, forecast defaults) stays
-quick. A busy pool is *not* treated as an outage.
+quick. A busy pool is *not* treated as an outage. This holds after the pool exists too: a pool that has no connection for 2
+seconds asks one direct connect (serialised, so one failed probe fails every waiting caller) whether the database is there; if
+not, the fail-fast window opens at once instead of every request waiting out `DB_POOL_TIMEOUT`.
+
+A session advisory lock (the bootstrap, the migration runner) is released with `db.release_advisory_lock`: it rolls back first
+(an aborted transaction cannot run the unlock) and, if it still cannot release, closes the connection so the server drops the
+session and the pool replaces it. Without that, a failed step left the lock on a pooled connection and every later bootstrap
+skipped for up to 30 minutes.
+
+**First start on a fresh database.** The products table is filled by the catalog's own first-use seeding, which the product
+seed now triggers *before* the first import, so the series find the products they link to; series the startup import skips
+(they already have a version) still get their product links refreshed (they are the importer's defaults, not admin choices).
+A series extended from another (Netflix from Connect) carries a hash of that distribution in its fingerprint, so a new Connect
+export makes a new Netflix version instead of leaving it "unchanged".
 
 ## The Constanza front end
 

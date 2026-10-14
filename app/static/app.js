@@ -1171,6 +1171,8 @@ async function startNewProposal() {
 // shared by New proposal and by pasting a different request over the current one.
 function _clearPerProposalState() {
   _resetEpoch++;
+  state.constanzaGeoOverride = {};       // a geography picked for a line belongs to the proposal being left
+  if (window.Constanza) Constanza.onProposalReset();
   state.strategyBrief = null;
   state.roadblocks = null;
   state.rvSelected = null;
@@ -6778,11 +6780,10 @@ function renderAvailsGrid() {
 // between what was typed and what the backend echoed back. Falls back to replacing the
 // whole input only if the item can't be found.
 function _replaceGeoItem(text, item, replacement) {
-  const pattern = item.trim().split(/\s*,\s*/)
-    .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .join("\\s*,\\s*");
-  const re = new RegExp(pattern, "i");
-  return re.test(text) ? text.replace(re, () => replacement) : replacement;
+  // Whole-item matching lives with the rest of the Constanza UI (constanza.js): "Orange" is not found inside "Orange County",
+  // and an item that is not in the text adds the pick to a list instead of wiping it.
+  if (window.Constanza && Constanza.replaceGeoItem) return Constanza.replaceGeoItem(text, item, replacement);
+  return String(text || "").includes(item) ? text.replace(item, replacement) : replacement;
 }
 
 // Does this product's avails card get the "Auto-calculate avails (Constanza)" button? Admin -> Forecast decides: every
@@ -6975,7 +6976,8 @@ function _constanzaGeoInfo(data) {
 
 function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
   const li = state.lineItems.find(x => x.id === lid);
-  const p = state.productIndex[li ? li.product_name : ""] || {};
+  if (!li) return false;     // the line was removed (or the proposal changed) since the estimate was pulled: write nothing
+  const p = state.productIndex[li.product_name] || {};
   state.availsData[lid] = state.availsData[lid] || {};
   const entry = state.availsData[lid];
 
@@ -6996,6 +6998,7 @@ function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
   if (entry.est_uniques) entry.frequency = Math.round((entry.max_imps / entry.est_uniques) * 10) / 10;
 
   renderAvailsGrid();
+  return true;
 }
 
 function syncAvailsFromGrid() {

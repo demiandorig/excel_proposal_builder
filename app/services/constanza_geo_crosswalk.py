@@ -398,6 +398,16 @@ def _place_name_index() -> dict[str, list[tuple[str, str, str]]]:
     return by_name
 
 
+def place_in_state(name: str, state: str) -> bool:
+    """True when a city / town / CDP with this name exists in `state` and has market data bundled ("Richmond" in CA). Lets
+    the DMA matcher tell "Richmond, CA" (the city) from "the Richmond market plus California"."""
+    key = _norm_name(name)
+    if not key or _unsupported_reason(state, "city") is not None:
+        return False
+    shares = _load_geo("place_dma.json")["shares"]
+    return any(abbr == state and gid in shares for gid, abbr, _display in _place_name_index().get(key, []))
+
+
 def _resolve_city(token: str, relaxed: bool = False) -> GeoResolution | None:
     token = token.strip()
     index = _place_name_index()

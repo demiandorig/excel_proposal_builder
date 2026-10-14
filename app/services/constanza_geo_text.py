@@ -33,6 +33,14 @@ from typing import Optional
 class Prepared:
     text: str
     interpretations: list[dict] = field(default_factory=list)
+    # cleaned item -> the text the planner TYPED for it, only where the two differ ("Travus Co., TX" became "Travus County,
+    # TX"): a suggestion that stands in for the item must name what is in the box, or the UI cannot find it to replace.
+    origins: dict = field(default_factory=dict)
+    # cleaned item -> {"inner": the place named inside the container}. "Kansas City, MO and surrounding areas in Johnson County"
+    # becomes the item "Johnson County" with the inner place remembered: the resolver uses it to pick the right Johnson County
+    # (the one in Kansas City's market) instead of assuming the inner place's state, and falls back to the inner place if the
+    # container cannot be matched at all.
+    context: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------------------------- states
@@ -109,35 +117,50 @@ _LEADING_FILLER_RE = re.compile(
 _COUNTY_ABBR_RE = re.compile(r"\b((?:[A-Z][A-Za-z'.-]*\s)*[A-Z][A-Za-z'.-]*)\s+(?:Co|Cty|Cnty)\.?(?=\s*(?:,|$))")
 
 
-def _with_inherited_state(outer: str, inner: str) -> str:
-    """'Adams County' + 'Othello, WA' -> 'Adams County, WA' (the outer area is in the same state the planner named)."""
-    outer = outer.strip().strip(",")
-    if _trailing_state_abbr(outer) or split_trailing_state(outer):
-        return outer
-    state = _trailing_state_abbr(inner)
-    return f"{outer}, {state}" if state else outer
-
-
 MAX_CLEAN_CHARS = 200      # no real place name is longer; longer text is left alone (and never fed to the regexes below)
 
+_GENERIC_INNER_RE = re.compile(r"^(?:all\s+)?(?:the\s+)?(?:areas?|cities|city|towns?|communities|neighborhoods|suburbs|places|everything)$", re.IGNORECASE)
+_PLURAL_COUNTIES_RE = re.compile(r"^(?P<names>.+?)\s+(?:counties|parishes|boroughs)\b(?P<tail>[^;]*)$", re.IGNORECASE)
 
-def _clean_chunk(chunk: str) -> tuple[str, Optional[str]]:
+
+def _same(chunk: str) -> dict:
+    return {"text": chunk, "why": None, "context": None, "src": chunk}
+
+
+def _clean_chunk(chunk: str) -> list[dict]:
+    """One typed list item -> the clean item(s) it means: [{"text", "why", "context", "src"}] (`why` None when nothing changed;
+    `src` is the part of the typed text the item came from). Usually one entry; a few phrasings stand for several places."""
     from app.services.constanza_geo import _NATIONAL_WORDS
     chunk = re.sub(r"\s+", " ", chunk).strip()        # one space between words: keeps the patterns below linear
     if len(chunk) > MAX_CLEAN_CHARS or chunk.lower() in _NATIONAL_WORDS:
-        return chunk, None                    # too long to be a place; or "all markets", "all us": complete phrases, not filler
+        return [_same(chunk)]                 # too long to be a place; or "all markets", "all us": complete phrases, not filler
     original = chunk
     m = _SURROUNDING_IN_RE.match(chunk)
     if m:
-        inner, outer = m.group("inner").strip(" ,"), m.group("outer").strip()
-        became = _with_inherited_state(outer, inner)
-        return became, (f"You asked for the surrounding areas in {outer}, so the larger area is used — it already includes "
-                        f"the places named before it ('{inner}').")
+        inner, outer = m.group("inner").strip(" ,"), m.group("outer").strip().strip(",")
+        return [{"text": outer, "src": chunk, "context": {"inner": inner},
+                 "why": (f"You asked for the surrounding areas in {outer}, so the larger area is used — it already includes "
+                         f"the places named before it ('{inner}').")}]
+    # "X in Y County and Z in W County": each statement on its own, so one container never swallows the next place
+    parts = split_conjunctions(chunk)
+    if len(parts) > 1 and any(_IN_CONTAINER_RE.match(p) for p in parts):
+        out: list[dict] = []
+        for part in parts:
+            out.extend(_clean_chunk(part))
+        return out
     m = _IN_CONTAINER_RE.match(chunk)
     if m:
-        inner, outer = m.group("inner").strip(" ,"), m.group("outer").strip()
-        became = _with_inherited_state(outer, inner)
-        return became, f"'{inner}' is inside {outer}, so the larger area is used."
+        inner, outer = m.group("inner").strip(" ,"), m.group("outer").strip().strip(",")
+        if _GENERIC_INNER_RE.match(inner):    # "cities in Orange County, CA": no named place, just everything in the county
+            return [{"text": outer, "src": chunk, "context": None, "why": "dropped the introductory words"}]
+        return [{"text": outer, "src": chunk, "context": {"inner": inner}, "why": f"'{inner}' is inside {outer}, so the larger area is used."}]
+    m = _PLURAL_COUNTIES_RE.match(chunk)
+    if m:                                     # "Los Angeles and Orange counties, CA": one county per name
+        names = split_conjunctions(m.group("names")) or [m.group("names").strip()]
+        if len(names) > 1:
+            tail = m.group("tail").rstrip()
+            return [{"text": f"{n} County{tail}", "src": chunk, "context": None,
+                     "why": "read 'counties' as one county for each name"} for n in names]
     reasons = []
     cleaned = _SURROUNDING_TAIL_RE.sub("", chunk)
     if cleaned != chunk:
@@ -157,8 +180,8 @@ def _clean_chunk(chunk: str) -> tuple[str, Optional[str]]:
         chunk = cleaned
     chunk = re.sub(r"\s+", " ", chunk).strip(" ,")
     if chunk != original.strip() and chunk:
-        return chunk, "; ".join(reasons) or "tidied the text"
-    return original, None
+        return [{"text": chunk, "src": original, "context": None, "why": "; ".join(reasons) or "tidied the text"}]
+    return [_same(original)]
 
 
 _ZIP_ONLY_RE = re.compile(r"^\d{5}(?:-\d{4})?$")
@@ -178,6 +201,10 @@ def _split_stateful_list(chunk: str) -> list[str]:
     return parts if all(stands_alone(p) for p in parts) else [chunk]
 
 
+def _norm_space(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
 def prepare(text: str, hint: Optional[str] = None) -> Prepared:
     """Clean the text one list item at a time (items are separated by newlines, semicolons or '|'). Returns the text to
     match plus an interpretation for every item that was changed."""
@@ -185,27 +212,60 @@ def prepare(text: str, hint: Optional[str] = None) -> Prepared:
         return Prepared(text)                                  # typed lists of codes / countries need no phrase cleanup
     items: list[str] = []
     interps: list[dict] = []
+    origins: dict = {}
+    context: dict = {}
     for chunk in re.split(r"[\n;|]+", text or ""):
         chunk = chunk.strip()
         if not chunk:
             continue
-        cleaned, why = _clean_chunk(chunk)
-        if why:
-            interps.append({"input": chunk, "became": cleaned, "why": why})
-        listed = _split_stateful_list(cleaned)
-        if len(listed) > 1:
-            interps.append({"input": cleaned, "became": "; ".join(listed), "why": "read as a list of places"})
-        items.extend(listed)
-    return Prepared("; ".join(items) if items else (text or ""), interps)
+        pieces = _clean_chunk(chunk)
+        # One chunk that became SEVERAL places from the same words ("Los Angeles and Orange counties"): none of them stands for
+        # the whole text, so replacing "the typed text of one" would take the others with it.
+        shared_source = len(pieces) > 1 and all(p["src"] == pieces[0]["src"] for p in pieces)
+        for piece in pieces:
+            cleaned = piece["text"]
+            if piece["why"]:
+                interps.append({"input": piece["src"], "became": cleaned, "why": piece["why"]})
+            listed = _split_stateful_list(cleaned)
+            if len(listed) > 1:
+                interps.append({"input": cleaned, "became": "; ".join(listed), "why": "read as a list of places"})
+            for item in listed:
+                items.append(item)
+                # A rewritten item ("Travus Co., TX" -> "Travus County, TX", "X and surrounding areas in Johnson County" ->
+                # "Johnson County") is not written in the box as it now reads: what the UI must replace or remove is the typed text.
+                if piece["why"] and not shared_source and _norm_space(item) != _norm_space(piece["src"]):
+                    origins.setdefault(item, piece["src"])
+                if piece["context"]:
+                    context.setdefault(item, piece["context"])
+    return Prepared("; ".join(items) if items else (text or ""), interps, origins, context)
 
 
-_CONJUNCTION_RE = re.compile(r"\s+(?:and|&|plus)\s+|\s*\+\s*", re.IGNORECASE)
+_CONJUNCTION_RE = re.compile(r"\s+(?:and|&|plus|or)\s+|\s*\+\s*", re.IGNORECASE)
 
 
 def split_conjunctions(item: str) -> list[str]:
     """'Othello, WA and Adams County, WA' -> ['Othello, WA', 'Adams County, WA']. Used only after the whole string failed
-    to resolve as ONE place (a DMA name can contain 'and')."""
+    to resolve as ONE place (a DMA name can contain 'and'). 'or' is read like 'and': Constanza cannot choose between places,
+    it adds them."""
     return [p.strip(" ,") for p in _CONJUNCTION_RE.split(item) if p and p.strip(" ,")]
+
+
+def shared_trailing_state(pieces: list[str]) -> Optional[str]:
+    """'Austin and Round Rock, TX' -> 'TX': the state written once, after the last place, belongs to every place before it
+    that names none. None when the last piece has no state or the earlier pieces already carry theirs."""
+    if len(pieces) < 2:
+        return None
+    last = pieces[-1]
+    abbr = _trailing_state_abbr(last)
+    if abbr is None:
+        split = split_trailing_state(last)
+        abbr = split[1] if split else None
+    if abbr is None:
+        return None
+    for p in pieces[:-1]:
+        if _ZIP_ONLY_RE.match(p) or _trailing_state_abbr(p) or split_trailing_state(p):
+            return None
+    return abbr
 
 
 # --------------------------------------------------------------------------------------------- fuzzy names
@@ -347,6 +407,17 @@ def suggest(text: str, hint: Optional[str] = None, limit: int = 6) -> list[dict]
     return out
 
 
+@lru_cache(maxsize=1)
+def _states_with_markets() -> frozenset:
+    from app.data.constanza import load_dma_reference
+    return frozenset(d.state for d in load_dma_reference())
+
+
+def _state_has_markets(state: str) -> bool:
+    """A few states (NJ, DE, NH, DC) have no TV market homed in them: 'all of its markets' would resolve to nothing."""
+    return state in _states_with_markets()
+
+
 def broaden(areas: list) -> list[dict]:
     """The larger areas that contain a resolved place or ZIP: its TV market(s) and its state. Offered, never applied."""
     seen_geo: set = set()
@@ -365,7 +436,7 @@ def broaden(areas: list) -> list[dict]:
     for dma, _pop in sorted(dmas.items(), key=lambda kv: -kv[1])[:2]:
         out.append({"kind": "broaden", "label": f"{dma} (TV market)", "geo_type": "dma", "resolve_hint": dma, "state": state,
                     "why": "the TV market that contains it"})
-    if state:
+    if state and _state_has_markets(state):
         from app.services.constanza_geo import _STATE_NAMES_TO_ABBR
         name = next((n.title() for n, ab in _STATE_NAMES_TO_ABBR.items() if ab == state), state)
         out.append({"kind": "broaden", "label": f"{name} (all its TV markets)", "geo_type": "state", "resolve_hint": state, "state": state,
@@ -374,9 +445,10 @@ def broaden(areas: list) -> list[dict]:
 
 
 def overlap_suggestions(areas: list, typed: Optional[dict] = None) -> list[dict]:
-    """A city / ZIP listed next to a county that PROBABLY contains it (same state, every market the small place touches is a
-    market the county touches, and the county is bigger): counting both would count the place twice. Containment cannot be
-    proven from the bundled data, so this is an offer — "use the larger area only" — never an automatic merge."""
+    """A city / ZIP listed next to a county it MAY sit inside (same state, every market the small place touches is a market the
+    county touches, and the county is bigger): counting both would count those people twice. The bundled data cannot prove a
+    place is inside a county (Fremont and Berkeley share a market with Santa Clara County, and are in Alameda County), so this
+    is an offer the planner judges - "drop these if they are inside" - never an automatic merge and never worded as fact."""
     out: list[dict] = []
     counties = {}
     for a in areas:
@@ -403,9 +475,11 @@ def overlap_suggestions(areas: list, typed: Optional[dict] = None) -> list[dict]
                 inside.append(parts[0].label or geo_id)
                 inside_ids.append(geo_id)
         if inside:
-            # `drop_inputs`: what the planner TYPED for the small places, so the UI can take exactly those out of the text.
-            drop_inputs = list(dict.fromkeys(typed[g] for g in inside_ids if typed and typed.get(g)))
-            out.append({"kind": "overlap", "label": f"Use {c_label} only", "geo_type": "county", "resolve_hint": c_label, "drops": inside,
-                        "drop_inputs": drop_inputs,
-                        "why": f"{', '.join(inside)} may be inside {c_label}; listing both counts the same people twice."})
+            # `drop_inputs`: what the planner TYPED for the small places (every spelling), so the UI can take exactly those out.
+            drop_inputs = list(dict.fromkeys(x for g in inside_ids for x in ((typed or {}).get(g) or [])))
+            names = ", ".join(inside)
+            out.append({"kind": "overlap", "label": f"Drop {names} — it may be inside {c_label}", "geo_type": "county",
+                        "resolve_hint": c_label, "drops": inside, "drop_inputs": drop_inputs,
+                        "why": f"{names} may already be inside {c_label} (the data can't prove it either way). If it is, listing both "
+                               "counts the same people twice."})
     return out

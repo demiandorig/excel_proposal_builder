@@ -70,9 +70,10 @@ def test_two_places_joined_by_and_are_a_list_and_a_probable_overlap_is_offered_n
     res = resolve_geo("Othello, WA and Adams County, WA")
     assert res.method == "mixed" and sorted(labels(res)) == ["Adams County, WA", "Othello, WA"]            # both kept: containment is not provable
     offer = next(s for s in res.suggestions if s["kind"] == "overlap")
-    assert offer["label"] == "Use Adams County, WA only" and offer["drops"] == ["Othello, WA"]
+    assert offer["label"] == "Drop Othello, WA — it may be inside Adams County, WA" and offer["drops"] == ["Othello, WA"]
+    assert offer["drop_inputs"] == ["Othello, WA"] and "can't prove" in offer["why"]                      # an offer, never worded as fact
     assert any("counted twice" in n for n in res.notes)
-    assert labels(resolve_geo(offer["resolve_hint"])) == ["Adams County, WA"]                                # taking the offer
+    assert labels(resolve_geo(offer["resolve_hint"])) == ["Adams County, WA"]                                # the fallback text
 
 
 def test_overlap_is_not_offered_for_a_city_bigger_than_the_county_or_in_another_state():
@@ -254,3 +255,130 @@ def test_an_estimate_carries_how_the_geography_was_read():
         product_name="Search - SEM", geo_text="Adams County Washinton", national_monthly_total=1_000_000))
     assert out["geo_interpretations"][0]["became"] == "Adams County, WA" and out["geo_suggestions"]
     assert out["by_area"][0]["area_label"] == "Adams County, WA"
+
+
+# --------------------------------------------------------------------------------------------- review fixes
+# Each of these was a confirmed defect found by an independent review of the branch.
+
+@pytest.mark.parametrize("text,label", [
+    ("Richmond, CA", "Richmond, CA"), ("Washington, PA", "Washington, PA"), ("Washington, MO", "Washington, MO"), ("Indiana, PA", "Indiana, PA"),
+    ("Alexandria, VA", "Alexandria, VA"), ("Peoria, AZ", "Peoria, AZ"), ("Meridian, ID", "Meridian, ID"), ("Springfield, IL", "Springfield, IL"),
+    ("Kansas City, KS", "Kansas City, KS"), ("Kansas City, Kansas", "Kansas City, KS"),
+])
+def test_a_city_and_state_is_that_city_not_a_market_elsewhere_plus_the_whole_state(text, label):
+    """'Richmond, CA' used to be the Richmond-Petersburg market PLUS every California market, with high confidence."""
+    res = resolve_geo(text)
+    assert res.method == "city" and labels(res) == [label] and not res.unmatched_tokens and not res.ambiguous
+
+
+@pytest.mark.parametrize("text", ["Washington, D.C.", "Washington D.C.", "washington, d.c.", "Washington, DC"])
+def test_washington_dc_is_the_market_however_it_is_dotted(text):
+    res = resolve_geo(text)
+    assert res.method == "exact_dma" and labels(res) == ["Washington, DC (Hagerstown)"] and not res.unmatched_tokens
+
+
+def test_the_readings_that_were_always_lists_are_still_lists():
+    assert resolve_geo("Los Angeles, NV").method == "mixed" and "Las Vegas" in labels(resolve_geo("Los Angeles, NV"))
+    assert resolve_geo("Washington, Oregon").method == "state_list" and "Seattle-Tacoma" in labels(resolve_geo("Washington, Oregon"))
+    assert labels(resolve_geo("New York, NY")) == ["New York"] and labels(resolve_geo("Dallas, TX")) == ["Dallas-Ft. Worth"]
+    assert resolve_geo("CA, NV, AZ").method == "state_list"
+
+
+def test_a_county_named_in_a_metro_that_spans_two_states_is_not_given_the_inner_places_state():
+    res = resolve_geo("Kansas City, MO and surrounding areas in Johnson County")
+    assert not res.resolved and [c["label"] for c in res.ambiguous[0]["candidates"]] == ["Johnson County, KS", "Johnson County, MO"]
+    assert any("same TV market" in n for n in res.notes)
+    assert labels(resolve_geo("Johnson County, KS")) == ["Johnson County, KS"]                               # picking one works
+
+
+def test_a_container_name_that_exists_in_many_states_is_narrowed_to_the_one_in_the_places_market():
+    res = resolve_geo("Othello, WA and surrounding areas in Adams County")
+    assert labels(res) == ["Adams County, WA"] and any("same TV market as Othello, WA" in i["why"] for i in res.interpretations)
+    res = resolve_geo("Texarkana, TX and surrounding areas in Miller County")                                  # Miller County, TX does not exist
+    assert labels(res) == ["Miller County, AR"]
+
+
+def test_a_container_that_cannot_be_matched_falls_back_to_the_place_named_inside_it():
+    res = resolve_geo("Dallas and surrounding areas in Nowhereville County")
+    assert labels(res) == ["Dallas-Ft. Worth"] and any("couldn't match" in i["why"] for i in res.interpretations)
+
+
+def test_a_suggestion_names_the_text_the_planner_typed_so_the_ui_can_replace_it():
+    res = resolve_geo("Plano, TX; Travus Co., TX")
+    sg = next(s for s in res.suggestions if s["kind"] == "did_you_mean")
+    assert sg["label"] == "Travis County, TX" and sg["replaces"] == "Travus Co., TX"                          # not 'Travus County, TX'
+    for typed in ("Plano, TX; Travus Co., TX", "Plano, TX; Kolin County, TX", "Adams Co.; Othello, WA", "Othelo; Adams Cty, WA"):
+        r = resolve_geo(typed)
+        for s in r.suggestions:
+            if s.get("replaces"):
+                assert s["replaces"].lower() in typed.lower(), (typed, s)
+        for entry in r.ambiguous:
+            assert entry["input"].lower() in typed.lower(), (typed, entry)
+
+
+@pytest.mark.parametrize("text", ["Trenton, NJ", "Bergen County, NJ", "Hudson County, NJ", "Dover, DE", "Concord, NH", "Hillsborough County, NH"])
+def test_a_state_with_no_market_homed_in_it_is_never_offered_as_a_larger_area(text):
+    """The 'all its TV markets' button for NJ, DE, NH and DC resolved to nothing and wiped the planner's text."""
+    res = resolve_geo(text)
+    assert res.resolved
+    assert not [s for s in res.suggestions if s["kind"] == "broaden" and s["geo_type"] == "state"]
+    for s in res.suggestions:
+        assert resolve_geo(s["resolve_hint"]).resolved, (text, s)
+
+
+@pytest.mark.parametrize("text,labels_expected", [
+    ("Austin and Round Rock, TX", ["Austin"]), ("Orlando and Kissimmee, FL", ["Orlando-Daytona Bch-Melbrn"]),
+    ("Tucson and Mesa, AZ", None), ("Boise & Nampa, ID", None), ("Salt Lake City and Provo, UT", None),
+    ("Dallas or Houston", ["Dallas-Ft. Worth", "Houston"]), ("Dallas, Houston or Austin", ["Dallas-Ft. Worth", "Houston", "Austin"]),
+])
+def test_places_listed_with_and_or_a_shared_state_all_resolve(text, labels_expected):
+    res = resolve_geo(text)
+    assert res.resolved and not res.unmatched_tokens, (text, res.unmatched_tokens)
+    if labels_expected:
+        assert labels(res) == labels_expected
+    assert any(i["why"].startswith("read as a list of places") for i in res.interpretations)
+
+
+def test_or_is_read_as_a_list_and_says_so():
+    res = resolve_geo("Dallas or Houston")
+    assert "'or' is read like 'and'" in res.interpretations[0]["why"]
+
+
+def test_plural_counties_are_one_county_each():
+    res = resolve_geo("Los Angeles and Orange counties, CA")
+    assert labels(res) == ["Los Angeles County, CA", "Orange County, CA"] and res.method == "county"
+
+
+def test_one_container_does_not_swallow_the_next_place_in_the_list():
+    res = resolve_geo("Plano in Collin County and Houston in Harris County")
+    assert labels(res) == ["Collin County, TX", "Harris County, TX"] and not res.unmatched_tokens
+    assert understood(res)["Plano in Collin County"] == "Collin County"
+
+
+def test_cities_in_a_county_is_the_county_not_a_place_called_cities():
+    res = resolve_geo("cities in Orange County, CA")
+    assert labels(res) == ["Orange County, CA"] and res.interpretations[0]["why"] == "dropped the introductory words"
+
+
+def test_an_overlap_offer_lists_every_spelling_typed_for_the_same_place():
+    res = resolve_geo("Othello, WA; Othello WA; Adams County, WA")
+    offer = next(s for s in res.suggestions if s["kind"] == "overlap")
+    assert offer["drop_inputs"] == ["Othello, WA", "Othello WA"]
+
+
+def test_an_overlap_offer_is_worded_as_a_possibility_for_places_that_are_not_in_the_county():
+    """Fremont and Berkeley share a market with Santa Clara County but are in Alameda County: the offer never says otherwise."""
+    res = resolve_geo("Santa Clara County, CA; Fremont, CA; Berkeley, CA")
+    offer = next(s for s in res.suggestions if s["kind"] == "overlap")
+    assert "may be inside" in offer["label"] and "can't prove" in offer["why"] and "only" not in offer["label"].lower().split("drop")[0]
+
+
+def test_the_ambiguity_of_a_container_names_the_whole_typed_phrase_so_picking_replaces_it():
+    text = "Dallas; Kansas City, MO and surrounding areas in Johnson County; Austin"
+    res = resolve_geo(text)
+    entry = res.ambiguous[0]
+    assert entry["input"] == "Kansas City, MO and surrounding areas in Johnson County" and entry["input"] in text
+    assert [c["label"] for c in entry["candidates"]] == ["Johnson County, KS", "Johnson County, MO"]
+    assert gt.prepare("Los Angeles and Orange counties, CA").origins == {}                    # several places from one phrase: none stands for the text
+    assert gt.prepare("Plano in Collin County and Houston in Harris County").origins == {
+        "Collin County": "Plano in Collin County", "Harris County": "Houston in Harris County"}
