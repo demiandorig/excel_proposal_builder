@@ -160,6 +160,38 @@ def test_an_audience_estimate_headlines_the_narrowed_numbers_and_keeps_the_unfil
     assert out["month"]["mid"] == 10 and out["baseMonthMid"] == 100 and out["uniques"] is None      # uniques describe the unfiltered audience
 
 
+def test_the_people_counts_are_the_products_audience_and_uniques_narrowed_with_the_impressions():
+    out = run("""return JSON.stringify(P.summarize({ months: 2, imps_low: 100, imps_mid: 200, imps_high: 300, est_uniques: 9, reach_universe: 40,
+        series: { unit: "monthly" },
+        audience: { imps_low: 10, imps_mid: 20, imps_high: 30, audience_people: 2, est_uniques: 1, impressions_per_person: 5 } }));""")
+    assert out["people"] == 2 and out["peopleBase"] == 40 and out["uniques"] == 1 and out["perPerson"] == 5     # 10 a month / 2 people
+    plain = run("""return JSON.stringify(P.summarize({ months: 1, imps_low: 80, imps_mid: 100, imps_high: 120, est_uniques: 9, reach_universe: 20,
+        series: { unit: "monthly" } }));""")
+    assert plain["people"] == 20 and plain["perPerson"] == 5 and plain["uniques"] == 9
+    none = run("""return JSON.stringify(P.summarize({ months: 1, imps_low: 80, imps_mid: 100, imps_high: 120, series: null }));""")
+    assert none["people"] is None and none["perPerson"] is None and none["uniques"] is None
+
+
+def test_the_audience_box_leads_with_the_products_audience_and_calls_the_census_figure_market_population():
+    out = run("""const data = { months: 1, imps_low: 2, imps_mid: 2584100, imps_high: 3, reach_universe: 487600,
+        audience: { imps_low: 242996, imps_mid: 402887, imps_high: 562778, audience_people: 76022, est_uniques: 26084, impressions_per_person: 5.3,
+          underlying_population: 2049177, reliability_floor_population: 10000, below_reliability_threshold: false,
+          confidence_tier: "audience_modeled_stacked", interests: [{ supported: true, label: "Auto Intenders", rate: 0.31 }], notes: [] } };
+        return JSON.stringify(P.audienceBoxHtml(data.audience, P.summarize(data)));""")
+    assert "Audience on this product" in out and "76,022" in out and "of the 487,600 it reaches here" in out and "5.3 impressions per person a month" in out
+    assert "Market population (census)" in out and "2,049,177 adults" in out and "across all media" in out
+    assert "Underlying audience" not in out
+
+
+def test_without_a_reach_universe_the_audience_box_shows_only_the_market_population_and_says_why():
+    out = run("""const data = { months: 1, imps_low: 2, imps_mid: 100, imps_high: 3,
+        audience: { imps_low: 1, imps_mid: 50, imps_high: 60, audience_people: null, est_uniques: null, underlying_population: 5000,
+          reliability_floor_population: 10000, below_reliability_threshold: true, confidence_tier: "audience_modeled_single_cut", interests: [], notes: [] } };
+        return JSON.stringify(P.audienceBoxHtml(data.audience, P.summarize(data)));""")
+    assert "Market population (census)" in out and "no audience count" in out and "below the ~10,000 reliability floor" in out
+    assert "Audience on this product" not in out
+
+
 def test_badges_say_where_the_numbers_came_from_and_list_the_live_sports_period():
     out = run("""return JSON.stringify({
         live: P.badgesHtml({ geo_confidence: "high", weeks: 2.1, series: { channel: "live_sports", unit: "weekly", data_basis: "modeled", period_label: "Regular season, ends Sep 27, 2026" } }),

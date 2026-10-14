@@ -121,7 +121,9 @@ class AudienceAreaEstimate:
     imps_low: float
     imps_mid: float
     imps_high: float
-    underlying_population: float
+    underlying_population: float       # the CENSUS population of the market that fits the cuts (see AudienceEstimate)
+    audience_people: float | None = None   # the product's reach universe here, narrowed by the same cuts
+    unique_viewers: float | None = None    # its est. monthly uniques here, narrowed by the same cuts
 
 
 @dataclass
@@ -133,6 +135,9 @@ class AudienceEstimate:
     imps_low: float
     imps_mid: float
     imps_high: float
+    # The CENSUS population of the market that fits the cuts (adults when an interest rate, which is a share of adults, is
+    # applied): how many people are in the area and fit, across all media. It is context and the basis of the reliability
+    # floor — NOT what the product reaches, which is `audience_people`.
     underlying_population: float
     reliability_floor_population: float
     below_reliability_threshold: bool
@@ -140,6 +145,16 @@ class AudienceEstimate:
     cuts_applied: int
     by_area: list[AudienceAreaEstimate] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # What THIS PRODUCT reaches: the platform's reach universe for the geography (AvailsEstimate.reach_universe) narrowed by the
+    # same age / gender / interest cuts as the impressions, so impressions >= audience always holds. None when the data behind
+    # the estimate has no reach universe.
+    audience_people: float | None = None
+    est_uniques: float | None = None           # the est. monthly uniques narrowed the same way
+    impressions_per_person: float | None = None   # monthly impressions / audience people (unchanged by the cuts)
+
+    @property
+    def market_population(self) -> float:
+        return self.underlying_population
 
 
 def load_interest_taxonomy() -> list[dict]:
@@ -277,15 +292,20 @@ _ACS_FILE_BY_SOURCE_TYPE = {
 }
 
 
-def _age_gender_share(area: AreaEstimate, age_min: int | None, age_max: int | None, gender: str | None) -> tuple[float, bool]:
-    """Returns (share, used_real_area_data). Uses this exact area's ACS
+ADULT_AGE = 18
+
+
+def _age_gender_share(area: AreaEstimate, age_min: int | None, age_max: int | None, gender: str | None,
+                      adults_only: bool = False) -> tuple[float, bool]:
+    """Returns (share, used_real_area_data). `adults_only` counts only people from 18 up (an interest rate is a share of
+    ADULTS, so the population it is applied to must not include children). Uses this exact area's ACS
     age/sex bands when available (area.geo_id + area.source_type point at
     one of the ACS bundles); a whole-DMA/state/country area has no single
     ACS geo_id of its own, so this falls back to `False` (share=1.0,
     i.e. no age/gender narrowing applied) rather than guessing at a
     national distribution — the caller should treat that as "this cut
     wasn't actually applied", not as a confident 100% match."""
-    if age_min is None and age_max is None and (gender is None or gender == "all"):
+    if not adults_only and age_min is None and age_max is None and (gender is None or gender == "all"):
         return 1.0, True  # no demographic narrowing requested at all — trivially "applied"
 
     acs_file = _ACS_FILE_BY_SOURCE_TYPE.get(area.source_type)
@@ -302,6 +322,8 @@ def _age_gender_share(area: AreaEstimate, age_min: int | None, age_max: int | No
     for band in entry["age_sex"]:
         band_lo, band_hi = band["age_min"], band["age_max"] if band["age_max"] is not None else 200
         lo = age_min if age_min is not None else 0
+        if adults_only:
+            lo = max(lo, ADULT_AGE)
         hi = age_max if age_max is not None else 200
         if band_hi < lo or band_lo > hi:
             continue  # this age band doesn't overlap the requested range at all
@@ -386,6 +408,10 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
 
     total_underlying_pop = 0.0
     imps_mid_total = 0.0
+    people_total = 0.0
+    people_known = False
+    uniques_total = 0.0
+    uniques_known = False
     by_area: list[AudienceAreaEstimate] = []
     not_narrowed: list[str] = []
 
@@ -400,18 +426,33 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
             gender_key = gender if gender in interest.rate_by_gender else "all"
             interest_multiplier *= interest.rate_by_gender.get(gender_key, interest.rate_by_gender["all"])
 
-        area_mid = area_est.imps_mid * share * interest_multiplier
-        area_low = area_est.imps_low * share * interest_multiplier
-        area_high = area_est.imps_high * share * interest_multiplier
-        # The audience's own size includes the interest cut: a segment that is 0.1% of adults is a tiny audience however
-        # large the geography, and the reliability warning has to see that.
-        area_pop = area_est.area_population * share * interest_multiplier
+        cut = share * interest_multiplier
+        area_mid = area_est.imps_mid * cut
+        area_low = area_est.imps_low * cut
+        area_high = area_est.imps_high * cut
+        # The product's audience and its uniques are cut exactly like its impressions, so the three always agree (the
+        # audience is never larger than the impressions it is shown beside).
+        area_people = area_est.reach_universe * cut if area_est.reach_universe is not None else None
+        area_uniques = area_est.unique_viewers * cut if area_est.unique_viewers is not None else None
+        # The census population that fits the cuts. An interest rate is a share of ADULTS, so with one applied the
+        # population it multiplies is the adults' (children are not auto intenders); without one the share stands as is. The
+        # interest cut is part of the size: a segment that is 0.1% of adults is a tiny audience however large the
+        # geography, and the reliability warning has to see that.
+        pop_share = _age_gender_share(area_est, spec.age_min, spec.age_max, gender, adults_only=True)[0] if supported_interests else share
+        area_pop = area_est.area_population * pop_share * interest_multiplier
 
         total_underlying_pop += area_pop
         imps_mid_total += area_mid
+        if area_people is not None:
+            people_total += area_people
+            people_known = True
+        if area_uniques is not None:
+            uniques_total += area_uniques
+            uniques_known = True
         by_area.append(AudienceAreaEstimate(
             area_label=area_est.area_label, dma=area_est.dma, weight=area_est.weight,
             imps_low=area_low, imps_mid=area_mid, imps_high=area_high, underlying_population=area_pop,
+            audience_people=area_people, unique_viewers=area_uniques,
         ))
 
     if age_gender_requested and any_age_gender_applied and not_narrowed:
@@ -469,11 +510,13 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
 
     if below_floor:
         notes.append(
-            f"Underlying population ~{total_underlying_pop:,.0f} — below the "
+            f"The market population that fits this cut (census) is ~{total_underlying_pop:,.0f} — below the "
             f"~{RELIABILITY_FLOOR_POPULATION:,.0f} reliability floor for this cut. Shown as an "
             "order-of-magnitude estimate, not a precise figure."
         )
 
+    audience_people = people_total if people_known else None
+    months = max(1, base.months)
     return AudienceEstimate(
         base=base, age_gender_share_applied=any_age_gender_applied, interests=interests,
         search_multiplier_applied=search_multiplier_applied,
@@ -482,4 +525,7 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
         reliability_floor_population=RELIABILITY_FLOOR_POPULATION,
         below_reliability_threshold=below_floor, confidence_tier=tier, cuts_applied=cuts_applied,
         by_area=by_area, notes=notes,
+        audience_people=audience_people,
+        est_uniques=uniques_total if uniques_known else None,
+        impressions_per_person=(imps_mid_total / months / audience_people) if audience_people else None,
     )

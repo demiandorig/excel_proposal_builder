@@ -88,6 +88,10 @@ class AreaEstimate:
     apportionment: str = ""
     state: str | None = None
     geo_id: str | None = None
+    # The platform's own count of the people it can reach here for this product (the export's "Reach Universe"), scaled the
+    # same way as the impressions. None when the data behind the estimate has no such figure (the bundled workbook, a
+    # population-share estimate). This, not the census population in `area_population`, is the product's audience.
+    reach_universe: float | None = None
 
 
 @dataclass
@@ -107,6 +111,8 @@ class AvailsEstimate:
     # Where the numbers came from (forecast_store.SeriesRef.to_public()): series, version, data basis, unit, period.
     series: dict | None = None
     weeks: float | None = None
+    # Sum of the areas' reach universes (people the product can reach in the whole geography); None when no area has one.
+    reach_universe: float | None = None
 
 
 def _area_weights(areas: list[ResolvedArea], trait: str | None = None) -> list[float]:
@@ -334,6 +340,8 @@ def estimate_from_series(
     imps_low = imps_mid = imps_high = 0.0
     uniques_total = 0.0
     uniques_known = False
+    universe_total = 0.0
+    universe_known = False
     no_row: list[str] = []
     modeled_areas = 0
     for area, weight in zip(geo.areas, weights):
@@ -355,6 +363,7 @@ def estimate_from_series(
             share = area.dma_share
             if row is None:
                 no_row.append(area.dma)
+        area_universe = None
         if row is None:
             area_low = area_mid = area_high = 0.0
             area_uniques = area_hh = None
@@ -376,18 +385,24 @@ def estimate_from_series(
             # reach is a per-month concept, not cumulative (the model workbook never multiplied it by months either)
             area_uniques = row.est_reach * share * scale if row.est_reach is not None else None
             area_hh = row.unique_hh * share * scale if row.unique_hh is not None else None
+            # people, like reach, are a per-period count: never multiplied by the months of the flight
+            area_universe = row.reach_universe * share * scale if row.reach_universe is not None else None
         imps_low += area_low
         imps_mid += area_mid
         imps_high += area_high
         if area_uniques is not None:
             uniques_total += area_uniques
             uniques_known = True
+        if area_universe is not None:
+            universe_total += area_universe
+            universe_known = True
         by_area.append(AreaEstimate(
             area_label=area.label or area.dma, dma=area.dma, weight=weight,
             imps_low=area_low, imps_mid=area_mid, imps_high=area_high,
             unique_viewers=area_uniques, unique_hh=area_hh,
             area_population=area.area_population, source_type=area.source_type,
             apportionment=area.apportionment, state=area.state, geo_id=area.geo_id,
+            reach_universe=area_universe,
         ))
 
     notes.extend(_series_notes(series, weeks, modeled_areas, len(by_area)))
@@ -409,7 +424,7 @@ def estimate_from_series(
         geo_method=geo.method, geo_confidence=geo.geo_confidence, months=months,
         imps_low=imps_low, imps_mid=imps_mid, imps_high=imps_high,
         est_uniques=uniques_total if uniques_known else None, by_area=by_area, notes=notes,
-        series=series.to_public(), weeks=weeks,
+        series=series.to_public(), weeks=weeks, reach_universe=universe_total if universe_known else None,
     )
 
 

@@ -314,12 +314,20 @@
     const months = Math.max(1, data.months || 1);
     const weekly = !!(data.series && data.series.unit === "weekly" && data.weeks);
     const per = (v, d) => (v == null ? null : v / d);
+    // The people the product reaches (the platform's reach universe) and its est. monthly uniques - both narrowed by the audience
+    // cuts when there are any, exactly like the impressions, so audience <= impressions always holds. null where the data has none.
+    const people = aud ? aud.audience_people : data.reach_universe;
+    const uniques = aud ? aud.est_uniques : data.est_uniques;
+    const monthMid = per(src.imps_mid, months);
     return {
       aud, months, weekly, weeks: weekly ? data.weeks : null,
       total: { low: src.imps_low, mid: src.imps_mid, high: src.imps_high },
-      month: { low: per(src.imps_low, months), mid: per(src.imps_mid, months), high: per(src.imps_high, months) },
+      month: { low: per(src.imps_low, months), mid: monthMid, high: per(src.imps_high, months) },
       week: weekly ? { low: per(src.imps_low, data.weeks), mid: per(src.imps_mid, data.weeks), high: per(src.imps_high, data.weeks) } : null,
-      uniques: !aud && data.est_uniques != null ? data.est_uniques : null,
+      uniques: uniques == null ? null : uniques,
+      people: people == null ? null : people,
+      peopleBase: data.reach_universe == null ? null : data.reach_universe,          // before the audience cuts
+      perPerson: people ? monthMid / people : null,                                  // monthly impressions per person
       baseMonthMid: aud ? per(data.imps_mid, months) : null,
     };
   }
@@ -353,12 +361,24 @@
     return `<div class="cz-error"><strong>Not included — couldn’t be matched:</strong><ul class="cz-list">${tokens.map((t) => `<li><strong>${esc(t)}</strong>${reasons[t] ? ` — ${esc(reasons[t])}` : ""}</li>`).join("")}</ul></div>`;
   }
 
-  function audienceBoxHtml(aud) {
+  // `m` is summarize()'s result for the same data. The first people-count is what THIS PRODUCT reaches (its reach universe in the
+  // geography, narrowed by the cuts - the number the impressions come from); the census population of the market that fits the
+  // cuts is context beside it, said to be about everyone in the market across all media, so the two are never read as one audience.
+  function audienceBoxHtml(aud, m) {
     if (!aud) return "";
     const tier = { audience_modeled_geo_only: "Geography only — no demographic narrowing", audience_modeled_single_cut: "1 targeting cut applied", audience_modeled_stacked: "Several cuts stacked — directional, not precise" }[aud.confidence_tier] || "";
     const lines = [];
     if (tier) lines.push(`<p><strong>${esc(tier)}</strong></p>`);
-    lines.push(`<p>Underlying audience ≈ <strong>${num(aud.underlying_population)}</strong> people${aud.below_reliability_threshold ? ` — <span class="cz-warn-text">below the ~${num(aud.reliability_floor_population)} reliability floor for this cut; treat as order-of-magnitude only.</span>` : "."}</p>`);
+    const people = m ? m.people : aud.audience_people;
+    const floor = aud.below_reliability_threshold ? ` <span class="cz-warn-text">That is below the ~${num(aud.reliability_floor_population)} reliability floor for this cut; treat the result as order-of-magnitude only.</span>` : "";
+    if (people != null) {
+      const ipp = m && m.perPerson ? ` — about ${m.perPerson.toFixed(1)} impressions per person a month` : "";
+      const of = m && m.peopleBase != null && m.peopleBase !== people ? ` of the ${num(m.peopleBase)} it reaches here` : "";
+      lines.push(`<p>Audience on this product ≈ <strong>${num(people)}</strong> people${of}${ipp}.</p>`);
+      lines.push(`<p><small>Market population (census): ≈ ${num(aud.underlying_population)} ${aud.interests && aud.interests.some((i) => i.supported) ? "adults " : "people "}in the market fit these cuts, across all media — more than any one product reaches.${floor}</small></p>`);
+    } else {
+      lines.push(`<p>Market population (census): ≈ <strong>${num(aud.underlying_population)}</strong> ${aud.interests && aud.interests.some((i) => i.supported) ? "adults " : "people "}in the market fit these cuts, across all media. This product’s own data has no audience count, so its reach is not shown.${floor}</p>`);
+    }
     (aud.interests || []).forEach((i) => {
       const name = i.label || i.input_text;
       if (i.supported) {
@@ -419,8 +439,9 @@
     el.innerHTML = `
       <div class="cz-badges">${badgesHtml(data)}</div>
       <table class="constanza-range-table"><tr><th></th><th>Low</th><th>Mid</th><th>High</th></tr>${monthRow}${weekRow}${totalRow}</table>
+      ${m.people != null ? `<p class="constanza-uniques">Audience (people): <strong>${num(m.people)}</strong>${m.perPerson ? ` · ${m.perPerson.toFixed(1)} impressions per person a month` : ""}</p>` : ""}
       ${m.uniques != null ? `<p class="constanza-uniques">Est. monthly uniques: <strong>${num(m.uniques)}</strong></p>` : ""}
-      ${audienceBoxHtml(m.aud)}
+      ${audienceBoxHtml(m.aud, m)}
       ${unmatchedHtml(data)}
       <div class="cz-geohelp"></div>
       ${notes ? `<ul class="cz-list">${notes}</ul>` : ""}
@@ -924,6 +945,8 @@
       `${m.aud ? "Audience impressions" : "Impressions"} per month (low / mid / high): ${num(m.month.low)} / ${num(m.month.mid)} / ${num(m.month.high)}`,
       `Flight total (low / mid / high): ${num(m.total.low)} / ${num(m.total.mid)} / ${num(m.total.high)}`,
     ];
+    if (m.people != null) lines.push(`Audience on this product: ${num(m.people)} people${m.perPerson ? ` (about ${m.perPerson.toFixed(1)} impressions per person a month)` : ""}`);
+    if (m.uniques != null) lines.push(`Est. uniques per month: ${num(m.uniques)}`);
     if (data.series) lines.push(`Source: ${data.series.title || data.series.key}, version ${data.series.version}${data.series.period_label ? `; period: ${data.series.period_label}` : ""}`);
     notesOf(data).slice(0, 3).forEach((n) => lines.push(`Note: ${n}`));
     return lines.join("\n");
@@ -947,8 +970,9 @@
     } else if (m.months > 1) {
       side.push({ label: `Flight total · ${m.months} mo`, v: num(m.total.mid), r: `${compact(m.total.low)} – ${compact(m.total.high)}` });
     }
+    if (m.people != null) side.push({ label: "Audience (people)", v: num(m.people), r: m.perPerson ? `${m.perPerson.toFixed(1)} imps per person / mo` : "" });
     if (m.uniques != null) side.push({ label: "Est. uniques / month", v: num(m.uniques), r: "" });
-    if (m.aud) side.push({ label: "Before the audience filter", v: num(m.baseMonthMid) + " / mo", r: "" });
+    if (m.aud) side.push({ label: "Before the audience filter", v: num(m.baseMonthMid) + " imps / mo", r: m.peopleBase != null ? `${num(m.peopleBase)} people` : "" });
     const notes = notesOf(data).map((n) => `<li>${esc(n)}</li>`).join("");
     const inserts = insertButtons(data, m);
     $("cz-result").innerHTML = `
@@ -961,7 +985,7 @@
         <div class="cz-metric main"><span class="cz-mlabel">${esc(main.label)}</span><span class="cz-mvalue">${num(main.v.mid)}</span><span class="cz-mrange">${compact(main.v.low)} – ${compact(main.v.high)} range</span></div>
         ${side.map((s) => `<div class="cz-metric"><span class="cz-mlabel">${esc(s.label)}</span><span class="cz-mvalue">${esc(s.v)}</span>${s.r ? `<span class="cz-mrange">${esc(s.r)}</span>` : ""}</div>`).join("")}
       </div>
-      ${audienceBoxHtml(m.aud)}
+      ${audienceBoxHtml(m.aud, m)}
       ${unmatchedHtml(data)}
       <div class="cz-section-title">Where the impressions are</div>
       ${shareBarHtml(rows, rows.reduce((s, r) => s + r.imps_mid, 0))}
@@ -1261,7 +1285,7 @@
     _state: S,
     // Pure helpers, exposed so tests/test_constanza_frontend.py can run them without a browser.
     _pure: { compact, editGeoItem, tidyList, removeGeoItems, replaceItem, looksLikeList, summarize, normGeo, geoHelpHtml, badgesHtml, lineLabel, seriesMeta, notesOf,
-      markStale, requestBody },
+      markStale, requestBody, audienceBoxHtml },
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount);

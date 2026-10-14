@@ -1400,6 +1400,8 @@ def _serialize_avails_estimate(estimate, resolution) -> dict:
         "imps_mid": estimate.imps_mid,
         "imps_high": estimate.imps_high,
         "est_uniques": estimate.est_uniques,
+        # People the product can reach in this geography (the platform's reach universe), before any audience cut
+        "reach_universe": estimate.reach_universe,
         "series": estimate.series,
         "weeks": estimate.weeks,
         "notes": _geo_warning_notes(resolution) + list(estimate.notes),
@@ -1412,7 +1414,7 @@ def _serialize_avails_estimate(estimate, resolution) -> dict:
             {
                 "area_label": a.area_label, "dma": a.dma, "weight": a.weight,
                 "imps_low": a.imps_low, "imps_mid": a.imps_mid, "imps_high": a.imps_high,
-                "unique_viewers": a.unique_viewers, "unique_hh": a.unique_hh,
+                "unique_viewers": a.unique_viewers, "unique_hh": a.unique_hh, "reach_universe": a.reach_universe,
             }
             for a in estimate.by_area
         ],
@@ -1462,7 +1464,13 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
         "audience": {
             "imps_low": audience_estimate.imps_low, "imps_mid": audience_estimate.imps_mid,
             "imps_high": audience_estimate.imps_high,
+            # What THIS PRODUCT reaches with the cuts applied (null when its data has no reach universe), and the
+            # census population of the market that fits them (all media; the basis of the reliability floor).
+            "audience_people": audience_estimate.audience_people,
+            "est_uniques": audience_estimate.est_uniques,
+            "impressions_per_person": audience_estimate.impressions_per_person,
             "underlying_population": audience_estimate.underlying_population,
+            "market_population": audience_estimate.market_population,
             "reliability_floor_population": audience_estimate.reliability_floor_population,
             "below_reliability_threshold": audience_estimate.below_reliability_threshold,
             "confidence_tier": audience_estimate.confidence_tier,
@@ -1485,6 +1493,7 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
                     "area_label": a.area_label, "dma": a.dma, "weight": a.weight,
                     "imps_low": a.imps_low, "imps_mid": a.imps_mid, "imps_high": a.imps_high,
                     "underlying_population": a.underlying_population,
+                    "audience_people": a.audience_people, "unique_viewers": a.unique_viewers,
                 }
                 for a in audience_estimate.by_area
             ],

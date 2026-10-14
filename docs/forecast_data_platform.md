@@ -195,6 +195,22 @@ caveat ("this targeted variant will deliver fewer impressions") travels with the
 as "everyone" while counted as an applied cut). An interest with no sourced male/female split applies its all-adults rate to a
 gender cut and the estimate says so.
 
+**The people-counts on a result card** are three different things, kept apart:
+
+* **Audience on this product** (`audience.audience_people`): the platform's own *Reach Universe* for the geography
+  (`forecast_avail_*.reach_universe`, carried through the engine as `AvailsEstimate.reach_universe`) narrowed by the **same**
+  age / gender / interest cuts as the impressions. It is the number to read beside the impressions: the ratio of the two never
+  changes with the cuts (`impressions_per_person`, monthly), and est. uniques (`audience.est_uniques`, the export's *Est. Reach*
+  narrowed the same way) is always at most the audience. A series or workbook with no reach universe (the seven legacy model
+  series) returns `null` and the card simply does not show an audience count.
+* **Est. uniques / month**: the platform's *Est. Reach*; now narrowed by the cuts too, so "Apply to Avails" writes uniques and a
+  frequency that agree with the narrowed impressions.
+* **Market population** (`audience.market_population`, also still `underlying_population`): the census population of the
+  market that fits the cuts, across all media. It is context and the basis of the reliability floor (about 10,000), **not** what
+  a product reaches: Los Angeles holds about 2.0M adult women who are auto intenders while Entravision+ Connect - Family reaches
+  about 76K of them. An interest rate is a share of *adults*, so with one applied the population it multiplies is the adults'
+  (ACS ages 18+), not everyone including children (this lowered the figure by about a fifth).
+
 ## Geography matching
 
 Free text goes through `app/services/constanza_geo_text.py` (the forgiving layer) before the strict matchers in
