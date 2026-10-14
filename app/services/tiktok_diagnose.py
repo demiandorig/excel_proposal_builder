@@ -2,8 +2,8 @@
 Checks the TikTok connection end to end, against the real account (or a mock, with TIKTOK_API_BASE): is the token good, can it
 read the targeting catalogs, are the TV markets findable by name, and does an audience-size estimate come back.
 
-    python -m app.services.tiktok_diagnose              # a short run (about 12 calls)
-    python -m app.services.tiktok_diagnose --all-dmas   # also try to place all 210 TV markets and list the ones TikTok names differently
+    python -m app.services.tiktok_diagnose              # every check, and all 210 TV markets (about 15 calls)
+    python -m app.services.tiktok_diagnose --sample     # a sample of about 40 markets
     python -m app.services.tiktok_diagnose --json
 
 The same checks run from Admin -> Forecast ("Test the connection"). Nothing is written to TikTok and no secret is printed. When
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -25,11 +26,7 @@ from app.services import tiktok_client, tiktok_geo
 from app.services.constanza_geo import GeoResolution, ResolvedArea
 from app.services.tiktok_client import TikTokAPIError, TikTokClient
 
-SAMPLE_MARKETS = ["Los Angeles", "New York", "Chicago", "Dallas-Ft. Worth", "Phoenix (Prescott)", "Boston (Manchester)",
-                  "Washington, DC (Hagerstown)", "Portland, OR", "Portland-Auburn", "Tampa-St. Pete (Sarasota)", "Miami-Ft. Lauderdale",
-                  "San Francisco-Oakland-San Jose", "Columbus, OH", "Columbus, GA"]
-
-
+SAMPLE_SIZE = 40                    # markets tried when only a sample is asked for
 @dataclass
 class Check:
     name: str
@@ -67,8 +64,29 @@ def _timed(name: str, fn: Callable[[], tuple[str, bool]]) -> Check:
         return Check(name, False, f"{type(exc).__name__}: {exc}", seconds=time.monotonic() - started)
 
 
-def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = False) -> list[Check]:
-    """The checks, in order; a failure that every later check would share (a bad token) stops the run there."""
+def sample_markets(dmas: list) -> list:
+    """The markets worth trying when not all 210 are: the biggest ten, every market whose first city another market shares (the ones a
+    name match can confuse), the abbreviated names (St. / Ft. / Mt.) and the ones with an ampersand."""
+    chosen = list(dmas[:10])
+    by_lead: dict[str, list] = {}
+    for d in dmas:
+        by_lead.setdefault(tiktok_geo._primary(d.dma).lower(), []).append(d)
+    for group in by_lead.values():
+        if len(group) > 1:
+            chosen.extend(group)
+    chosen.extend([d for d in dmas if re.search(r"\b(St|Ft|Mt)\b\.?", d.dma)][:6])
+    chosen.extend([d for d in dmas if "&" in d.dma][:3])
+    out, seen = [], set()
+    for d in chosen:
+        if d.dma not in seen:
+            seen.add(d.dma)
+            out.append(d)
+    return out[:SAMPLE_SIZE]
+
+
+def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = True) -> list[Check]:
+    """The checks, in order; a failure that every later check would share (a bad token) stops the run there. All 210 TV markets are
+    tried by default: against TikTok's market list that is one call, and the line says which markets did not match."""
     if client is None:
         missing = tiktok_client.missing_config()
         if missing:
@@ -108,13 +126,14 @@ def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = False)
 
     dmas = list(load_dma_reference())
     by_name = {d.dma: d for d in dmas}
-    wanted = dmas if all_dmas else [by_name[n] for n in SAMPLE_MARKETS if n in by_name]
+    wanted = dmas if all_dmas else sample_markets(dmas)
 
     def markets():
         out = tiktok_geo.map_resolution(_resolution([_area(d) for d in wanted], "exact_dma"), client)
         shown = "; ".join(f"{l.source} → “{l.name}”" for l in out.locations[:4])
         missed = out.unmapped
-        detail = f"{len(out.locations)} of {len(wanted)} TV markets placed ({shown}{'…' if len(out.locations) > 4 else ''})"
+        how = {"list": "from TikTok's own market list", "search": "by searching: TikTok's market list was not available"}.get(out.market_source, "")
+        detail = f"{len(out.locations)} of {len(wanted)} TV markets placed {how} ({shown}{'…' if len(out.locations) > 4 else ''})"
         if missed:
             detail += ". NOT placed: " + "; ".join(f"{m['input']} — {m['reason']}" for m in missed[:12]) + (f" and {len(missed) - 12} more" if len(missed) > 12 else "")
         return detail, bool(missed)
@@ -177,10 +196,10 @@ def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = False)
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Check the TikTok connection end to end.")
-    parser.add_argument("--all-dmas", action="store_true", help="try to place all 210 TV markets, not just a sample")
+    parser.add_argument("--sample", action="store_true", help="try a sample of the TV markets (about 40) instead of all 210")
     parser.add_argument("--json", action="store_true", help="print the checks as JSON")
     args = parser.parse_args(argv)
-    checks = run_checks(all_dmas=args.all_dmas)
+    checks = run_checks(all_dmas=not args.sample)
     if args.json:
         print(json.dumps([c.to_public() for c in checks], indent=2))
     else:

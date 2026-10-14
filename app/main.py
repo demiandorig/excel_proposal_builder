@@ -45,7 +45,7 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, Body, Request, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -888,23 +888,26 @@ class ConstanzaAudienceSpecModel(BaseModel):
 
 class TikTokTargetingModel(BaseModel):
     """The audience set up the way TikTok Ads Manager sets up an ad group (see constanza_tiktok.Targeting, which validates it).
-    Every list empty / every field None means "not narrowed"."""
-    gender: Optional[str] = None
-    age_groups: list[str] = []
-    languages: list[str] = []
-    interest_category_ids: list[str] = []
-    interest_keyword_ids: list[str] = []
-    purchase_intention_ids: list[str] = []
-    video_interaction_ids: list[str] = []
-    creator_interaction_ids: list[str] = []
-    hashtag_ids: list[str] = []
+    Every list empty / every field None means "not narrowed". A field this model does not know is refused (a typo must not quietly
+    become a broader audience), and every list is capped before anything looks inside it."""
+    model_config = ConfigDict(extra="forbid")
+
+    gender: Optional[str] = Field(None, max_length=20)
+    age_groups: list[str] = Field(default_factory=list, max_length=10)
+    languages: list[str] = Field(default_factory=list, max_length=60)
+    interest_category_ids: list[str] = Field(default_factory=list, max_length=120)
+    interest_keyword_ids: list[str] = Field(default_factory=list, max_length=120)
+    purchase_intention_ids: list[str] = Field(default_factory=list, max_length=120)
+    video_interaction_ids: list[str] = Field(default_factory=list, max_length=120)
+    creator_interaction_ids: list[str] = Field(default_factory=list, max_length=120)
+    hashtag_ids: list[str] = Field(default_factory=list, max_length=120)
     video_period: int = 15
-    spending_power: Optional[str] = None
-    household_income: list[str] = []
-    operating_system: Optional[str] = None
-    network_types: list[str] = []
-    placements: list[str] = []
-    objective: str = "reach"
+    spending_power: Optional[str] = Field(None, max_length=10)
+    household_income: list[str] = Field(default_factory=list, max_length=10)
+    operating_system: Optional[str] = Field(None, max_length=10)
+    network_types: list[str] = Field(default_factory=list, max_length=10)
+    placements: list[str] = Field(default_factory=list, max_length=6)
+    objective: str = Field("reach", max_length=20)
 
 
 class ConstanzaEstimateRequest(BaseModel):
@@ -1501,6 +1504,7 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
             "impressions_per_person": audience_estimate.impressions_per_person,
             "underlying_population": audience_estimate.underlying_population,
             "market_population": audience_estimate.market_population,
+            "market_population_adults": audience_estimate.market_population_adults,
             "reliability_floor_population": audience_estimate.reliability_floor_population,
             "below_reliability_threshold": audience_estimate.below_reliability_threshold,
             "confidence_tier": audience_estimate.confidence_tier,

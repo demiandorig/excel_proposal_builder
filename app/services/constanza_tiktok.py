@@ -36,8 +36,12 @@ AGE_GROUPS = (("AGE_18_24", "18–24"), ("AGE_25_34", "25–34"), ("AGE_35_44", 
 OBJECTIVES = {
     "reach": {"label": "Reach", "objective_type": "REACH", "optimization_goal": "REACH"},
     "video_views": {"label": "Video views", "objective_type": "VIDEO_VIEWS", "optimization_goal": "ENGAGED_VIEW"},
-    "traffic": {"label": "Traffic", "objective_type": "TRAFFIC", "optimization_goal": "CLICK"},
+    # TikTok asks for a promotion type with any objective other than Reach / Video views / Engagement (Get available locations)
+    "traffic": {"label": "Traffic", "objective_type": "TRAFFIC", "optimization_goal": "CLICK", "promotion_type": "WEBSITE"},
 }
+# Purchase intent is offered for these objectives only (Estimate audience size: APP_PROMOTION, WEB_CONVERSIONS, LEAD_GENERATION, TRAFFIC, PRODUCT_SALES)
+PURCHASE_INTENT_OBJECTIVES = ("traffic",)
+ADULT_AGE_GROUPS = tuple(k for k, _ in AGE_GROUPS)
 DEFAULT_OBJECTIVE = "reach"
 HOUSEHOLD_INCOME = (("TOP5", "Top 5% of ZIP codes"), ("TOP10", "Top 10%"), ("TOP10_25", "Top 10–25%"), ("TOP25_50", "Top 25–50%"))
 NETWORK_TYPES = (("WIFI", "Wi-Fi"), ("4G", "4G"), ("5G", "5G"), ("3G", "3G"), ("2G", "2G"))
@@ -48,17 +52,32 @@ CREATOR_ACTIONS = ["FOLLOWING", "VIEW_HOMEPAGE"]
 HASHTAG_ACTIONS = ["VIEW_HASHTAG"]
 
 MAX_IDS = 50
-_ID_RE = re.compile(r"^\d{1,20}$")
+AGE_RESTRICTION_CODE = 40065          # "The targeting options are not supported for targeting the age group 13-17 in the US"
+_ID_RE = re.compile(r"^\d{1,20}$", re.ASCII)
 _LANG_RE = re.compile(r"^[a-z]{2,4}(?:-[A-Za-z]{2,4})?$")
 
 
+def _as_list(label: str, raw: Any) -> list:
+    """A list (or tuple) of values; None is an empty one. A bare string is not one: "12345" is not five IDs."""
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"{label} must be a list.")
+    return list(raw)
+
+
 def _ids(label: str, raw: Any) -> tuple[str, ...]:
+    items = _as_list(label, raw)
+    if len(items) > 10 * MAX_IDS:                          # refuse a flood before looking at it, then say the real limit below
+        raise ValueError(f"Choose at most {MAX_IDS} {label.lower()}.")
     out: list[str] = []
-    for item in raw or []:
+    seen: set[str] = set()
+    for item in items:
         text = str(item).strip()
         if not _ID_RE.match(text):
             raise ValueError(f"{label} contains something that isn't a TikTok ID.")
-        if text not in out:
+        if text not in seen:
+            seen.add(text)
             out.append(text)
     if len(out) > MAX_IDS:
         raise ValueError(f"Choose at most {MAX_IDS} {label.lower()}.")
@@ -67,7 +86,7 @@ def _ids(label: str, raw: Any) -> tuple[str, ...]:
 
 def _choices(label: str, raw: Any, allowed: dict[str, str] | set[str]) -> tuple[str, ...]:
     out: list[str] = []
-    for item in raw or []:
+    for item in _as_list(label, raw):
         text = str(item).strip()
         if text not in allowed:
             raise ValueError(f"{label}: “{text[:30]}” isn't one TikTok offers.")
@@ -104,13 +123,18 @@ class Targeting:
     def from_dict(cls, raw: Optional[dict]) -> "Targeting":
         """Validate a request body's targeting. ValueError carries a planner-readable message; nothing is silently corrected."""
         raw = raw or {}
+        if not isinstance(raw, dict):
+            raise ValueError("The TikTok targeting must be an object.")
         try:
             gender = normalize_gender(raw.get("gender"))
         except ValueError:
             raise ValueError("Gender must be male, female or all.") from None
         age_groups = _choices("Age", raw.get("age_groups"), {k for k, _ in AGE_GROUPS})
         languages = []
-        for code in raw.get("languages") or []:
+        language_items = _as_list("Languages", raw.get("languages"))
+        if len(language_items) > 200:
+            raise ValueError("Choose at most 20 languages.")
+        for code in language_items:
             code = str(code).strip()
             if not _LANG_RE.match(code):
                 raise ValueError(f"“{code[:20]}” isn't a TikTok language code.")
@@ -118,7 +142,7 @@ class Targeting:
                 languages.append(code)
         if len(languages) > 20:
             raise ValueError("Choose at most 20 languages.")
-        placements = _choices("Placement", raw.get("placements") or [PLACEMENT_TIKTOK], set(PLACEMENTS)) or (PLACEMENT_TIKTOK,)
+        placements = _choices("Placement", raw.get("placements") or [PLACEMENT_TIKTOK], set(PLACEMENTS))
         objective = str(raw.get("objective") or DEFAULT_OBJECTIVE)
         if objective not in OBJECTIVES:
             raise ValueError("Objective must be Reach, Video views or Traffic.")
@@ -149,19 +173,22 @@ class Targeting:
 
     def check_combinations(self) -> None:
         """The combinations TikTok itself refuses (Estimate audience size, parameter notes), said before a call is spent on them."""
+        if PLACEMENT_TIKTOK not in self.placements:
+            # ZIP codes, household income and spending power need it, and it is what the product runs on
+            raise ValueError("TikTok has to be one of the placements.")
         if self.interactions and self.placements != (PLACEMENT_TIKTOK,):
             raise ValueError("Video, creator and hashtag interactions work only when TikTok is the only placement.")
-        if self.household_income and PLACEMENT_TIKTOK not in self.placements:
-            raise ValueError("Household income applies to the TikTok placement only.")
         if self.purchase_intention_ids and self.interest_keyword_ids:
             raise ValueError("Purchase intent and additional interests can't be used together - TikTok treats them as conflicting.")
-        if self.purchase_intention_ids and self.objective == "reach":
-            raise ValueError("Purchase intent isn't available for a Reach campaign - choose the Traffic objective to use it.")
+        if self.purchase_intention_ids and self.objective not in PURCHASE_INTENT_OBJECTIVES:
+            raise ValueError(f"Purchase intent isn't available for a {OBJECTIVES[self.objective]['label']} campaign - choose the Traffic objective to use it.")
 
 
-def build_estimate_body(t: Targeting, mapping: Mapping, goal_override: Optional[str] = None) -> dict:
+def build_estimate_body(t: Targeting, mapping: Mapping, goal_override: Optional[str] = None, adult_ages: bool = False) -> dict:
     """The /ad/audience_size/estimate/ request for a targeting and its TikTok locations (the client adds the advertiser). A Reach
-    estimate's optimization goal can be replaced (TIKTOK_OPTIMIZATION_GOAL, or `goal_override` from the diagnostics)."""
+    estimate's optimization goal can be replaced (TIKTOK_OPTIMIZATION_GOAL, or `goal_override` from the diagnostics). `adult_ages` spells
+    the five adult age groups out when the planner chose none: TikTok asks for that (return code 40065) when U.S. audiences are targeted
+    by interests, and the estimate leaves out under-18s anyway, so it is the same audience."""
     preset = OBJECTIVES[t.objective]
     goal = preset["optimization_goal"]
     if t.objective == DEFAULT_OBJECTIVE:
@@ -170,6 +197,8 @@ def build_estimate_body(t: Targeting, mapping: Mapping, goal_override: Optional[
         "objective_type": preset["objective_type"], "optimization_goal": goal,
         "placement_type": "PLACEMENT_TYPE_NORMAL", "placements": list(t.placements),
     }
+    if preset.get("promotion_type"):
+        body["promotion_type"] = preset["promotion_type"]
     if mapping.location_ids:
         body["location_ids"] = mapping.location_ids
     if mapping.zipcode_ids:
@@ -178,6 +207,8 @@ def build_estimate_body(t: Targeting, mapping: Mapping, goal_override: Optional[
         body["gender"] = {"male": "GENDER_MALE", "female": "GENDER_FEMALE"}[t.gender]
     if t.age_groups:
         body["age_groups"] = [k for k, _ in AGE_GROUPS if k in t.age_groups]           # Ads Manager's order
+    elif adult_ages:
+        body["age_groups"] = list(ADULT_AGE_GROUPS)
     if t.languages:
         body["languages"] = list(t.languages)
     if t.interest_category_ids:
@@ -219,6 +250,7 @@ class TikTokEstimate:
     mapping: Mapping
     targeting: Targeting
     request: dict
+    adult_ages_sent: bool = False          # the adult age groups were spelled out because TikTok asked for it (40065)
 
     @property
     def monthly(self) -> dict:
@@ -239,6 +271,9 @@ class TikTokEstimate:
             out.append(f"TikTok calls this audience “{STAGE_LABELS[size.stage]}” ({STAGE_NOTES[size.stage]}); a narrow audience can limit delivery.")
         if t.objective != DEFAULT_OBJECTIVE:
             out.append(f"Asked of TikTok as a {OBJECTIVES[t.objective]['label']} campaign.")
+        if self.adult_ages_sent:
+            out.append("TikTok needs the age groups spelled out when U.S. audiences are targeted by interests, so all five adult groups were sent — "
+                       "the same audience, since the estimate leaves out under-18s.")
         return out
 
 
@@ -251,10 +286,20 @@ def estimate(res: GeoResolution, targeting: Targeting, months: int, client: Opti
     if not mapping.usable:
         why = "; ".join(f"{u['input']} ({u['reason']})" for u in mapping.unmapped[:4])
         raise ValueError("None of those places could be found in TikTok" + (f": {why}." if why else "."))
-    body = build_estimate_body(targeting, mapping, goal_override)
-    size = client.estimate_audience(body)
+    adult = bool(getattr(client, "adult_ages_needed", False)) and not targeting.age_groups
+    body = build_estimate_body(targeting, mapping, goal_override, adult_ages=adult)
+    try:
+        size = client.estimate_audience(body)
+    except TikTokAPIError as refused:
+        if refused.code != AGE_RESTRICTION_CODE or "age_groups" in body:
+            raise
+        # TikTok: "manually specify an age_groups value that does not contain AGE_13_17". Spell the adult groups out and remember it
+        body = build_estimate_body(targeting, mapping, goal_override, adult_ages=True)
+        size = client.estimate_audience(body)
+        client.adult_ages_needed = True
+        adult = True
     return TikTokEstimate(size=size, factor=tiktok_client.impressions_per_person(), months=max(1, int(months)),
-                          mapping=mapping, targeting=targeting, request=body)
+                          mapping=mapping, targeting=targeting, request=body, adult_ages_sent=adult and not targeting.age_groups)
 
 
 # ------------------------------------------------------------------------------------------------------------- what the dock needs to draw its form

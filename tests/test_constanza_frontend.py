@@ -175,10 +175,11 @@ def test_the_people_counts_are_the_products_audience_and_uniques_narrowed_with_t
 def test_the_audience_box_leads_with_the_products_audience_and_calls_the_census_figure_market_population():
     out = run("""const data = { months: 1, imps_low: 2, imps_mid: 2584100, imps_high: 3, reach_universe: 487600,
         audience: { imps_low: 242996, imps_mid: 402887, imps_high: 562778, audience_people: 76022, est_uniques: 26084, impressions_per_person: 5.3,
-          underlying_population: 2049177, reliability_floor_population: 10000, below_reliability_threshold: false,
+          underlying_population: 2049177, reliability_floor_population: 10000, below_reliability_threshold: false, market_population_adults: true,
           confidence_tier: "audience_modeled_stacked", interests: [{ supported: true, label: "Auto Intenders", rate: 0.31 }], notes: [] } };
         return JSON.stringify(P.audienceBoxHtml(data.audience, P.summarize(data)));""")
-    assert "Audience on this product" in out and "76,022" in out and "of the 487,600 it reaches here" in out and "5.3 impressions per person a month" in out
+    assert "Audience on this product" in out and "76,022" in out and "of the 487,600 it reaches here" in out
+    assert "5.3 impressions per reachable person a month" in out and "(15.4 per est. unique)" in out
     assert "Market population (census)" in out and "2,049,177 adults" in out and "across all media" in out
     assert "Underlying audience" not in out
 
@@ -444,3 +445,36 @@ def test_a_repaint_of_the_result_keeps_the_banner_when_the_form_has_changed():
     render = _between(CZ_JS, "  function renderResult(data) {", "  function renderError(message)")
     assert "markStale();" in render.split('$("cz-copy").addEventListener')[-1]
     assert "tog.addEventListener(\"click\", () => { S.showAllAreas = !S.showAllAreas; renderResult(data); })" in render
+
+
+def _audience_box(extra_aud="", extra_data="", people=76022, census=2049177):
+    return run(f"""const data = {{ months: 1, imps_low: 2, imps_mid: 2584100, imps_high: 3, reach_universe: 487600, {extra_data}
+        audience: {{ imps_low: 242996, imps_mid: 402887, imps_high: 562778, audience_people: {people}, est_uniques: 26084, impressions_per_person: 5.3,
+          underlying_population: {census}, reliability_floor_population: 10000, below_reliability_threshold: false, {extra_aud}
+          confidence_tier: "audience_modeled_stacked", interests: [{{ supported: true, label: "Auto Intenders", rate: 0.31 }}], notes: [] }} }};
+        return JSON.stringify(P.audienceBoxHtml(data.audience, P.summarize(data)));""")
+
+
+def test_the_census_figure_says_adults_only_when_it_counts_adults():
+    assert "2,049,177 adults in the market" in _audience_box("market_population_adults: true,")
+    assert "2,049,177 people in the market" in _audience_box("market_population_adults: false,")
+
+
+def test_more_than_any_one_product_reaches_is_only_said_when_the_audience_is_smaller_than_the_census_figure():
+    """A display platform counts devices: Dallas holds 8.4M of them against 6.4M census adults. The card must not say the opposite."""
+    assert "more than any one product reaches" in _audience_box("market_population_adults: true,")
+    big = _audience_box("market_population_adults: true,", people=8_357_600, census=6_380_000)
+    assert "8,357,600" in big and "more than any one product reaches" not in big and "across all media." in big
+
+
+def test_a_baseline_product_is_not_called_the_audience_on_this_product():
+    out = _audience_box("market_population_adults: true,", 'series: { relation: "baseline_proxy" },')
+    assert "Audience on the baseline product" in out and "Audience on this product" not in out and "This product’s own targeting reaches fewer" in out
+
+
+def test_the_summary_carries_impressions_per_unique_and_per_reachable_person_and_the_proxy_flag():
+    out = run("""return JSON.stringify(P.summarize({ months: 1, imps_low: 80, imps_mid: 100, imps_high: 120, est_uniques: 20, reach_universe: 50,
+        series: { unit: "monthly", relation: "baseline_proxy" } }));""")
+    assert out["perPerson"] == 2 and out["perUnique"] == 5 and out["proxy"] is True
+    plain = run("""return JSON.stringify(P.summarize({ months: 1, imps_low: 80, imps_mid: 100, imps_high: 120, series: { unit: "monthly" } }));""")
+    assert plain["perUnique"] is None and plain["proxy"] is False

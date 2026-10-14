@@ -85,7 +85,14 @@ def test_a_full_targeting_is_read_as_given_and_duplicates_collapse():
     ({"placements": ["PLACEMENT_FACEBOOK"]}, "isn't one TikTok offers"),
     ({"objective": "brand"}, "Objective must be"),
     ({"video_interaction_ids": ["1700"], "placements": ["PLACEMENT_TIKTOK", "PLACEMENT_PANGLE"]}, "only when TikTok is the only placement"),
-    ({"household_income": ["TOP5"], "placements": ["PLACEMENT_PANGLE"]}, "TikTok placement only"),
+    ({"household_income": ["TOP5"], "placements": ["PLACEMENT_PANGLE"]}, "TikTok has to be one of the placements"),
+    ({"placements": ["PLACEMENT_PANGLE"]}, "TikTok has to be one of the placements"),
+    ({"purchase_intention_ids": ["26100"], "objective": "video_views"}, "isn't available for a Video views campaign"),
+    ({"interest_category_ids": ["１２３４５"]}, "isn't a TikTok ID"),
+    ({"interest_category_ids": "12345"}, "must be a list"),
+    ({"age_groups": "AGE_18_24"}, "must be a list"),
+    ({"languages": "en"}, "must be a list"),
+    ({"interest_category_ids": [str(i) for i in range(40_000)]}, "at most 50"),
     ({"purchase_intention_ids": ["26100"], "interest_keyword_ids": ["19155001"], "objective": "traffic"}, "can't be used together"),
     ({"purchase_intention_ids": ["26100"]}, "isn't available for a Reach campaign"),
 ])
@@ -425,3 +432,72 @@ def test_every_browse_tab_reads_the_one_list_tiktok_sends_by_default(tiktok):
         assert main.constanza_tiktok_targeting(kind)["items"]
     assert tiktok.fake.count("/targeting/search/") == 1
     assert "sub_targeting_types" not in tiktok.fake.calls[0]["params"]
+
+
+# --------------------------------------------------------------------------------------------- the review's findings
+
+def test_targeting_that_is_not_an_object_is_refused_in_plain_words():
+    for bad in ("12345", ["x"], 5):
+        with pytest.raises(ValueError, match="must be an object"):
+            ct.Targeting.from_dict(bad)
+
+
+def test_a_flood_of_ids_is_refused_without_working_through_it():
+    import time
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="at most 50"):
+        ct.Targeting.from_dict({"interest_category_ids": [str(i) for i in range(200_000)]})
+    assert time.monotonic() - started < 1.0
+
+
+def test_a_traffic_estimate_carries_the_promotion_type_tiktok_asks_for():
+    body = ct.build_estimate_body(ct.Targeting.from_dict({"objective": "traffic"}), loc("1"))
+    assert body["promotion_type"] == "WEBSITE" and "promotion_type" not in ct.build_estimate_body(ct.Targeting(), loc("1"))
+
+
+def test_a_traffic_campaign_with_purchase_intent_is_taken_by_tiktok(tiktok):
+    t = ct.Targeting.from_dict({"objective": "traffic", "purchase_intention_ids": ["26100"], "age_groups": ["AGE_25_34"]})
+    est = ct.estimate(resolve_geo("Los Angeles"), t, 1, client=tiktok)
+    assert est.size.mid > 0 and tiktok.fake.calls[-1]["body"]["promotion_type"] == "WEBSITE"
+
+
+def test_geography_alone_is_asked_without_age_groups_like_tiktoks_own_example(tiktok):
+    est = ct.estimate(resolve_geo("Los Angeles"), ct.Targeting(), 1, client=tiktok)
+    assert "age_groups" not in tiktok.fake.calls[-1]["body"] and not est.adult_ages_sent
+
+
+def test_when_tiktok_asks_for_the_age_groups_to_be_spelled_out_they_are_sent_and_remembered(tiktok):
+    """Return code 40065: U.S. interest targeting needs `age_groups` that do not contain AGE_13_17. The five adult groups are the same audience
+    (the estimate leaves out under-18s), so the request is repeated once with them, the planner is told, and the next one does not fail first."""
+    t = ct.Targeting.from_dict({"interest_category_ids": ["12100"]})
+    first = ct.estimate(resolve_geo("Los Angeles"), t, 1, client=tiktok)
+    estimates = [c for c in tiktok.fake.calls if c["path"] == ESTIMATE]
+    assert len(estimates) == 2 and "age_groups" not in estimates[0]["body"]
+    assert estimates[1]["body"]["age_groups"] == ["AGE_18_24", "AGE_25_34", "AGE_35_44", "AGE_45_54", "AGE_55_100"]
+    assert first.adult_ages_sent and tiktok.adult_ages_needed and any("age groups spelled out" in n for n in first.notes())
+    ct.estimate(resolve_geo("Chicago"), t, 1, client=tiktok)
+    estimates = [c for c in tiktok.fake.calls if c["path"] == ESTIMATE]
+    assert len(estimates) == 3 and estimates[2]["body"]["age_groups"]            # remembered: no failing call first
+
+
+def test_a_planners_own_age_groups_are_never_replaced(tiktok):
+    t = ct.Targeting.from_dict({"interest_category_ids": ["12100"], "age_groups": ["AGE_25_34"]})
+    est = ct.estimate(resolve_geo("Los Angeles"), t, 1, client=tiktok)
+    assert tiktok.fake.calls[-1]["body"]["age_groups"] == ["AGE_25_34"] and not est.adult_ages_sent and not tiktok.adult_ages_needed
+
+
+def test_an_age_refusal_that_the_adult_groups_do_not_cure_is_reported(tiktok):
+    tiktok.fake.queue(ESTIMATE, FakeResponse(200, fail(40065, "age restrictions")), FakeResponse(200, fail(40065, "age restrictions again")))
+    with pytest.raises(tc.TikTokAPIError) as err:
+        ct.estimate(resolve_geo("Los Angeles"), ct.Targeting.from_dict({"interest_category_ids": ["12100"]}), 1, client=tiktok)
+    assert err.value.code == 40065 and err.value.kind == "invalid"
+
+
+def test_the_endpoint_tells_the_planner_when_the_age_groups_were_spelled_out(tiktok):
+    out = main.constanza_estimate(request(tiktok=targeting(interest_category_ids=["12100"])))
+    assert any("age groups spelled out" in n for n in out["notes"]) and out["imps_mid"] > 0
+
+
+def test_the_wire_model_refuses_a_field_it_does_not_know_instead_of_dropping_it():
+    with pytest.raises(Exception):
+        main.TikTokTargetingModel(**{"gender": "male", "agegroups": ["AGE_18_24"]})

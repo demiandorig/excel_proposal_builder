@@ -1806,6 +1806,8 @@ function wireForecast() {
 }
 
 // ---- TikTok connection (Admin -> Forecast): is it set up, and a one-click end-to-end check. No secret is ever shown. ----------
+let _ttTesting = false;                    // a test is running: the button stays off until it ends, whatever else refreshes the status
+
 async function loadTikTokStatus() {
   const state = document.getElementById("fc-tt-state");
   const btn = document.getElementById("fc-tt-test");
@@ -1818,7 +1820,7 @@ async function loadTikTokStatus() {
     } else {
       state.innerHTML = `<span class="fc-badge fc-default">Not connected</span> add <code>${s.missing.map(escapeHtml).join("</code> and <code>")}</code> to the app's secrets`;
     }
-    btn.disabled = !s.configured;
+    btn.disabled = _ttTesting || !s.configured;
     btn.title = s.configured ? "" : "Add the TikTok secrets first";
   } catch (e) {
     state.textContent = `Couldn't read the TikTok status: ${e.message}`;
@@ -1829,6 +1831,8 @@ async function testTikTokConnection() {
   const btn = document.getElementById("fc-tt-test");
   const list = document.getElementById("fc-tt-checks");
   const note = document.getElementById("fc-tt-note");
+  if (_ttTesting) return;
+  _ttTesting = true;
   btn.disabled = true;
   note.classList.remove("fc-err");
   note.textContent = "Checking with TikTok… (about 10–20 seconds)";
@@ -1849,6 +1853,7 @@ async function testTikTokConnection() {
     note.textContent = e.message;
     note.classList.add("fc-err");
   } finally {
+    _ttTesting = false;
     btn.disabled = false;
     loadTikTokStatus();
   }
@@ -1865,6 +1870,7 @@ async function loadForecast() {
   } catch (e) {
     document.getElementById("fc-body").innerHTML = `<tr><td colspan="8" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
     document.getElementById("fc-coverage-body").innerHTML = `<tr><td colspan="4" class="admin-empty">—</td></tr>`;
+    loadTikTokStatus();                    // the connection card does not depend on the product table: it still says what it can
   }
 }
 

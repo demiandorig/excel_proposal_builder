@@ -203,17 +203,35 @@ gender cut and the estimate says so.
 
 * **Audience on this product** (`audience.audience_people`): the platform's own *Reach Universe* for the geography
   (`forecast_avail_*.reach_universe`, carried through the engine as `AvailsEstimate.reach_universe`) narrowed by the **same**
-  age / gender / interest cuts as the impressions. It is the number to read beside the impressions: the ratio of the two never
-  changes with the cuts (`impressions_per_person`, monthly), and est. uniques (`audience.est_uniques`, the export's *Est. Reach*
-  narrowed the same way) is always at most the audience. A series or workbook with no reach universe (the seven legacy model
-  series) returns `null` and the card simply does not show an audience count.
+  age / gender / interest cuts as the impressions. It is the number to read beside the impressions: the ratio of the two does
+  not change with the cuts (`impressions_per_person`, monthly, per person *in the reach universe*) and impressions are normally
+  larger than the audience. "Normally": a platform reports a ZIP at its floor (about 180 avails a month), so 123 of the 16,028
+  Connect-Family ZIP rows hold more people than avails, and a display platform counts **devices or IDs**, not people (eDigital
+  Display's universe in Dallas, 8.4M, is larger than Dallas's 6.4M census adults); when the audience exceeds the census figure the
+  estimate carries a note saying so and the card does not claim the census is the larger. A series or workbook with no reach
+  universe (the seven legacy model series) returns `null` and the card simply does not show an audience count. A product that
+  forecasts from **another product's series** (a baseline proxy: VIX 360, a targeted Netflix variant) shows it as "Audience on the
+  baseline product", since its own targeting reaches fewer.
 * **Est. uniques / month**: the platform's *Est. Reach*; now narrowed by the cuts too, so "Apply to Avails" writes uniques and a
-  frequency that agree with the narrowed impressions.
+  frequency (impressions ÷ uniques, shown on the card as "per est. unique") that agree with the narrowed impressions. This is a
+  different "per person" figure from `impressions_per_person` (impressions ÷ the reach universe): the card labels each.
 * **Market population** (`audience.market_population`, also still `underlying_population`): the census population of the
   market that fits the cuts, across all media. It is context and the basis of the reliability floor (about 10,000), **not** what
   a product reaches: Los Angeles holds about 2.0M adult women who are auto intenders while Entravision+ Connect - Family reaches
   about 76K of them. An interest rate is a share of *adults*, so with one applied the population it multiplies is the adults'
-  (ACS ages 18+), not everyone including children (this lowered the figure by about a fifth).
+  (ACS ages 18+), not everyone including children (this lowered the figure by about a fifth); `market_population_adults` says
+  whether that happened (a country has no age data, so its figure counts everyone and the card says "people", not "adults"). An
+  age range with no adults (16–17) and an interest rate shows 0 and says why.
+
+**Ages: "everyone" and "18+" differ, and that was already true.** The age / gender share is the matching part of the *whole*
+population, so leaving the age boxes blank is everyone (children included: 100%) while "18 to (blank)" is the adults (about
+78%), and reads about a fifth lower. The impressions model treats avails as proportional to the whole population; if the avails
+are really an adult audience, adults-only shares would be the better basis (age-restricted audiences would read about 28%
+higher). That is a modelling choice nobody has confirmed, so it was left as it was.
+
+**A whole state asked for as a whole** scales a home market's avails to the platform's own state row (above); its people and
+reach are scaled to the state row's *own* `reach_universe` / `est_reach` when it has them (they do not add across markets: a
+household served from Denver is in Denver's universe), and to the avails ratio only when the state row has none.
 
 ## Geography matching
 

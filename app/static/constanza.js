@@ -317,7 +317,8 @@
     const weekly = !!(data.series && data.series.unit === "weekly" && data.weeks);
     const per = (v, d) => (v == null ? null : v / d);
     // The people the product reaches (the platform's reach universe) and its est. monthly uniques - both narrowed by the audience
-    // cuts when there are any, exactly like the impressions, so audience <= impressions always holds. null where the data has none.
+    // cuts when there are any, exactly like the impressions, so impressions are normally larger than the audience (not always: a ZIP
+    // the platform reports at its floor can hold more people than avails). null where the data has none.
     const people = aud ? aud.audience_people : data.reach_universe;
     const uniques = aud ? aud.est_uniques : data.est_uniques;
     const monthMid = per(src.imps_mid, months);
@@ -329,7 +330,9 @@
       uniques: uniques == null ? null : uniques,
       people: people == null ? null : people,
       peopleBase: data.reach_universe == null ? null : data.reach_universe,          // before the audience cuts
-      perPerson: people ? monthMid / people : null,                                  // monthly impressions per person
+      perPerson: people ? monthMid / people : null,                                  // monthly impressions per person in the reach universe
+      perUnique: uniques ? monthMid / uniques : null,                                // ... per est. unique: the frequency the Avails step shows
+      proxy: !!(data.series && data.series.relation === "baseline_proxy"),         // another product's audience stands in for this one's
       baseMonthMid: aud ? per(data.imps_mid, months) : null,
     };
   }
@@ -375,13 +378,17 @@
     if (tier) lines.push(`<p><strong>${esc(tier)}</strong></p>`);
     const people = m ? m.people : aud.audience_people;
     const floor = aud.below_reliability_threshold ? ` <span class="cz-warn-text">That is below the ~${num(aud.reliability_floor_population)} reliability floor for this cut; treat the result as order-of-magnitude only.</span>` : "";
+    const who = aud.market_population_adults ? "adults" : "people";                 // adults only when an interest rate (a share of adults) clipped it to 18+
     if (people != null) {
-      const ipp = m && m.perPerson ? ` — about ${m.perPerson.toFixed(1)} impressions per person a month` : "";
+      const ipp = m && m.perPerson ? ` — about ${m.perPerson.toFixed(1)} impressions per reachable person a month${m.perUnique ? ` (${m.perUnique.toFixed(1)} per est. unique)` : ""}` : "";
       const of = m && m.peopleBase != null && m.peopleBase !== people ? ` of the ${num(m.peopleBase)} it reaches here` : "";
-      lines.push(`<p>Audience on this product ≈ <strong>${num(people)}</strong> people${of}${ipp}.</p>`);
-      lines.push(`<p><small>Market population (census): ≈ ${num(aud.underlying_population)} ${aud.interests && aud.interests.some((i) => i.supported) ? "adults " : "people "}in the market fit these cuts, across all media — more than any one product reaches.${floor}</small></p>`);
+      const proxy = m && m.proxy;
+      lines.push(`<p>${proxy ? "Audience on the baseline product" : "Audience on this product"} ≈ <strong>${num(people)}</strong> people${of}${ipp}.${proxy ? " <small>This product’s own targeting reaches fewer.</small>" : ""}</p>`);
+      // "more than any one product reaches" is only said when it is true: a display platform counts devices, and can hold more than the census does
+      const more = people <= aud.underlying_population ? " — more than any one product reaches" : "";
+      lines.push(`<p><small>Market population (census): ≈ ${num(aud.underlying_population)} ${who} in the market fit these cuts, across all media${more}.${floor}</small></p>`);
     } else {
-      lines.push(`<p>Market population (census): ≈ <strong>${num(aud.underlying_population)}</strong> ${aud.interests && aud.interests.some((i) => i.supported) ? "adults " : "people "}in the market fit these cuts, across all media. This product’s own data has no audience count, so its reach is not shown.${floor}</p>`);
+      lines.push(`<p>Market population (census): ≈ <strong>${num(aud.underlying_population)}</strong> ${who} in the market fit these cuts, across all media. This product’s own data has no audience count, so its reach is not shown.${floor}</p>`);
     }
     (aud.interests || []).forEach((i) => {
       const name = i.label || i.input_text;
@@ -445,7 +452,7 @@
       <div class="cz-badges">${badgesHtml(data)}</div>
       <table class="constanza-range-table"><tr><th></th><th>Low</th><th>Mid</th><th>High</th></tr>${monthRow}${weekRow}${totalRow}</table>
       ${plug ? plug.cardHtml(data, m) : ""}
-      ${m.people != null ? `<p class="constanza-uniques">Audience (people): <strong>${num(m.people)}</strong>${m.perPerson ? ` · ${m.perPerson.toFixed(1)} impressions per person a month` : ""}</p>` : ""}
+      ${m.people != null ? `<p class="constanza-uniques">Audience (${m.proxy ? "baseline product, " : ""}people): <strong>${num(m.people)}</strong>${m.perPerson ? ` · ${m.perPerson.toFixed(1)} impressions per reachable person a month` : ""}</p>` : ""}
       ${m.uniques != null && !plug ? `<p class="constanza-uniques">Est. monthly uniques: <strong>${num(m.uniques)}</strong></p>` : ""}
       ${audienceBoxHtml(m.aud, m)}
       ${unmatchedHtml(data)}
@@ -496,7 +503,12 @@
 
   function registerMethod(name, factory) {
     plugins[name] = factory(pluginCtx());
-    if ($("cz-method-forms")) mountPlugin(name);
+    const host = $("cz-method-forms");
+    if (host) {
+      const old = host.querySelector(`[data-method="${name}"]`);
+      if (old) old.remove();                          // a panel still bound to the earlier registration would show state the request never sends
+      mountPlugin(name);
+    }
   }
 
   // Show the selected product's own panel (and hide the Entravision audience block it replaces), and name the button for it.
@@ -996,7 +1008,7 @@
       `${m.aud ? "Audience impressions" : "Impressions"} per month (low / mid / high): ${num(m.month.low)} / ${num(m.month.mid)} / ${num(m.month.high)}`,
       `Flight total (low / mid / high): ${num(m.total.low)} / ${num(m.total.mid)} / ${num(m.total.high)}`,
     ];
-    if (m.people != null) lines.push(`Audience on this product: ${num(m.people)} people${m.perPerson ? ` (about ${m.perPerson.toFixed(1)} impressions per person a month)` : ""}`);
+    if (m.people != null) lines.push(`Audience on ${m.proxy ? "the baseline product" : "this product"}: ${num(m.people)} people${m.perPerson ? ` (about ${m.perPerson.toFixed(1)} impressions per reachable person a month)` : ""}`);
     if (m.uniques != null && !data.tiktok) lines.push(`Est. uniques per month: ${num(m.uniques)}`);
     const plug = pluginFor(data);
     if (plug) plug.summaryLines(data, asked).forEach((l) => lines.push(l));
@@ -1023,8 +1035,8 @@
     } else if (m.months > 1) {
       side.push({ label: `Flight total · ${m.months} mo`, v: num(m.total.mid), r: `${compact(m.total.low)} – ${compact(m.total.high)}` });
     }
-    if (m.people != null) side.push({ label: "Audience (people)", v: num(m.people), r: m.perPerson ? `${m.perPerson.toFixed(1)} imps per person / mo` : "" });
-    if (m.uniques != null) side.push({ label: "Est. uniques / month", v: num(m.uniques), r: "" });
+    if (m.people != null) side.push({ label: m.proxy ? "Audience (baseline product)" : "Audience (people)", v: num(m.people), r: m.perPerson ? `${m.perPerson.toFixed(1)} imps per reachable person / mo` : "" });
+    if (m.uniques != null) side.push({ label: "Est. uniques / month", v: num(m.uniques), r: m.perUnique ? `${m.perUnique.toFixed(1)} imps per unique` : "" });
     if (m.aud) side.push({ label: "Before the audience filter", v: num(m.baseMonthMid) + " imps / mo", r: m.peopleBase != null ? `${num(m.peopleBase)} people` : "" });
     const notes = notesOf(data).map((n) => `<li>${esc(n)}</li>`).join("");
     const inserts = insertButtons(data, m);
@@ -1136,6 +1148,7 @@
       const msg = errorText(r.data, `The request failed (${r.status}).`);
       renderError(msg);
       setMood("oops");
+      if (plug && plug.onError) plug.onError(r.status);
       if (/national_monthly_total|population share|no forecast avails/i.test(msg)) { S.needTotal = true; updateTotalField(); }
       resolveNow();                                              // refresh the suggestions next to the geography box
       scrollToResult();

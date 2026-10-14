@@ -138,7 +138,8 @@ def test_the_repr_and_the_logs_never_show_the_token(caplog):
     (40016, "rate_limit", 429), (40100, "rate_limit", 429), (40133, "rate_limit", 429),
     (40300, "config", 503), (40301, "config", 503),
     (40000, "invalid", 422), (40002, "invalid", 422), (40065, "invalid", 422), (40700, "invalid", 422),
-    (51003, "unavailable", 502), (50000, "unavailable", 502), (49999, "invalid", 422), (60001, "unexpected", 502),
+    (51003, "unavailable", 502), (50000, "unavailable", 502), (49999, "invalid", 422), (60001, "unavailable", 502), (41001, "unavailable", 502),
+    (41000, "permission", 502), (70000, "unexpected", 502),
 ])
 def test_every_return_code_is_classified_by_what_to_do_about_it(code, kind, status):
     assert tc._classify(code) == kind
@@ -392,3 +393,157 @@ def test_asking_for_every_kind_leaves_the_kinds_out_which_is_what_tiktok_default
     assert "sub_targeting_types" not in c.fake.calls[-1]["params"] and json.loads(c.fake.calls[-1]["params"]["search_keywords"]) == ["auto"]
     c.targeting_list(["hashtag_interaction"])
     assert json.loads(c.fake.calls[-1]["params"]["sub_targeting_types"]) == ["HASHTAG_INTERACTION"]
+
+
+# --------------------------------------------------------------------------------------------- the review's findings
+
+@pytest.mark.parametrize("token", ["abc\u200bdef", "abc def", "abc\ndef", "tok…", "tökén", "abc\tdef"])
+def test_a_token_with_a_pasted_invisible_or_non_ascii_character_is_reported_as_a_setting_to_fix(monkeypatch, token):
+    monkeypatch.setenv("TIKTOK_ACCESS_TOKEN", token)
+    monkeypatch.setenv("TIKTOK_ADVERTISER_ID", "7000000000000000001")
+    assert not tc.is_configured()
+    assert any(m.startswith("TIKTOK_ACCESS_TOKEN (") and "copy it again" in m for m in tc.missing_config())
+    assert token not in " ".join(tc.missing_config())
+
+
+@pytest.mark.parametrize("base,usable", [
+    ("https://business-api.tiktok.com/open_api/v1.3", True), ("HTTPS://example.com/x", True), ("http://127.0.0.1:8790/open_api/v1.3", True),
+    ("http://localhost/x", True), ("http://business-api.tiktok.com/open_api/v1.3", False), ("ftp://x", False), ("http://127.0.0.1.evil.com/", False),
+])
+def test_the_api_base_must_be_https_unless_it_is_this_machine(monkeypatch, base, usable):
+    monkeypatch.setenv("TIKTOK_ACCESS_TOKEN", "abc")
+    monkeypatch.setenv("TIKTOK_ADVERTISER_ID", "7000000000000000001")
+    monkeypatch.setenv("TIKTOK_API_BASE", base)
+    assert tc.is_configured() is usable
+    if not usable:
+        assert any("TIKTOK_API_BASE" in m for m in tc.missing_config())
+
+
+def test_a_character_a_header_cannot_carry_is_a_configuration_error_not_a_422_with_the_codec_message():
+    class Latin1Session:
+        def request(self, *a, **k):
+            "tök".encode("latin-1", "strict")
+            raise UnicodeEncodeError("latin-1", "\u200b", 0, 1, "ordinal not in range")
+    c = make_client()
+    c._session = Latin1Session()
+    with pytest.raises(TikTokAPIError) as err:
+        c.languages()
+    assert err.value.kind == "config" and err.value.status_code == 503 and "latin-1" not in err.value.public_message()
+
+
+def test_a_redirect_is_never_followed_so_the_token_cannot_be_sent_to_another_host():
+    seen = {}
+
+    class Redirecting:
+        def request(self, method, url, **kwargs):
+            seen.update(kwargs)
+            return FakeResponse(302, "")
+    c = make_client()
+    c._session = Redirecting()
+    with pytest.raises(TikTokAPIError) as err:
+        c.languages()
+    assert seen["allow_redirects"] is False and err.value.kind == "unexpected" and "redirect" in str(err.value)
+
+
+def test_http_429_with_a_body_that_is_not_json_is_still_a_rate_limit():
+    c = make_client()
+    c.fake.queue("/tool/language/", *[FakeResponse(429, "Too Many Requests") for _ in range(3)])
+    with pytest.raises(TikTokAPIError) as err:
+        c.languages()
+    assert err.value.kind == "rate_limit" and err.value.status_code == 429
+
+
+def test_maintenance_is_unavailable_and_is_not_retried():
+    c = make_client()
+    c.fake.queue(ESTIMATE, FakeResponse(200, fail(60001, "The system is in maintenance.")))
+    with pytest.raises(TikTokAPIError) as err:
+        c.estimate_audience(US_BODY)
+    assert err.value.kind == "unavailable" and c.fake.count(ESTIMATE) == 1 and c.sleeps == []
+
+
+def test_what_tiktok_says_loses_the_token_and_any_ad_account_id_before_it_is_shown_to_anyone():
+    c = make_client()
+    msg = f"No permission for advertiser 7000000000000001234 with token {GOOD_TOKEN}; location 8840000440601 is fine"
+    c.fake.queue(ESTIMATE, FakeResponse(200, fail(40001, msg)))
+    with pytest.raises(TikTokAPIError) as err:
+        c.estimate_audience(US_BODY)
+    shown = err.value.public_message() + " " + str(err.value)
+    assert GOOD_TOKEN not in shown and "7000000000000001234" not in shown and "…1234" in shown and "8840000440601" in shown     # a place ID is kept
+
+
+def test_a_call_that_cannot_finish_inside_its_deadline_is_not_retried():
+    clock = Clock()
+    c = make_client(clock=clock)
+    c.fake.queue(ESTIMATE, FakeResponse(200, fail(40100, "slow")), FakeResponse(200, fail(40100, "slow")))
+
+    def slow_sleep(seconds):
+        clock.now += 40                                  # each pause eats most of the deadline
+
+    c._sleep = slow_sleep
+    with pytest.raises(TikTokAPIError) as err:
+        c.estimate_audience(US_BODY)
+    assert err.value.kind == "rate_limit" and c.fake.count(ESTIMATE) <= 2
+
+
+def test_calls_in_flight_are_capped_and_a_queue_that_would_wait_too_long_is_refused():
+    clock = Clock()
+    c = make_client(clock=clock, min_interval=1.0)
+    with pytest.raises(TikTokAPIError) as err:
+        for _ in range(20):                               # the 20th slot would be 19 s away: more than the 5 s a turn may wait
+            c._throttle.wait(tc.MAX_QUEUE_WAIT)
+    assert err.value.kind == "rate_limit" and "waiting for their turn" in str(err.value)
+    assert c._slots._value == tc.MAX_CONCURRENT
+
+
+def test_the_in_flight_cap_gives_every_slot_back_even_when_a_call_fails():
+    c = make_client()
+    for _ in range(tc.MAX_CONCURRENT * 2):
+        with pytest.raises(TikTokAPIError):
+            c.estimate_audience({**US_BODY, "location_ids": []})
+    assert c._slots._value == tc.MAX_CONCURRENT
+
+
+def test_the_market_list_is_the_countries_states_and_markets_with_their_kind():
+    regions = make_client().list_regions()
+    by_name = {r["name"]: r for r in regions}
+    assert by_name["United States"]["level"] == "COUNTRY" and by_name["United States"]["id"] == "6252001"
+    assert by_name["Texas"]["area_type"] == "ADMIN" and by_name["Texas"]["level"] == "PROVINCE" and by_name["Texas"]["parent_id"] == "6252001"
+    markets = [r for r in regions if r["area_type"] == "METROPOLITAN_OR_DMA"]
+    assert len(markets) == 210 and all(r["level"] == "PROVINCE" and r["region_code"] == "US" for r in markets)
+
+
+def test_the_market_list_is_one_get_with_the_documented_parameters_and_is_cached():
+    c = make_client()
+    c.list_regions()
+    c.list_regions()
+    call = c.fake.calls[0]
+    assert c.fake.count("/tool/region/") == 1 and call["method"] == "GET"
+    assert json.loads(call["params"]["placements"]) == ["PLACEMENT_TIKTOK"] and call["params"]["level_range"] == "TO_PROVINCE"
+    assert call["params"]["objective_type"] == "REACH" and call["params"]["advertiser_id"] == ADVERTISER
+
+
+def test_a_place_found_by_search_carries_the_chain_of_its_parents_when_tiktok_sends_it():
+    c = make_client()
+    city = next(t for t in c.search_locations(["Frankfort"], geo_types=["CITY", "DISTRICT"], search_type="FUZZY_SEARCH") if t["name"] == "Frankfort")
+    assert [(a["name"], a["geo_type"]) for a in city["ancestors"]] == [("Franklin County", "CITY"), ("Kentucky", "PROVINCE"), ("United States", "COUNTRY")]
+    bare = make_client(FakeTikTok(parent_tags=False)).search_locations(["Frankfort"], geo_types=["CITY", "DISTRICT"], search_type="FUZZY_SEARCH")
+    assert bare and all(t["ancestors"] == [] for t in bare)
+
+
+def test_a_catalog_that_came_back_empty_is_not_remembered_so_the_next_call_asks_again():
+    c = make_client()
+    c.fake.queue("/tool/language/", FakeResponse(200, ok({"languages": []})))
+    assert c.languages() == []
+    assert [l["code"] for l in c.languages()][:1] == ["en"] and c.fake.count("/tool/language/") == 2     # the empty answer was not kept
+    assert c.languages() and c.fake.count("/tool/language/") == 2                                        # the real one is
+    c2 = make_client()
+    c2.fake.queue("/targeting/search/", FakeResponse(200, ok({"general_interest": {"list_result": []}})))
+    assert all(items == [] for items in c2.targeting_list().values())
+    assert c2.targeting_list()["general_interest"] and c2.fake.count("/targeting/search/") == 2
+    c3 = make_client()
+    c3.fake.queue("/tool/region/", FakeResponse(200, ok({"region_info": []})))
+    assert c3.list_regions() == [] and c3.list_regions() and c3.fake.count("/tool/region/") == 2
+    c4 = make_client()
+    c4.fake.queue("/tool/targeting/search/", FakeResponse(200, ok({"targeting_tag_list": []})))
+    assert c4.search_locations(["Phoenix"], geo_types=["DMA"]) == []
+    assert c4.search_locations(["Phoenix"], geo_types=["DMA"]) and c4.fake.count("/tool/targeting/search/") == 2

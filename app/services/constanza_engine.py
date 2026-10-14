@@ -263,7 +263,15 @@ def _series_notes(series: "forecast_store.SeriesRef", weeks: float | None, model
     return notes
 
 
-def _state_scales(series: "forecast_store.SeriesRef", geo: GeoResolution, dmas: dict, factor: float) -> tuple[dict[str, float], list[str]]:
+@dataclass(frozen=True)
+class StateScale:
+    """How a whole state's home markets are scaled up to the platform's own state row."""
+    avails: float                      # makes the home markets' avails add up to the state's avails
+    universe: float | None = None      # ... their reach universes up to the state's own (None: the state row has none)
+    reach: float | None = None         # ... their est. reach up to the state's own
+
+
+def _state_scales(series: "forecast_store.SeriesRef", geo: GeoResolution, dmas: dict, factor: float) -> tuple[dict[str, StateScale], list[str]]:
     """For each state requested as a whole and covered by a state row of the series: the factor that makes its home-state
     markets add up to the platform's own state total. A state is more than the markets homed in it (Wyoming's own row is
     nearly twice what its two markets hold: the rest is served from Denver, Billings and Salt Lake City), so summing the
@@ -287,24 +295,31 @@ def _state_scales(series: "forecast_store.SeriesRef", geo: GeoResolution, dmas: 
         return {}, [f"The platform's own state totals ({', '.join(usable)}) were not used because the request also names areas outside "
                     f"the whole states asked for ({shown}): a state total includes households served from other markets, so mixing it "
                     "with those areas could count some twice. Each market is counted as the platform reports it."]
-    scale: dict[str, float] = {}
+    scale: dict[str, StateScale] = {}
     said: list[str] = []
     for st in geo.whole_states:
         row = rows.get(st)
         if row is None or not row.avails:
             continue
-        home = 0.0
+        home = home_universe = home_reach = 0.0
         for a in geo.areas:
             if a.source_type == "dma" and a.state == st and a.dma:
                 key = geo_reference.dma_key_for_label(a.dma)
                 dma_row = dmas.get(key) if key else None
                 if dma_row is not None:
                     home += dma_row.avails * a.dma_share
+                    home_universe += (dma_row.reach_universe or 0.0) * a.dma_share
+                    home_reach += (dma_row.est_reach or 0.0) * a.dma_share
         if home > 0:
-            scale[st] = row.avails / home
-            if abs(scale[st] - 1.0) >= 0.02:
+            # People and reach are scaled to the STATE ROW'S OWN figures when it has them: they are not additive across markets (a household
+            # served from Denver is in Denver's universe, not Wyoming's), so the avails ratio is the wrong factor for them.
+            scale[st] = StateScale(
+                avails=row.avails / home,
+                universe=row.reach_universe / home_universe if row.reach_universe and home_universe > 0 else None,
+                reach=row.est_reach / home_reach if row.est_reach and home_reach > 0 else None)
+            if abs(scale[st].avails - 1.0) >= 0.02:
                 said.append(f"{st}: the platform's own state total is {row.avails * factor:,.0f} against {home * factor:,.0f} in the markets homed there "
-                            f"(x{scale[st]:.2f})")
+                            f"(x{scale[st].avails:.2f})")
     notes = []
     if said:
         notes.append("Whole-state requests use the platform's own state totals, which include the parts of a state served from markets "
@@ -379,14 +394,17 @@ def estimate_from_series(
                 modeled_areas += 1
             # A market homed in a state the planner asked for whole is scaled so the markets add up to the platform's own
             # state total (only DMA-typed areas carry whole-state requests; a ZIP / county / city is never scaled).
-            scale = state_scale.get(area.state, 1.0) if area.source_type == "dma" else 1.0
+            sscale = state_scale.get(area.state) if area.source_type == "dma" else None
+            scale = sscale.avails if sscale else 1.0
+            reach_scale = sscale.reach if sscale and sscale.reach is not None else scale
+            universe_scale = sscale.universe if sscale and sscale.universe is not None else scale
             area_mid = row.avails * factor * share * scale
             area_low, area_high = area_mid * lo_mult, area_mid * hi_mult
             # reach is a per-month concept, not cumulative (the model workbook never multiplied it by months either)
-            area_uniques = row.est_reach * share * scale if row.est_reach is not None else None
+            area_uniques = row.est_reach * share * reach_scale if row.est_reach is not None else None
             area_hh = row.unique_hh * share * scale if row.unique_hh is not None else None
             # people, like reach, are a per-period count: never multiplied by the months of the flight
-            area_universe = row.reach_universe * share * scale if row.reach_universe is not None else None
+            area_universe = row.reach_universe * share * universe_scale if row.reach_universe is not None else None
         imps_low += area_low
         imps_mid += area_mid
         imps_high += area_high

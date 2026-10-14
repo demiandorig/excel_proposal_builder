@@ -1,10 +1,13 @@
 """An in-memory stand-in for TikTok's Marketing API (v1.3), shaped like TikTok's documented answers, for the tests and for the
 offline mock server used to try the dock without an ad account.
 
-It implements only what Constanza calls - the audience-size estimate, the location search, the interest / behavior search and the
-language list - and it refuses what TikTok's documentation says TikTok refuses (a missing field, overlapping locations, purchase
-intent on a Reach campaign, interactions on Pangle, a wrong token), with the same return codes, so a test that passes here has
-at least asked TikTok a question TikTok would take.
+It implements only what Constanza calls - the audience-size estimate, the location search and market list, the interest / behavior
+search and the language list - and it is STRICT: it refuses what TikTok's documentation says TikTok refuses (a missing field, a number
+where the docs say string, an unknown field, an objective / goal pair that does not exist, overlapping locations, purchase intent on a
+Reach campaign, interactions on Pangle, more than 3,000 places, a US request that targets interests without spelling the age groups
+out - code 40065 - a wrong token), with the same return codes, so a test that passes here has at least asked TikTok a question TikTok
+would take. Places are docs-shaped too: a state's parent is the country, a county's parent is its state, a city's parent is its COUNTY,
+and `parent_tags` carries the chain of ancestors of the places a search found (the docs' own ZIP example).
 
 What it can NOT do is know TikTok's real market names or numbers: the names of the markets follow a configurable style
 (`market_style`), and the audience numbers are a deterministic model (population x the share each setting keeps), not data."""
@@ -35,17 +38,16 @@ def dma_id(rank: int) -> str:
     return str(800_000 + rank)
 
 
-# a few counties and cities for the one-by-one look-ups: (id, name, state, geo_type, description)
-PLACES = [
-    ("910001", "Los Angeles County", "CA", "CITY", "County"),
-    ("910002", "Adams County", "WA", "CITY", "County"),
-    ("910003", "Adams County", "CO", "CITY", "County"),
-    ("910004", "Adams County", "IL", "CITY", "County"),
-    ("910005", "Harris County", "TX", "CITY", "County"),
-    ("920001", "Sacramento", "CA", "DISTRICT", "City"),
-    ("920002", "Springfield", "IL", "DISTRICT", "City"),
-    ("920003", "Springfield", "MO", "DISTRICT", "City"),
-    ("920004", "Plano", "TX", "DISTRICT", "City"),
+# counties (id, name, state): their parent is the STATE. A few names exist in several states on purpose.
+COUNTIES = [
+    ("910001", "Los Angeles County", "CA"), ("910002", "Adams County", "WA"), ("910003", "Adams County", "CO"), ("910004", "Adams County", "IL"),
+    ("910005", "Harris County", "TX"), ("910006", "Sacramento County", "CA"), ("910007", "Collin County", "TX"), ("910008", "Franklin County", "KY"),
+    ("910009", "Franklin County", "OH"), ("910010", "St. Louis County", "MO"), ("910011", "Sangamon County", "IL"), ("910012", "Greene County", "MO"),
+]
+# cities (id, name, county id): their parent is their COUNTY (the docs' example: Frankfort -> Franklin County -> Kentucky)
+CITIES = [
+    ("920001", "Sacramento", "910006"), ("920002", "Springfield", "910011"), ("920003", "Springfield", "910012"), ("920004", "Plano", "910007"),
+    ("920005", "Frankfort", "910008"), ("920006", "Franklin", "910009"),
 ]
 COUNTRIES = [("6252001", "United States", "US"), ("6251999", "Canada", "CA"), ("3996063", "Mexico", "MX")]
 
@@ -66,6 +68,41 @@ ADDITIONAL = {"auto": [("19155001", "Auto Racing"), ("19155002", "Auto Repair"),
 LANGUAGES = [("en", "English"), ("es", "Spanish"), ("zh", "Chinese"), ("pt", "Portuguese"), ("fr", "French")]
 AGE_WEIGHT = {"AGE_18_24": 0.22, "AGE_25_34": 0.27, "AGE_35_44": 0.21, "AGE_45_54": 0.16, "AGE_55_100": 0.14}
 
+# the objective -> optimization goals that exist (Enumerations - Advertising objective / Optimization goal)
+GOALS = {"REACH": {"REACH"}, "VIDEO_VIEWS": {"ENGAGED_VIEW", "ENGAGED_VIEW_FIFTEEN"}, "TRAFFIC": {"CLICK", "TRAFFIC_LANDING_PAGE_VIEW"}}
+PLACEMENTS = {"PLACEMENT_TIKTOK", "PLACEMENT_PANGLE", "PLACEMENT_GLOBAL_APP_BUNDLE"}
+ESTIMATE_FIELDS = {
+    "advertiser_id", "placement_type", "placements", "app_id", "pixel_id", "ios14_targeting", "objective_type", "optimization_goal", "promotion_type",
+    "product_source", "catalog_id", "product_set_id", "catalog_authorized_bc_id", "shopping_ads_retargeting_type", "shopping_ads_retargeting_actions_days",
+    "included_custom_actions", "excluded_custom_actions", "audience_ids", "excluded_audience_ids", "audience_rule", "audience_type", "location_ids",
+    "zipcode_ids", "isp_ids", "gender", "age_groups", "languages", "interest_category_ids", "interest_keyword_ids", "purchase_intention_keyword_ids",
+    "actions", "operating_systems", "min_ios_version", "min_android_version", "device_model_ids", "network_types", "household_income", "spending_power",
+    "device_price_ranges", "carrier_ids", "included_pangle_audience_package_ids", "excluded_pangle_audience_package_ids", "blocked_pangle_app_ids",
+    "targeting_expansion", "auto_targeting_enabled", "contextual_tag_ids",
+}
+SCENE_ACTIONS = {"VIDEO_RELATED": {"WATCHED_TO_END", "LIKED", "COMMENTED", "SHARED"}, "CREATOR_RELATED": {"FOLLOWING", "VIEW_HOMEPAGE"},
+                 "HASHTAG_RELATED": {"VIEW_HASHTAG"}}
+
+# the Nielsen workbook abbreviates; TikTok may write the names out in full
+FULL_NAMES = {
+    "Dallas-Ft. Worth": "Dallas-Fort Worth", "Tampa-St. Pete (Sarasota)": "Tampa-St. Petersburg (Sarasota)", "Orlando-Daytona Bch-Melbrn": "Orlando-Daytona Beach-Melbourne",
+    "Minneapolis-St. Paul": "Minneapolis-Saint Paul", "Miami-Ft. Lauderdale": "Miami-Fort Lauderdale", "St. Louis": "Saint Louis",
+    "Greenville-Spart-Ashevll-And": "Greenville-Spartanburg-Asheville-Anderson", "West Palm Beach-Ft. Pierce": "West Palm Beach-Fort Pierce",
+    "Harrisburg-Lncstr-Leb-York": "Harrisburg-Lancaster-Lebanon-York", "Grand Rapids-Kalmzoo-B.Crk": "Grand Rapids-Kalamazoo-Battle Creek",
+    "Norfolk-Portsmth-Newpt Nws": "Norfolk-Portsmouth-Newport News", "Greensboro-H.Point-W.Salem": "Greensboro-High Point-Winston Salem",
+    "Ft. Myers-Naples": "Fort Myers-Naples", "Mobile-Pensacola (Ft Walt)": "Mobile-Pensacola (Fort Walton Beach)",
+    "Wilkes Barre-Scranton-Hztn": "Wilkes Barre-Scranton-Hazleton", "Huntsville-Decatur (Flor)": "Huntsville-Decatur (Florence)",
+    "Harlingen-Wslco-Brnsvl-McA": "Harlingen-Weslaco-Brownsville-McAllen", "Paducah-Cape Girard-Harsbg": "Paducah-Cape Girardeau-Harrisburg",
+    "Champaign&Sprngfld-Decatur": "Champaign & Springfield-Decatur", "Cedar Rapids-Wtrlo-IWC&Dub": "Cedar Rapids-Waterloo-Iowa City & Dubuque",
+    "Ft. Smith-Fay-Sprngdl-Rgrs": "Fort Smith-Fayetteville-Springdale-Rogers", "Greenville-N.Bern-Washngtn": "Greenville-New Bern-Washington",
+    "Davenport-R.Island-Moline": "Davenport-Rock Island-Moline", "Tyler-Longview(Lfkn&Ncgd)": "Tyler-Longview (Lufkin & Nacogdoches)",
+    "Lincoln & Hastings-Krny": "Lincoln & Hastings-Kearney", "Ft. Wayne": "Fort Wayne", "Johnstown-Altoona-St Colge": "Johnstown-Altoona-State College",
+    "Yakima-Pasco-Rchlnd-Knnwck": "Yakima-Pasco-Richland-Kennewick", "Santa Barbra-Sntmra-Slobs": "Santa Barbara-Santa Maria-San Luis Obispo",
+    "Columbus-Tupelo-W Pnt-Hstn": "Columbus-Tupelo-West Point-Houston", "Minot-Bsmrck-Dcknsn(Wlstn)": "Minot-Bismarck-Dickinson (Williston)",
+    "Rochestr-Mason City-Austin": "Rochester-Mason City-Austin", "Idaho Fals-Pocatllo(Jcksn)": "Idaho Falls-Pocatello (Jackson)", "St. Joseph": "Saint Joseph",
+    "Birmingham (Ann and Tusc)": "Birmingham (Anniston and Tuscaloosa)",
+}
+
 
 def market_name(dma, style: str) -> str:
     """How the fake names a TV market, so the tests can check the mapping against different conventions."""
@@ -78,6 +115,10 @@ def market_name(dma, style: str) -> str:
         return f"{name}, {dma.state}"
     if style == "dma_suffix":
         return f"{name} DMA"
+    if style == "full_plain":
+        return FULL_NAMES.get(name, name)
+    if style == "full_state":
+        return f"{FULL_NAMES.get(name, name)} {dma.state}"
     raise ValueError(style)
 
 
@@ -102,10 +143,14 @@ def fail(code: int, message: str, request_id: str = "REQ-FAIL") -> dict:
 
 
 class FakeTikTok:
-    def __init__(self, market_style: str = "state", token: str = GOOD_TOKEN, advertiser: str = ADVERTISER):
+    def __init__(self, market_style: str = "state", token: str = GOOD_TOKEN, advertiser: str = ADVERTISER, *, region_list: bool = True,
+                 parent_tags: bool = True):
         self.market_style, self.token, self.advertiser = market_style, token, advertiser
+        self.region_list = region_list                   # does /tool/region/ answer (False: 40008 like an endpoint that is not there)
+        self.parent_tags = parent_tags                   # does a location search send the chain of parents
+        self.reach_goals = {"REACH"}                     # the optimization goals this account takes for a Reach objective (docs example: CLICK)
         self.calls: list[dict] = []
-        self.queues: dict[str, list] = {}           # path -> [FakeResponse | Exception | callable] used before the normal answer
+        self.queues: dict[str, list] = {}                # path -> [FakeResponse | Exception | callable] used before the normal answer
         self.dmas = list(load_dma_reference())
         self.estimate_overrides: Optional[Callable[[dict], dict]] = None
 
@@ -135,17 +180,20 @@ class FakeTikTok:
         route = {
             ("GET", "/tool/language/"): self._languages,
             ("GET", "/targeting/search/"): self._targeting,
+            ("GET", "/tool/region/"): self._regions,
             ("POST", "/tool/targeting/search/"): self._locations,
             ("POST", "/ad/audience_size/estimate/"): self._estimate,
         }.get((method, path))
         if route is None:
-            return 404, fail(40008, "The interface has not been implemented.")
+            return 404, "404 page not found"
         return 200, route(params or {}, body or {})
 
     def _check_advertiser(self, value: Any) -> Optional[dict]:
         if not value:
             return fail(40002, "advertiser_id: Missing data for required field.")
-        if str(value) != self.advertiser:
+        if not isinstance(value, str):
+            return fail(40002, "advertiser_id: Not a valid string.")
+        if value != self.advertiser:
             return fail(40300, "The advertiser does not exist or has been deleted.")
         return None
 
@@ -175,6 +223,8 @@ class FakeTikTok:
             subs = ["GENERAL_INTEREST", "PURCHASE_INTENTION", "VIDEO_INTERACTION", "CREATOR_INTERACTION", "HASHTAG_INTERACTION"]
             if keywords is not None:
                 subs.insert(1, "ADDITIONAL_INTEREST")
+        if keywords is not None and len(keywords) > 1 and not set(subs) <= {"ADDITIONAL_INTEREST", "HASHTAG_INTERACTION"}:
+            return fail(40002, "sub_targeting_types: With more than one keyword only ADDITIONAL_INTEREST and HASHTAG_INTERACTION are allowed.")
         tables = {"general_interest": GENERAL_INTERESTS, "purchase_intention": PURCHASE_INTENTIONS, "video_interaction": VIDEO_INTERACTIONS,
                   "creator_interaction": CREATOR_INTERACTIONS, "hashtag_interaction": HASHTAG_BUNDLES}
         sub_names = {"GENERAL_INTEREST": "general_interest", "ADDITIONAL_INTEREST": "additional_interest", "PURCHASE_INTENTION": "purchase_intention",
@@ -206,19 +256,38 @@ class FakeTikTok:
 
     # ---- locations -------------------------------------------------------------------------------------------------------
     def _all_locations(self) -> list[dict]:
-        out = [{"id": i, "name": n, "type": "COUNTRY", "parent": "0", "region": r, "description": "Country"} for i, n, r in COUNTRIES]
+        out = [{"id": i, "name": n, "type": "COUNTRY", "parent": "0", "region": r, "description": "Country", "area": "ADMIN", "level": "COUNTRY"} for i, n, r in COUNTRIES]
         for abbr, ident in STATE_IDS.items():
-            out.append({"id": ident, "name": _STATE_NAME.get(abbr, abbr), "type": "PROVINCE", "parent": US_ID, "region": "US", "description": "State"})
+            out.append({"id": ident, "name": _STATE_NAME.get(abbr, abbr), "type": "PROVINCE", "parent": US_ID, "region": "US", "description": "State",
+                        "area": "ADMIN", "level": "PROVINCE"})
         for d in self.dmas:
-            out.append({"id": dma_id(d.rank), "name": market_name(d, self.market_style), "type": "DMA", "parent": US_ID, "region": "US", "description": "DMA"})
-        for ident, name, state, gtype, desc in PLACES:
-            out.append({"id": ident, "name": name, "type": gtype, "parent": STATE_IDS[state], "region": "US", "description": desc})
+            out.append({"id": dma_id(d.rank), "name": market_name(d, self.market_style), "type": "DMA", "parent": US_ID, "region": "US", "description": "DMA",
+                        "area": "METROPOLITAN_OR_DMA", "level": "PROVINCE"})
+        for ident, name, state in COUNTIES:
+            out.append({"id": ident, "name": name, "type": "CITY", "parent": STATE_IDS[state], "region": "US", "description": "County", "area": "ADMIN", "level": "CITY"})
+        for ident, name, county in CITIES:
+            out.append({"id": ident, "name": name, "type": "DISTRICT", "parent": county, "region": "US", "description": "City", "area": "ADMIN", "level": "DISTRICT"})
         return out
 
     @staticmethod
-    def _tag(loc: dict, keyword: str) -> dict:
-        return {"keyword": keyword, "name": loc["name"], "targeting_type": "GEO", "status_info": {"status": "ENABLED", "reason": None},
-                "geo": {"geo_id": loc["id"], "geo_type": loc["type"], "parent_id": loc["parent"], "region_code": loc["region"], "description": loc["description"]}}
+    def _tag(loc: dict, keyword: Optional[str]) -> dict:
+        tag = {"name": loc["name"], "targeting_type": "GEO", "status_info": {"status": "ENABLED", "reason": None},
+               "geo": {"geo_id": loc["id"], "geo_type": loc["type"], "parent_id": loc["parent"], "region_code": loc["region"], "description": loc["description"]}}
+        if keyword is not None:
+            tag["keyword"] = keyword
+        return tag
+
+    def _ancestor_tags(self, found: list[dict]) -> list[dict]:
+        """The `parent_tags` of an answer: every ancestor (county, state, country) of the places found, each once."""
+        by_id = {l["id"]: l for l in self._all_locations()}
+        seen, out = set(), []
+        for loc in found:
+            cur = by_id.get(loc["parent"])
+            while cur is not None and cur["id"] not in seen:
+                seen.add(cur["id"])
+                out.append(self._tag(cur, None))
+                cur = by_id.get(cur["parent"])
+        return out
 
     def _locations(self, params: dict, body: dict) -> dict:
         bad = self._check_advertiser(body.get("advertiser_id"))
@@ -227,21 +296,29 @@ class FakeTikTok:
         for need in ("objective_type", "placements", "search_type", "keywords"):
             if not body.get(need):
                 return fail(40002, f"{need}: Missing data for required field.")
+        if body["objective_type"] not in GOALS:
+            return fail(40002, "objective_type: Invalid value.")
         kind, keywords = body["search_type"], body["keywords"]
         geo_types, regions = body.get("geo_types"), body.get("region_codes")
+        if kind not in ("FUZZY_SEARCH", "BATCH_REGION_SEARCH", "BATCH_ZIPCODE_SEARCH"):
+            return fail(40002, "search_type: Invalid value.")
         if kind in ("BATCH_REGION_SEARCH", "BATCH_ZIPCODE_SEARCH") and not regions:
             return fail(40002, "region_codes: Required when search_type is BATCH_REGION_SEARCH or BATCH_ZIPCODE_SEARCH.")
         if kind == "FUZZY_SEARCH" and len(keywords) != 1:
             return fail(40002, "keywords: Only one keyword is allowed for FUZZY_SEARCH.")
         if len(keywords) > 1000:
             return fail(40011, "Too many IDs are provided in a single request.")
+        if any(not isinstance(k, str) for k in keywords):
+            return fail(40002, "keywords: Not a valid string.")
         tags: list[dict] = []
+        found: list[dict] = []
         if kind == "BATCH_ZIPCODE_SEARCH":
             for z in keywords:
                 if z.isdigit() and len(z) == 5 and z not in ("00000", "99999"):
                     tags.append({"keyword": z, "name": z, "targeting_type": "GEO", "status_info": {"status": "ENABLED", "reason": None},
                                  "geo": {"geo_id": "88400004" + z, "geo_type": "ZIP_CODE", "parent_id": "910001", "region_code": "US", "description": "postcode"}})
-            return ok({"targeting_tag_list": tags, "parent_tags": []})
+                    found.append({"parent": "910001"})
+            return ok({"targeting_tag_list": tags, "parent_tags": self._ancestor_tags(found) if self.parent_tags else []})
         pool = [l for l in self._all_locations() if (not geo_types or l["type"] in geo_types) and (not regions or l["region"] in regions)]
         limit = 5 if kind == "BATCH_REGION_SEARCH" else 100
         for kw in keywords:
@@ -249,7 +326,30 @@ class FakeTikTok:
             hits = [l for l in pool if word in l["name"].lower()]
             hits.sort(key=lambda l: (not l["name"].lower().startswith(word), len(l["name"]), l["name"]))
             tags.extend(self._tag(l, kw) for l in hits[:limit])
-        return ok({"targeting_tag_list": tags, "parent_tags": []})
+            found.extend(hits[:limit])
+        return ok({"targeting_tag_list": tags, "parent_tags": self._ancestor_tags(found) if self.parent_tags else []})
+
+    def _regions(self, params: dict, body: dict) -> dict:
+        """GET /tool/region/ - the locations TikTok can target down to `level_range`; a market (DMA) sits at province level."""
+        bad = self._check_advertiser(params.get("advertiser_id"))
+        if bad:
+            return bad
+        if not self.region_list:
+            return fail(40008, "The interface (endpoint) has not been implemented.")
+        for need in ("placements", "objective_type"):
+            if not params.get(need):
+                return fail(40002, f"{need}: Missing data for required field.")
+        placements = _json.loads(params["placements"])
+        if not isinstance(placements, list) or not set(placements) <= PLACEMENTS:
+            return fail(40002, "placements: Invalid value.")
+        level_range = params.get("level_range", "ALL")
+        depth = {"TO_COUNTRY": ("COUNTRY",), "TO_PROVINCE": ("COUNTRY", "PROVINCE"), "TO_CITY": ("COUNTRY", "PROVINCE", "CITY"),
+                 "TO_DISTRICT": ("COUNTRY", "PROVINCE", "CITY", "DISTRICT"), "ALL": ("COUNTRY", "PROVINCE", "CITY", "DISTRICT")}.get(level_range)
+        if depth is None:
+            return fail(40002, "level_range: Invalid value.")
+        info = [{"next_level_ids": [], "area_type": l["area"], "level": l["level"], "region_code": l["region"], "location_id": l["id"], "name": l["name"],
+                 "parent_id": l["parent"], "support_below_18": True} for l in self._all_locations() if l["level"] in depth]
+        return ok({"region_info": info, "region_list": sorted({r["region_code"] for r in info})})
 
     # ---- the audience-size estimate ------------------------------------------------------------------------------------------
     def _location_users(self, body: dict) -> tuple[Optional[float], Optional[dict]]:
@@ -280,34 +380,91 @@ class FakeTikTok:
             return None, fail(40002, "Overlapping locations are not supported.")
         return total, None
 
+    @staticmethod
+    def _strings(body: dict, field: str) -> Optional[str]:
+        value = body.get(field)
+        if value is None:
+            return None
+        if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+            return f"{field}: Must be a list of strings."
+        return None
+
     def _estimate(self, params: dict, body: dict) -> dict:
         bad = self._check_advertiser(body.get("advertiser_id"))
         if bad:
             return bad
+        unknown = sorted(set(body) - ESTIMATE_FIELDS)
+        if unknown:
+            return fail(40002, f"{unknown[0]}: Unknown field.")
         for need in ("objective_type", "optimization_goal"):
             if not body.get(need):
                 return fail(40002, f"{need}: Missing data for required field.")
-        if body.get("placement_type", "PLACEMENT_TYPE_NORMAL") == "PLACEMENT_TYPE_NORMAL" and not body.get("placements"):
+        objective, goal = body["objective_type"], body["optimization_goal"]
+        allowed = self.reach_goals if objective == "REACH" else GOALS.get(objective)
+        if allowed is None:
+            return fail(40002, "objective_type: Invalid value.")
+        if goal not in allowed:
+            return fail(40002, f"optimization_goal: {goal} is not valid for objective_type {objective}.")
+        if objective not in ("REACH", "VIDEO_VIEWS", "ENGAGEMENT") and not body.get("promotion_type"):
+            return fail(40002, f"promotion_type: Required when objective_type is {objective}.")
+        for field in ("location_ids", "zipcode_ids", "age_groups", "languages", "interest_category_ids", "interest_keyword_ids",
+                      "purchase_intention_keyword_ids", "placements", "household_income", "operating_systems", "network_types"):
+            err = self._strings(body, field)
+            if err:
+                return fail(40002, err)
+        placements = body.get("placements") or []
+        if body.get("placement_type", "PLACEMENT_TYPE_NORMAL") == "PLACEMENT_TYPE_NORMAL" and not placements:
             return fail(40002, "placements: Required when placement_type is PLACEMENT_TYPE_NORMAL.")
-        if not body.get("location_ids") and not body.get("zipcode_ids"):
+        if not set(placements) <= PLACEMENTS:
+            return fail(40002, "placements: Invalid value.")
+        ids = list(body.get("location_ids") or []) + list(body.get("zipcode_ids") or [])
+        if not ids:
             return fail(40002, "You need to set location_ids or zipcode_ids or both.")
-        if body.get("zipcode_ids") and "PLACEMENT_TIKTOK" not in (body.get("placements") or []):
+        if len(ids) > 3000:
+            return fail(40002, "location_ids: The combined total of location IDs and zip code IDs cannot exceed 3,000 per ad group.")
+        if body.get("zipcode_ids") and "PLACEMENT_TIKTOK" not in placements:
             return fail(40002, "Zip code targeting is only supported on the TikTok placement.")
+        if body.get("household_income") and "PLACEMENT_TIKTOK" not in placements:
+            return fail(40002, "household_income: Only applicable to the TikTok placement.")
+        if body.get("spending_power") and "PLACEMENT_TIKTOK" not in placements and body.get("placement_type") != "PLACEMENT_TYPE_AUTOMATIC":
+            return fail(40002, "spending_power: Requires the TikTok placement.")
         if body.get("purchase_intention_keyword_ids") and body.get("interest_keyword_ids"):
             return fail(40002, "Do not pass in purchase_intention_keyword_ids and interest_keyword_ids at the same time.")
-        if body.get("purchase_intention_keyword_ids") and body.get("objective_type") in ("REACH", "VIDEO_VIEWS", "ENGAGEMENT"):
+        if body.get("purchase_intention_keyword_ids") and objective in ("REACH", "VIDEO_VIEWS", "ENGAGEMENT"):
             return fail(40002, "purchase_intention_keyword_ids is not supported for this objective_type.")
         actions = body.get("actions") or []
-        if actions and (body.get("placements") or []) != ["PLACEMENT_TIKTOK"]:
+        if not isinstance(actions, list):
+            return fail(40002, "actions: Must be a list.")
+        for action in actions:
+            if not isinstance(action, dict) or action.get("action_scene") not in SCENE_ACTIONS:
+                return fail(40002, "actions.action_scene: Invalid value.")
+            if action.get("action_period") not in (0, 7, 15):
+                return fail(40002, "actions.action_period: Must be 0, 7 or 15.")
+            if not set(action.get("video_user_actions") or []) <= SCENE_ACTIONS[action["action_scene"]]:
+                return fail(40002, "actions.video_user_actions: Invalid value for this action_scene.")
+            if not action.get("action_category_ids") or any(not isinstance(v, str) for v in action["action_category_ids"]):
+                return fail(40002, "actions.action_category_ids: Must be a list of strings.")
+        if actions and placements != ["PLACEMENT_TIKTOK"]:
             return fail(40002, "action_category_ids: Valid only when TikTok placement is the only placement selected.")
         for g in body.get("age_groups") or []:
             if g not in AGE_WEIGHT and g != "AGE_13_17":
                 return fail(40002, f"age_groups: {g} is not a valid value.")
         if body.get("gender") not in (None, "GENDER_MALE", "GENDER_FEMALE", "GENDER_UNLIMITED"):
             return fail(40002, "gender: Invalid value.")
+        if not set(body.get("operating_systems") or []) <= {"ANDROID", "IOS"} or len(body.get("operating_systems") or []) > 1:
+            return fail(40002, "operating_systems: Only one of ANDROID or IOS is allowed.")
+        if not set(body.get("network_types") or []) <= {"WIFI", "2G", "3G", "4G", "5G"}:
+            return fail(40002, "network_types: Invalid value.")
+        if not set(body.get("household_income") or []) <= {"TOP5", "TOP10", "TOP10_25", "TOP25_50"}:
+            return fail(40002, "household_income: Invalid value.")
         base, err = self._location_users(body)
         if err:
             return err
+        # Return code 40065: in the US, interest / behavior / income / spending targeting cannot cover the age group 13-17, so the ad group
+        # has to say which ages it means (the appendix: "manually specify an age_groups value that does not contain AGE_13_17").
+        restricted = any(body.get(f) for f in ("interest_category_ids", "interest_keyword_ids", "purchase_intention_keyword_ids", "actions", "household_income", "spending_power"))
+        if restricted and not body.get("age_groups"):
+            return fail(40065, "Based on one or more of your choices, ad delivery to US audiences will be subject to age targeting restrictions")
         share = 1.0
         if body.get("age_groups"):
             share *= sum(AGE_WEIGHT.get(g, 0.0) for g in body["age_groups"])

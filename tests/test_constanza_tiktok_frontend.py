@@ -145,15 +145,35 @@ def test_the_counts_on_the_two_sections_follow_the_settings():
     assert out == {"before": [0, 0], "after": [3, 2]}
 
 
-def test_a_pull_waits_only_when_the_server_said_tiktok_is_not_connected():
+def test_a_pull_is_never_refused_by_the_page_the_server_says_whether_tiktok_is_connected():
+    """A 'not connected' status read when the dock opened used to block Estimate until the dock was reopened, even after an admin added the
+    secrets. The server's answer is always current, so the page no longer judges."""
     out = run("""
-        var T = TT._pure.T, unknown = TT.canPull();
-        T.status = { configured: false, missing: ['TIKTOK_ACCESS_TOKEN'] }; var off = TT.canPull();
-        T.status = { configured: true }; var on = TT.canPull();
-        T.status = { error: 'x', options: null }; var broken = TT.canPull();
-        return JSON.stringify({ unknown: unknown, off: off, on: on, broken: broken });""")
-    assert out["unknown"]["ok"] and out["on"]["ok"] and out["broken"]["ok"]
-    assert not out["off"]["ok"] and "TIKTOK_ACCESS_TOKEN" in out["off"]["reason"] and "TIKTOK_ADVERTISER_ID" in out["off"]["reason"]
+        var T = TT._pure.T, seen = [];
+        seen.push(TT.canPull().ok);
+        T.status = { configured: false, missing: ['TIKTOK_ACCESS_TOKEN'] }; seen.push(TT.canPull().ok);
+        T.status = { configured: true }; seen.push(TT.canPull().ok);
+        T.status = { error: 'x', options: null }; seen.push(TT.canPull().ok);
+        return JSON.stringify(seen);""")
+    assert out == [True, True, True, True]
+
+
+def test_the_asked_summary_names_the_video_look_back_only_when_a_video_interaction_is_picked():
+    out = run("""
+        var T = TT._pure.T, before = TT.context().summary.slice();
+        TT._pure.pushPick('video_interaction', { id: '1700', name: 'Cars & Motorcycles' });
+        var d15 = TT.context().summary.slice(); T.videoPeriod = 7; var d7 = TT.context().summary.slice(); T.videoPeriod = 0; var any = TT.context().summary.slice();
+        return JSON.stringify({ before: before, d15: d15, d7: d7, any: any });""")
+    assert out["before"] == [] and out["d15"] == ["Video interaction: Cars & Motorcycles", "Video look-back: 15 days"]
+    assert out["d7"][-1] == "Video look-back: 7 days" and out["any"][-1] == "Video look-back: any time"
+
+
+def test_a_pick_is_added_once_and_a_kind_holds_at_most_fifty():
+    out = run("""
+        var T = TT._pure.T, add = (i) => TT._pure.pushPick('general_interest', { id: String(i), name: 'N' + i });
+        var first = add(1), again = add(1), rest = []; for (var i = 2; i <= 60; i++) rest.push(add(i));
+        return JSON.stringify({ first: first, again: again, kept: T.picks.length, refused: rest.filter(function (x) { return !x; }).length });""")
+    assert out == {"first": True, "again": False, "kept": 50, "refused": 10}
 
 
 # --------------------------------------------------------------------------------------------- the host sends it for the TikTok product only
@@ -260,3 +280,19 @@ def test_the_step_05_card_shows_the_audience_and_says_it_is_the_geography_alone(
 def test_a_tiktok_product_has_its_own_group_in_the_picker_and_no_budget_to_spread():
     assert 'tiktok: "TikTok · live audience estimate"' in CZ_JS and '"tiktok", "_generic"' in CZ_JS
     assert "!pluginOf(p) && !!((p && p.method === \"generic\")" in CZ_JS
+
+
+def test_the_panel_updates_its_buttons_in_place_and_only_rebuilds_them_when_the_menus_change():
+    for hook in ("function buildChoices()", "function syncChoices()", "function syncBrowse()", "if (sig === builtFor) return;"):
+        assert hook in TT_JS, hook
+    changed = TT_JS[TT_JS.index("    function changed() {"):TT_JS.index("// ---------------------------------------------------------------- the connection")]
+    assert "buildChoices()" not in changed and "syncChoices()" in changed and "syncBrowse()" in changed
+    assert 'T.placements = ["PLACEMENT_TIKTOK"]' in changed                    # the interaction lock lives where every pick passes through
+
+
+def test_the_page_tells_the_panel_when_a_pull_failed_so_a_stale_connection_banner_refreshes():
+    assert "plug.onError(r.status)" in CZ_JS and "onError" in TT_JS and "loadStatus(true)" in TT_JS
+
+
+def test_the_chip_button_style_does_not_reset_the_chip_font_size():
+    assert "button.cz-chip { cursor: pointer; font-family: inherit; }" in CZ_CSS and "font: inherit" not in CZ_CSS.split("button.cz-chip", 1)[1].split("}", 1)[0]

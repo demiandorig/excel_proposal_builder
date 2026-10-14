@@ -34,7 +34,6 @@
     };
     const STAGES = { 1: "Too narrow", 2: "Narrow", 3: "Balanced", 4: "Fairly broad" };
     const TYPE_LABEL = { COUNTRY: "country", PROVINCE: "state", DMA: "TV market", CITY: "county / city", DISTRICT: "city", ZIP_CODE: "ZIP" };
-    const SETUP = "TikTok isn’t connected yet — an admin needs to add TIKTOK_ACCESS_TOKEN and TIKTOK_ADVERTISER_ID to the app’s secrets.";
 
     // ---------------------------------------------------------------- state
     const fresh = () => ({
@@ -72,6 +71,7 @@
         const names = T.picks.filter((p) => p.kind === kind).map((p) => p.name);
         if (names.length) parts.push(`${KINDS[kind]}${names.length > 1 ? "s" : ""}: ${names.join("; ")}`);
       });
+      if (T.picks.some((p) => p.kind === "video_interaction")) parts.push("Video look-back: " + (T.videoPeriod ? `${T.videoPeriod} days` : "any time"));
       if (T.spending === "HIGH") parts.push("High spending power");
       if (T.income.length) parts.push("Household income: " + T.income.slice().sort().map((i) => labelOf("household_income", i)).join(", "));
       if (T.os) parts.push(labelOf("operating_systems", T.os));
@@ -183,21 +183,47 @@
       el.innerHTML = `<span class="cz-dot"></span> Connected to TikTok · ad account ${esc(s.advertiser || "")} · impressions = audience × ${esc(String(s.impressions_per_person))} a month`;
     }
 
-    function renderAge() {
-      $("cz-tt-age").innerHTML = seg("age", options("age_groups"), (id) => T.age.includes(id));
+    // The buttons of a group are built once (and again only when TikTok's menus arrive); after that a change only flips their state in
+    // place, so the keyboard focus stays on the button that was pressed.
+    let builtFor = "";
+    function buildChoices() {
+      const sig = JSON.stringify([options("age_groups"), options("household_income"), options("operating_systems"), options("network_types"), options("placements"), options("objectives")]);
+      if (sig === builtFor) return;
+      builtFor = sig;
+      const off = () => false;
+      $("cz-tt-age").innerHTML = seg("age", options("age_groups"), off);
+      $("cz-tt-income").innerHTML = seg("income", options("household_income"), off);
+      $("cz-tt-os").innerHTML = seg("os", [["", "Any device"]].concat(options("operating_systems")), off);
+      $("cz-tt-net").innerHTML = seg("network", options("network_types"), off);
+      $("cz-tt-place").innerHTML = seg("place", options("placements"), off);
+      $("cz-tt-obj").innerHTML = seg("objective", options("objectives"), off);
     }
-    function renderSimple() {
-      $("cz-tt-income").innerHTML = seg("income", options("household_income"), (id) => T.income.includes(id));
-      $("cz-tt-os").innerHTML = seg("os", [["", "Any device"]].concat(options("operating_systems")), (id) => (T.os || "") === id);
-      $("cz-tt-net").innerHTML = seg("network", options("network_types"), (id) => T.networks.includes(id));
+
+    const press = (el, on) => el.querySelectorAll("button[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(on(b.dataset.v))));
+
+    function syncChoices() {
+      press($("cz-tt-age"), (v) => T.age.includes(v));
+      press($("cz-tt-gender"), (v) => v === (T.gender || ""));
+      press($("cz-tt-spend"), (v) => v === (T.spending || ""));
+      press($("cz-tt-income"), (v) => T.income.includes(v));
+      press($("cz-tt-os"), (v) => v === (T.os || ""));
+      press($("cz-tt-net"), (v) => T.networks.includes(v));
+      press($("cz-tt-place"), (v) => T.placements.includes(v));
+      press($("cz-tt-obj"), (v) => T.objective === v);
+      press($("cz-tt-period"), (v) => Number(v) === T.videoPeriod);
       const locked = interactionPicked();
-      $("cz-tt-place").innerHTML = seg("place", options("placements"), (id) => T.placements.includes(id), (id) => (id === "PLACEMENT_PANGLE" && locked ? "disabled" : ""));
+      $("cz-tt-place").querySelectorAll('button[data-v="PLACEMENT_PANGLE"]').forEach((b) => { b.disabled = locked; });
       $("cz-tt-place-note").textContent = locked ? "Video, creator and hashtag interactions work only when TikTok is the only placement." : "TikTok alone is what the Tiktok Ads product runs on; add Pangle to see the audience including TikTok’s partner apps.";
-      $("cz-tt-obj").innerHTML = seg("objective", options("objectives"), (id) => T.objective === id);
       $("cz-tt-period").classList.toggle("hidden", !T.picks.some((p) => p.kind === "video_interaction"));
-      $("cz-tt-period").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(Number(b.dataset.v) === T.videoPeriod)));
-      $("cz-tt-spend").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === (T.spending || ""))));
-      $("cz-tt-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === (T.gender || ""))));
+    }
+
+    // The Browse chips show which categories are picked: flipped in place too, whichever way a pick was added or removed.
+    function syncBrowse() {
+      $("cz-tt-browse-body").querySelectorAll('button[data-tt="browse-add"]').forEach((b) => {
+        const on = T.picks.some((p) => p.kind === T.tab && p.id === b.dataset.id);
+        b.setAttribute("aria-pressed", String(on));
+        b.classList.toggle("cz-ok", on);
+      });
     }
 
     function renderPicks() {
@@ -205,8 +231,8 @@
         `<span class="cz-chip cz-ok" title="${esc(p.path || KINDS[p.kind])}">${esc(p.name)} <small>${esc(KINDS[p.kind])}</small><button type="button" class="cz-x" data-tt="rm-pick" data-i="${i}" aria-label="Remove ${esc(p.name)}">×</button></span>`).join("");
       $("cz-tt-pick-hint").textContent = T.picks.length ? `${T.picks.length} chosen` : "";
       const notes = [];
-      if (T.picks.some((p) => p.kind === "purchase_intention") && T.objective === "reach") {
-        notes.push(`<p class="cz-note cz-warn">Purchase intent isn’t available for a Reach campaign. <button type="button" class="cz-link" data-tt="fix-objective">Use the Traffic objective</button></p>`);
+      if (T.picks.some((p) => p.kind === "purchase_intention") && T.objective !== "traffic") {
+        notes.push(`<p class="cz-note cz-warn">Purchase intent isn’t available for a ${esc(labelOf("objectives", T.objective))} campaign. <button type="button" class="cz-link" data-tt="fix-objective">Use the Traffic objective</button></p>`);
       }
       if (T.picks.some((p) => p.kind === "purchase_intention") && T.picks.some((p) => p.kind === "additional_interest")) {
         notes.push(`<p class="cz-note cz-warn">Purchase intent and interest keywords can’t be used together — TikTok treats them as conflicting. Remove one.</p>`);
@@ -231,11 +257,13 @@
     }
 
     function renderAll() {
-      renderStatus(); renderAge(); renderSimple(); renderPicks(); renderLanguages(); updateCounts();
+      renderStatus(); buildChoices(); syncChoices(); renderPicks(); renderLanguages(); updateCounts();
     }
 
     function changed() {
-      renderSimple(); renderPicks(); updateCounts();
+      // an interaction (video, creator, hashtag) works only when TikTok is the ONLY placement: whatever picked it, the lock holds
+      if (interactionPicked() && !(T.placements.length === 1 && T.placements[0] === "PLACEMENT_TIKTOK")) T.placements = ["PLACEMENT_TIKTOK"];
+      syncChoices(); renderPicks(); updateCounts(); syncBrowse();
       markStale();
     }
 
@@ -301,8 +329,7 @@
       }
       const found = r.data.results || {};
       T.hits = [];
-      KIND_ORDER.forEach((kind) => (found[kind] || []).forEach((item) => T.hits.push({ kind, item })));
-      T.hits = T.hits.slice(0, 40);
+      KIND_ORDER.forEach((kind) => (found[kind] || []).slice(0, 6).forEach((item) => T.hits.push({ kind, item })));        // six of each kind: all of them show
       T.active = T.hits.length ? 0 : -1;
       box.innerHTML = T.hits.length
         ? T.hits.map((h, i) => `<div class="cz-interest-item ${i === T.active ? "cz-active" : ""}" role="option" id="cz-tt-hit-${i}" data-i="${i}"><span>${esc(h.item.name)}${h.item.path ? ` <span class="cz-grp">${esc(h.item.path)}</span>` : ""}</span><span class="cz-rate">${esc(KINDS[h.kind])}</span></div>`).join("")
@@ -315,8 +342,9 @@
       let r;
       try { r = await api(`/api/constanza/tiktok/targeting?kind=${encodeURIComponent(kind)}`); } catch (e) { r = { ok: false, data: {} }; }
       if (!r.ok) return { error: errorText(r.data, "TikTok’s list isn’t available right now.") };
-      T.catalog[kind] = r.data.items || [];                         // a failure is not remembered: the next open tries again
-      return T.catalog[kind];
+      const items = r.data.items || [];
+      if (items.length) T.catalog[kind] = items;                    // a failure, or an empty answer, is not remembered: the next open tries again
+      return items;
     }
 
     async function renderBrowse() {
@@ -343,7 +371,14 @@
     function hideLangHits() {
       $("cz-tt-lang-results").classList.add("hidden");
       $("cz-tt-lang-q").setAttribute("aria-expanded", "false");
+      $("cz-tt-lang-q").removeAttribute("aria-activedescendant");
       T.langHits = []; T.langActive = -1;
+    }
+
+    function markLang() {
+      $("cz-tt-lang-results").querySelectorAll(".cz-interest-item").forEach((el, i) => el.classList.toggle("cz-active", i === T.langActive));
+      const input = $("cz-tt-lang-q");
+      if (T.langActive >= 0 && T.langHits[T.langActive]) input.setAttribute("aria-activedescendant", `cz-tt-lang-${T.langActive}`); else input.removeAttribute("aria-activedescendant");
     }
 
     async function searchLanguages() {
@@ -354,7 +389,9 @@
         if (!r.ok) {
           const box = $("cz-tt-lang-results");
           box.classList.remove("hidden");
+          $("cz-tt-lang-q").setAttribute("aria-expanded", "true");
           box.innerHTML = `<div class="cz-empty">${esc(errorText(r.data, "TikTok’s language list isn’t available right now."))}</div>`;
+          T.langHits = []; T.langActive = -1;
           return;
         }
         T.languagesAll = r.data.items || [];
@@ -368,6 +405,7 @@
       box.innerHTML = T.langHits.length
         ? T.langHits.map((l, i) => `<div class="cz-interest-item ${i === T.langActive ? "cz-active" : ""}" role="option" id="cz-tt-lang-${i}" data-i="${i}"><span>${esc(l.name)}</span><span class="cz-rate">${esc(l.code)}</span></div>`).join("")
         : `<div class="cz-empty">No language matches “${esc(q)}”.</div>`;
+      markLang();
     }
 
     function addLanguage(l) {
@@ -388,14 +426,14 @@
         if (!b || !root.contains(b)) return;
         const v = b.dataset.v;
         switch (b.dataset.tt) {
-          case "age": T.age = toggled(T.age, v); renderAge(); break;
+          case "age": T.age = toggled(T.age, v); break;
           case "gender": T.gender = v; break;
           case "spending": T.spending = v; break;
           case "income": T.income = toggled(T.income, v); break;
           case "os": T.os = v; break;
           case "network": T.networks = toggled(T.networks, v); break;
           case "place":
-            if (v === "PLACEMENT_TIKTOK") return;                    // TikTok is always a placement: it is what the product runs on
+            if (v === "PLACEMENT_TIKTOK" || b.disabled) return;      // TikTok is always a placement: it is what the product runs on
             T.placements = toggled(T.placements, v);
             break;
           case "objective": T.objective = v; break;
@@ -411,12 +449,13 @@
             return;
           case "browse-add": {
             const item = (T.catalog[T.tab] || []).find((i) => String(i.id) === b.dataset.id);
-            if (item) { if (T.picks.some((p) => p.kind === T.tab && p.id === String(item.id))) T.picks = T.picks.filter((p) => !(p.kind === T.tab && p.id === String(item.id))); else addPick(T.tab, item); renderBrowse(); }
-            return;
+            if (!item) return;
+            if (T.picks.some((p) => p.kind === T.tab && p.id === String(item.id))) T.picks = T.picks.filter((p) => !(p.kind === T.tab && p.id === String(item.id)));
+            else pushPick(T.tab, item);
+            break;                                                    // the tail below redraws the chips and flips the Browse chips in place
           }
           default: return;
         }
-        if (interactionPicked()) T.placements = ["PLACEMENT_TIKTOK"];
         changed();
       });
 
@@ -431,11 +470,11 @@
         } else if (e.key === "Enter") {
           e.preventDefault();
           if (T.hits[T.active]) addPick(T.hits[T.active].kind, T.hits[T.active].item);
-        } else if (e.key === "Escape" && T.hits.length) { e.preventDefault(); e.stopPropagation(); hideHits(); }
+        } else if (e.key === "Escape" && !$("cz-tt-results").classList.contains("hidden")) { e.preventDefault(); e.stopPropagation(); hideHits(); }
       });
       $("cz-tt-results").addEventListener("click", (e) => {
         const el = e.target.closest(".cz-interest-item");
-        if (el && T.hits[Number(el.dataset.i)]) { const h = T.hits[Number(el.dataset.i)]; addPick(h.kind, h.item); if ($("cz-tt-browse").open) renderBrowse(); }
+        if (el && T.hits[Number(el.dataset.i)]) { const h = T.hits[Number(el.dataset.i)]; addPick(h.kind, h.item); }
       });
       $("cz-tt-browse").addEventListener("toggle", (e) => { if (e.target.open) renderBrowse(); });
       $("cz-tt-filter").addEventListener("input", renderBrowse);
@@ -448,11 +487,11 @@
           if (!T.langHits.length) return;
           e.preventDefault();
           T.langActive = (T.langActive + (e.key === "ArrowDown" ? 1 : -1) + T.langHits.length) % T.langHits.length;
-          $("cz-tt-lang-results").querySelectorAll(".cz-interest-item").forEach((el, i) => el.classList.toggle("cz-active", i === T.langActive));
+          markLang();
         } else if (e.key === "Enter") {
           e.preventDefault();
           if (T.langHits[T.langActive]) addLanguage(T.langHits[T.langActive]);
-        } else if (e.key === "Escape" && T.langHits.length) { e.preventDefault(); e.stopPropagation(); hideLangHits(); }
+        } else if (e.key === "Escape" && !$("cz-tt-lang-results").classList.contains("hidden")) { e.preventDefault(); e.stopPropagation(); hideLangHits(); }
       });
       $("cz-tt-lang-results").addEventListener("click", (e) => {
         const el = e.target.closest(".cz-interest-item");
@@ -469,7 +508,9 @@
       if (!$("cz-tt")) return;
       ["cz-tt-q", "cz-tt-lang-q", "cz-tt-filter"].forEach((id) => { if ($(id)) $(id).value = ""; });
       hideHits(); hideLangHits();
+      $("cz-tt-tabs").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.v === T.tab)));
       renderAll();
+      if ($("cz-tt-browse").open) renderBrowse();
     }
 
     // ---------------------------------------------------------------- the result
@@ -532,14 +573,19 @@
       return lines;
     }
 
+    // Nothing is refused here: the server says "TikTok isn't connected yet" itself, and its answer is always current, where a status read
+    // when the dock opened is not (an admin may have added the secrets since).
     function canPull() {
-      if (T.status && !T.status.error && T.status.configured === false) return { ok: false, reason: SETUP };
       return { ok: true };
+    }
+
+    function onError(status) {
+      if (status === 503) loadStatus(true);                       // the connection changed under us: show it
     }
 
     return {
       goLabel: "Estimate audience →",
-      formHtml, bind, reset, canPull,
+      formHtml, bind, reset, canPull, onError,
       onSelect: () => { renderAll(); loadStatus(false); },
       requestPart: () => ({ tiktok: targeting() }),
       context: () => ({ summary: summaryParts() }),

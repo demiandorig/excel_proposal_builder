@@ -57,6 +57,9 @@ MAX_RETRIES = 2              # extra attempts after the first for a retryable fa
 NETWORK_BACKOFF = (0.6, 1.5)
 RATE_LIMIT_BACKOFF = (1.0, 2.5)
 MIN_INTERVAL = 0.12          # seconds between calls leaving this process (TikTok limits calls per second per app)
+MAX_CONCURRENT = 6           # calls in flight at once: a slow TikTok must not hold every worker thread of the app
+MAX_QUEUE_WAIT = 5.0         # a call that would have to wait longer than this for its turn is refused instead of queued
+CALL_DEADLINE = 45.0         # seconds one call may take in all, retries included
 
 BATCH_LIMIT = 1000         # keywords per location search (TikTok's own limit for the batch search types)
 
@@ -70,7 +73,8 @@ SETUP_HINT = "an admin needs to add TIKTOK_ACCESS_TOKEN and TIKTOK_ADVERTISER_ID
 
 # --- TikTok's return codes (Appendix - Return codes), grouped by what the caller should do about them --------------------
 _AUTH_CODES = {40101, 40102, 40103, 40104, 40105, 40106, 40107, 40108, 40109, 40110, 40113, 40115, 40116}
-_PERMISSION_CODES = {40001, 40117, 40118, 40119, 40124, 40125}
+_PERMISSION_CODES = {40001, 40117, 40118, 40119, 40124, 40125, 41000}      # 41000: the client IP is on the banned-country list
+_UNAVAILABLE_CODES = {41001, 60001}                                          # the interface is offline / the system is in maintenance
 _RATE_LIMIT_CODES = {40016, 40100, 40132, 40133}
 _ADVERTISER_CODES = {40300, 40301}
 _INVALID_CODES = {40000, 40002, 40006, 40007, 40008, 40010, 40011, 40051, 40065, 40700}
@@ -123,14 +127,22 @@ def impressions_per_person() -> float:
     return DEFAULT_IMPRESSIONS_PER_PERSON
 
 
-_ADVERTISER_RE = re.compile(r"^\d{5,25}$")
+_ADVERTISER_RE = re.compile(r"^\d{5,25}$", re.ASCII)
+_TOKEN_RE = re.compile(r"^[\x21-\x7e]+$")          # printable ASCII, no space: all a header can carry (a pasted zero-width space is not)
+_LOCAL_BASE_RE = re.compile(r"^http://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(?:/|$)")
 
 
 def missing_config() -> list[str]:
     """The settings that are absent or unusable, by name (never their values)."""
     problems = []
-    if not access_token():
+    token = access_token()
+    if not token:
         problems.append("TIKTOK_ACCESS_TOKEN")
+    elif not _TOKEN_RE.match(token):
+        problems.append("TIKTOK_ACCESS_TOKEN (it has a space or a character a token cannot hold — copy it again)")
+    base = _env("TIKTOK_API_BASE")
+    if base and not (base.lower().startswith("https://") or _LOCAL_BASE_RE.match(base.lower())):
+        problems.append("TIKTOK_API_BASE (it must be an https address)")
     adv = advertiser_id()
     if not adv:
         problems.append("TIKTOK_ADVERTISER_ID")
@@ -174,9 +186,10 @@ class TikTokAPIError(Exception):
         if self.kind == "not_configured":
             return f"TikTok isn't connected yet — {SETUP_HINT}."
         if self.kind == "config":
-            return f"TikTok doesn't recognise the ad account ID this app was given — {SETUP_HINT.replace('add', 'check')}{said}."
+            return f"TikTok doesn't recognise the ad account this app was given — an admin needs to check TIKTOK_ADVERTISER_ID{said}."
         if self.kind == "auth":
-            return f"TikTok rejected the app's access token — it has expired or been revoked, so an admin needs to replace TIKTOK_ACCESS_TOKEN{said}."
+            return (f"TikTok rejected the app's access token — it may have expired or been revoked, or not be allowed for this ad account, "
+                    f"so an admin needs to check TIKTOK_ACCESS_TOKEN{said}.")
         if self.kind == "permission":
             return f"TikTok says this app or ad account isn't allowed to do that{said}."
         if self.kind == "rate_limit":
@@ -201,6 +214,8 @@ def _classify(code: int) -> str:
         return "rate_limit"
     if code in _ADVERTISER_CODES:
         return "config"
+    if code in _UNAVAILABLE_CODES:
+        return "unavailable"
     if code in _INVALID_CODES:
         return "invalid"
     if 50000 <= code < 60000:
@@ -250,13 +265,25 @@ class _Throttle:
         self._next = 0.0
         self._lock = threading.Lock()
 
-    def wait(self) -> None:
+    def wait(self, max_wait: Optional[float] = None) -> None:
         with self._lock:
             now = self._clock()
             start = max(now, self._next)
+            if max_wait is not None and start - now > max_wait:
+                raise TikTokAPIError("too many requests are waiting for their turn", kind="rate_limit")
             self._next = start + self.interval
         if start > now:
             self._sleep(start - now)
+
+
+_LONG_DIGITS = re.compile(r"\b\d{15,}\b")           # an ad account / business center ID; a place ID (7-13 digits) is not one
+
+
+def _scrub(message: str, token: str) -> str:
+    """TikTok's own message with the token and any ad account ID taken out: it is shown to every planner."""
+    if token and len(token) >= 6:
+        message = message.replace(token, "…")
+    return _LONG_DIGITS.sub(lambda m: "…" + m.group(0)[-4:], message)
 
 
 def _canonical(value: Any) -> str:
@@ -327,7 +354,9 @@ class TikTokClient:
         self._clock, self._sleep = clock, sleep
         self._cache = _TTLCache(clock=clock)
         self._throttle = _Throttle(min_interval, clock, sleep)
+        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT)
         self.max_retries = max_retries
+        self.adult_ages_needed = False       # set once TikTok has asked (code 40065) for the adult age groups to be spelled out
 
     def clear_cache(self) -> None:
         """Forget every answer held in memory (the diagnostics want TikTok's real answer, not yesterday's)."""
@@ -338,8 +367,9 @@ class TikTokClient:
 
     # ---- the one place a request is made --------------------------------------------------------------------------------
     def call(self, method: str, path: str, *, params: Optional[dict] = None, body: Optional[dict] = None,
-             cache_ttl: Optional[float] = None) -> tuple[dict, Optional[str], bool]:
-        """(data, request_id, from_cache). Raises TikTokAPIError for every failure."""
+             cache_ttl: Optional[float] = None, cache_if: Optional[Callable[[dict], bool]] = None) -> tuple[dict, Optional[str], bool]:
+        """(data, request_id, from_cache). Raises TikTokAPIError for every failure. `cache_if` decides whether an answer is worth remembering:
+        a catalog that came back EMPTY is not (it would be served for hours), the next call asks TikTok again."""
         key = None
         if cache_ttl:
             key = f"{method} {path} {_canonical(params)} {_canonical(body)}"
@@ -347,14 +377,24 @@ class TikTokClient:
             if hit:
                 return value[0], value[1], True
         data, request_id = self._send(method, path, params, body)
-        if key is not None:
+        if key is not None and (cache_if is None or cache_if(data)):
             self._cache.put(key, (data, request_id), cache_ttl)
         return data, request_id, False
 
     def _send(self, method: str, path: str, params: Optional[dict], body: Optional[dict]) -> tuple[dict, Optional[str]]:
+        # at most MAX_CONCURRENT calls in flight, and one that cannot get a slot soon is refused: a slow TikTok must not pin every worker
+        if not self._slots.acquire(timeout=MAX_QUEUE_WAIT):
+            raise TikTokAPIError("too many requests are waiting for TikTok", kind="rate_limit")
+        try:
+            return self._send_locked(method, path, params, body)
+        finally:
+            self._slots.release()
+
+    def _send_locked(self, method: str, path: str, params: Optional[dict], body: Optional[dict]) -> tuple[dict, Optional[str]]:
         url = f"{self.base}{path}"
         headers = {"Access-Token": self._token, "Accept": "application/json", "User-Agent": "constanza-proposal-builder/1"}
-        kwargs: dict[str, Any] = {"headers": headers, "timeout": (CONNECT_TIMEOUT, READ_TIMEOUT)}
+        # allow_redirects is off: requests would carry our custom Access-Token header to whatever host a redirect names
+        kwargs: dict[str, Any] = {"headers": headers, "timeout": (CONNECT_TIMEOUT, READ_TIMEOUT), "allow_redirects": False}
         if params:
             # TikTok's GET endpoints take arrays and objects as JSON in the query string (placements=["PLACEMENT_TIKTOK"])
             kwargs["params"] = {k: (json.dumps(v, separators=(",", ":")) if isinstance(v, (list, dict)) else v) for k, v in params.items() if v is not None}
@@ -362,15 +402,23 @@ class TikTokClient:
             headers["Content-Type"] = "application/json"
             kwargs["json"] = body
 
+        began = self._clock()
         attempt = 0
+
+        def can_retry(delay: float) -> bool:
+            return attempt < self.max_retries and (self._clock() - began) + delay + READ_TIMEOUT <= CALL_DEADLINE
+
         while True:
-            self._throttle.wait()
+            self._throttle.wait(MAX_QUEUE_WAIT)
             started = self._clock()
             try:
                 resp = self._session.request(method, url, **kwargs)
+            except UnicodeError:
+                raise TikTokAPIError("the access token has a character that cannot be sent in a header", kind="config") from None
             except (requests.Timeout, requests.ConnectionError) as exc:
                 error = TikTokAPIError(f"could not reach TikTok ({type(exc).__name__})", kind="unavailable")
-                if attempt < self.max_retries:
+                delay = NETWORK_BACKOFF[min(attempt, len(NETWORK_BACKOFF) - 1)]
+                if can_retry(delay):
                     self._pause(NETWORK_BACKOFF, attempt)
                     attempt += 1
                     continue
@@ -379,6 +427,8 @@ class TikTokClient:
                 raise TikTokAPIError(f"the request failed ({type(exc).__name__})", kind="unavailable") from None
 
             elapsed = self._clock() - started
+            if 300 <= resp.status_code < 400:
+                raise TikTokAPIError(f"TikTok answered with a redirect (HTTP {resp.status_code}), which is not followed", kind="unexpected", http_status=resp.status_code)
             try:
                 payload = resp.json()
             except ValueError:
@@ -388,19 +438,22 @@ class TikTokClient:
             log.info("tiktok %s %s -> http %s code %s in %.2fs request_id=%s", method, path, resp.status_code, code, elapsed, request_id)
 
             # a rate limit, a 5xx or a gateway answer that is not TikTok's envelope: retry a little, then say so
+            limited = resp.status_code == 429 or (isinstance(code, int) and code in _RATE_LIMIT_CODES)
             retryable_http = resp.status_code == 429 or resp.status_code >= 500
-            if (retryable_http or (isinstance(code, int) and (code in _RATE_LIMIT_CODES or 50000 <= code < 60000))) and attempt < self.max_retries:
-                self._pause(RATE_LIMIT_BACKOFF if (resp.status_code == 429 or code in _RATE_LIMIT_CODES) else NETWORK_BACKOFF, attempt)
-                attempt += 1
-                continue
+            if retryable_http or limited or (isinstance(code, int) and 50000 <= code < 60000):
+                schedule = RATE_LIMIT_BACKOFF if limited else NETWORK_BACKOFF
+                if can_retry(schedule[min(attempt, len(schedule) - 1)]):
+                    self._pause(schedule, attempt)
+                    attempt += 1
+                    continue
 
             if not isinstance(payload, dict) or not isinstance(code, int):
-                kind = "unavailable" if retryable_http else "unexpected"
+                kind = "rate_limit" if resp.status_code == 429 else ("unavailable" if retryable_http else "unexpected")
                 raise TikTokAPIError(f"HTTP {resp.status_code} with an unreadable body", kind=kind, http_status=resp.status_code)
             if code == 0:
                 data = payload.get("data")
                 return (data if isinstance(data, dict) else {}), (str(request_id) if request_id else None)
-            message = str(payload.get("message") or "").strip()
+            message = _scrub(str(payload.get("message") or "").strip(), self._token)
             log.warning("tiktok %s %s failed: code %s: %s (request_id=%s)", method, path, code, message[:300], request_id)
             raise TikTokAPIError(message[:400], kind=_classify(code), code=code, http_status=resp.status_code,
                                  request_id=str(request_id) if request_id else None)
@@ -411,7 +464,8 @@ class TikTokClient:
     # ---- the targeting lookups ---------------------------------------------------------------------------------------------
     def languages(self) -> list[dict]:
         """[{code, name}] - every language TikTok can target (/tool/language/)."""
-        data, _, _ = self.call("GET", "/tool/language/", params={"advertiser_id": self.advertiser}, cache_ttl=TTL_CATALOG)
+        data, _, _ = self.call("GET", "/tool/language/", params={"advertiser_id": self.advertiser}, cache_ttl=TTL_CATALOG,
+                               cache_if=lambda d: bool(d.get("languages")))
         out = []
         for item in data.get("languages") or []:
             if isinstance(item, dict) and item.get("code"):
@@ -450,7 +504,8 @@ class TikTokClient:
         params: dict[str, Any] = {"advertiser_id": self.advertiser, "targeting_type": "INTEREST_AND_BEHAVIOR"}
         if set(kinds) != set(LIST_KINDS):        # every kind is what TikTok sends when the field is left out: ask for that, the plainest request
             params["sub_targeting_types"] = [_SUB_TYPE[k] for k in kinds]
-        data, _, _ = self.call("GET", "/targeting/search/", params=params, cache_ttl=TTL_CATALOG)
+        data, _, _ = self.call("GET", "/targeting/search/", params=params, cache_ttl=TTL_CATALOG,
+                               cache_if=lambda d: any(isinstance(d.get(k), dict) and d[k].get("list_result") for k in TARGETING_KINDS))
         return {k: self._items(data.get(k), None) for k in kinds}
 
     def targeting_search(self, keyword: str, kinds: Iterable[str] = tuple(TARGETING_KINDS)) -> dict[str, list[dict]]:
@@ -466,11 +521,27 @@ class TikTokClient:
         return {k: self._items(data.get(k), keyword) for k in kinds}
 
     # ---- locations ---------------------------------------------------------------------------------------------------------
+    def list_regions(self, level_range: str = "TO_PROVINCE") -> list[dict]:
+        """Every location TikTok can target down to the level asked (/tool/region/): countries, states and - at state level - TV
+        markets (`area_type` METROPOLITAN_OR_DMA). [{id, name, parent_id, region_code, area_type, level}]. One call, cached for hours."""
+        params = {"advertiser_id": self.advertiser, "placements": ["PLACEMENT_TIKTOK"], "objective_type": objective_type(), "level_range": level_range}
+        data, _, _ = self.call("GET", "/tool/region/", params=params, cache_ttl=TTL_CATALOG, cache_if=lambda d: bool(d.get("region_info")))
+        out = []
+        for r in data.get("region_info") or []:
+            if not isinstance(r, dict) or not r.get("location_id"):
+                continue
+            out.append({"id": str(r["location_id"]), "name": str(r.get("name") or ""), "parent_id": str(r.get("parent_id") or ""),
+                        "region_code": str(r.get("region_code") or ""), "area_type": str(r.get("area_type") or ""), "level": str(r.get("level") or "")})
+        return out
+
     def search_locations(self, keywords: list[str], *, geo_types: Optional[list[str]] = None, region_codes: Optional[list[str]] = ("US",),
                          search_type: str = "BATCH_REGION_SEARCH") -> list[dict]:
         """Location tags for the keywords (/tool/targeting/search/): [{keyword, name, geo_id, geo_type, parent_id, region_code,
-        description, enabled}]. BATCH_REGION_SEARCH takes up to 1,000 keywords and returns the five best per keyword;
-        BATCH_ZIPCODE_SEARCH takes exact ZIP codes; FUZZY_SEARCH takes one keyword and returns up to 100."""
+        description, enabled, ancestors}]. `ancestors` is the chain of parents the answer carried in `parent_tags` (nearest first:
+        a city's county, then its state, then its country), each {geo_id, geo_type, name, description}; it is empty when TikTok did not
+        send the parents, and a caller must then treat where a place sits as UNKNOWN, not as a match. BATCH_REGION_SEARCH takes up to
+        1,000 keywords and returns the five best per keyword; BATCH_ZIPCODE_SEARCH takes exact ZIP codes; FUZZY_SEARCH takes one
+        keyword and returns up to 100."""
         keywords = [k for k in keywords if k]
         if not keywords:
             return []
@@ -486,17 +557,28 @@ class TikTokClient:
                 body["geo_types"] = list(geo_types)
             if region_codes:
                 body["region_codes"] = list(region_codes)
-            data, _, _ = self.call("POST", "/tool/targeting/search/", body=body, cache_ttl=TTL_LOCATION)
+            data, _, _ = self.call("POST", "/tool/targeting/search/", body=body, cache_ttl=TTL_LOCATION,
+                                   cache_if=lambda d: bool(d.get("targeting_tag_list")))
+            parents: dict[str, dict] = {}
+            for tag in data.get("parent_tags") or []:
+                pg = (tag or {}).get("geo") or {}
+                if pg.get("geo_id"):
+                    parents[str(pg["geo_id"])] = {"geo_id": str(pg["geo_id"]), "geo_type": str(pg.get("geo_type") or ""), "name": str((tag or {}).get("name") or ""),
+                                                  "description": str(pg.get("description") or ""), "parent_id": str(pg.get("parent_id") or "")}
             for tag in data.get("targeting_tag_list") or []:
                 geo = (tag or {}).get("geo") or {}
                 if not geo.get("geo_id"):
                     continue
                 status = ((tag or {}).get("status_info") or {}).get("status")
+                chain, cur = [], str(geo.get("parent_id") or "")
+                while cur in parents and len(chain) < 8 and not any(c["geo_id"] == cur for c in chain):
+                    chain.append({k: parents[cur][k] for k in ("geo_id", "geo_type", "name", "description")})
+                    cur = parents[cur]["parent_id"]
                 out.append({
                     "keyword": str(tag.get("keyword") or ""), "name": str(tag.get("name") or ""), "geo_id": str(geo["geo_id"]),
                     "geo_type": str(geo.get("geo_type") or ""), "parent_id": str(geo.get("parent_id") or ""),
                     "region_code": str(geo.get("region_code") or ""), "description": str(geo.get("description") or ""),
-                    "enabled": status in (None, "ENABLED"),
+                    "enabled": status in (None, "ENABLED"), "ancestors": chain,
                 })
         return out
 

@@ -192,3 +192,53 @@ def test_the_estimate_payload_has_the_universe_and_the_audience_counts(with_univ
 def test_the_payload_says_null_when_the_data_has_no_universe(without_universe):
     out = main.constanza_estimate(estimate_body(audience=main.ConstanzaAudienceSpecModel(gender="female")))
     assert out["reach_universe"] is None and out["audience"]["audience_people"] is None and out["audience"]["est_uniques"] is None
+
+
+# --------------------------------------------------------------------------------------------- the review's findings
+
+def test_the_market_population_says_whether_it_counts_adults(with_universe):
+    base = base_estimate()
+    with_interest = estimate_audience(base, WOMEN_AUTO)
+    without_interest = estimate_audience(base, AudienceSpec(gender="female"))
+    assert with_interest.market_population_adults is True and without_interest.market_population_adults is False
+
+
+def test_a_country_with_no_age_data_is_not_called_adults():
+    """Mexico has no ACS age bands, so the interest rate is applied to everyone: the card must not say 'adults'."""
+    res = resolve_geo("Mexico")
+    est = engine.estimate_avails(FAMILY, res, months=1, national_monthly_total=1_000_000)
+    aud = estimate_audience(est, AudienceSpec(interest_terms=["Auto Intenders"]))
+    assert aud.underlying_population > 0 and aud.market_population_adults is False
+
+
+def test_the_payload_carries_the_adults_flag(with_universe):
+    out = main.constanza_estimate(estimate_body(audience=main.ConstanzaAudienceSpecModel(gender="female", interest_terms=["Auto Intenders"])))
+    assert out["audience"]["market_population_adults"] is True
+    plain = main.constanza_estimate(estimate_body(audience=main.ConstanzaAudienceSpecModel(gender="female")))
+    assert plain["audience"]["market_population_adults"] is False
+
+
+def test_a_reach_universe_larger_than_the_census_population_is_explained_not_called_smaller(monkeypatch):
+    """A display platform counts devices or IDs: eDigital Display's universe in Dallas is 8.4M against 6.4M census adults. The note says why."""
+    _install(monkeypatch, True)
+    rows = store.dma_table(7001)
+    rows["los-angeles"] = store.Row("los-angeles", LA_AVAILS, reach_universe=60_000_000.0, est_reach=LA_REACH)
+    monkeypatch.setattr(store, "dma_table", lambda sid: rows)
+    try:
+        aud = estimate_audience(base_estimate(), WOMEN_AUTO)
+        assert aud.audience_people > aud.underlying_population
+        assert any("larger than the census population" in n and "devices or IDs" in n for n in aud.notes)
+    finally:
+        store.invalidate()
+        fm.invalidate()
+
+
+def test_the_census_note_is_absent_when_the_universe_is_smaller(with_universe):
+    aud = estimate_audience(base_estimate(), WOMEN_AUTO)
+    assert not any("larger than the census population" in n for n in aud.notes)
+
+
+def test_an_age_range_with_no_adults_and_an_interest_rate_of_adults_says_so(with_universe):
+    aud = estimate_audience(base_estimate(), AudienceSpec(age_min=16, age_max=17, interest_terms=["Auto Intenders"]))
+    assert aud.underlying_population == 0 and any("this age range has none" in n for n in aud.notes)
+    assert not any("larger than the census population" in n for n in aud.notes)

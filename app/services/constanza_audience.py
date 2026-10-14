@@ -152,6 +152,10 @@ class AudienceEstimate:
     est_uniques: float | None = None           # the est. monthly uniques narrowed the same way
     impressions_per_person: float | None = None   # monthly impressions / audience people (unchanged by the cuts)
 
+    # True when the market population counts ADULTS (an interest rate was applied and every area had age data to clip to 18+); False
+    # when it is everyone in the area that fits the age / gender cuts (no interest, or an area - a country - with no age data).
+    market_population_adults: bool = False
+
     @property
     def market_population(self) -> float:
         return self.underlying_population
@@ -412,6 +416,7 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     people_known = False
     uniques_total = 0.0
     uniques_known = False
+    adults_everywhere = True
     by_area: list[AudienceAreaEstimate] = []
     not_narrowed: list[str] = []
 
@@ -438,7 +443,11 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
         # population it multiplies is the adults' (children are not auto intenders); without one the share stands as is. The
         # interest cut is part of the size: a segment that is 0.1% of adults is a tiny audience however large the
         # geography, and the reliability warning has to see that.
-        pop_share = _age_gender_share(area_est, spec.age_min, spec.age_max, gender, adults_only=True)[0] if supported_interests else share
+        if supported_interests:
+            pop_share, adults_known = _age_gender_share(area_est, spec.age_min, spec.age_max, gender, adults_only=True)
+            adults_everywhere = adults_everywhere and adults_known          # no age data for the area (a country): everyone is counted, not adults
+        else:
+            pop_share = share
         area_pop = area_est.area_population * pop_share * interest_multiplier
 
         total_underlying_pop += area_pop
@@ -516,6 +525,12 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
         )
 
     audience_people = people_total if people_known else None
+    if supported_interests and age_gender_requested and spec.age_max is not None and spec.age_max < ADULT_AGE:
+        notes.append("Interest rates describe adults (18+) and this age range has none: the market population is shown as 0, and the interest's "
+                     "rate is applied to the age group only as a rough proxy.")
+    elif audience_people is not None and total_underlying_pop > 0 and audience_people > total_underlying_pop:
+        notes.append(f"This product's reach universe ({audience_people:,.0f}) is larger than the census population that fits these cuts "
+                     f"({total_underlying_pop:,.0f}): the platform counts devices or IDs, not people, so read it as the product's own audience measure.")
     months = max(1, base.months)
     return AudienceEstimate(
         base=base, age_gender_share_applied=any_age_gender_applied, interests=interests,
@@ -528,4 +543,5 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
         audience_people=audience_people,
         est_uniques=uniques_total if uniques_known else None,
         impressions_per_person=(imps_mid_total / months / audience_people) if audience_people else None,
+        market_population_adults=bool(supported_interests) and adults_everywhere,
     )
