@@ -70,11 +70,13 @@ Admin -> Product Catalog; nothing here is consulted again except to fill an empt
 table and as the fail-safe when the database can't be read.
 """
 
+import json
 import logging
 import math
 import re
 import time
 from dataclasses import dataclass, field, asdict, replace
+from pathlib import Path
 from typing import Optional, Union
 
 from app.db import get_connection
@@ -231,33 +233,6 @@ CATALOG: list[Product] = [
     # ===========================================================================
     Product(
         family='Online Video',
-        name='Video - Pre-roll (OLV)',
-        short_label='Awareness / Retargeting',
-        proposal_description='Video messages shown before video content selected by the user that can last between 15 and 30 seconds. - Geo Only (DMA) + Hispanic. Device (mobile and desktop) Variants (contact planning for exact tier): Video - Pre-roll + 1 additional targeting layer: $24 CPM; Video - Pre-roll + 2 additional targeting layers: $25 CPM.',
-        sizes=':15s/:30s, 16:9',
-        buying_model='CPM',
-        base_rate=23.0,
-        estimated_impressions=False,
-        discloses_impressions=True,
-        minimum_spend=750.0,
-        minimum_flight_days=[30, 90],
-        sla_data_days=1,
-        sla_creative_days=3,
-        sla_activate_days=3,
-        sla_total_days=7,
-        media_allocation_pct=0.0,
-        margin_upper=0.4,
-        margin_lower=0.3,
-        tech_platform='',
-        wide_orbit_code='Video - Pre-roll (OLV)',
-        notes='',
-        estimated_cpm_for_imps=None,
-        hispanic_targeting_forced=None,
-        cannabis_policy='not_allowed',
-        political_policy='not_allowed',
-    ),
-    Product(
-        family='Online Video',
         name='YouTube Ads - Skippable',
         short_label='Awareness / Retargeting',
         proposal_description='Skippable in-stream and video discovery ads on YouTube; viewers can skip after five seconds. Targeting availability: Demographics, Interests, Video Remarketing, Topics, Keywords (keyword targeting option depends on your ad format). 6 creatives max. Each language target will need separate campaigns (ie WO line IDs)',
@@ -313,33 +288,6 @@ CATALOG: list[Product] = [
     # ===========================================================================
     # DISPLAY
     # ===========================================================================
-    Product(
-        family='Display',
-        name='eDigital Network Display - Standard IAB',
-        short_label='Awareness / Retargeting',
-        proposal_description='Entravision hispanic display network. Access to 1st party data and premium quality inventory. Standard IAB units Desktop and/or Mobile. Variants (contact planning for exact tier): Geo targeting only + Hispanic: $9 CPM; Geo targeting only + Hispanic + 1 additional targeting layer: $10 CPM; Geo targeting only + Hispanic + 2 additional targeting layer: $11 CPM.',
-        sizes='300x250, 728x90, 320x50, 160x600',
-        buying_model='CPM',
-        base_rate=9.0,
-        estimated_impressions=False,
-        discloses_impressions=True,
-        minimum_spend=750.0,
-        minimum_flight_days=[30, 90],
-        sla_data_days=1,
-        sla_creative_days=3,
-        sla_activate_days=3,
-        sla_total_days=8,
-        media_allocation_pct=0.0,
-        margin_upper=0.4,
-        margin_lower=0.3,
-        tech_platform='',
-        wide_orbit_code='eDigital Network Display - Standard IAB',
-        notes='',
-        estimated_cpm_for_imps=None,
-        hispanic_targeting_forced=None,
-        cannabis_policy='not_allowed',
-        political_policy='not_allowed',
-    ),
     Product(
         family='Display',
         name='Display - Geo Fence',
@@ -1925,6 +1873,54 @@ CATALOG: list[Product] = [
         is_addon=True,
     ),
 ]
+
+# ---------------------------------------------------------------------------
+# Products added with the forecast data platform (30: the Entravision+ Connect / Hispanic Connect tiers, Pause Ads,
+# VIX Select, eDigital Display and OLV, and one per Live Sports tab). They live in app/data/forecast/products.json so
+# the same records seed a fresh database (below), are inserted into an already-seeded one without touching any row an
+# admin has edited or deleted (app/services/forecast_import/product_seed.py), and are reviewed as data.
+# ---------------------------------------------------------------------------
+_FORECAST_SEED_PATH = Path(__file__).resolve().parent / "data" / "forecast" / "products.json"
+
+
+def _load_forecast_seed_products() -> list[tuple["Product", Optional[str]]]:
+    """[(product, name of the product it is listed after)], from products.json. A missing or malformed file yields no
+    extra products (the app runs exactly as before it existed)."""
+    try:
+        data = json.loads(_FORECAST_SEED_PATH.read_text(encoding="utf-8"))
+        out = []
+        for record in data.get("products", []):
+            record = dict(record)
+            after = record.pop("after", None)
+            record.pop("replaces", None)                      # metadata about the seed, see forecast_seed_replacements()
+            record["minimum_flight_days"] = tuple(record["minimum_flight_days"])
+            out.append((Product(**record), after))
+        return out
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        logging.getLogger(__name__).warning("forecast seed products not loaded: %s", exc)
+        return []
+
+
+def forecast_seed_replacements() -> dict[str, str]:
+    """{new product name: the older product it replaces}, from products.json. A database that already has the older product
+    hides it at the moment the new one is inserted (product_seed.apply_to_db); a fresh database never has it (it is gone from
+    CATALOG), and a saved proposal that names it keeps resolving it, because a hidden product still resolves by name."""
+    try:
+        data = json.loads(_FORECAST_SEED_PATH.read_text(encoding="utf-8"))
+        return {r["name"]: r["replaces"] for r in data.get("products", []) if r.get("replaces")}
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+
+
+def _place_seed_products(products: list, additions: list) -> None:
+    for product, after in additions:
+        if any(p.name == product.name for p in products):
+            continue
+        at = next((i for i, p in enumerate(products) if p.name == after), None)
+        products.insert(len(products) if at is None else at + 1, product)
+
+
+_place_seed_products(CATALOG, _load_forecast_seed_products())
 
 # ===========================================================================
 # THE PRODUCT LIST

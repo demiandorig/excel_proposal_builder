@@ -41,6 +41,10 @@ from app.services.constanza_geo import resolve_geo
 from app.services.schema_bootstrap import idempotent_statements
 
 ROOT = Path(__file__).resolve().parent.parent
+# The 30 products added with the forecast data platform (app/data/forecast/products.json). Offline - no database, so no
+# series links - they get the built-in default: the Entravision Plus ones show the button as a population-share estimate.
+NEW_FORECAST_PRODUCTS = {r["name"] for r in json.loads((ROOT / "app" / "data" / "forecast" / "products.json").read_text())["products"]}
+NEW_EP = {r["name"] for r in json.loads((ROOT / "app" / "data" / "forecast" / "products.json").read_text())["products"] if r["family"] == "Entravision Plus"}
 ROKU = "Entravision Plus - Roku Ads (Includes The Roku Channel and the popular Espacio Latino Hub)"
 PRIME = "Entravision Plus - Amazon Prime Video"
 HULU = "Entravision Plus - Hulu"
@@ -111,8 +115,11 @@ def test_with_no_admin_rows_every_product_behaves_exactly_as_phase_1_hard_coded_
 
 
 def test_the_built_in_mapping_is_the_one_the_planner_was_told_about():
-    ep = [p for p in catalog.CATALOG if p.family == "Entravision Plus"]
+    """The ORIGINAL 22 Entravision Plus products keep the mapping they were given in Phase 1; the products added later
+    (NEW_EP) are only checked to show the button."""
+    ep = [p for p in catalog.CATALOG if p.family == "Entravision Plus" and p.name not in NEW_EP]
     assert len(ep) == 22
+    assert all(fm.resolve_forecast(n, "Entravision Plus").enabled for n in NEW_EP)
     modeled = {p.name: fm.resolve_forecast(p.name, p.family).platform for p in ep if fm.resolve_forecast(p.name, p.family).method == "platform"}
     assert modeled == {
         ROKU: "roku", PRIME: "prime", HULU: "hulu", "Entravision Plus - Peacock": "peacock",
@@ -335,10 +342,10 @@ def _catalog_payload():
 def test_every_product_in_the_catalog_payload_carries_its_forecast_config():
     products = _catalog_payload()
     assert len(products) == len(catalog.effective_catalog())
-    assert products[ROKU]["forecast"] == {"enabled": True, "method": "platform", "platform": "roku", "hispanic_weighted": False, "source": "default"}
+    assert products[ROKU]["forecast"] == {"enabled": True, "method": "platform", "platform": "roku", "hispanic_weighted": False, "source": "default", "relation": "primary"}
     assert products[VIX]["forecast"]["method"] == "generic" and products[VIX]["forecast"]["enabled"] is True
     assert products[SEARCH]["forecast"]["enabled"] is False
-    assert sum(1 for p in products.values() if p["forecast"]["enabled"]) == 22
+    assert sum(1 for p in products.values() if p["forecast"]["enabled"]) == 22 + len(NEW_EP)
 
 
 def test_an_admin_change_reaches_the_catalog_payload(store):
@@ -364,7 +371,7 @@ def test_the_platform_products_endpoint_is_the_live_mapping(store):
 
 def test_the_admin_payload_lists_every_product_with_coverage_and_totals(store):
     data = asyncio.run(main.admin_get_forecast_map())
-    assert data["summary"] == {"total": len(catalog.effective_catalog()), "enabled": 22, "platform_modeled": 10, "generic": 12, "customized": 0}
+    assert data["summary"] == {"total": len(catalog.effective_catalog()), "enabled": 22 + len(NEW_EP), "platform_modeled": 10, "generic": 12 + len(NEW_EP), "customized": 0}
     rows = {r["name"]: r for r in data["products"]}
     assert rows[ROKU]["enabled"] and rows[ROKU]["method"] == "platform" and rows[ROKU]["platform"] == "roku" and not rows[ROKU]["customized"]
     assert rows[SEARCH]["enabled"] is False and rows[SEARCH]["default"]["enabled"] is False
@@ -379,7 +386,7 @@ def test_the_admin_payload_lists_every_product_with_coverage_and_totals(store):
 
 def test_saving_a_choice_answers_with_the_refreshed_list(store):
     data = asyncio.run(main.admin_set_forecast_map(_body(SEARCH, method="generic", platform=None), _request("planner@x.com")))
-    assert data["saved"] is True and data["summary"]["customized"] == 1 and data["summary"]["enabled"] == 23
+    assert data["saved"] is True and data["summary"]["customized"] == 1 and data["summary"]["enabled"] == 23 + len(NEW_EP)
     row = next(r for r in data["products"] if r["name"] == SEARCH)
     assert row["enabled"] and row["method"] == "generic" and row["customized"]
     assert store.rows[SEARCH]["updated_by"] == "planner@x.com"

@@ -70,7 +70,7 @@ def test_a_hold_headline_followed_by_a_previously_approved_list_stays_a_blanket_
         None, "** All Entravision Digital Products are currently on hold and will not accept cannabis ads **",
         "Previously approved for the following products (currently on hold as well):", "CTV/OTT", "eDigital OLV"])
     assert cat.kind == "blanket_hold"
-    assert rs.evaluate_product("Video - Pre-roll (OLV)", "Online Video", [cat])["verdict"] == "not_allowed"
+    assert rs.evaluate_product("eDigital OLV", "Online Video", [cat])["verdict"] == "not_allowed"
 
 
 def test_a_second_list_after_a_spacer_row_is_not_absorbed_as_approved_products():
@@ -153,7 +153,7 @@ def test_a_failed_pre_sync_read_refuses_to_overwrite_the_stored_rows(monkeypatch
 
 def test_a_mapping_typed_under_an_intermediate_display_name_still_matches(monkeypatch, builtin_state):
     monkeypatch.setattr("app.catalog.load_rate_overrides",
-                        lambda: {"Video - Pre-roll (OLV)": {"name": "Pre-roll C"}})
+                        lambda: {"eDigital OLV": {"name": "Pre-roll C"}})
     monkeypatch.setattr("app.catalog.all_product_aliases",
                         lambda: {"Pre-roll B": "Pre-roll C", "Pre-roll A": "Pre-roll B"})
     from app import catalog
@@ -191,10 +191,10 @@ def test_more_ways_of_saying_no_are_caught(sentence):
 
 
 def test_a_mixed_risk_keeps_its_real_sentence_and_what_was_removed_is_recorded(builtin_state):
-    items = _items("Video - Pre-roll (OLV)")
-    matrix = rs.build_matrix(["Video - Pre-roll (OLV)"], ["Political"])
+    items = _items("eDigital OLV")
+    matrix = rs.build_matrix(["eDigital OLV"], ["Political"])
     result = {"overall_summary": "", "used_web_search": True, "error": None, "categories": [], "product_roadblocks": [{
-        "product_name": "Video - Pre-roll (OLV)", "risk_level": "high",
+        "product_name": "eDigital OLV", "risk_level": "high",
         "risks": [{"issue": "Additional: approvals", "source": "s",
                    "detail": "Political ads are not allowed on OLV. Meta needs ID authorization before launch."}],
         "recommended_mitigation": "Submit creative early."}]}
@@ -203,15 +203,15 @@ def test_a_mixed_risk_keeps_its_real_sentence_and_what_was_removed_is_recorded(b
     assert entry["risks"][0]["detail"] == "Meta needs ID authorization before launch."
     assert entry["recommended_mitigation"] == "Submit creative early."
     assert [c["text"] for c in result["removed_claims"]] == ["Political ads are not allowed on OLV."]
-    assert result["removed_claims"][0]["product"] == "Video - Pre-roll (OLV)"
+    assert result["removed_claims"][0]["product"] == "eDigital OLV"
 
 
 def test_untouched_text_keeps_its_line_breaks_and_does_not_lower_the_risk(builtin_state):
-    items = _items("Video - Pre-roll (OLV)")
-    matrix = rs.build_matrix(["Video - Pre-roll (OLV)"], ["Political"])
+    items = _items("eDigital OLV")
+    matrix = rs.build_matrix(["eDigital OLV"], ["Political"])
     mitigation = "1. Submit early.\n2. Add the Paid for by disclosure."
     result = {"overall_summary": "", "used_web_search": True, "error": None, "categories": [], "product_roadblocks": [{
-        "product_name": "Video - Pre-roll (OLV)", "risk_level": "high",
+        "product_name": "eDigital OLV", "risk_level": "high",
         "risks": [{"issue": "Additional: lead time", "detail": "Approvals take a week.", "source": "s"}],
         "recommended_mitigation": mitigation}]}
     rb._apply_matrix(result, matrix, items)
@@ -229,7 +229,7 @@ def test_denial_removal_does_not_cut_sentences_at_abbreviations():
 
 
 def test_a_model_shortened_product_name_is_filtered_like_the_real_one(builtin_state):
-    name = "eDigital Network Display - Standard IAB"
+    name = "eDigital Display"
     items = _items(name)
     matrix = rs.build_matrix([name], ["Political"])
     result = {"overall_summary": "", "used_web_search": True, "error": None, "categories": [], "product_roadblocks": [{
@@ -244,12 +244,12 @@ def test_a_model_shortened_product_name_is_filtered_like_the_real_one(builtin_st
 
 
 def test_a_product_the_model_repeats_is_merged_so_neither_copy_escapes_the_filter(builtin_state):
-    items = _items("Video - Pre-roll (OLV)")
-    matrix = rs.build_matrix(["Video - Pre-roll (OLV)"], ["Political"])
+    items = _items("eDigital OLV")
+    matrix = rs.build_matrix(["eDigital OLV"], ["Political"])
     denial = {"issue": "Political ads not allowed", "detail": "Political ads are not allowed on OLV.", "source": "s"}
     caveat = {"issue": "Additional: lead time", "detail": "Approvals take a week.", "source": "s"}
     result = {"overall_summary": "", "used_web_search": True, "error": None, "categories": [], "product_roadblocks": [
-        {"product_name": "Video - Pre-roll (OLV)", "risk_level": "low", "risks": [caveat], "recommended_mitigation": ""},
+        {"product_name": "eDigital OLV", "risk_level": "low", "risks": [caveat], "recommended_mitigation": ""},
         {"product_name": "video - pre-roll (olv)", "risk_level": "high", "risks": [denial], "recommended_mitigation": ""}]}
     rb._apply_matrix(result, matrix, items)
     assert len(result["product_roadblocks"]) == 1
@@ -257,7 +257,7 @@ def test_a_product_the_model_repeats_is_merged_so_neither_copy_escapes_the_filte
 
 
 def test_a_summary_denial_is_removed_when_the_vertical_is_allowed_on_every_product_even_unnamed(builtin_state):
-    items = _items("Video - Pre-roll (OLV)", "eDigital Network Display - Standard IAB")
+    items = _items("eDigital OLV", "eDigital Display")
     matrix = rs.build_matrix([li.product_name for li in items], ["Political"])
     result = {"overall_summary": "Political ads are not accepted on this campaign's digital products. Budget is tight.",
               "used_web_search": True, "error": None, "categories": [], "product_roadblocks": []}
@@ -277,7 +277,7 @@ def test_the_pptx_row_estimate_counts_hard_line_breaks():
 def test_the_pptx_impressions_sub_line_follows_the_time_unit():
     from app.services import pptx_builder as pb
     from app.catalog import by_name
-    product = by_name("Video - Pre-roll (OLV)")
+    product = by_name("eDigital OLV")
     li = LineItem(product_name=product.name, monthly_budget=2010.0, months=3, id="x")
     assert pb._product_cell_text(product, li).splitlines()[1].endswith("impressions/mo")
     assert pb._product_cell_text(product, li, "/wk").splitlines()[1].endswith("impressions/wk")
@@ -292,7 +292,7 @@ def test_the_pptx_total_row_has_no_empty_run_that_falls_back_to_the_18pt_default
     pptx = pytest.importorskip("pptx")
     from app.services import pptx_builder
     from app.catalog import by_name
-    items = _items("Video - Pre-roll (OLV)")
+    items = _items("eDigital OLV")
     out = tmp_path / "t.pptx"
     pptx_builder.build_signature_deck(ProposalRequest(client_name="Acme"), [{"name": "A", "products": [by_name(items[0].product_name)], "line_items": items}],
                                       out, gross=False, proposal_title="T")
@@ -302,20 +302,20 @@ def test_the_pptx_total_row_has_no_empty_run_that_falls_back_to_the_18pt_default
 
 def test_avails_only_added_value_lines_leave_the_sov_cell_blank(tmp_path):
     paid = LineItem(product_name="Search - SEM", monthly_budget=1000.0, months=3, id="p")
-    gift = LineItem(product_name="eDigital Network Display - Standard IAB", monthly_budget=0.0, months=3, id="g", is_added_value=True)
+    gift = LineItem(product_name="eDigital Display", monthly_budget=0.0, months=3, id="g", is_added_value=True)
     out = tmp_path / "ao.xlsx"
     generate_proposal(ProposalRequest(client_name="Acme", request_type="New Business", start_date="2026-09-01", end_date="2026-11-30",
                                       total_months=3), [paid, gift], out, force_tabs={"net": False, "avails_only": True},
                       avails_data={"p": {"max_imps": 100000, "max_spend": 5000}, "g": {"max_imps": 200000, "max_spend": 9000}})
     import openpyxl
     ws = next(w for w in openpyxl.load_workbook(out).worksheets if "Avails" in w.title)
-    row = next(r for r in range(1, ws.max_row + 1) if str(ws.cell(row=r, column=3).value or "").startswith("eDigital Network Display"))
+    row = next(r for r in range(1, ws.max_row + 1) if str(ws.cell(row=r, column=3).value or "").startswith("eDigital Display"))
     assert ws.cell(row=row, column=13).value is None
 
 
 def test_a_tier_whose_lines_disagree_on_months_is_warned_about(tmp_path):
     lis = [LineItem(product_name="Search - SEM", monthly_budget=1000.0, months=3, id="a"),
-           LineItem(product_name="eDigital Network Display - Standard IAB", monthly_budget=1000.0, months=2, id="b")]
+           LineItem(product_name="eDigital Display", monthly_budget=1000.0, months=2, id="b")]
     summary = generate_proposal(ProposalRequest(client_name="Acme", request_type="New Business", start_date="2026-09-01",
                                                 end_date="2026-11-30", total_months=3), lis, tmp_path / "w.xlsx")
     assert any("different month counts" in w for w in summary.get("warnings", []))
@@ -324,7 +324,7 @@ def test_a_tier_whose_lines_disagree_on_months_is_warned_about(tmp_path):
 def test_add_on_descriptions_lose_the_internal_variants_tail(tmp_path):
     out = tmp_path / "addon.xlsx"
     li = LineItem(product_name="Search - SEM", monthly_budget=1000.0, months=3, id="a")
-    addon = SimpleNamespace(product_name="Video - Pre-roll (OLV)", amount=100.0, notes_override=None)
+    addon = SimpleNamespace(product_name="eDigital OLV", amount=100.0, notes_override=None)
     generate_proposal(ProposalRequest(client_name="Acme", request_type="New Business", start_date="2026-09-01",
                                       end_date="2026-11-30", total_months=3), [li], out, addons=[addon])
     import openpyxl

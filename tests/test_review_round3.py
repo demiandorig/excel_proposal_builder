@@ -190,7 +190,7 @@ def test_a_missing_table_is_told_apart_from_a_flaky_read(monkeypatch):
 # --- Roadblocks -----------------------------------------------------------------------------------------------------
 
 def test_the_model_shortened_name_prefers_the_closest_product_and_never_merges_a_product_not_in_the_plan(builtin_state):
-    std, geo = "eDigital Network Display - Standard IAB", "Display - Geo Fence"
+    std, geo = "eDigital Display", "Display - Geo Fence"
     items = _items(std, geo)
     matrix = rs.build_matrix([std, geo], ["Political"])
     denial = {"issue": "Political ads not allowed", "detail": "Political ads are not allowed on Display.", "source": "s"}
@@ -211,7 +211,7 @@ def test_the_model_shortened_name_prefers_the_closest_product_and_never_merges_a
 
 
 def test_an_unmatched_model_entry_cannot_deny_a_vertical_allowed_on_every_plan_product(builtin_state):
-    items = _items("Video - Pre-roll (OLV)", "eDigital Network Display - Standard IAB")
+    items = _items("eDigital OLV", "eDigital Display")
     matrix = rs.build_matrix([li.product_name for li in items], ["Political"])
     result = {"overall_summary": "", "used_web_search": True, "error": None, "categories": [], "product_roadblocks": [
         {"product_name": "Programmatic video", "risk_level": "high", "recommended_mitigation": "Do not run political ads here.",
@@ -272,7 +272,7 @@ def test_a_huge_geo_list_does_not_slow_blurb_parsing_down():
 
 def test_the_grand_total_fallback_counts_base_periods_not_merged_buckets(tmp_path):
     lis = [LineItem(product_name="Search - SEM", monthly_budget=1000.0, months=3, id="a"),
-           LineItem(product_name="eDigital Network Display - Standard IAB", monthly_budget=1000.0, months=2, id="b")]
+           LineItem(product_name="eDigital Display", monthly_budget=1000.0, months=2, id="b")]
     tiers = [{"label": "A", "line_items": lis, "avails_data": {}, "start_date": "2026-09-01", "end_date": "2026-12-31",
               "period_merge_groups": [["2026-09", "2026-10"]]}]
     out = tmp_path / "m.xlsx"

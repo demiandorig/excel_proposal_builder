@@ -28,7 +28,7 @@ from app.data.constanza import read_json_maybe_gz  # noqa: E402
 DATA_DIR = REPO_ROOT / "app" / "data" / "constanza"
 
 BUNDLES = [
-    "country_reference.json",
+    "country_reference.json", "audience_taxonomy.json",
     "acs_age_sex_county.json", "acs_age_sex_zcta.json", "acs_age_sex_cd.json",
     "acs_age_sex_place.json", "acs_age_sex_dma.json", "acs_age_sex_state.json",
     "geo/county_dma.json", "geo/cd_dma.json",  # county_dma has no _meta today (extract_constanza_geo_crosswalks.py doesn't stamp one yet) — reported as unknown

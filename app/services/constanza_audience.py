@@ -16,7 +16,7 @@ of parity with panel-based measurement.
     audience_imps(geo, age x gender, interests, months) =
         dma_baseline(geo, product, months)        # constanza_engine.py, already area-weighted
       x age_gender_share(geo)                       # this area's own ACS age x sex data when available
-      x PRODUCT of interest_incidence(interest_i)    # curated, SOURCED rates only — see interest_incidence.json
+      x PRODUCT of interest_incidence(interest_i)    # SOURCED / DERIVED rates only — see audience_taxonomy.py and audience_taxonomy.json
       x PRODUCT of geo_interest_multiplier(interest_i, area)  # Google Ads search-volume skew — see constanza_search.py; defaults to 1.0 (no-op) until configured
 
 The LLM (reused from app/services/llm_utils.py, same OPENAI_API_KEY/
@@ -24,7 +24,7 @@ _HAS_OPENAI degrade pattern as app/services/ai_enricher.py) has exactly
 two jobs, both classification, NEVER number generation:
   1. Parse free text into a structured AudienceSpec.
   2. Map a free-text interest phrase to the nearest category in
-     interest_incidence.json's known taxonomy, or report it unsupported.
+     the audience taxonomy (audience_taxonomy.py), or report it unsupported.
 The LLM is never asked for, and its output never becomes, an incidence
 rate or a final number. When no LLM is configured, parsing falls back to
 a plain keyword/substring match against the same taxonomy — narrower, but
@@ -52,6 +52,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from app.data.constanza import read_json_maybe_gz
+from app.services import audience_taxonomy
 from app.services.constanza_engine import AreaEstimate, AvailsEstimate
 
 try:
@@ -73,7 +74,10 @@ _CV_GEO = {"exact": 0.05, "hud_ratio": 0.10, "tract_overlap": 0.15,
            "census_relationship_file": 0.20, "single_county_place": 0.10,
            "population_share_national": 0.35}
 _CV_AGE_GENDER = 0.05      # ACS-anchored — well measured
-_CV_INTEREST = 0.30        # curated, not sampled
+_CV_INTEREST = 0.30        # curated, not sampled (used when a segment carries no confidence grade)
+# How far a published rate can be trusted, from the research verdict (audience_taxonomy.json): a direct recent survey of the
+# exact definition is tighter than a proxy or an old figure. Still a coarse heuristic, not a measured standard error.
+_CV_INTEREST_BY_CONFIDENCE = {"high": 0.15, "moderate": 0.25, "low": 0.40}
 _CV_SEARCH_APPLIED = 0.20  # only counted when the multiplier actually fired (not a no-op 1.0)
 
 RELIABILITY_FLOOR_POPULATION = 10_000  # a starting heuristic, not a derived constant — see module docstring
@@ -92,11 +96,21 @@ class AudienceSpec:
 @dataclass
 class InterestResolution:
     input_text: str
-    category: str | None          # matched interest_incidence.json category key, or None
-    supported: bool
+    category: str | None          # the matched taxonomy segment id (audience_taxonomy.py), or None
+    supported: bool               # True only when the segment has a SOURCED rate that is applied
     rate_by_gender: dict | None = None
     source: str | None = None
     source_date: str | None = None
+    label: str | None = None
+    group: str | None = None
+    status: str | None = None     # sourced | derived | no_public_rate; None when nothing matched at all
+    confidence: str | None = None
+    definition: str | None = None
+    source_url: str | None = None
+    caveats: str | None = None
+    how: str | None = None        # how it was matched: name | keyword | partial | words | fuzzy | llm
+    gender_split: bool = False    # True when the source gives its OWN male and female rates (else 'all' stands in for both)
+    suggestions: list = field(default_factory=list)   # the closest OTHER segments, [{id, label, supported}]
 
 
 @dataclass
@@ -128,17 +142,9 @@ class AudienceEstimate:
     notes: list[str] = field(default_factory=list)
 
 
-@lru_cache(maxsize=1)
 def load_interest_taxonomy() -> list[dict]:
-    return json.loads((_DATA_DIR / "interest_incidence.json").read_text())["categories"]
-
-
-def _keyword_match_interest(text: str) -> dict | None:
-    text_lower = text.lower()
-    for cat in load_interest_taxonomy():
-        if any(kw in text_lower for kw in cat["keywords"]):
-            return cat
-    return None
+    """The segments that have a sourced rate, one dict each (id as `category`, label, keywords, rate_by_gender, source...)."""
+    return audience_taxonomy.load_taxonomy().categories()
 
 
 def _openai_client():
@@ -150,44 +156,72 @@ def _openai_client():
     return _OpenAI(api_key=api_key)
 
 
+def _suggestions(tax, text: str, exclude: str | None = None, limit: int = 3) -> list[dict]:
+    return [{"id": h.segment.id, "label": h.segment.label, "supported": h.segment.supported}
+            for h in tax.search(text, limit=limit + 1) if h.segment.id != exclude][:limit]
+
+
+def _resolution(text: str, seg: "audience_taxonomy.Segment", how: str, tax) -> InterestResolution:
+    rates = None
+    if seg.supported:
+        rates = {"all": seg.rate_all, "male": seg.rate_male if seg.rate_male is not None else seg.rate_all,
+                 "female": seg.rate_female if seg.rate_female is not None else seg.rate_all}
+    return InterestResolution(
+        input_text=text, category=seg.id, supported=seg.supported, rate_by_gender=rates, source=seg.source_line() or None,
+        source_date=seg.source_date, label=seg.label, group=seg.group_key, status=seg.status, confidence=seg.confidence,
+        definition=seg.definition or None, source_url=seg.source_url, caveats=seg.caveats or None, how=how,
+        gender_split=seg.supported and seg.rate_male is not None and seg.rate_female is not None,
+        suggestions=_suggestions(tax, text, exclude=seg.id))
+
+
 def resolve_interest(text: str) -> InterestResolution:
-    """Maps free text to a taxonomy category via keyword match first (fast,
-    deterministic, no API call); if that fails and an LLM is configured,
-    asks it to pick the nearest category from the known list — NEVER to
-    invent a rate. Unmatched either way comes back unsupported, per the
-    stats research's own recommendation: treat any trait without a
-    sourced rate as unsupported rather than having the model guess."""
-    direct = _keyword_match_interest(text)
-    if direct:
-        return InterestResolution(
-            input_text=text, category=direct["category"], supported=True,
-            rate_by_gender=direct["rate_by_gender"], source=direct["source"], source_date=direct["source_date"],
-        )
+    """Maps free text to a taxonomy segment: its id or name, an alias, a phrase inside the text ("likes sports"), a near
+    spelling — all deterministic, no API call. Only when none of that is close enough, and an LLM is configured, it is asked to
+    pick the nearest segment from the known list — NEVER to invent a rate. A segment that is known but has no sourced rate
+    comes back as not supported, with its status, so the planner is told why nothing was applied; text that matches
+    nothing comes back unsupported with the closest segments to choose from."""
+    tax = audience_taxonomy.load_taxonomy()
+    hit = tax.best_match(text)
+    if hit is not None:
+        return _resolution(text, hit.segment, hit.how, tax)
 
     client = _openai_client()
-    if client is None:
-        return InterestResolution(input_text=text, category=None, supported=False)
+    if client is not None:
+        options = "\n".join(f"- {s.id}: {s.label}" for s in tax.ordered())
+        prompt = (
+            f"A media planner described a target audience interest as: {text!r}\n\n"
+            f"Which ONE of these known audience segments, if any, does it most closely match? "
+            f"Reply with ONLY the segment id (e.g. \"sports_fan\") or the single word \"none\" "
+            f"if it doesn't confidently match any of them. Do not invent a new segment.\n\n{options}"
+        )
+        try:
+            raw = llm_utils.chat_text(client, model=_MODEL, prompt=prompt, max_completion_tokens=20).strip().lower()
+        except Exception:
+            raw = "none"
+        seg = tax.segments.get(raw)
+        if seg is not None:
+            return _resolution(text, seg, "llm", tax)
+    return InterestResolution(input_text=text, category=None, supported=False, suggestions=_suggestions(tax, text, limit=4))
 
-    categories = load_interest_taxonomy()
-    options = "\n".join(f"- {c['category']}: {c['label']}" for c in categories)
-    prompt = (
-        f"A media planner described a target audience interest as: {text!r}\n\n"
-        f"Which ONE of these known categories, if any, does it most closely match? "
-        f"Reply with ONLY the category key (e.g. \"sports_fan\") or the single word \"none\" "
-        f"if it doesn't confidently match any of them. Do not invent a new category.\n\n{options}"
-    )
-    try:
-        raw = llm_utils.chat_text(client, model=_MODEL, prompt=prompt, max_completion_tokens=20).strip().lower()
-    except Exception:
-        return InterestResolution(input_text=text, category=None, supported=False)
 
-    match = next((c for c in categories if c["category"].lower() == raw), None)
-    if match is None:
-        return InterestResolution(input_text=text, category=None, supported=False)
-    return InterestResolution(
-        input_text=text, category=match["category"], supported=True,
-        rate_by_gender=match["rate_by_gender"], source=match["source"], source_date=match["source_date"],
-    )
+_GENDER_ALIASES = {
+    "male": "male", "m": "male", "man": "male", "men": "male", "boy": "male", "boys": "male",
+    "female": "female", "f": "female", "woman": "female", "women": "female", "girl": "female", "girls": "female",
+}
+_GENDER_ALL = {"", "all", "any", "both", "everyone", "all genders", "no preference"}
+
+
+def normalize_gender(value) -> str | None:
+    """'male' / 'female', or None for no gender cut ('all', blank). Anything else raises ValueError: a typo must be told
+    to the planner, not read as 'everyone' while still being counted as an applied cut."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in _GENDER_ALL:
+        return None
+    if text in _GENDER_ALIASES:
+        return _GENDER_ALIASES[text]
+    raise ValueError("Gender must be male, female or all.")
 
 
 def parse_audience_text(text: str) -> AudienceSpec:
@@ -214,9 +248,13 @@ def parse_audience_text(text: str) -> AudienceSpec:
     except Exception:
         return AudienceSpec(geo_text=text)
 
+    try:
+        gender = normalize_gender(data.get("gender"))
+    except ValueError:
+        gender = None                                   # a model's odd answer is dropped, never applied
     return AudienceSpec(
         age_min=data.get("age_min"), age_max=data.get("age_max"),
-        gender=data.get("gender"), interest_terms=data.get("interest_terms") or [],
+        gender=gender, interest_terms=data.get("interest_terms") or [],
         geo_text=data.get("geo_text") or text, geo_type_hint=data.get("geo_type_hint"),
     )
 
@@ -291,6 +329,12 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     originating ResolvedArea fields (population/geo_id/apportionment/
     state) forward, so this never needs to re-resolve geo text or assume
     a positional match against a separate GeoResolution."""
+    try:
+        gender = normalize_gender(spec.gender)
+        gender_note = None
+    except ValueError:
+        gender = None
+        gender_note = f"Gender {spec.gender!r} wasn't recognised (use male, female or all), so no gender cut was applied."
     interests = [resolve_interest(t) for t in spec.interest_terms]
     # Two phrases that map to the same category ("sports" and "football") are ONE interest — multiplying its incidence
     # rate in twice would shrink the audience by the rate squared for no reason.
@@ -309,17 +353,35 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
 
     cvs = []
     notes = list(base.notes)
-    if unsupported:
+    if gender_note:
+        notes.append(gender_note)
+    known_without_rate = [i for i in unsupported if i.status == "no_public_rate"]
+    unmatched = [i for i in unsupported if i.status is None]
+    if known_without_rate:
         notes.append(
-            f"No sourced incidence rate for: {', '.join(i.input_text for i in unsupported)} — "
-            "excluded from the estimate rather than guessed. Ask the planner to confirm the "
-            "nearest supported interest, or drop this targeting dimension."
+            "No sourced incidence rate exists for: " + ", ".join(f"{i.label or i.input_text}" for i in known_without_rate) +
+            " — it is a known audience, but no defensible public number was found, so it was NOT applied (the estimate is "
+            "wider than that audience). Ask the platform for its own segment size, or drop this targeting dimension."
         )
+    if unmatched:
+        close = {s_["label"] for i in unmatched for s_ in i.suggestions[:2]}
+        notes.append(
+            f"No sourced incidence rate for: {', '.join(i.input_text for i in unmatched)} — excluded from the estimate rather "
+            "than guessed." + (f" Closest known audiences: {', '.join(sorted(close))}." if close else "")
+        )
+    for i in supported_interests:
+        if i.confidence == "low":
+            notes.append(f"'{i.label or i.input_text}' uses a low-confidence rate ({i.source or 'derived estimate'}); treat the result as directional.")
 
     if duplicates:
         notes.append(f"{', '.join(duplicates)} map to an interest already counted — applied once, not stacked.")
 
-    age_gender_requested = spec.age_min is not None or spec.age_max is not None or (spec.gender not in (None, "all"))
+    age_gender_requested = spec.age_min is not None or spec.age_max is not None or gender is not None
+    if gender is not None:
+        for i in supported_interests:
+            if not i.gender_split:
+                notes.append(f"'{i.label or i.input_text}' has no sourced male/female split, so its all-adults rate was applied to the "
+                             f"{gender} audience unchanged; for a gender-skewed audience that can over- or understate it.")
     any_age_gender_applied = False
 
     total_underlying_pop = 0.0
@@ -328,20 +390,22 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     not_narrowed: list[str] = []
 
     for area_est in base.by_area:
-        share, applied = _age_gender_share(area_est, spec.age_min, spec.age_max, spec.gender)
+        share, applied = _age_gender_share(area_est, spec.age_min, spec.age_max, gender)
         any_age_gender_applied = any_age_gender_applied or applied
         if age_gender_requested and not applied:
             not_narrowed.append(area_est.area_label)
 
         interest_multiplier = 1.0
         for interest in supported_interests:
-            gender_key = spec.gender if spec.gender in interest.rate_by_gender else "all"
+            gender_key = gender if gender in interest.rate_by_gender else "all"
             interest_multiplier *= interest.rate_by_gender.get(gender_key, interest.rate_by_gender["all"])
 
         area_mid = area_est.imps_mid * share * interest_multiplier
         area_low = area_est.imps_low * share * interest_multiplier
         area_high = area_est.imps_high * share * interest_multiplier
-        area_pop = area_est.area_population * share
+        # The audience's own size includes the interest cut: a segment that is 0.1% of adults is a tiny audience however
+        # large the geography, and the reliability warning has to see that.
+        area_pop = area_est.area_population * share * interest_multiplier
 
         total_underlying_pop += area_pop
         imps_mid_total += area_mid
@@ -373,7 +437,7 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
         cvs.append(_CV_AGE_GENDER)
     # One factor per distinct interest: each is its own curated, independence-assumed cut, so stacking them must widen
     # the band (they are the least-independent pair in practice — sports and gaming overlap).
-    cvs.extend(_CV_INTEREST for _ in supported_interests)
+    cvs.extend(_CV_INTEREST_BY_CONFIDENCE.get(i.confidence or "", _CV_INTEREST) for i in supported_interests)
     # constanza_search.py's geo_interest_multiplier() is ready to call here
     # once two things exist: real Google Ads credentials, AND a ZIP/county/
     # city -> Google Ads geo-target-criteria-ID crosswalk (not yet built —

@@ -14,6 +14,8 @@
        styles.css's own tokens, safe to load here too; verified no
        selector in it collides with anything styles.css already defines. -->
   <link rel="stylesheet" href="/static/admin.css" />
+  <!-- Constanza: the bottom-right launcher, its dock, and the Step 05 avails-card styling. -->
+  <link rel="stylesheet" href="/static/constanza.css" />
 </head>
 <body>
   <!-- Full-page overlay while a past proposal is being reopened
@@ -92,74 +94,8 @@
     </div>
   </div>
 
-  <!-- Project Constanza — the standalone DMA-weighted avails puller.
-       Reachable from any step (masthead button), independent of curated
-       line items — for exploring what a CTV platform can deliver in a
-       geo before line items are even picked, not just per-avails-card.
-       See app/services/constanza_engine.py + constanza_geo.py. -->
-  <div id="constanza-modal" class="modal-overlay hidden">
-    <div class="modal-box">
-      <div class="modal-head">
-        <h2>🛰️ Constanza — Avails Puller</h2>
-        <button type="button" class="modal-close-btn" id="constanza-close-btn" title="Close">✕</button>
-      </div>
-      <p class="lede">DMA-weighted CTV avails, pulled fast from bundled platform data — a starting point, not a replacement for checking Roku Ads Manager / Amazon DSP / The Trade Desk / Madhive when precision matters on a specific deal.</p>
-      <div class="constanza-modal-form">
-        <label>Geo
-          <input type="text" id="constanza-modal-geo" placeholder="e.g. National · Los Angeles DMA · 95814, 95815 · Sacramento County, CA · CA-06" />
-        </label>
-        <label>Geo type
-          <select id="constanza-modal-geo-type">
-            <option value="">Auto-detect (DMA / State / ZIP / County / District)</option>
-            <option value="zip">ZIP code</option>
-            <option value="county">County</option>
-            <option value="congressional_district">Congressional district</option>
-            <option value="city">City</option>
-            <option value="country">Country (incl. US)</option>
-          </select>
-        </label>
-        <label>Platform
-          <select id="constanza-modal-platform"></select>
-        </label>
-        <label>Months
-          <input type="number" id="constanza-modal-months" min="1" value="1" />
-        </label>
-        <label title="Platform data only exists for the U.S. For another country, enter the monthly impressions you want spread across it by population share (low confidence).">Monthly imps total <span class="constanza-optional">(non-US countries only)</span>
-          <input type="number" id="constanza-modal-total" min="0" step="1000" placeholder="e.g. 1000000" />
-        </label>
-      </div>
-      <details class="constanza-audience-details">
-        <summary>🎯 Audience targeting (optional) — age, gender, interest</summary>
-        <div class="constanza-modal-form constanza-audience-form">
-          <label>Age min
-            <input type="number" id="constanza-audience-age-min" min="0" max="120" placeholder="e.g. 18" />
-          </label>
-          <label>Age max
-            <input type="number" id="constanza-audience-age-max" min="0" max="120" placeholder="e.g. 24" />
-          </label>
-          <label>Gender
-            <select id="constanza-audience-gender">
-              <option value="">All</option>
-              <option value="male">Male</option>
-              <option value="female">Female</option>
-            </select>
-          </label>
-          <label>Interest(s)
-            <input type="text" id="constanza-audience-interests" placeholder="e.g. likes sports (comma-separated for more than one)" />
-          </label>
-        </div>
-        <button type="button" class="btn-copy" id="constanza-browse-interests-btn">Browse supported interests →</button>
-        <p class="constanza-interest-list" id="constanza-interest-list" style="display:none;"></p>
-      </details>
-      <div class="constanza-calc-row">
-        <button type="button" class="btn-primary" id="constanza-modal-calc-btn">Calculate →</button>
-      </div>
-      <div id="constanza-modal-result"></div>
-    </div>
-  </div>
-
   <header class="masthead">
-    <div class="masthead-inner">
+    <div class="masthead-inner masthead-inner--steps">
       <a class="brand" href="#" id="logo-reset" title="Start new proposal">
         <img src="/static/entravision-logo.svg" class="brand-logo" alt="Entravision" />
         <div class="brand-title">
@@ -177,7 +113,6 @@
         <div class="step" data-step="7" title="Roadblocks"><span>07</span><span class="step-label"> Roadblocks</span></div>
         <div class="step" data-step="8" title="Generate"><span>08</span><span class="step-label"> Generate</span></div>
       </nav>
-      <button type="button" class="masthead-btn" id="constanza-open-btn" title="DMA-weighted CTV avails puller">🛰️ Constanza</button>
       <div id="account-widget" class="account-widget"></div>
     </div>
   </header>
@@ -997,5 +932,6 @@ Client name: ...
   <script src="/static/session-guard.js"></script>
   <script src="/static/curate-math.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/constanza.js"></script>
 </body>
 </html>

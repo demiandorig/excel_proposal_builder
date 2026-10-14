@@ -26,7 +26,7 @@ from app.services.notion_parser import ProposalRequest
 from app.services.proposal_generator import LineItem, _banner_title, generate_proposal
 
 EMAIL = "Email Campaigns - Display Re-targeting"
-IAB = "eDigital Network Display - Standard IAB"
+IAB = "eDigital Display"
 
 
 @pytest.fixture(autouse=True)

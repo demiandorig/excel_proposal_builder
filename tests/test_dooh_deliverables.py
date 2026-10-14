@@ -588,7 +588,7 @@ def _req(**kw):
 
 
 def test_a_dooh_product_in_the_plan_produces_the_deliverables_next_to_the_other_tabs(tmp_path):
-    names = ["Digital Out of Home", "eDigital Network Display - Standard IAB", "Search - SEM"]
+    names = ["Digital Out of Home", "eDigital Display", "Search - SEM"]
     lines = [LineItem(product_name=n, monthly_budget=2000.0, months=3, id=f"l{i}") for i, n in enumerate(names)]
     out = tmp_path / "e2e.xlsx"
     summary = generate_proposal(_req(agency_fee=0.15, client_name="Fronteras del Norte"), lines, out)

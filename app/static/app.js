@@ -819,15 +819,6 @@ function wireEvents() {
     document.getElementById("notion-reference-panel").classList.add("hidden");
   });
 
-  // Constanza — standalone DMA avails puller (reachable from any step)
-  document.getElementById("constanza-open-btn").addEventListener("click", openConstanzaModal);
-  document.getElementById("constanza-close-btn").addEventListener("click", closeConstanzaModal);
-  document.getElementById("constanza-modal").addEventListener("click", (e) => {
-    if (e.target.id === "constanza-modal") closeConstanzaModal();  // backdrop click
-  });
-  document.getElementById("constanza-modal-calc-btn").addEventListener("click", onConstanzaModalCalculate);
-  document.getElementById("constanza-browse-interests-btn").addEventListener("click", onBrowseConstanzaInterests);
-
   // Notion ID — digits only, max 5
   document.getElementById("notion-id-input").addEventListener("input", (e) => {
     e.target.value = e.target.value.replace(/\D/g, "").slice(0, 5);
@@ -1180,6 +1171,8 @@ async function startNewProposal() {
 // shared by New proposal and by pasting a different request over the current one.
 function _clearPerProposalState() {
   _resetEpoch++;
+  state.constanzaGeoOverride = {};       // a geography picked for a line belongs to the proposal being left
+  if (window.Constanza) Constanza.onProposalReset();
   state.strategyBrief = null;
   state.roadblocks = null;
   state.rvSelected = null;
@@ -3411,6 +3404,7 @@ function renderLineItems() {
       <td class="product">
         ${escapeHtml(li.product_name)}
         <span class="family-tag">${escapeHtml(p.family || "")}</span>
+        ${_livePeriodTag(p)}
         <label class="line-note-field">
           <span class="line-note-field-label">Line note (optional) <em>— shown under the product name in the export</em></span>
           <input type="text" class="line-note-input" maxlength="${LINE_MODIFIER_MAX}" autocomplete="off"
@@ -4415,6 +4409,12 @@ function _applyTimeUnitLabels() {
   setText("monthly-total-gross-label", ff ? "Full-Flight total (Gross)" : `${adjective} total (Gross)`);
   setText("col-budget-header", ff ? "Full-Flight $" : `${adjective} $`);
   setText("col-months-header", nounPlural);     // hidden in Full Flight (#step-4.ff-mode)
+  // Below 1200px the Curate table has no header row (each line is a card), so these two labels travel as CSS variables.
+  const lineItemsTable = document.querySelector("table.line-items");
+  if (lineItemsTable && lineItemsTable.style && typeof lineItemsTable.style.setProperty === "function") {
+    lineItemsTable.style.setProperty("--lbl-budget", JSON.stringify(ff ? "Full-Flight $" : `${adjective} $`));
+    lineItemsTable.style.setProperty("--lbl-months", JSON.stringify(nounPlural));
+  }
   setText("mb-step-title", ff ? "Full-Flight billing" : `${adjective} breakdown`);
   setText("mb-step-lede", ff
     ? "This proposal bills the whole flight as one period, so there is no per-period breakdown to build — each line is a single amount in the proposal. To split budgets across months, weeks or quarters, change the billing period in Step 04 (or Step 02)."
@@ -6542,7 +6542,11 @@ function renderAvailsGrid() {
       <p class="sov-helper" id="sov-helper-${escapeAttr(li.id)}"></p>
       ${!isFreeform && _forecastEnabled(p) ? `
       <div class="constanza-block">
-        <button type="button" class="btn-secondary constanza-autocalc-btn" data-lid="${escapeAttr(li.id)}">🛰️ Auto-calculate avails (Constanza)</button>
+        ${window.Constanza ? Constanza.periodLineHtml(p.forecast && p.forecast.series) : ""}
+        <div class="cz-card-actions">
+          <button type="button" class="btn-secondary constanza-autocalc-btn" data-lid="${escapeAttr(li.id)}">${window.Constanza ? Constanza.iconHtml() : "🛰️"}Auto-calculate avails</button>
+          <button type="button" class="cz-link constanza-line-dock-btn" data-lid="${escapeAttr(li.id)}">Open in Constanza</button>
+        </div>
         <div class="constanza-result" id="constanza-result-${escapeAttr(li.id)}" style="display:none;"></div>
       </div>
       ` : ""}
@@ -6758,6 +6762,10 @@ function renderAvailsGrid() {
   grid.querySelectorAll(".constanza-autocalc-btn").forEach(btn => {
     btn.addEventListener("click", () => onConstanzaAutoCalc(btn.dataset.lid));
   });
+  grid.querySelectorAll(".constanza-line-dock-btn").forEach(btn => {
+    btn.addEventListener("click", () => openConstanzaForLine(btn.dataset.lid));
+  });
+  if (window.Constanza) Constanza.hintOnce();
 }
 
 // ----------------------------------------------------------------------
@@ -6767,33 +6775,15 @@ function renderAvailsGrid() {
 // Manager / Amazon DSP / The Trade Desk / Madhive — not a silent
 // replacement for checking the platform when precision matters.
 // ----------------------------------------------------------------------
-// Warning for the parts of a geo list that did NOT make it into the numbers —
-// with the reason when the backend knows one (e.g. an Alaska ZIP). The backend
-// also puts a "NOT INCLUDED ..." line in `notes`; _constanzaNotes() drops that
-// one so the planner doesn't see it twice.
-function _constanzaUnmatchedHtml(data, suffix = "") {
-  const tokens = data.unmatched_geo_tokens || [];
-  if (!tokens.length) return "";
-  const reasons = {};
-  (data.unmatched_geo_details || []).forEach(d => { reasons[d.input] = d.reason; });
-  const items = tokens.map(t => `<li><strong>${escapeHtml(t)}</strong>${reasons[t] ? ` — ${escapeHtml(reasons[t])}` : ""}</li>`).join("");
-  return `<div class="constanza-warning"><p>Not included — couldn't be matched${escapeHtml(suffix)}:</p><ul>${items}</ul></div>`;
-}
-
-function _constanzaNotes(data) {
-  return (data.notes || []).filter(n => !n.startsWith("NOT INCLUDED in this estimate"));
-}
-
 // Swap ONE item of a geo list for the planner's pick ("Springfield" -> "Springfield, MO"
 // inside "Springfield, 95814, Placer County, CA"), tolerant of spacing/case differences
 // between what was typed and what the backend echoed back. Falls back to replacing the
 // whole input only if the item can't be found.
 function _replaceGeoItem(text, item, replacement) {
-  const pattern = item.trim().split(/\s*,\s*/)
-    .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-    .join("\\s*,\\s*");
-  const re = new RegExp(pattern, "i");
-  return re.test(text) ? text.replace(re, () => replacement) : replacement;
+  // Whole-item matching lives with the rest of the Constanza UI (constanza.js): "Orange" is not found inside "Orange County",
+  // and an item that is not in the text adds the pick to a list instead of wiping it.
+  if (window.Constanza && Constanza.replaceGeoItem) return Constanza.replaceGeoItem(text, item, replacement);
+  return String(text || "").includes(item) ? text.replace(item, replacement) : replacement;
 }
 
 // Does this product's avails card get the "Auto-calculate avails (Constanza)" button? Admin -> Forecast decides: every
@@ -6826,6 +6816,30 @@ function _constanzaMonthlyBudget(li, flightMonths) {
   return budget * (_SOV_MONTHLY_EQUIVALENT_SCALE[state.timeUnit] ?? 1);
 }
 
+// Live-sports products carry the season window their avails were estimated for; it is listed wherever the product is, for
+// the team's reference (the flight dates are NOT checked against it).
+function _livePeriodTag(p) {
+  const s = p && p.forecast && p.forecast.series;
+  if (!s || s.channel !== "live_sports" || !s.period_label) return "";
+  return `<span class="period-tag" title="The window the live-sports avails estimate covers — flight dates are not checked against it">📅 ${escapeHtml(s.period_label)}</span>`;
+}
+
+// The geography this line pulls avails for: one the planner picked from a suggestion for THIS line (kept only for the
+// session), else the proposal's own.
+function _constanzaGeoFor(lid) {
+  const picked = state.constanzaGeoOverride && state.constanzaGeoOverride[lid];
+  return picked || _effectiveGeo(state.activeTierLabel);
+}
+
+// Days from the flight's first day to its last, both counted: what a weekly (live-sports) series is scaled by. null when
+// the proposal has no readable dates.
+function _constanzaFlightDays() {
+  const start = _mbParseDate(_effectiveStartDate(state.activeTierLabel));
+  const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
+  if (!start || !end || end < start) return null;
+  return Math.min(Math.round((end - start) / 86400000) + 1, 3660);
+}
+
 async function onConstanzaAutoCalc(lid) {
   const li = state.lineItems.find(x => x.id === lid);
   const btn = document.querySelector(`.constanza-autocalc-btn[data-lid="${escapeAttr(lid)}"]`);
@@ -6833,7 +6847,7 @@ async function onConstanzaAutoCalc(lid) {
   if (!li || !btn || !resultEl) return;
   const p = state.productIndex[li.product_name] || {};
 
-  const geoText = _effectiveGeo(state.activeTierLabel);
+  const geoText = _constanzaGeoFor(lid);
 
   // Only meaningful for the generic (no-platform-model) fallback — the
   // planner's own curated monthly budget, converted to impressions via
@@ -6851,6 +6865,7 @@ async function onConstanzaAutoCalc(lid) {
   btn.disabled = true;
   btn.innerHTML = '<span class="btn-inline-spinner"></span>Pulling…';
   resultEl.style.display = "none";
+  if (window.Constanza) Constanza.setMood("thinking");
   try {
     const res = await fetch("/api/constanza/estimate", {
       method: "POST",
@@ -6859,19 +6874,21 @@ async function onConstanzaAutoCalc(lid) {
         product_name: li.product_name,
         geo_text: geoText,
         months: flightMonths,
+        flight_days: _constanzaFlightDays(),
         national_monthly_total: nationalMonthlyImpsTotal,
       }),
     });
     const data = await res.json();
     if (!res.ok) {
-      resultEl.style.display = "block";
-      resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(_constanzaErrorText(data, res.statusText))}</p>`;
+      await _constanzaShowCardError(lid, resultEl, _constanzaErrorText(data, res.statusText), geoText);
       return;
     }
     renderConstanzaResult(lid, data);
+    if (window.Constanza) Constanza.setMood("happy", 2600);
   } catch (err) {
     resultEl.style.display = "block";
     resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(String(err))}</p>`;
+    if (window.Constanza) Constanza.setMood("oops", 4000);
   } finally {
     btn.disabled = false;
     btn.innerHTML = originalLabel;
@@ -6886,60 +6903,67 @@ function _constanzaErrorText(data, fallback) {
   return fallback || "Request failed.";
 }
 
+// The error, plus — when the geography is the problem — the places it might have meant, to pick from right here.
+async function _constanzaShowCardError(lid, resultEl, message, geoText) {
+  let resolution = null;
+  try {
+    const r = await fetch("/api/constanza/resolve", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ geo_text: geoText }),
+    });
+    if (r.ok) resolution = await r.json();
+  } catch (_) { /* the message alone is still useful */ }
+  if (window.Constanza) {
+    Constanza.renderCardError(resultEl, message, resolution, _constanzaCardOpts(lid));
+    Constanza.setMood("oops", 4000);
+  } else {
+    resultEl.style.display = "block";
+    resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(message)}</p>`;
+  }
+}
+
+// What the shared Constanza card renderer (constanza.js) needs to act on this line.
+function _constanzaCardOpts(lid) {
+  return {
+    getText: () => _constanzaGeoFor(lid),
+    onGeoText: (next) => {
+      state.constanzaGeoOverride = state.constanzaGeoOverride || {};
+      state.constanzaGeoOverride[lid] = next;
+      onConstanzaAutoCalc(lid);
+    },
+    onApply: (monthlyMid, estUniques, geoInfo) => applyConstanzaEstimate(lid, monthlyMid, estUniques, geoInfo),
+    onRefine: () => openConstanzaForLine(lid),
+  };
+}
+
+function openConstanzaForLine(lid) {
+  const li = state.lineItems.find(x => x.id === lid);
+  if (!li || !window.Constanza) return;
+  const days = _constanzaFlightDays();
+  Constanza.open({
+    product: li.product_name,
+    geo: _constanzaGeoFor(lid),
+    months: _constanzaFlightMonths(li),
+    flightDays: days,
+    lineId: lid,
+    lineLabel: Constanza.lineLabel(li),
+  });
+}
+
 function renderConstanzaResult(lid, data) {
   const resultEl = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
   if (!resultEl) return;
-
-  const confidenceLabel = data.confidence === "platform_modeled"
-    ? "✅ Modeled from real platform-avails-by-DMA data"
-    : (data.geo_confidence === "low_confidence_international"
-        ? "⚠️ Rough estimate — platform data is U.S.-only; spread by population share"
-        : "⚠️ Rough estimate — no CTV platform modeled for this product (population-share only)");
-  const geoNote = data.geo_method === "unresolved"
-    ? "Geo didn't resolve to any DMA."
-    : `Geo resolved via <strong>${escapeHtml(data.geo_method)}</strong> → ${data.by_area.length} area${data.by_area.length === 1 ? "" : "s"}.`;
-  const unmatchedNote = _constanzaUnmatchedHtml(data, " — add these markets manually if they matter");
-  const notesHtml = _constanzaNotes(data).map(n => `<li>${escapeHtml(n)}</li>`).join("");
-
-  // The avails fields this writes into are explicitly MONTHLY ("Max
-  // Recommended Monthly Imps/Spend", paired with "Est. Monthly Uniques")
-  // — data.imps_* is the FULL flight total across data.months (useful on
-  // its own, e.g. to sanity-check a platform has enough ceiling for the
-  // whole flight), so it's shown separately from the monthly figure that
-  // actually gets applied, and never fed into the monthly fields as-is
-  // (doing so would also silently inflate the imps/uniques frequency
-  // triangle by a factor of `months`).
-  const monthlyMid = data.imps_mid / data.months;
-  const monthlyLow = data.imps_low / data.months;
-  const monthlyHigh = data.imps_high / data.months;
-
-  resultEl.style.display = "block";
-  resultEl.innerHTML = `
-    <p class="constanza-confidence">${confidenceLabel}</p>
-    <p class="constanza-geo-note">${geoNote}</p>
-    ${unmatchedNote}
-    <table class="constanza-range-table">
-      <tr><th></th><th>Low</th><th>Mid</th><th>High</th></tr>
-      <tr>
-        <td>Monthly imps</td>
-        <td>${formatPlainDisplay(monthlyLow)}</td>
-        <td>${formatPlainDisplay(monthlyMid)}</td>
-        <td>${formatPlainDisplay(monthlyHigh)}</td>
-      </tr>
-      ${data.months > 1 ? `
-      <tr>
-        <td>Total over ${data.months}mo flight</td>
-        <td>${formatPlainDisplay(data.imps_low)}</td>
-        <td>${formatPlainDisplay(data.imps_mid)}</td>
-        <td>${formatPlainDisplay(data.imps_high)}</td>
-      </tr>
-      ` : ""}
-    </table>
-    ${data.est_uniques != null ? `<p class="constanza-uniques">Est. monthly uniques: ${formatPlainDisplay(data.est_uniques)}</p>` : ""}
-    ${notesHtml ? `<ul class="constanza-notes">${notesHtml}</ul>` : ""}
-    <button type="button" class="btn-secondary constanza-apply-btn" data-lid="${escapeAttr(lid)}">Apply monthly mid-case →</button>
-  `;
-  resultEl.querySelector(".constanza-apply-btn").addEventListener("click", () => applyConstanzaEstimate(lid, monthlyMid, data.est_uniques, _constanzaGeoInfo(data)));
+  // The avails fields this writes into are explicitly MONTHLY ("Max Recommended Monthly Imps/Spend", paired with "Est.
+  // Monthly Uniques") — the card shows the full-flight total separately and only ever applies the monthly figure
+  // (feeding the total in would also inflate the imps/uniques frequency triangle by the number of months).
+  Constanza.renderCard(resultEl, data, _constanzaCardOpts(lid));
+  const picked = state.constanzaGeoOverride && state.constanzaGeoOverride[lid];
+  if (picked) {
+    resultEl.insertAdjacentHTML("afterbegin", `<p class="cz-note cz-using">Geography for this line: <strong>${escapeHtml(picked)}</strong> <button type="button" class="cz-link cz-reset-geo">Use the proposal’s geography</button></p>`);
+    resultEl.querySelector(".cz-reset-geo").addEventListener("click", () => {
+      delete state.constanzaGeoOverride[lid];
+      onConstanzaAutoCalc(lid);
+    });
+  }
 }
 
 function _constanzaGeoInfo(data) {
@@ -6952,7 +6976,8 @@ function _constanzaGeoInfo(data) {
 
 function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
   const li = state.lineItems.find(x => x.id === lid);
-  const p = state.productIndex[li ? li.product_name : ""] || {};
+  if (!li) return false;     // the line was removed (or the proposal changed) since the estimate was pulled: write nothing
+  const p = state.productIndex[li.product_name] || {};
   state.availsData[lid] = state.availsData[lid] || {};
   const entry = state.availsData[lid];
 
@@ -6973,290 +6998,11 @@ function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
   if (entry.est_uniques) entry.frequency = Math.round((entry.max_imps / entry.est_uniques) * 10) / 10;
 
   renderAvailsGrid();
+  return true;
 }
 
 function syncAvailsFromGrid() {
   // No-op: state.availsData is kept in sync via the blur listeners above.
-}
-
-// ----------------------------------------------------------------------
-// Constanza — standalone avails-puller modal. Same engine as the per-card
-// "Auto-calculate" button, but reachable from any step and not tied to an
-// already-curated line item — for exploring what a platform/geo can
-// deliver before line items are even picked. See index.html's
-// #constanza-modal and app/services/constanza_engine.py.
-// ----------------------------------------------------------------------
-// label -> representative catalog product name Constanza can estimate
-// for it. Mirrors the BUILT-IN mapping in app/services/constanza_forecast_map.
-// DEFAULT_PLATFORM_PRODUCTS (the server is still the source of truth for the
-// actual computation — this list only drives the dropdown's display, and
-// Admin -> Forecast changes don't alter it).
-const CONSTANZA_PLATFORM_OPTIONS = [
-  { label: "Roku Channel", product: "Entravision Plus - Roku Ads (Includes The Roku Channel and the popular Espacio Latino Hub)" },
-  { label: "Amazon Prime Video", product: "Entravision Plus - Amazon Prime Video" },
-  { label: "Hulu", product: "Entravision Plus - Hulu" },
-  { label: "Peacock", product: "Entravision Plus - Peacock" },
-  { label: "Other FAST (Tubi, Pluto, Samsung TV Plus, …)", product: "Entravision Plus - Other FAST (Tubi, Pluto TV, Samsung TV Plus, and other long-tail FAST channels)" },
-  { label: "vMVPD (Fubo, Sling, DIRECTV Stream, …)", product: "Entravision Plus - vMVPD (Fubo, Sling, DIRECTV Stream, Philo, Frndly, Vidgo + MVPD streaming apps)" },
-  { label: "Blended CTV/OTT — Reach (Madhive, general market)", product: "Entravision Plus - CTV/OTT Reach" },
-  { label: "Blended CTV/OTT — Hispanic-weighted (Madhive)", product: "Entravision Plus - Hispanics CTV/OTT" },
-];
-
-function openConstanzaModal() {
-  const select = document.getElementById("constanza-modal-platform");
-  if (!select.options.length) {
-    select.innerHTML = CONSTANZA_PLATFORM_OPTIONS.map((o, i) => `<option value="${i}">${escapeHtml(o.label)}</option>`).join("");
-  }
-  document.getElementById("constanza-modal-geo").value = (state.parsed && state.parsed.geo) || "";
-  document.getElementById("constanza-modal").classList.remove("hidden");
-}
-
-function closeConstanzaModal() {
-  document.getElementById("constanza-modal").classList.add("hidden");
-}
-
-function _constanzaAudienceFromForm() {
-  const ageMin = document.getElementById("constanza-audience-age-min").value;
-  const ageMax = document.getElementById("constanza-audience-age-max").value;
-  const gender = document.getElementById("constanza-audience-gender").value;
-  const interestsRaw = document.getElementById("constanza-audience-interests").value.trim();
-  const interestTerms = interestsRaw ? interestsRaw.split(",").map(s => s.trim()).filter(Boolean) : [];
-  if (!ageMin && !ageMax && !gender && !interestTerms.length) return null;
-  return {
-    age_min: ageMin ? parseInt(ageMin, 10) : null,
-    age_max: ageMax ? parseInt(ageMax, 10) : null,
-    gender: gender || null,
-    interest_terms: interestTerms,
-  };
-}
-
-async function onConstanzaModalCalculate() {
-  const btn = document.getElementById("constanza-modal-calc-btn");
-  const resultEl = document.getElementById("constanza-modal-result");
-  const geoText = document.getElementById("constanza-modal-geo").value;
-  const geoTypeHint = document.getElementById("constanza-modal-geo-type").value || null;
-  const months = Math.max(1, parseInt(document.getElementById("constanza-modal-months").value, 10) || 1);
-  const totalRaw = parseFloat(document.getElementById("constanza-modal-total").value);
-  const nationalMonthlyTotal = totalRaw > 0 ? totalRaw : null;
-  const option = CONSTANZA_PLATFORM_OPTIONS[Number(document.getElementById("constanza-modal-platform").value)];
-  const audience = _constanzaAudienceFromForm();
-
-  const originalLabel = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '<span class="btn-inline-spinner"></span>Pulling…';
-  resultEl.innerHTML = "";
-  try {
-    // Resolve first so an ambiguous geo ("Sacramento" with no state) can
-    // show a disambiguation picker instead of a raw 422 error — the
-    // estimate call would otherwise just refuse with no candidates.
-    const resolveRes = await fetch("/api/constanza/resolve", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ geo_text: geoText, geo_type_hint: geoTypeHint }),
-    });
-    const resolved = await resolveRes.json();
-    if (resolved.ambiguous && resolved.ambiguous.length) {
-      renderConstanzaAmbiguity(resolved.ambiguous, geoTypeHint);
-      return;
-    }
-    if (!resolved.resolved) {
-      const reasons = (resolved.unmatched_details || []).map(d => `<li>${escapeHtml(d.reason)}</li>`).join("");
-      resultEl.innerHTML = reasons
-        ? `<div class="constanza-error"><p>⚠️ Couldn't resolve "${escapeHtml(geoText)}":</p><ul>${reasons}</ul></div>`
-        : `<p class="constanza-error">⚠️ Couldn't resolve "${escapeHtml(geoText)}" to any geography — try a different spelling or geo type.</p>`;
-      return;
-    }
-
-    const res = await fetch("/api/constanza/estimate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        product_name: option.product, geo_text: geoText, geo_type_hint: geoTypeHint, months,
-        national_monthly_total: nationalMonthlyTotal,
-        audience,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(_constanzaErrorText(data, res.statusText))}</p>`;
-      return;
-    }
-    renderConstanzaModalResult(option, data);
-  } catch (err) {
-    resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(String(err))}</p>`;
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = originalLabel;
-  }
-}
-
-let _constanzaTaxonomyCache = null;
-
-async function onBrowseConstanzaInterests() {
-  const listEl = document.getElementById("constanza-interest-list");
-  if (listEl.style.display !== "none") {
-    listEl.style.display = "none";
-    return;
-  }
-  if (!_constanzaTaxonomyCache) {
-    const res = await fetch("/api/constanza/interest-taxonomy");
-    const data = await res.json();
-    _constanzaTaxonomyCache = data.categories;
-  }
-  listEl.style.display = "block";
-  listEl.innerHTML = _constanzaTaxonomyCache.map(c => `
-    <button type="button" class="btn-copy constanza-interest-pick-btn" data-label="${escapeHtml(c.label)}"
-            title="${escapeHtml(c.source)}, ${escapeHtml(c.source_date)}">${escapeHtml(c.label)}</button>
-  `).join(" ") || "<em>No sourced interest categories yet.</em>";
-  listEl.querySelectorAll(".constanza-interest-pick-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const input = document.getElementById("constanza-audience-interests");
-      const existing = input.value.trim();
-      input.value = existing ? `${existing}, ${btn.dataset.label}` : btn.dataset.label;
-    });
-  });
-}
-
-function renderConstanzaAmbiguity(ambiguous, geoTypeHint) {
-  const resultEl = document.getElementById("constanza-modal-result");
-  const blocks = ambiguous.map((entry, i) => `
-    <div class="constanza-ambiguity-block">
-      <p>"${escapeHtml(entry.input)}" matches more than one place — pick one:</p>
-      <div class="constanza-insert-row">
-        ${entry.candidates.map(c => `
-          <button type="button" class="btn-secondary constanza-ambiguity-pick-btn" data-entry="${i}" data-resolve-hint="${escapeHtml(c.resolve_hint)}">${escapeHtml(c.label)}</button>
-        `).join("")}
-      </div>
-    </div>
-  `).join("");
-  resultEl.innerHTML = `<div class="constanza-warning">${blocks}</div>`;
-  resultEl.querySelectorAll(".constanza-ambiguity-pick-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      // Replace only the ambiguous item — the rest of a list ("Springfield, 95814,
-      // Placer County, CA") stays exactly as the planner typed it.
-      const geoInput = document.getElementById("constanza-modal-geo");
-      const entry = ambiguous[Number(btn.dataset.entry)];
-      geoInput.value = _replaceGeoItem(geoInput.value, entry.input, btn.dataset.resolveHint);
-      onConstanzaModalCalculate();
-    });
-  });
-}
-
-function _constanzaConfidenceBadge(data) {
-  const geoBadge = {
-    high: "🟢 High geo confidence",
-    medium: "🟡 Medium geo confidence — spans multiple counties/DMAs",
-    low_confidence_international: "🔴 Low confidence — international, population-share only",
-    unresolved: "",
-  }[data.geo_confidence] || "";
-  if (!data.audience) return geoBadge;
-  const audienceBadge = {
-    audience_modeled_geo_only: "🟢 Geo only, no demographic narrowing",
-    audience_modeled_single_cut: "🟡 1 targeting cut applied",
-    audience_modeled_stacked: "🟠 Multiple targeting cuts stacked — directional, not precise",
-  }[data.audience.confidence_tier] || "";
-  return `${geoBadge}${geoBadge && audienceBadge ? " · " : ""}${audienceBadge}`;
-}
-
-function renderConstanzaModalResult(option, data) {
-  const resultEl = document.getElementById("constanza-modal-result");
-  const confidenceLabel = data.confidence === "platform_modeled"
-    ? "✅ Modeled from real platform-avails-by-DMA data"
-    : (data.geo_confidence === "low_confidence_international"
-        ? "⚠️ Rough estimate — platform data is U.S.-only; spread by population share"
-        : "⚠️ Rough estimate — no CTV platform modeled for this product");
-  const geoNote = data.geo_method === "unresolved"
-    ? "Geo didn't resolve to any DMA."
-    : `Geo resolved via <strong>${escapeHtml(data.geo_method)}</strong> → ${data.by_area.length} area${data.by_area.length === 1 ? "" : "s"}.`;
-  const unmatchedNote = _constanzaUnmatchedHtml(data);
-  const geoNotesHtml = _constanzaNotes(data).map(n => `<p class="constanza-notes">${escapeHtml(n)}</p>`).join("");
-  const confidenceBadge = _constanzaConfidenceBadge(data);
-
-  // When an audience spec was applied, the audience-narrowed numbers are
-  // what actually matter to the planner — show those as the headline
-  // figures, with the plain geo/platform numbers underneath for context.
-  const audience = data.audience;
-  const monthlyMid = (audience ? audience.imps_mid : data.imps_mid) / data.months;
-  const monthlyLow = (audience ? audience.imps_low : data.imps_low) / data.months;
-  const monthlyHigh = (audience ? audience.imps_high : data.imps_high) / data.months;
-
-  const rows = audience ? audience.by_area : data.by_area;
-  const topAreas = [...rows].sort((a, b) => b.imps_mid - a.imps_mid).slice(0, 25);
-  const areaRows = topAreas.map(a => `
-    <tr>
-      <td>${escapeHtml(a.area_label)}${a.dma && a.dma !== a.area_label ? ` <span class="constanza-area-dma">(${escapeHtml(a.dma)})</span>` : ""}</td>
-      <td>${(a.weight * 100).toFixed(2)}%</td>
-      <td>${formatPlainDisplay(a.imps_mid)}</td>
-      <td>${a.unique_viewers != null ? formatPlainDisplay(a.unique_viewers) : (a.underlying_population != null ? formatPlainDisplay(a.underlying_population) : "—")}</td>
-    </tr>
-  `).join("");
-
-  const audienceBlock = audience ? `
-    <div class="constanza-audience-summary">
-      <p><strong>Audience-narrowed estimate</strong> (underlying population ~${formatPlainDisplay(audience.underlying_population)})</p>
-      ${audience.below_reliability_threshold ? `
-        <p class="constanza-warning">Below the ~${formatPlainDisplay(audience.reliability_floor_population)} reliability floor for this cut — treat as order-of-magnitude, not precise.</p>
-      ` : ""}
-      ${audience.interests.map(i => i.supported
-        ? `<p class="constanza-interest-note">✓ "${escapeHtml(i.input_text)}" → ${escapeHtml(i.category)} (${escapeHtml(i.source)}, ${escapeHtml(i.source_date)})</p>`
-        : `<p class="constanza-warning">⚠️ No sourced rate for "${escapeHtml(i.input_text)}" — excluded from the estimate, not guessed.</p>`
-      ).join("")}
-      ${audience.notes.map(n => `<p class="constanza-notes">${escapeHtml(n)}</p>`).join("")}
-    </div>
-  ` : "";
-
-  // Matching curated line items (same product) this estimate could be
-  // applied to directly, without re-entering it on the avails step.
-  const matchingLineItems = state.lineItems.filter(li => li.product_name === option.product);
-  const insertButtons = matchingLineItems.map(li => `
-    <button type="button" class="btn-secondary constanza-modal-insert-btn" data-lid="${escapeAttr(li.id)}">
-      Insert into avails for "${escapeHtml(li.target_override || li.product_name)}" →
-    </button>
-  `).join(" ");
-
-  resultEl.innerHTML = `
-    <p class="constanza-confidence">${confidenceLabel}</p>
-    ${confidenceBadge ? `<p class="constanza-badge-row">${confidenceBadge}</p>` : ""}
-    <p class="constanza-geo-note">${geoNote}</p>
-    ${unmatchedNote}
-    ${geoNotesHtml}
-    ${audienceBlock}
-    <table class="constanza-range-table">
-      <tr><th></th><th>Low</th><th>Mid</th><th>High</th></tr>
-      <tr>
-        <td>Monthly imps</td>
-        <td>${formatPlainDisplay(monthlyLow)}</td>
-        <td>${formatPlainDisplay(monthlyMid)}</td>
-        <td>${formatPlainDisplay(monthlyHigh)}</td>
-      </tr>
-      ${data.months > 1 ? `
-      <tr>
-        <td>Total over ${data.months}mo flight</td>
-        <td>${formatPlainDisplay(audience ? audience.imps_low : data.imps_low)}</td>
-        <td>${formatPlainDisplay(audience ? audience.imps_mid : data.imps_mid)}</td>
-        <td>${formatPlainDisplay(audience ? audience.imps_high : data.imps_high)}</td>
-      </tr>
-      ` : ""}
-    </table>
-    ${!audience && data.est_uniques != null ? `<p class="constanza-uniques">Est. monthly uniques: ${formatPlainDisplay(data.est_uniques)}</p>` : ""}
-    ${topAreas.length ? `
-    <div class="table-scroll constanza-dma-table-scroll">
-      <table class="admin-table constanza-dma-table">
-        <thead><tr><th>Area</th><th>Share</th><th>Monthly imps (mid)</th><th>Uniques / pop.</th></tr></thead>
-        <tbody>${areaRows}</tbody>
-      </table>
-    </div>
-    ${rows.length > topAreas.length ? `<p class="constanza-more-dmas">+ ${rows.length - topAreas.length} more areas not shown</p>` : ""}
-    ` : ""}
-    ${insertButtons ? `<div class="constanza-insert-row">${insertButtons}</div>` : ""}
-  `;
-
-  resultEl.querySelectorAll(".constanza-modal-insert-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      applyConstanzaEstimate(btn.dataset.lid, monthlyMid, audience ? null : data.est_uniques, _constanzaGeoInfo(data));
-      closeConstanzaModal();
-    });
-  });
 }
 
 // --------------------------------------------------------------------------

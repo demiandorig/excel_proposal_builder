@@ -23,6 +23,8 @@ DMA/state matching untouched and dispatches to those for everything else.
 """
 from __future__ import annotations
 
+import contextvars
+import dataclasses
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -97,6 +99,16 @@ class GeoResolution:
     # Advisory caveats that don't block a result (mixed geography levels that may overlap,
     # a same-name place resolved to the larger one, ...).
     notes: list[str] = field(default_factory=list)
+    # What the forgiving text layer understood and changed (constanza_geo_text.py), so a planner always sees how their
+    # words were read: [{"input", "became", "why"}].
+    interpretations: list[dict] = field(default_factory=list)
+    # Places to pick from: "did you mean" candidates for text that did not resolve, and "broaden to" larger areas that
+    # contain a resolved place. [{"kind", "label", "geo_type", "resolve_hint", "why", ...}]
+    suggestions: list[dict] = field(default_factory=list)
+    # States the planner asked for as a WHOLE ("Texas", "WA"): their home-state DMAs are in `areas`, but a series that
+    # carries its own state rows (constanza_engine) uses those totals, which include the parts of the state served from
+    # markets homed elsewhere.
+    whole_states: list[str] = field(default_factory=list)
 
     @property
     def resolved(self) -> bool:
@@ -275,6 +287,44 @@ def _dma_area(d: DMA) -> ResolvedArea:
     )
 
 
+def _is_place_in_state(prev: dict, state: str, state_token: str) -> bool:
+    """A name that matched no market in `state`: is it a real city / town there? Then "Name, ST" is that place. When the
+    name is itself a state's name ("Washington", "Indiana"), only a two-letter code after it counts ("Washington, PA"):
+    "Washington, Oregon" stays two states. The town is the default at any size, because the other reading ("the two whole
+    states") is the one that would be silently huge when wrong; the two states are always offered as the alternative
+    (`_state_pair_alternative`)."""
+    from app.services import constanza_geo_crosswalk
+    if prev["is_state"] and not (len(state_token) == 2 and state_token.isupper()):
+        return False
+    return constanza_geo_crosswalk.place_in_state(prev["token"], state)
+
+
+def _state_pair_alternative(item: str, res: "GeoResolution") -> dict | None:
+    """"Delaware, OH" resolved as the TOWN: offer the other reading, the two states, so the planner can switch."""
+    m = re.match(r"^\s*([A-Za-z][A-Za-z .]*?)\s*,\s*([A-Z]{2})\s*$", item)
+    if not m or res.method != "city":
+        return None
+    first = _match_state(m.group(1))
+    second = m.group(2)
+    if not first or second not in _VALID_STATE_ABBR or first == second:
+        return None
+    return {"kind": "did_you_mean", "label": f"The states {_state_display_name(first)} and {_state_display_name(second)}",
+            "geo_type": "state", "resolve_hint": f"{first}; {second}", "state": None, "population": 0,
+            "why": f"read as the town of {item}; these are the two states instead", "replaces": item}
+
+
+def _dma_from_alias(text: str, dmas: list) -> DMA | None:
+    try:
+        from app.services.forecast_import import geo_reference as geo_ref
+        key = geo_ref.dma_key_for_label(text) or geo_ref.dma_key_for_label(_clean_token(text))
+        if key is None:
+            return None
+        name = next((d.name for d in geo_ref.dma_table() if d.key == key), None)
+    except Exception:  # noqa: BLE001 - the alias file is an enhancement; never let it break matching
+        return None
+    return next((d for d in dmas if d.dma == name), None)
+
+
 def _resolve_dma_or_state(text: str) -> GeoResolution | None:
     """The original Phase 1 matcher — DMA names and US states only.
     Returns None (never a GeoResolution) when nothing matches at all, so
@@ -304,6 +354,12 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
             geo_confidence="high", notes=notes,
         )
 
+    # A market named the way a Nielsen / Madhive export spells it ("Cedar Rapids - Waterloo & Dubuque", "Tampa - Saint
+    # Petersburg (Sarasota)"): the curated alias file (app/data/forecast/dma_aliases.csv) knows every such spelling.
+    alias = _dma_from_alias(text, dmas)
+    if alias is not None:
+        return GeoResolution(input_text=text, method="exact_dma", areas=[_dma_area(alias)], geo_confidence="high", notes=notes)
+
     punctuated, remainder = _extract_punctuated_dmas(text)
     tokens = [t for t in (_SPLIT_RE.split(remainder)) if t.strip()]
     named_dmas: list[DMA] = list(punctuated)
@@ -322,16 +378,23 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
             continue
         state = _match_state(token)
         if state and units and units[-1]["state"] is None:
-            prev_matches = _all_dma_matches(units[-1]["token"], dmas)
+            prev = units[-1]
+            prev_matches = _all_dma_matches(prev["token"], dmas)
             if any(_dma_in_state(d, state) for d in prev_matches):
                 # Also when the place is itself a state's name: "New York, NY" is the New York market, as it always was.
-                units[-1]["state"] = state
+                prev["state"] = state
                 continue
-            if not prev_matches and not units[-1]["is_state"] and "unqualified_state" not in units[-1]:
+            if "unqualified_state" not in prev and (
+                (not prev_matches and not prev["is_state"])
+                or _is_place_in_state(prev, state, token)
+            ):
                 # "Santa Monica, CA": a place that is no DMA's name, with the state that qualifies IT. That is a city
                 # (or county / ZIP) — never "the place plus every DMA in the state", which is what a bare state token
                 # means. It is left unmatched here so the city/county resolvers get the whole string.
-                units[-1]["unqualified_state"] = state
+                # The same when the name IS a market elsewhere ("Richmond, CA" is the city in California, not the Richmond
+                # VA market plus every California market) or a state's name ("Washington, PA", "Indiana, PA").
+                prev["unqualified_state"] = state
+                prev["is_state"] = False
                 continue
         units.append({"token": token, "raw": raw_token.strip(), "state": None, "is_state": state is not None})
 
@@ -429,6 +492,7 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
         areas=[_dma_area(d) for d in deduped],
         unmatched_tokens=unmatched, geo_confidence="high", ambiguous=ambiguous, notes=notes,
         unmatched_details=unmatched_details,
+        whole_states=sorted(a for a in matched_states if a not in empty_states),
     )
 
 
@@ -483,7 +547,13 @@ def _split_items(text: str, hint: str | None) -> list[str]:
         if len(pieces) > 1 and (hint is not None or any(has_strong_signal(p) for p in pieces)):
             items.extend(pieces if hint in ("zip", "congressional_district", "country") else _pair_states(pieces, places_only=hint in ("city", "county")))
         else:
-            items.append(chunk)
+            paired = _pair_states(pieces, places_only=True) if len(pieces) >= 4 and len(pieces) % 2 == 0 else []
+            # "Plano, TX, Frisco, TX, Allen, TX": every place with its state is a list of places (only the first was read, silently).
+            # Not "CA, NV, AZ, TX" (state codes pair with each other): the first piece of a pair must not be a two-letter state code.
+            if paired and len(paired) * 2 == len(pieces) and not any(len(q.split(",")[0].strip()) == 2 and _match_state(q.split(",")[0].strip()) for q in paired):
+                items.extend(paired)
+            else:
+                items.append(chunk)
     return items
 
 
@@ -492,15 +562,20 @@ _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low_confidence_international": 1, "
 
 def _merge_resolutions(text: str, parts: list[GeoResolution]) -> GeoResolution:
     """Combines per-item resolutions of a list into one. Areas are de-duplicated
-    (the same ZIP or DMA listed twice counts once); confidence is the weakest
-    contributing item's; anything that failed is carried through, never dropped."""
+    (the same ZIP or DMA listed twice counts once); a ZIP / county / city whose market is ALSO listed as a whole DMA is
+    covered by it and counted once (the larger geography wins); confidence is the weakest contributing item's; anything
+    that failed is carried through, never dropped."""
     areas: list[ResolvedArea] = []
     seen: set = set()
     unmatched: list[str] = []
     details: list[dict] = []
     ambiguous: list[dict] = []
     notes: list[str] = []
+    interpretations: list[dict] = []
+    suggestions: list[dict] = []
+    whole_states: list[str] = []
     for part in parts:
+        whole_states.extend(st for st in part.whole_states if st not in whole_states)
         for a in part.areas:
             key = (a.source_type, a.geo_id or a.label or a.dma, a.dma)
             if key not in seen:
@@ -510,6 +585,36 @@ def _merge_resolutions(text: str, parts: list[GeoResolution]) -> GeoResolution:
         details.extend(d for d in part.unmatched_details if d not in details)
         ambiguous.extend(part.ambiguous)
         notes.extend(n for n in part.notes if n not in notes)
+        interpretations.extend(i for i in part.interpretations if i not in interpretations)
+        suggestions.extend(sg for sg in part.suggestions if sg not in suggestions)
+
+    # The larger geography wins: a piece of a ZIP / county / city that lies in a market the planner also listed whole is
+    # already inside that market's numbers. (Only the piece in that market is dropped: a county split across two markets
+    # keeps the part in the other one.)
+    whole_dmas = {a.dma for a in areas if a.source_type == "dma" and a.dma}
+    if whole_dmas:
+        covered: dict[str, str] = {}
+        kept: list[ResolvedArea] = []
+        for a in areas:
+            if a.source_type != "dma" and a.dma in whole_dmas:
+                covered[a.label or a.geo_id or a.dma] = a.dma
+            else:
+                kept.append(a)
+        for label, dma in covered.items():
+            notes.append(f"'{label}' is inside {dma}, which is also in your list, so it is counted once (as part of {dma}).")
+        areas = kept
+
+    from app.services import constanza_geo_text as gtext
+    typed: dict[str, list[str]] = {}          # every spelling the planner typed for a place (the same place can be typed twice)
+    for part in parts:
+        for a in part.areas:
+            spellings = typed.setdefault(a.geo_id or a.label or a.dma or "", [])
+            if part.input_text not in spellings:
+                spellings.append(part.input_text)
+    for sg in gtext.overlap_suggestions(areas, typed):
+        # A list item that was itself split ("X and Y") already carried its own, more precise offer up from the inner merge.
+        if not any(o["kind"] == sg["kind"] and o["resolve_hint"] == sg["resolve_hint"] for o in suggestions):
+            suggestions.append(sg)
 
     resolved_parts = [p for p in parts if p.areas]
     methods = {p.method for p in resolved_parts}
@@ -519,14 +624,18 @@ def _merge_resolutions(text: str, parts: list[GeoResolution]) -> GeoResolution:
         method = methods.pop() if len(methods) == 1 else "mixed"
         confidence = min((p.geo_confidence for p in resolved_parts), key=lambda c: _CONFIDENCE_RANK.get(c, 0))
         levels = sorted({a.source_type for a in areas})
+        smaller = [l for l in levels if l not in ("dma", "state", "country")]
         if len(levels) > 1 and any(l != "dma" for l in levels):
             notes.append(
                 "This list mixes geography levels (" + ", ".join(levels) + ") and they are added together — "
-                "if one listed area sits inside another (a ZIP inside a listed county or DMA), it is counted twice."
+                "if one listed area sits inside another (a city inside a listed county, say), it is counted twice."
+                if smaller else
+                "This list mixes geography levels (" + ", ".join(levels) + ") and they are added together."
             )
     return GeoResolution(
         input_text=text, method=method, areas=areas, unmatched_tokens=unmatched,
         geo_confidence=confidence, ambiguous=ambiguous, unmatched_details=details, notes=notes,
+        interpretations=interpretations, suggestions=suggestions, whole_states=whole_states,
     )
 
 
@@ -537,11 +646,37 @@ def _unresolved(text: str, hint: str | None) -> GeoResolution:
     return res
 
 
+_DOTTED_DC_RE = re.compile(r"(?<![A-Za-z])D\.\s?C\.?(?![A-Za-z])", re.IGNORECASE)
 _MAX_ITEM_CHARS = 200     # no real place name is longer; bounds the regex work any single item can cause
 _MAX_ITEMS = 300
 
 
+_MEMO: contextvars.ContextVar = contextvars.ContextVar("constanza_geo_memo", default=None)
+
+
+def _clone(res: GeoResolution) -> GeoResolution:
+    """A copy the caller may change (interpretations, suggestions, input_text are all edited after resolving)."""
+    return dataclasses.replace(
+        res, areas=list(res.areas), unmatched_tokens=list(res.unmatched_tokens),
+        ambiguous=[{**e, "candidates": [dict(c) for c in e.get("candidates", [])]} for e in res.ambiguous],
+        unmatched_details=[dict(d) for d in res.unmatched_details], notes=list(res.notes),
+        interpretations=[dict(i) for i in res.interpretations], suggestions=[dict(sg) for sg in res.suggestions],
+        whole_states=list(res.whole_states))
+
+
 def _resolve_single(text: str, hint: str | None) -> GeoResolution:
+    """Within one resolve_geo call the same text resolves once (a list item is looked at several times: the strict pass, the
+    state probe, the list reading); each caller gets its own copy."""
+    memo = _MEMO.get()
+    if memo is None:
+        return _resolve_single_uncached(text, hint)
+    key = (text, hint)
+    if key not in memo:
+        memo[key] = _resolve_single_uncached(text, hint)
+    return _clone(memo[key])
+
+
+def _resolve_single_uncached(text: str, hint: str | None) -> GeoResolution:
     if len(text) > _MAX_ITEM_CHARS:
         res = GeoResolution(input_text=text[:60] + "…", method="unresolved", areas=[], unmatched_tokens=[text[:60] + "…"], geo_confidence="unresolved")
         res.unmatched_details = [{"input": res.unmatched_tokens[0], "reason": f"That entry is too long to be a place name (over {_MAX_ITEM_CHARS} characters)."}]
@@ -612,14 +747,215 @@ def resolve_geo(geo_text: str | None, geo_type_hint: str | None = None) -> GeoRe
     and the results are merged: every item either contributes areas or is
     reported back (unmatched / ambiguous) — nothing is silently dropped.
     """
-    text = (geo_text or "").strip()
+    token = _MEMO.set({})
+    try:
+        return _resolve_geo(geo_text, geo_type_hint)
+    finally:
+        _MEMO.reset(token)
+
+
+def _resolve_geo(geo_text: str | None, geo_type_hint: str | None) -> GeoResolution:
+    text = _DOTTED_DC_RE.sub("DC", (geo_text or "").strip())       # "Washington, D.C." is Washington, DC
     hint = geo_type_hint if geo_type_hint in _TYPED_HINTS else None
-    items = _split_items(text, hint)
+    from app.services import constanza_geo_text as gtext
+    prepared = gtext.prepare(text, hint) if len(text) <= _MAX_ITEM_CHARS * 10 else gtext.Prepared(text)
+    items = _split_items(prepared.text, hint)
     if len(items) > _MAX_ITEMS:
         return GeoResolution(
             input_text=text[:60] + "…", method="unresolved", areas=[], unmatched_tokens=[], geo_confidence="unresolved",
             unmatched_details=[{"input": "list", "reason": f"That list has {len(items):,} entries — at most {_MAX_ITEMS} places at a time."}],
         )
     if len(items) > 1:
-        return _merge_resolutions(text, [_resolve_single(item, hint) for item in items])
-    return _resolve_single(items[0], hint)
+        result = _merge_resolutions(text, [_resolve_item(item, hint, context=prepared.context) for item in items])
+    else:
+        result = _resolve_item(items[0], hint, context=prepared.context)
+        result.input_text = text if prepared.interpretations else result.input_text
+    result.interpretations = prepared.interpretations + [i for i in result.interpretations if i not in prepared.interpretations]
+    if result.resolved and len(items) == 1 and not result.ambiguous:
+        result.suggestions.extend(sg for sg in gtext.broaden(result.areas) if sg not in result.suggestions)
+    if prepared.origins:
+        # What the UI replaces or removes is what the planner TYPED ("Travus Co., TX"), not the tidied item it was read as.
+        for sg in result.suggestions:
+            if sg.get("replaces") in prepared.origins:
+                sg["replaces"] = prepared.origins[sg["replaces"]]
+            if sg.get("drop_inputs"):
+                sg["drop_inputs"] = list(dict.fromkeys(prepared.origins.get(x, x) for x in sg["drop_inputs"]))
+        for entry in result.ambiguous:
+            entry["input"] = prepared.origins.get(entry["input"], entry["input"])
+    return result
+
+
+def _resolve_item(item: str, hint: str | None, allow_split: bool = True, context: dict | None = None) -> GeoResolution:
+    """One list item, with the forgiving readings tried only when the strict matchers found nothing, or only part of it:
+    "X and Y" as two places (with the state written once at the end shared by both), a state written after the name with no
+    comma or misspelled ("Adams County Washinton"), one clear near-spelling, and finally ranked suggestions. A container
+    ("surrounding areas in Johnson County") is matched together with the place named inside it. Every change is reported in
+    `interpretations`; a guess is never silent."""
+    res = _resolve_single(item, hint)
+    if len(item) > _MAX_ITEM_CHARS:
+        return res
+    alt = _state_pair_alternative(item, res)
+    if alt:
+        res.suggestions.append(alt)
+    ctx = (context or {}).get(item)
+    if ctx:
+        done = _resolve_container(item, hint, res, ctx)
+        if done is not None:
+            return done
+    if res.ambiguous:
+        return res
+    from app.services import constanza_geo_text as gtext
+    if res.areas:
+        if res.unmatched_tokens and allow_split:                  # PART of the item resolved: try the rest the forgiving way
+            better = _resolve_as_list(item, hint, res, context)
+            if better is not None:
+                return better
+        return res
+
+    if allow_split:
+        merged = _resolve_as_list(item, hint, res, context)
+        if merged is not None:
+            return merged
+
+    split = gtext.split_trailing_state(item)
+    if split:
+        name, abbr, how = split
+        candidate = f"{name}, {abbr}"
+        sub = _resolve_single(candidate, hint)
+        if sub.areas or sub.ambiguous:
+            names = {v: k for k, v in _STATE_NAMES_TO_ABBR.items()}
+            typed = item.replace(",", " ").split()[-1]
+            if how == "fuzzy":
+                why = f"read the state '{typed}' as {names.get(abbr, abbr).title()} ({abbr})"
+            else:
+                why = f"read '{abbr}' at the end as the state"
+            sub.interpretations.append({"input": item, "became": candidate, "why": why})
+            sub.input_text = item
+            return sub
+
+    best = gtext.fuzzy_best(item, hint)
+    if best is not None:
+        sub = _resolve_single(best["resolve_hint"], hint)
+        if sub.areas:
+            sub.interpretations.append({"input": item, "became": best["label"], "why": f"read as {best['label']} (the closest spelling; check it is the place you meant)"})
+            sub.input_text = item
+            return sub
+
+    res.suggestions = [{**sg, "replaces": item} for sg in gtext.suggest(item, hint)]
+    return res
+
+
+def _resolve_as_list(item: str, hint: str | None, res: GeoResolution, context: dict | None) -> GeoResolution | None:
+    """"Austin and Round Rock, TX" / "Dallas or Houston" as the places they name. The state written once at the end applies to
+    each earlier place that exists there. Returned only when it understood more than the strict pass did."""
+    from app.services import constanza_geo_text as gtext
+    pieces = gtext.split_conjunctions(item)
+    if len(pieces) < 2:
+        return None
+    why = "read as a list of places"
+    if gtext.OR_WORD_RE.search(item):
+        why += " ('or' is read like 'and': the places are added together, since Constanza cannot choose between them)"
+    state = gtext.shared_trailing_state(pieces)
+    if state:
+        shared = []
+        for p in pieces[:-1]:
+            # The state typed once at the end belongs to a place that exists in it ("Lincoln and Springfield, IL" is Lincoln, IL, not
+            # the Nebraska market). Where the qualified form does not name a place - it turns into "that whole state" ("Chicago, IN"
+            # would add every Indiana market) or leaves the state unmatched ("Philadelphia, DE") - the piece stays as typed: it is a
+            # market of its own.
+            qualified = f"{p}, {state}"
+            q = _resolve_single(qualified, hint)
+            shared.append(qualified if q.areas and not q.whole_states and not q.unmatched_tokens else p)
+        typed_pieces = gtext.split_conjunctions(item)
+        qualified_pieces = [(typed, now) for typed, now in zip(typed_pieces[:-1], shared) if typed != now]
+        pieces = shared + [pieces[-1]]
+        if qualified_pieces:
+            why += f"; the state at the end ({state}) applies to each place that needs one"
+    else:
+        qualified_pieces = []
+    merged = _merge_resolutions(item, [_resolve_item(p, hint, allow_split=False, context=context) for p in pieces])
+    if not merged.areas:
+        return None
+    if qualified_pieces:
+        # "Dallas and Lostine, OR" read as Dallas, OR: the places as typed (Dallas as its whole TV market) are one click away - when
+        # they really read differently.
+        differing = []
+        for typed, now in qualified_pieces:
+            bare_areas = _resolve_single(typed, hint).areas
+            now_areas = _resolve_single(now, hint).areas
+            if bare_areas and {(a.dma, a.geo_id, a.label) for a in bare_areas} != {(a.dma, a.geo_id, a.label) for a in now_areas}:
+                differing.append((bare_areas[0].label or typed, now_areas[0].label or now if now_areas else now))
+        if differing:
+            merged.suggestions.append({
+                "kind": "did_you_mean", "label": "Each place as typed, without sharing " + state, "geo_type": "", "resolve_hint": "; ".join(typed_pieces),
+                "state": None, "population": 0, "replaces": item,
+                "why": f"e.g. {differing[0][0]} instead of {differing[0][1]}"})
+    if res.areas and (len(merged.unmatched_tokens) > len(res.unmatched_tokens)
+                      or (len(merged.unmatched_tokens) == len(res.unmatched_tokens) and len(merged.areas) <= len(res.areas))):
+        return None
+    merged.interpretations.insert(0, {"input": item, "became": "; ".join(pieces), "why": why})
+    return merged
+
+
+def _resolve_container(item: str, hint: str | None, res: GeoResolution, ctx: dict) -> GeoResolution | None:
+    """A container that came with the place named inside it ("Kansas City, MO and surrounding areas in Johnson County").
+    A name that exists in several states is narrowed to the one in the same TV market as the inner place - and when two
+    fit, the planner picks; the inner place's own state is never assumed for it. A container that cannot be matched at all
+    falls back to the inner place. None: nothing to add, the strict result stands."""
+    inner = ctx["inner"]
+    if res.ambiguous and not res.areas:
+        entry = res.ambiguous[0]
+        inner_res = _resolve_single(inner, hint)
+        inner_dmas = {a.dma for a in inner_res.areas if a.dma}
+        if not inner_dmas:
+            return None
+        kept = []
+        for cand in entry["candidates"]:
+            cres = _resolve_single(cand["resolve_hint"], hint)
+            if cres.areas and {a.dma for a in cres.areas if a.dma} & inner_dmas:
+                kept.append((cand, cres))
+        in_market = [c for c, _ in kept]
+        how = f"the one in the same TV market as {inner}"
+        # A county that is smaller than the place named beside it is not the one meant ("Kansas City, MO" has ten times the
+        # people of Johnson County, MO; the Johnson County around it is the Kansas one). The place is read as the CITY here: by
+        # default "Kansas City, MO" is the whole market.
+        if len(kept) > 1:
+            city = _resolve_single(inner, "city")
+            sized = city.areas or (inner_res.areas if all(a.source_type in ("city", "zip", "county") for a in inner_res.areas) else [])
+            inner_pop = sum(a.area_population for a in sized)
+            if inner_pop:
+                roomy = [(c, r) for c, r in kept if sum(a.area_population for a in r.areas) >= inner_pop]
+                if roomy and len(roomy) < len(kept):
+                    kept, how = roomy, f"the one in the same TV market as {inner} that is big enough to surround it"
+        # ... and when the place was typed WITH its state ("Overland Park, KS"), the county in that state is the one meant.
+        if len(kept) > 1:
+            from app.services import constanza_geo_text as gtext
+            typed_state = gtext._trailing_state_abbr(inner) or (gtext.split_trailing_state(inner) or (None, None, None))[1]
+            same = [(c, r) for c, r in kept if typed_state and {a.state for a in r.areas} == {typed_state}]
+            if len(same) == 1:
+                kept, how = same, f"the one in {typed_state}, the state typed with {inner}"
+        if len(kept) == 1:
+            cand, cres = kept[0]
+            cres.input_text = item
+            cres.interpretations.append({"input": item, "became": cand["label"],
+                                         "why": f"'{item}' exists in {len(entry['candidates'])} places; {cand['label']} is {how}"})
+            if len(in_market) > 1:
+                # chosen by size or by the typed state, not because it was the only one nearby: put the others one click away
+                for other in in_market:
+                    if other["label"] != cand["label"]:
+                        cres.suggestions.append({"kind": "did_you_mean", "label": other["label"], "geo_type": other["geo_type"],
+                                                 "resolve_hint": other["resolve_hint"], "state": other.get("state"), "population": 0,
+                                                 "why": f"the other {item.rsplit(' in ', 1)[-1]} near {inner}", "replaces": item})
+            return cres
+        if len(kept) > 1:
+            return GeoResolution(
+                input_text=item, method="unresolved", areas=[], unmatched_tokens=list(res.unmatched_tokens), geo_confidence="unresolved",
+                ambiguous=[{**entry, "candidates": [c for c, _ in kept]}],
+                notes=[f"More than one {item} lies in the same TV market as {inner}: pick the one you mean."])
+        return None
+    if not res.areas and not res.ambiguous:
+        sub = _resolve_item(inner, hint, allow_split=False)
+        if sub.areas or sub.ambiguous:
+            sub.interpretations.append({"input": item, "became": inner, "why": f"couldn't match '{item}', so only the place named inside it ('{inner}') is used"})
+            return sub
+    return None

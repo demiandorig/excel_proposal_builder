@@ -1,0 +1,220 @@
+alias,dma,how_matched,seen_in
+Abilene - Sweetwater,Abilene-Sweetwater,exact,live-sports+madhive-export
+"Albany, GA","Albany, GA",exact,live-sports+madhive-export
+Albany - Schenectady - Troy,Albany-Schenectady-Troy,exact,live-sports+madhive-export
+Albuquerque - Santa Fe,Albuquerque-Santa Fe,exact,live-sports+madhive-export
+Albuquerque-Santa Fe,Albuquerque-Santa Fe,exact,netflix-baseline
+"Alexandria, LA","Alexandria, LA",exact,live-sports+madhive-export
+Alpena,Alpena,exact,live-sports+madhive-export
+Amarillo,Amarillo,exact,live-sports+madhive-export
+Anchorage,Anchorage,exact,live-sports+madhive-export
+Atlanta,Atlanta,exact,live-sports+madhive-export+netflix-baseline
+Augusta,Augusta-Aiken,curated,live-sports+madhive-export
+Austin,Austin,exact,netflix-baseline
+"Austin, TX",Austin,curated,live-sports+madhive-export
+Bakersfield,Bakersfield,exact,live-sports+madhive-export
+Baltimore,Baltimore,exact,live-sports+madhive-export
+Bangor,Bangor,exact,live-sports+madhive-export
+Baton Rouge,Baton Rouge,exact,live-sports+madhive-export
+Beaumont - Port Arthur,Beaumont-Port Arthur,exact,live-sports+madhive-export
+"Bend, OR","Bend, OR",exact,live-sports+madhive-export
+Billings,Billings,exact,live-sports+madhive-export
+Biloxi - Gulfport,Biloxi-Gulfport,exact,live-sports+madhive-export
+Binghamton,Binghamton,exact,live-sports+madhive-export
+Birmingham (Anniston and Tuscaloosa),Birmingham (Ann and Tusc),auto,live-sports+madhive-export
+Bluefield - Beckley - Oak Hill,Bluefield-Beckley-Oak Hill,exact,live-sports+madhive-export
+Boise,Boise,exact,live-sports+madhive-export
+Boston (Manchester),Boston (Manchester),exact,live-sports+madhive-export
+Bowling Green,Bowling Green,exact,live-sports+madhive-export
+Buffalo,Buffalo,exact,live-sports+madhive-export
+Burlington - Plattsburgh,Burlington-Plattsburgh,exact,live-sports+madhive-export
+Butte - Bozeman,Butte-Bozeman,exact,live-sports+madhive-export
+Casper - Riverton,Casper-Riverton,exact,live-sports+madhive-export
+Cedar Rapids - Waterloo & Dubuque,Cedar Rapids-Wtrlo-IWC&Dub,curated,live-sports+madhive-export
+Champaign & Springfield - Decatur,Champaign&Sprngfld-Decatur,auto,live-sports+madhive-export
+"Charleston, SC","Charleston, SC",exact,live-sports+madhive-export
+Charleston-Huntington,Charleston-Huntington,exact,live-sports+madhive-export
+Charlotte,Charlotte,exact,live-sports+madhive-export
+Charlottesville,Charlottesville,exact,live-sports+madhive-export
+Chattanooga,Chattanooga,exact,live-sports+madhive-export
+Cheyenne - Scottsbluff,Cheyenne-Scottsbluff,exact,live-sports+madhive-export
+Chicago,Chicago,exact,live-sports+madhive-export
+Chico - Redding,Chico-Redding,exact,live-sports+madhive-export
+Cincinnati,Cincinnati,exact,live-sports+madhive-export
+Clarksburg - Weston,Clarksburg-Weston,exact,live-sports+madhive-export
+Cleveland,Cleveland-Akron (Canton),curated,live-sports+madhive-export
+Colorado Springs - Pueblo,Colorado Springs-Pueblo,exact,live-sports+madhive-export
+"Columbia, SC","Columbia, SC",exact,live-sports+madhive-export
+Columbia - Jefferson City,Columbia-Jefferson City,exact,live-sports+madhive-export
+"Columbus, GA","Columbus, GA (Opelika, AL)",curated,live-sports+madhive-export
+"Columbus, OH","Columbus, OH",exact,live-sports+madhive-export
+Columbus - Tupelo - West Point,Columbus-Tupelo-W Pnt-Hstn,curated,live-sports+madhive-export
+Corpus Christi,Corpus Christi,exact,live-sports+madhive-export
+Dallas - Fort Worth,Dallas-Ft. Worth,exact,live-sports+madhive-export
+Dallas-Ft. Worth,Dallas-Ft. Worth,exact,netflix-baseline
+Davenport - Rock Island - Moline,Davenport-R.Island-Moline,auto,live-sports+madhive-export
+Dayton,Dayton,exact,live-sports+madhive-export
+Denver,Denver,exact,live-sports+madhive-export+netflix-baseline
+Des Moines - Ames,Des Moines-Ames,exact,live-sports+madhive-export
+Detroit,Detroit,exact,live-sports+madhive-export
+Dothan,Dothan,exact,live-sports+madhive-export
+Duluth - Superior,Duluth-Superior,exact,live-sports+madhive-export
+El Paso,El Paso (Las Cruces),curated,live-sports+madhive-export
+Elmira,Elmira (Corning),curated,live-sports+madhive-export
+Erie,Erie,exact,live-sports+madhive-export
+Eugene,Eugene,exact,live-sports+madhive-export
+Eureka,Eureka,exact,live-sports+madhive-export
+Evansville,Evansville,exact,live-sports+madhive-export
+Fairbanks,Fairbanks,exact,live-sports+madhive-export
+Fargo - Valley City,Fargo-Valley City,exact,live-sports+madhive-export
+Flint - Saginaw - Bay City,Flint-Saginaw-Bay City,exact,live-sports+madhive-export
+Fresno - Visalia,Fresno-Visalia,exact,live-sports+madhive-export
+Fort Myers - Naples,Ft. Myers-Naples,exact,live-sports+madhive-export
+Fort Smith - Fayetteville - Springdale - Rogers,Ft. Smith-Fay-Sprngdl-Rgrs,auto,live-sports+madhive-export
+Fort Wayne,Ft. Wayne,exact,live-sports+madhive-export
+Gainesville,Gainesville,exact,live-sports+madhive-export
+Glendive,Glendive,exact,live-sports+madhive-export
+Grand Junction - Montrose,Grand Junction-Montrose,exact,live-sports+madhive-export
+Grand Rapids - Kalamazoo - Battle Creek,Grand Rapids-Kalmzoo-B.Crk,auto,live-sports+madhive-export
+Great Falls,Great Falls,exact,live-sports+madhive-export
+Green Bay - Appleton,Green Bay-Appleton,exact,live-sports+madhive-export
+Greensboro - High Point - Winston-Salem,Greensboro-H.Point-W.Salem,auto,live-sports+madhive-export
+Greenville - New Bern - Washington,Greenville-N.Bern-Washngtn,auto,live-sports+madhive-export
+Greenville - Spartansburg - Asheville - Anderson,Greenville-Spart-Ashevll-And,curated,live-sports+madhive-export
+Greenwood - Greenville,Greenwood-Greenville,exact,live-sports+madhive-export
+Harlingen - Weslaco - Brownsville - McAllen,Harlingen-Wslco-Brnsvl-McA,auto,live-sports+madhive-export
+Harrisburg - Lancaster - Lebanon - York,Harrisburg-Lncstr-Leb-York,auto,live-sports+madhive-export
+Harrisonburg,Harrisonburg,exact,live-sports+madhive-export
+Hartford & New Haven,Hartford & New Haven,exact,live-sports+madhive-export
+Hattiesburg - Laurel,Hattiesburg-Laurel,exact,live-sports+madhive-export
+Helena,Helena,exact,live-sports+madhive-export
+Honolulu,Honolulu,exact,live-sports+madhive-export
+Houston,Houston,exact,live-sports+madhive-export+netflix-baseline
+Huntsville - Decatur (Florence),Huntsville-Decatur (Flor),auto,live-sports+madhive-export
+Idaho Falls - Pocatello,Idaho Fals-Pocatllo(Jcksn),curated,live-sports+madhive-export
+Indianapolis,Indianapolis,exact,live-sports+madhive-export
+"Jackson, MS","Jackson, MS",exact,live-sports+madhive-export
+"Jackson, TN","Jackson, TN",exact,live-sports+madhive-export
+"Jacksonville, Brunswick",Jacksonville,curated,live-sports+madhive-export
+Johnstown - Altoona,Johnstown-Altoona-St Colge,curated,live-sports+madhive-export
+Jonesboro,Jonesboro,exact,live-sports+madhive-export
+Joplin - Pittsburg,Joplin-Pittsburg,exact,live-sports+madhive-export
+Juneau,Juneau,exact,live-sports+madhive-export
+Kansas City,Kansas City,exact,live-sports+madhive-export
+Knoxville,Knoxville,exact,live-sports+madhive-export
+La Crosse - Eau Claire,La Crosse-Eau Claire,exact,live-sports+madhive-export
+"Lafayette, IN","Lafayette, IN",exact,live-sports+madhive-export
+"Lafayette, LA","Lafayette, LA",exact,live-sports+madhive-export
+Lake Charles,Lake Charles,exact,live-sports+madhive-export
+Lansing,Lansing,exact,live-sports+madhive-export
+Laredo,Laredo,exact,live-sports+madhive-export
+Las Vegas,Las Vegas,exact,live-sports+madhive-export+netflix-baseline
+Lexington,Lexington,exact,live-sports+madhive-export
+Lima,Lima,exact,live-sports+madhive-export
+Lincoln & Hastings - Kearney,Lincoln & Hastings-Krny,auto,live-sports+madhive-export
+Little Rock - Pine Bluff,Little Rock-Pine Bluff,exact,live-sports+madhive-export
+Los Angeles,Los Angeles,exact,live-sports+madhive-export+netflix-baseline
+Louisville,Louisville,exact,live-sports+madhive-export
+Lubbock,Lubbock,exact,live-sports+madhive-export
+Macon,Macon,exact,live-sports+madhive-export
+Madison,Madison,exact,live-sports+madhive-export
+Mankato,Mankato,exact,live-sports+madhive-export
+Marquette,Marquette,exact,live-sports+madhive-export
+Medford - Klamath Falls,Medford-Klamath Falls,exact,live-sports+madhive-export
+Memphis,Memphis,exact,live-sports+madhive-export
+Meridian,Meridian,exact,live-sports+madhive-export
+Miami - Fort Lauderdale,Miami-Ft. Lauderdale,exact,live-sports+madhive-export
+Milwaukee,Milwaukee,exact,live-sports+madhive-export
+Minneapolis - Saint Paul,Minneapolis-St. Paul,exact,live-sports+madhive-export
+Minot - Bismarck - Dickinson,Minot-Bsmrck-Dcknsn(Wlstn),curated,live-sports+madhive-export
+Missoula,Missoula,exact,live-sports+madhive-export
+Mobile - Pensacola (Fort Walton Beach),Mobile-Pensacola (Ft Walt),curated,live-sports+madhive-export
+Monroe - El Dorado,Monroe-El Dorado,exact,live-sports+madhive-export
+Monterey - Salinas,Monterey-Salinas,exact,live-sports+madhive-export
+Monterey-Salinas,Monterey-Salinas,exact,netflix-baseline
+Montgomery (Selma),Montgomery-Selma,exact,live-sports+madhive-export
+Florence - Myrtle Beach,Myrtle Beach-Florence,auto,live-sports+madhive-export
+Nashville,Nashville,exact,live-sports+madhive-export
+New Orleans,New Orleans,exact,live-sports+madhive-export
+New York,New York,exact,live-sports+madhive-export+netflix-baseline
+Norfolk - Portsmouth - Newport News,Norfolk-Portsmth-Newpt Nws,auto,live-sports+madhive-export
+North Platte,North Platte,exact,live-sports+madhive-export
+Odessa - Midland,Odessa-Midland,exact,live-sports+madhive-export
+Oklahoma City,Oklahoma City,exact,live-sports+madhive-export
+Omaha,Omaha,exact,live-sports+madhive-export
+Orlando - Daytona Beach - Melbourne,Orlando-Daytona Bch-Melbrn,auto,live-sports+madhive-export
+Orlando-Daytona BCH-Melbrn,Orlando-Daytona Bch-Melbrn,exact,netflix-baseline
+Ottumwa - Kirksville,Ottumwa-Kirksville,exact,live-sports+madhive-export
+Paducah - Cape Girardeau - Harrisburg - Mt Vernon,Paducah-Cape Girard-Harsbg,curated,live-sports+madhive-export
+Palm Springs,Palm Springs,exact,live-sports+madhive-export+netflix-baseline
+Panama City,Panama City,exact,live-sports+madhive-export
+Parkersburg,Parkersburg,exact,live-sports+madhive-export
+Peoria - Bloomington,Peoria-Bloomington,exact,live-sports+madhive-export
+Philadelphia,Philadelphia,exact,live-sports+madhive-export
+Phoenix,Phoenix (Prescott),curated,live-sports+madhive-export
+Phoenix (Prescott),Phoenix (Prescott),exact,netflix-baseline
+Pittsburgh,Pittsburgh,exact,live-sports+madhive-export
+"Portland, OR","Portland, OR",exact,live-sports+madhive-export
+Portland - Auburn,Portland-Auburn,exact,live-sports+madhive-export
+Presque Isle,Presque Isle,exact,live-sports+madhive-export
+Providence - New Bedford,Providence-New Bedford,exact,live-sports+madhive-export
+Quincy - Hannibal - Keokuk,Quincy-Hannibal-Keokuk,exact,live-sports+madhive-export
+Raleigh - Durham (Fayetteville),Raleigh-Durham (Fayetteville),exact,live-sports+madhive-export
+Rapid City,Rapid City,exact,live-sports+madhive-export
+Reno,Reno,exact,live-sports+madhive-export
+Richmond - Petersburg,Richmond-Petersburg,exact,live-sports+madhive-export
+Roanoke - Lynchburg,Roanoke-Lynchburg,exact,live-sports+madhive-export
+"Rochester, NY","Rochester, NY",exact,live-sports+madhive-export
+Rochester - Mason City - Austin,Rochestr-Mason City-Austin,auto,live-sports+madhive-export
+Rockford,Rockford,exact,live-sports+madhive-export
+Sacramento - Stockton - Modesto,Sacramento-Stockton-Modesto,exact,live-sports+madhive-export
+Sacramnto-Stkton-Modesto,Sacramento-Stockton-Modesto,auto,netflix-baseline
+Salisbury,Salisbury,exact,live-sports+madhive-export
+Salt Lake City,Salt Lake City,exact,live-sports+madhive-export
+San Angelo,San Angelo,exact,live-sports+madhive-export
+San Antonio,San Antonio,exact,live-sports+madhive-export
+San Diego,San Diego,exact,live-sports+madhive-export+netflix-baseline
+San Francisco - Oakland - San Jose,San Francisco-Oakland-San Jose,exact,live-sports+madhive-export
+Santa Barbara - Santa Maria - San Luis Obispo,Santa Barbra-Sntmra-Slobs,curated,live-sports+madhive-export
+Savannah,Savannah,exact,live-sports+madhive-export
+Seattle - Tacoma,Seattle-Tacoma,exact,live-sports+madhive-export
+"Sherman, TX - Ada, OK",Sherman-Ada,curated,live-sports+madhive-export
+Shreveport,Shreveport,exact,live-sports+madhive-export
+Sioux City,Sioux City,exact,live-sports+madhive-export
+Sioux Falls (Mitchell),Sioux Falls (Mitchell),exact,live-sports+madhive-export
+South Bend - Elkhart,South Bend-Elkhart,exact,live-sports+madhive-export
+Spokane,Spokane,exact,live-sports+madhive-export
+"Springfield, MO","Springfield, MO",exact,live-sports+madhive-export
+Springfield - Holyoke,Springfield-Holyoke,exact,live-sports+madhive-export
+Saint Joseph,St. Joseph,exact,live-sports+madhive-export
+Saint Louis,St. Louis,exact,live-sports+madhive-export
+Syracuse,Syracuse,exact,live-sports+madhive-export
+Tallahassee - Thomasville,Tallahassee-Thomasville,exact,live-sports+madhive-export
+Tampa - Saint Petersburg (Sarasota),Tampa-St. Pete (Sarasota),auto,live-sports+madhive-export
+Terre Haute,Terre Haute,exact,live-sports+madhive-export
+Toledo,Toledo,exact,live-sports+madhive-export
+Topeka,Topeka,exact,live-sports+madhive-export
+Traverse City - Cadillac,Traverse City-Cadillac,exact,live-sports+madhive-export
+"Tri-Cities, TN-VA","Tri-Cities, TN-VA",exact,live-sports+madhive-export
+Tucson (Sierra Vista),Tucson (Sierra Vista),exact,live-sports+madhive-export
+Tulsa,Tulsa,exact,live-sports+madhive-export
+Twin Falls,Twin Falls,exact,live-sports+madhive-export
+Tyler - Longview (Lufkin & Nacogdoches),Tyler-Longview(Lfkn&Ncgd),auto,live-sports+madhive-export
+Utica,Utica,exact,live-sports+madhive-export
+Victoria,Victoria,exact,live-sports+madhive-export
+Waco - Temple - Bryan,Waco-Temple-Bryan,exact,live-sports+madhive-export
+Washington DC (Hagerstown),"Washington, DC (Hagerstown)",exact,live-sports+madhive-export
+Washington DC (Hagrstwn),"Washington, DC (Hagerstown)",auto,netflix-baseline
+Watertown,Watertown,exact,live-sports+madhive-export
+Wausau - Rhinelander,Wausau-Rhinelander,exact,live-sports+madhive-export
+West Palm Beach - Fort Pierce,West Palm Beach-Ft. Pierce,exact,live-sports+madhive-export
+Wheeling - Steubenville,Wheeling-Steubenville,exact,live-sports+madhive-export
+Wichita Falls & Lawton,Wichita Falls & Lawton,exact,live-sports+madhive-export
+Wichita - Hutchinson,Wichita-Hutchinson Plus,curated,live-sports+madhive-export
+Wilkes Barre - Scranton,Wilkes Barre-Scranton-Hztn,curated,live-sports+madhive-export
+Wilmington,Wilmington,exact,live-sports+madhive-export
+Yakima - Pasco - Richland - Kennewick,Yakima-Pasco-Rchlnd-Knnwck,auto,live-sports+madhive-export
+Youngstown,Youngstown,exact,live-sports+madhive-export
+Yuma - El Centro,Yuma-El Centro,exact,live-sports+madhive-export
+Yuma-El Centro,Yuma-El Centro,exact,netflix-baseline
+Zanesville,Zanesville,exact,live-sports+madhive-export

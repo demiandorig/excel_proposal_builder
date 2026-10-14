@@ -57,7 +57,7 @@ def test_every_catalog_description_loses_the_tail_and_nothing_else():
 
 def test_a_clean_short_blurb_passes_through_untouched():
     text = "Banner ads shown across a network of websites and apps, retargeting shoppers as they browse."
-    assert _tighten_blurb(text, "eDigital Network Display - Standard IAB") == text
+    assert _tighten_blurb(text, "eDigital Display") == text
 
 
 @pytest.mark.parametrize("bad", [
@@ -163,7 +163,7 @@ def test_parse_response_applies_the_tightening_to_every_blurb():
     raw = json.dumps({
         "campaign_name": "Fall Push",
         "product_blurbs": [
-            {"product_name": "eDigital Network Display - Standard IAB",
+            {"product_name": "eDigital Display",
              "blurb": "Banner ads across a network of sites. This is the Hispanic-focused version of the product."},
             {"product_name": "AudioEngage", "blurb": "Runs on Spanish-language sites."},
         ],
@@ -173,7 +173,7 @@ def test_parse_response_applies_the_tightening_to_every_blurb():
     req = ProposalRequest(client_name="Acme")
     out = ai_enricher._parse_response(raw, req, [])
     by = {b.product_name: b.blurb for b in out.product_blurbs}
-    assert by["eDigital Network Display - Standard IAB"] == "Banner ads across a network of sites."
+    assert by["eDigital Display"] == "Banner ads across a network of sites."
     assert by["AudioEngage"] == ""
 
 

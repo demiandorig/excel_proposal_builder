@@ -40,13 +40,18 @@ remember to use area_population.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from app.data.constanza import PlatformFigures, load_dma_reference, load_platform_dma, load_hispanic_pct_by_state
+from app.services import forecast_store
 from app.services.constanza_forecast_map import (
     DEFAULT_HISPANIC_PRODUCTS, DEFAULT_PLATFORM_PRODUCTS, ForecastConfig, resolve_forecast,
 )
 from app.services.constanza_geo import GeoResolution, ResolvedArea
+from app.services.forecast_import import geo_reference
+
+log = logging.getLogger(__name__)
 
 # The BUILT-IN mapping of catalog products to the workbook's platform data, and the Hispanic-weighted set, now live in
 # constanza_forecast_map.py as the DEFAULTS of Admin -> Forecast (an admin can override any product there). They are
@@ -57,6 +62,9 @@ HISPANIC_TARGETED_PRODUCTS = DEFAULT_HISPANIC_PRODUCTS
 
 LOW_MULT = 0.7
 HIGH_MULT = 1.3
+# A market a series EXTENDED from a sample (Netflix) is less certain than one the source reported: a wider planning range.
+EXTENDED_BAND = (0.55, 1.45)
+WEEKS_PER_MONTH = 365.25 / 12 / 7
 
 
 @dataclass
@@ -96,6 +104,9 @@ class AvailsEstimate:
     est_uniques: float | None
     by_area: list[AreaEstimate] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Where the numbers came from (forecast_store.SeriesRef.to_public()): series, version, data basis, unit, period.
+    series: dict | None = None
+    weeks: float | None = None
 
 
 def _area_weights(areas: list[ResolvedArea], trait: str | None = None) -> list[float]:
@@ -130,8 +141,31 @@ def _area_weights(areas: list[ResolvedArea], trait: str | None = None) -> list[f
 
 def estimate_platform_modeled(
     product_name: str, platform: str, geo: GeoResolution, months: int, hispanic_weighted: bool | None = None,
+    flight_days: float | None = None, relation: str = "primary", link_note: str | None = None,
+) -> AvailsEstimate | None:
+    """`hispanic_weighted` is the product's effective config (Admin -> Forecast); None = the built-in default for the name.
+
+    `platform` is a series key. The series is read from Postgres (forecast_store); when the database can't be reached,
+    the original model workbook's bundled figures still answer for the seven legacy series, and any other series
+    returns None (the caller falls back to the population-share estimate)."""
+    series = forecast_store.series_by_key(platform)
+    if series is not None and relation != "primary":
+        series = series.with_link(relation, link_note or series.link_note)   # the "baseline for a targeted product" caveat
+    if series is not None:
+        try:
+            return estimate_from_series(
+                product_name, series, geo, months, hispanic_weighted=bool(hispanic_weighted), flight_days=flight_days)
+        except Exception as exc:  # noqa: BLE001 - a read error mid-estimate must not become a 500
+            log.warning("forecast series %s could not be read (%s: %s)", platform, type(exc).__name__, exc)
+    if platform not in load_platform_dma():
+        return None
+    return _estimate_from_bundle(product_name, platform, geo, months, hispanic_weighted)
+
+
+def _estimate_from_bundle(
+    product_name: str, platform: str, geo: GeoResolution, months: int, hispanic_weighted: bool | None = None,
 ) -> AvailsEstimate:
-    """`hispanic_weighted` is the product's effective config (Admin -> Forecast); None = the built-in default for the name."""
+    """The Phase 1/2 path over app/data/constanza/platform_dma.json (the offline fallback)."""
     figures_by_dma = load_platform_dma().get(platform, {})
     notes: list[str] = []
 
@@ -199,6 +233,186 @@ def estimate_platform_modeled(
     )
 
 
+def _series_notes(series: "forecast_store.SeriesRef", weeks: float | None, modeled_areas: int, total_areas: int) -> list[str]:
+    notes: list[str] = []
+    basis = series.data_basis
+    if basis == "extrapolated" and modeled_areas == 0:
+        basis = "platform_reported"          # every market in THIS answer is one the platform reported: nothing was extended
+    if basis == "platform_reported":
+        when = f", exported {series.exported_on}" if series.exported_on else ""
+        notes.append(f"Platform-reported avails ({series.title}, v{series.version}{when}). Rows are rounded by the platform; "
+                     "a ZIP or district with no row has no avails at the export's reporting floor (about 180 a month).")
+    elif basis == "extrapolated":
+        notes.append(f"{series.title}: the platform reported a sample of markets and the rest are EXTENDED from the Entravision+ Connect "
+                     f"market distribution ({modeled_areas} of {total_areas} resolved areas are extended; planning range is wider for those).")
+    elif basis == "modeled":
+        notes.append(f"Estimates from the Entravision model for this series ({series.title}, v{series.version}), not platform-reported avails.")
+    if series.avails_unit == "weekly":
+        window = f" for {series.period_label}" if series.period_label else ""
+        weeks_txt = f" This flight is about {weeks:.1f} weeks; " if weeks else " "
+        notes.append(f"Live-sports figures are WEEKLY estimates{window}.{weeks_txt}the flight dates are not checked against that window "
+                     "(seasons repeat each year), so confirm the games fall inside the flight.")
+    if series.relation == "baseline_proxy":
+        notes.append(series.link_note or "This product uses another product's avails as its baseline; its own targeting delivers fewer impressions.")
+    return notes
+
+
+def _state_scales(series: "forecast_store.SeriesRef", geo: GeoResolution, dmas: dict, factor: float) -> tuple[dict[str, float], list[str]]:
+    """For each state requested as a whole and covered by a state row of the series: the factor that makes its home-state
+    markets add up to the platform's own state total. A state is more than the markets homed in it (Wyoming's own row is
+    nearly twice what its two markets hold: the rest is served from Denver, Billings and Salt Lake City), so summing the
+    markets alone would understate it. Returns ({state: factor}, notes); empty when the series has no state rows."""
+    if not geo.whole_states or "state" not in series.levels:
+        return {}, []
+    try:
+        rows = forecast_store.state_rows(series.series_id, geo.whole_states)
+    except Exception:  # noqa: BLE001 - the market rows still answer
+        return {}, []
+    usable = [st for st in geo.whole_states if rows.get(st) is not None and rows[st].avails]
+    if not usable:
+        return {}, []
+    # A state's total already holds the households inside it that are served from markets homed elsewhere. Scaling the home
+    # markets up to it is sound only when the request is those states and nothing else: any other market, ZIP or county in the
+    # request could overlap that part and count it twice, so nothing is scaled then.
+    homed = set(geo.whole_states)
+    outside = [a.label or a.dma or "?" for a in geo.areas if not (a.source_type == "dma" and a.state in homed)]
+    if outside:
+        shown = ", ".join(outside[:4]) + (f" and {len(outside) - 4} more" if len(outside) > 4 else "")
+        return {}, [f"The platform's own state totals ({', '.join(usable)}) were not used because the request also names areas outside "
+                    f"the whole states asked for ({shown}): a state total includes households served from other markets, so mixing it "
+                    "with those areas could count some twice. Each market is counted as the platform reports it."]
+    scale: dict[str, float] = {}
+    said: list[str] = []
+    for st in geo.whole_states:
+        row = rows.get(st)
+        if row is None or not row.avails:
+            continue
+        home = 0.0
+        for a in geo.areas:
+            if a.source_type == "dma" and a.state == st and a.dma:
+                key = geo_reference.dma_key_for_label(a.dma)
+                dma_row = dmas.get(key) if key else None
+                if dma_row is not None:
+                    home += dma_row.avails * a.dma_share
+        if home > 0:
+            scale[st] = row.avails / home
+            if abs(scale[st] - 1.0) >= 0.02:
+                said.append(f"{st}: the platform's own state total is {row.avails * factor:,.0f} against {home * factor:,.0f} in the markets homed there "
+                            f"(x{scale[st]:.2f})")
+    notes = []
+    if said:
+        notes.append("Whole-state requests use the platform's own state totals, which include the parts of a state served from markets "
+                     "homed elsewhere, so each home-state market is scaled to match - " + "; ".join(said) + ".")
+    return scale, notes
+
+
+def estimate_from_series(
+    product_name: str, series: "forecast_store.SeriesRef", geo: GeoResolution, months: int,
+    hispanic_weighted: bool = False, flight_days: float | None = None,
+) -> AvailsEstimate:
+    """The estimate for a product whose avails live in a published series version.
+
+    Per resolved area the most direct row wins: a ZIP area uses the series' own ZIP row, a congressional-district area
+    its district row, a whole-DMA area its DMA row. Anything finer or odd (county, city) is its parent DMA's row times
+    the area's population share, as before. Only the rows needed are read from the database."""
+    sid = series.series_id
+    weekly = series.avails_unit == "weekly"
+    weeks = (flight_days / 7.0) if (weekly and flight_days) else (months * WEEKS_PER_MONTH if weekly else None)
+    factor = weeks if weekly else float(months)
+
+    zip_ids = [a.geo_id for a in geo.areas if a.source_type == "zip" and a.geo_id] if "zip" in series.levels else []
+    cd_for = {id(a): geo_reference.cd_key_from_geoid(a.geo_id) for a in geo.areas
+              if a.source_type == "congressional_district" and a.geo_id} if "cd" in series.levels else {}
+    zips = forecast_store.zip_rows(sid, zip_ids) if zip_ids else {}
+    cds = forecast_store.cd_rows(sid, [k for k in cd_for.values() if k]) if cd_for else {}
+    dmas = forecast_store.dma_table(sid)
+
+    state_scale, state_notes = _state_scales(series, geo, dmas, factor)
+    weights = _area_weights(geo.areas, trait="hispanic" if hispanic_weighted else None)
+    by_area: list[AreaEstimate] = []
+    notes: list[str] = []
+    imps_low = imps_mid = imps_high = 0.0
+    uniques_total = 0.0
+    uniques_known = False
+    no_row: list[str] = []
+    modeled_areas = 0
+    for area, weight in zip(geo.areas, weights):
+        if area.dma is None:
+            continue
+        row = None
+        share = 1.0
+        if area.source_type == "zip" and area.geo_id and "zip" in series.levels:
+            row = zips.get(area.geo_id)
+            if row is None:
+                no_row.append(f"ZIP {area.geo_id}")
+        elif area.source_type == "congressional_district" and cd_for.get(id(area)):
+            row = cds.get(cd_for[id(area)])
+            if row is None:
+                no_row.append(area.label or cd_for[id(area)])
+        else:
+            key = geo_reference.dma_key_for_label(area.dma)
+            row = dmas.get(key) if key else None
+            share = area.dma_share
+            if row is None:
+                no_row.append(area.dma)
+        if row is None:
+            area_low = area_mid = area_high = 0.0
+            area_uniques = area_hh = None
+        else:
+            if row.avails_low is not None and row.avails_high is not None:
+                lo_mult = row.avails_low / row.avails if row.avails else series.band_low
+                hi_mult = row.avails_high / row.avails if row.avails else series.band_high
+            elif series.data_basis == "extrapolated" and row.basis == "modeled":
+                lo_mult, hi_mult = EXTENDED_BAND
+            else:
+                lo_mult, hi_mult = series.band_low, series.band_high
+            if row.basis == "modeled" and series.data_basis == "extrapolated":
+                modeled_areas += 1
+            # A market homed in a state the planner asked for whole is scaled so the markets add up to the platform's own
+            # state total (only DMA-typed areas carry whole-state requests; a ZIP / county / city is never scaled).
+            scale = state_scale.get(area.state, 1.0) if area.source_type == "dma" else 1.0
+            area_mid = row.avails * factor * share * scale
+            area_low, area_high = area_mid * lo_mult, area_mid * hi_mult
+            # reach is a per-month concept, not cumulative (the model workbook never multiplied it by months either)
+            area_uniques = row.est_reach * share * scale if row.est_reach is not None else None
+            area_hh = row.unique_hh * share * scale if row.unique_hh is not None else None
+        imps_low += area_low
+        imps_mid += area_mid
+        imps_high += area_high
+        if area_uniques is not None:
+            uniques_total += area_uniques
+            uniques_known = True
+        by_area.append(AreaEstimate(
+            area_label=area.label or area.dma, dma=area.dma, weight=weight,
+            imps_low=area_low, imps_mid=area_mid, imps_high=area_high,
+            unique_viewers=area_uniques, unique_hh=area_hh,
+            area_population=area.area_population, source_type=area.source_type,
+            apportionment=area.apportionment, state=area.state, geo_id=area.geo_id,
+        ))
+
+    notes.extend(_series_notes(series, weeks, modeled_areas, len(by_area)))
+    notes.extend(state_notes)
+    if no_row:
+        shown = ", ".join(no_row[:6]) + (f" and {len(no_row) - 6} more" if len(no_row) > 6 else "")
+        notes.append(f"No avails in this series for: {shown} (counted as zero).")
+    if hispanic_weighted:
+        notes.append("The by-area share column is weighted by state-level Hispanic population % (a proxy); the impressions come from the series itself.")
+    if geo.method == "national" and "dma" in series.levels:
+        try:
+            unplaced = forecast_store.unknown_share(sid).get("dma")
+        except Exception:  # noqa: BLE001
+            unplaced = None
+        if unplaced and imps_mid:
+            notes.append(f"A national total excludes avails the platform could not place in a market (about {unplaced / (unplaced + imps_mid / factor):.1%}).")
+    return AvailsEstimate(
+        product_name=product_name, platform=series.series_key, confidence="platform_modeled",
+        geo_method=geo.method, geo_confidence=geo.geo_confidence, months=months,
+        imps_low=imps_low, imps_mid=imps_mid, imps_high=imps_high,
+        est_uniques=uniques_total if uniques_known else None, by_area=by_area, notes=notes,
+        series=series.to_public(), weeks=weeks,
+    )
+
+
 def estimate_generic_population(
     product_name: str, geo: GeoResolution, months: int, national_monthly_total: float,
     platform_modeled: bool | None = None,
@@ -259,21 +473,27 @@ def estimate_avails(
     product_name: str, geo: GeoResolution, months: int = 1,
     national_monthly_total: float | None = None,
     config: ForecastConfig | None = None,
+    flight_days: float | None = None,
 ) -> AvailsEstimate | None:
     """Entry point: routes to the platform-modeled or generic-fallback
     estimator by the product's forecast config — its Admin -> Forecast row if
-    it has one, else the built-in default for its name (see
+    it has one, else the default for its name (see
     constanza_forecast_map.resolve_forecast); `config` lets a caller that has
-    already resolved it pass it in. Returns None only when the
-    generic fallback would apply but no `national_monthly_total` was
-    given (nothing to apportion). A country-level (non-US) resolution
-    always routes to the generic fallback — no platform ever has
-    DMA-style bundled data outside the US."""
+    already resolved it pass it in. `flight_days` (optional) lets a weekly
+    series (live sports) use the line's real length instead of months x 4.35.
+    Returns None only when the generic fallback would apply but no
+    `national_monthly_total` was given (nothing to apportion). A country-level
+    (non-US) resolution always routes to the generic fallback — no platform
+    ever has DMA-style data outside the US."""
     cfg = config or resolve_forecast(product_name)
     platform = cfg.platform if cfg.method == "platform" else None
     is_international = geo.geo_confidence == "low_confidence_international"
     if platform and not is_international:
-        return estimate_platform_modeled(product_name, platform, geo, months, hispanic_weighted=cfg.hispanic_weighted)
+        est = estimate_platform_modeled(
+            product_name, platform, geo, months, hispanic_weighted=cfg.hispanic_weighted, flight_days=flight_days,
+            relation=cfg.relation, link_note=cfg.link_note)
+        if est is not None:
+            return est
     if national_monthly_total is None:
         return None
     return estimate_generic_population(product_name, geo, months, national_monthly_total, platform_modeled=bool(platform))
