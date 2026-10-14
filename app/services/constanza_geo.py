@@ -23,6 +23,8 @@ DMA/state matching untouched and dispatches to those for everything else.
 """
 from __future__ import annotations
 
+import contextvars
+import dataclasses
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -285,14 +287,33 @@ def _dma_area(d: DMA) -> ResolvedArea:
     )
 
 
+_MIN_TOWN_FOR_A_STATES_NAME = 5000      # "Washington, PA" (13,000) is a town; "Kansas, OK" (a few hundred) is two states
+
+
 def _is_place_in_state(prev: dict, state: str, state_token: str) -> bool:
     """A name that matched no market in `state`: is it a real city / town there? Then "Name, ST" is that place. When the
-    name is itself a state's name ("Washington", "Indiana"), only a two-letter code after it counts ("Washington, PA"):
-    "Washington, Oregon" stays two states."""
-    if prev["is_state"] and not (len(state_token) == 2 and state_token.isupper()):
-        return False
+    name is itself a state's name ("Washington", "Indiana"), only a two-letter code after it counts ("Washington, PA") and
+    only a town of some size: "Washington, Oregon" and "Kansas, OK" stay two states."""
     from app.services import constanza_geo_crosswalk
+    if prev["is_state"]:
+        if not (len(state_token) == 2 and state_token.isupper()):
+            return False
+        return constanza_geo_crosswalk.place_in_state(prev["token"], state, _MIN_TOWN_FOR_A_STATES_NAME)
     return constanza_geo_crosswalk.place_in_state(prev["token"], state)
+
+
+def _state_pair_alternative(item: str, res: "GeoResolution") -> dict | None:
+    """"Delaware, OH" resolved as the TOWN: offer the other reading, the two states, so the planner can switch."""
+    m = re.match(r"^\s*([A-Za-z][A-Za-z .]*?)\s*,\s*([A-Z]{2})\s*$", item)
+    if not m or res.method != "city":
+        return None
+    first = _match_state(m.group(1))
+    second = m.group(2)
+    if not first or second not in _VALID_STATE_ABBR or first == second:
+        return None
+    return {"kind": "did_you_mean", "label": f"The states {_state_display_name(first)} and {_state_display_name(second)}",
+            "geo_type": "state", "resolve_hint": f"{first}; {second}", "state": None, "population": 0,
+            "why": f"read as the town of {item}; these are the two states instead", "replaces": item}
 
 
 def _dma_from_alias(text: str, dmas: list) -> DMA | None:
@@ -627,7 +648,32 @@ _MAX_ITEM_CHARS = 200     # no real place name is longer; bounds the regex work 
 _MAX_ITEMS = 300
 
 
+_MEMO: contextvars.ContextVar = contextvars.ContextVar("constanza_geo_memo", default=None)
+
+
+def _clone(res: GeoResolution) -> GeoResolution:
+    """A copy the caller may change (interpretations, suggestions, input_text are all edited after resolving)."""
+    return dataclasses.replace(
+        res, areas=list(res.areas), unmatched_tokens=list(res.unmatched_tokens),
+        ambiguous=[{**e, "candidates": [dict(c) for c in e.get("candidates", [])]} for e in res.ambiguous],
+        unmatched_details=[dict(d) for d in res.unmatched_details], notes=list(res.notes),
+        interpretations=[dict(i) for i in res.interpretations], suggestions=[dict(sg) for sg in res.suggestions],
+        whole_states=list(res.whole_states))
+
+
 def _resolve_single(text: str, hint: str | None) -> GeoResolution:
+    """Within one resolve_geo call the same text resolves once (a list item is looked at several times: the strict pass, the
+    state probe, the list reading); each caller gets its own copy."""
+    memo = _MEMO.get()
+    if memo is None:
+        return _resolve_single_uncached(text, hint)
+    key = (text, hint)
+    if key not in memo:
+        memo[key] = _resolve_single_uncached(text, hint)
+    return _clone(memo[key])
+
+
+def _resolve_single_uncached(text: str, hint: str | None) -> GeoResolution:
     if len(text) > _MAX_ITEM_CHARS:
         res = GeoResolution(input_text=text[:60] + "…", method="unresolved", areas=[], unmatched_tokens=[text[:60] + "…"], geo_confidence="unresolved")
         res.unmatched_details = [{"input": res.unmatched_tokens[0], "reason": f"That entry is too long to be a place name (over {_MAX_ITEM_CHARS} characters)."}]
@@ -698,6 +744,14 @@ def resolve_geo(geo_text: str | None, geo_type_hint: str | None = None) -> GeoRe
     and the results are merged: every item either contributes areas or is
     reported back (unmatched / ambiguous) — nothing is silently dropped.
     """
+    token = _MEMO.set({})
+    try:
+        return _resolve_geo(geo_text, geo_type_hint)
+    finally:
+        _MEMO.reset(token)
+
+
+def _resolve_geo(geo_text: str | None, geo_type_hint: str | None) -> GeoResolution:
     text = _DOTTED_DC_RE.sub("DC", (geo_text or "").strip())       # "Washington, D.C." is Washington, DC
     hint = geo_type_hint if geo_type_hint in _TYPED_HINTS else None
     from app.services import constanza_geo_text as gtext
@@ -737,6 +791,9 @@ def _resolve_item(item: str, hint: str | None, allow_split: bool = True, context
     res = _resolve_single(item, hint)
     if len(item) > _MAX_ITEM_CHARS:
         return res
+    alt = _state_pair_alternative(item, res)
+    if alt:
+        res.suggestions.append(alt)
     ctx = (context or {}).get(item)
     if ctx:
         done = _resolve_container(item, hint, res, ctx)
@@ -793,16 +850,21 @@ def _resolve_as_list(item: str, hint: str | None, res: GeoResolution, context: d
     if len(pieces) < 2:
         return None
     why = "read as a list of places"
-    if re.search(r"\bor\b", item, re.IGNORECASE):
+    if gtext.OR_WORD_RE.search(item):
         why += " ('or' is read like 'and': the places are added together, since Constanza cannot choose between them)"
     state = gtext.shared_trailing_state(pieces)
     if state:
         shared = []
         for p in pieces[:-1]:
+            if _resolve_single(p, hint).areas:
+                shared.append(p)                 # "Chicago" is the Chicago market already: "Chicago, IN" would add all of Indiana
+                continue
             qualified = f"{p}, {state}"
-            shared.append(qualified if _resolve_single(qualified, hint).areas else p)
+            q = _resolve_single(qualified, hint)
+            shared.append(qualified if q.areas and not q.whole_states else p)
         pieces = shared + [pieces[-1]]
-        why += f"; the state at the end ({state}) applies to each place that exists there"
+        if pieces[:-1] != gtext.split_conjunctions(item)[:-1]:
+            why += f"; the state at the end ({state}) applies to each place that needs one"
     merged = _merge_resolutions(item, [_resolve_item(p, hint, allow_split=False, context=context) for p in pieces])
     if not merged.areas:
         return None
@@ -830,12 +892,38 @@ def _resolve_container(item: str, hint: str | None, res: GeoResolution, ctx: dic
             cres = _resolve_single(cand["resolve_hint"], hint)
             if cres.areas and {a.dma for a in cres.areas if a.dma} & inner_dmas:
                 kept.append((cand, cres))
+        in_market = [c for c, _ in kept]
+        how = f"the one in the same TV market as {inner}"
+        # A county that is smaller than the place named beside it is not the one meant ("Kansas City, MO" has ten times the
+        # people of Johnson County, MO; the Johnson County around it is the Kansas one). The place is read as the CITY here: by
+        # default "Kansas City, MO" is the whole market.
+        if len(kept) > 1:
+            city = _resolve_single(inner, "city")
+            sized = city.areas or (inner_res.areas if all(a.source_type in ("city", "zip", "county") for a in inner_res.areas) else [])
+            inner_pop = sum(a.area_population for a in sized)
+            if inner_pop:
+                roomy = [(c, r) for c, r in kept if sum(a.area_population for a in r.areas) >= inner_pop]
+                if roomy and len(roomy) < len(kept):
+                    kept, how = roomy, f"the one in the same TV market as {inner} that is big enough to surround it"
+        # ... and when the place was typed WITH its state ("Overland Park, KS"), the county in that state is the one meant.
+        if len(kept) > 1:
+            from app.services import constanza_geo_text as gtext
+            typed_state = gtext._trailing_state_abbr(inner) or (gtext.split_trailing_state(inner) or (None, None, None))[1]
+            same = [(c, r) for c, r in kept if typed_state and {a.state for a in r.areas} == {typed_state}]
+            if len(same) == 1:
+                kept, how = same, f"the one in {typed_state}, the state typed with {inner}"
         if len(kept) == 1:
             cand, cres = kept[0]
             cres.input_text = item
-            cres.interpretations.append({
-                "input": item, "became": cand["label"],
-                "why": f"'{item}' exists in {len(entry['candidates'])} places; {cand['label']} is the one in the same TV market as {inner}"})
+            cres.interpretations.append({"input": item, "became": cand["label"],
+                                         "why": f"'{item}' exists in {len(entry['candidates'])} places; {cand['label']} is {how}"})
+            if len(in_market) > 1:
+                # chosen by size or by the typed state, not because it was the only one nearby: put the others one click away
+                for other in in_market:
+                    if other["label"] != cand["label"]:
+                        cres.suggestions.append({"kind": "did_you_mean", "label": other["label"], "geo_type": other["geo_type"],
+                                                 "resolve_hint": other["resolve_hint"], "state": other.get("state"), "population": 0,
+                                                 "why": f"the other {item.rsplit(' in ', 1)[-1]} near {inner}", "replaces": item})
             return cres
         if len(kept) > 1:
             return GeoResolution(

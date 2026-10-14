@@ -246,6 +246,33 @@ def test_a_whole_state_uses_the_platforms_own_state_total_not_just_the_markets_h
     assert one_county.imps_mid < 1000.0 and not any("state totals" in n for n in one_county.notes)
 
 
+def test_a_whole_state_is_never_mixed_with_areas_outside_it(fake):
+    """The state total already holds the households inside the state that other markets serve. Scaling Wyoming up to it and
+    then adding Denver (or a county Denver serves) counted those households twice."""
+    fake.series["s"] = ref("s", 1, levels=("dma", "state"))
+    fake.dmas[1] = uniform_dmas(1000.0)
+    fake.states[(1, "WY")] = store.Row("WY", 3800.0)
+    for text in ("WY; Denver", "Wyoming and Albany County, WY", "WY; Sheridan County, MT"):
+        est = estimate("P", text, config=cfg("s"))
+        home = [a for a in est.by_area if a.dma in ("Cheyenne-Scottsbluff", "Casper-Riverton") and a.source_type == "dma"]
+        assert [a.imps_mid for a in home] == [pytest.approx(1000.0)] * 2, (text, [a.imps_mid for a in home])   # unscaled
+        note = next(n for n in est.notes if "were not used" in n)
+        assert "WY" in note and "count some twice" in note, (text, note)
+    assert estimate("P", "WY; Denver", config=cfg("s")).imps_mid == pytest.approx(3000.0)
+
+
+def test_several_whole_states_are_each_scaled_to_their_own_total(fake):
+    fake.series["s"] = ref("s", 1, levels=("dma", "state"))
+    fake.dmas[1] = uniform_dmas(1000.0)
+    fake.states[(1, "WY")] = store.Row("WY", 3800.0)
+    fake.states[(1, "MT")] = store.Row("MT", 6000.0)                          # four home markets hold 4,000
+    est = estimate("P", "WY, MT", config=cfg("s"))
+    assert est.imps_mid == pytest.approx(3800.0 + 6000.0)
+    assert not any("were not used" in n for n in est.notes)
+    zip_inside = estimate("P", "Wyoming; 82001", config=cfg("s"))             # a ZIP in a home market is part of the state's own markets
+    assert zip_inside.imps_mid == pytest.approx(3800.0)
+
+
 def test_a_state_without_its_own_row_or_a_series_without_state_rows_keeps_the_market_sum(fake):
     fake.series["s"] = ref("s", 1, levels=("dma", "state"))
     fake.series["t"] = ref("t", 2)                                         # no state level at all

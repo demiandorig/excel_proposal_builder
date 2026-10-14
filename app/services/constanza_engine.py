@@ -268,6 +268,19 @@ def _state_scales(series: "forecast_store.SeriesRef", geo: GeoResolution, dmas: 
         rows = forecast_store.state_rows(series.series_id, geo.whole_states)
     except Exception:  # noqa: BLE001 - the market rows still answer
         return {}, []
+    usable = [st for st in geo.whole_states if rows.get(st) is not None and rows[st].avails]
+    if not usable:
+        return {}, []
+    # A state's total already holds the households inside it that are served from markets homed elsewhere. Scaling the home
+    # markets up to it is sound only when the request is those states and nothing else: any other market, ZIP or county in the
+    # request could overlap that part and count it twice, so nothing is scaled then.
+    homed = set(geo.whole_states)
+    outside = [a.label or a.dma or "?" for a in geo.areas if not (a.source_type == "dma" and a.state in homed)]
+    if outside:
+        shown = ", ".join(outside[:4]) + (f" and {len(outside) - 4} more" if len(outside) > 4 else "")
+        return {}, [f"The platform's own state totals ({', '.join(usable)}) were not used because the request also names areas outside "
+                    f"the whole states asked for ({shown}): a state total includes households served from other markets, so mixing it "
+                    "with those areas could count some twice. Each market is counted as the platform reports it."]
     scale: dict[str, float] = {}
     said: list[str] = []
     for st in geo.whole_states:

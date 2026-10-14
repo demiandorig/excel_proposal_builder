@@ -219,6 +219,22 @@ def test_notes_that_repeat_the_unmatched_warning_are_not_shown_twice():
     ("Springfield Gardens, NY; Springfield", ["Springfield"], "Springfield Gardens, NY"),
     ("Adams County, WA, Othello, WA", ["Othello, WA"], "Adams County, WA"),
     ("Spokane and Othello, WA or Pasco, WA", ["Othello, WA"], "Spokane or Pasco, WA"),
+    # a state code that spells a word is a state code: OR is Oregon, in any case
+    ("Portland, OR; Seattle, WA", ["Seattle, WA"], "Portland, OR"),
+    ("Seattle, WA; Portland, OR", ["Seattle, WA"], "Portland, OR"),
+    ("Portland, OR; Salem, OR", ["Salem, OR"], "Portland, OR"),
+    ("Beaverton, OR and Hillsboro, OR", ["Hillsboro, OR"], "Beaverton, OR"),
+    ("Beaverton, OR and Hillsboro, OR", ["Beaverton, OR"], "Hillsboro, OR"),
+    ("portland, or; salem, or", ["salem, or"], "portland, or"),
+    ("Multnomah County, OR; Washington County, OR; Linn County, OR", ["Washington County, OR"], "Multnomah County, OR; Linn County, OR"),
+    # the separator goes with the item, wherever the item stands
+    ("Dallas, Houston, or Austin", ["Austin"], "Dallas, Houston"),
+    ("Dallas, Houston, or Austin", ["Houston"], "Dallas, or Austin"),
+    ("Dallas and Houston", ["Dallas"], "Houston"),
+    ("Dallas or Houston or Austin", ["Houston"], "Dallas or Austin"),
+    ("Dallas plus Houston", ["Houston"], "Dallas"),
+    ("Dallas AND Houston", ["Houston"], "Dallas"),
+    ("Dallas; Houston & Austin", ["Dallas"], "Houston & Austin"),
 ])
 def test_dropping_items_matches_whole_items_never_substrings(text, drop, expected):
     assert run(f"return JSON.stringify(P.removeGeoItems({json.dumps(text)}, {json.dumps(drop)}));") == expected
@@ -232,6 +248,10 @@ def test_dropping_items_matches_whole_items_never_substrings(text, drop, expecte
     ("Plano, TX; Travus County, TX", "Travus Co., TX", "Travis County, TX", "Plano, TX; Travus County, TX; Travis County, TX"),   # not found: the list is kept
     ("Plano, TX; Travis County, TX", "Travus Co., TX", "Travis County, TX", "Plano, TX; Travis County, TX"),       # ... and never duplicated
     ("Adams Count", "Something else", "Adams County, WA", "Adams County, WA"),                                    # a single typed item is the item
+    ("Portland, OR", "Portlnd, OR", "Portland, OR", "Portland, OR"),                                              # OR is Oregon: one place, not a list
+    ("Dallas, Houston", "Travus Co., TX", "Travis County, TX", "Dallas, Houston; Travis County, TX"),             # one comma, no state after it: a list
+    ("Othello, WA", "Othelo, WA", "Othello, WA", "Othello, WA"),
+    ("Adams County, Washington", "Adams Cty", "Adams County, WA", "Adams County, WA"),
 ])
 def test_replacing_an_item_never_wipes_the_rest_of_the_list(text, item, replacement, expected):
     assert run(f"return JSON.stringify(P.replaceItem({json.dumps(text)}, {json.dumps(item)}, {json.dumps(replacement)}));") == expected
@@ -317,3 +337,54 @@ def test_picking_the_right_county_replaces_the_whole_phrase_it_was_read_from_and
     text = "Dallas; Kansas City, MO and surrounding areas in Johnson County; Austin"
     out = run(f"return JSON.stringify(P.replaceItem({json.dumps(text)}, 'Kansas City, MO and surrounding areas in Johnson County', 'Johnson County, KS'));")
     assert out == "Dallas; Johnson County, KS; Austin"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Dallas", False), ("Othello, WA", False), ("Portland, OR", False), ("portland, or", False), ("Adams County, Washington", False),
+    ("Washington, Oregon", False), ("New York, NY", False), ("Kansas City, MO", False), ("90210", False),
+    ("Dallas, Houston", True), ("90210, 94105", True), ("Dallas and Houston", True), ("Dallas or Houston", True), ("Dallas AND Houston", True),
+    ("Dallas; Houston", True), ("Plano, TX, Frisco, TX", True), ("Dallas\nHouston", True), ("Beaverton, OR and Hillsboro, OR", True),
+])
+def test_text_is_a_list_when_it_names_more_than_one_place(text, expected):
+    """'OR' after a comma is Oregon and 'Dallas, Houston' is two places: the old test had both backwards."""
+    assert run(f"return JSON.stringify(P.looksLikeList({json.dumps(text)}));") is expected
+
+
+def test_tidying_a_list_never_takes_a_state_code_for_a_word():
+    out = run("""return JSON.stringify([P.tidyList("Portland, OR"), P.tidyList("Portland, OR;"), P.tidyList("; ; Portland, OR , ;"),
+        P.tidyList("Beaverton, OR; ; Salem, OR"), P.tidyList("Dallas and Houston")]);""")
+    assert out == ["Portland, OR", "Portland, OR", "Portland, OR", "Beaverton, OR; Salem, OR", "Dallas and Houston"]
+
+
+def _stale_run(steps: str):
+    """Drives markStale() against a one-element fake page: the banner is a node that can be inserted and removed."""
+    return run("""
+        var banner = null, inserted = 0;
+        var box = { querySelector: function () { return banner; }, insertAdjacentHTML: function () { banner = { remove: function () { banner = null; } }; inserted++; } };
+        document.getElementById = function (id) { return id === 'cz-result' ? box : null; };
+        var S = window.Constanza._state, markStale = P.markStale, requestBody = P.requestBody;
+        S.product = 'P'; S.geo = 'Dallas'; S.flight = 3; S.unit = 'months'; S.result = { ok: true };
+        S.resultSig = JSON.stringify(requestBody());
+        function shown() { return banner !== null; }
+    """ + steps)
+
+
+def test_the_stale_banner_is_judged_by_comparing_the_request_not_by_every_touch_of_the_form():
+    """Reopening the dock called setFlight(), which always marked the result stale: the banner appeared with nothing changed."""
+    out = _stale_run("""
+        var log = {};
+        markStale(); log.untouched = shown();                       // the form still asks for what was pulled
+        S.flight = 4; markStale(); log.changed = shown();           // a different flight length
+        S.flight = 3; markStale(); log.back = shown();              // ... put back: nothing to say any more
+        S.geo = 'Houston'; markStale(); markStale(); log.geo = shown(); log.once = inserted;
+        S.geo = 'Dallas'; S.ageMin = '25'; markStale(); log.audience = shown();
+        return JSON.stringify(log);""")
+    assert out == {"untouched": False, "changed": True, "back": False, "geo": True, "once": 2, "audience": True}
+
+
+def test_there_is_no_banner_without_a_result_or_for_a_result_that_has_no_request_on_record():
+    out = _stale_run("""
+        S.result = null; S.flight = 9; markStale(); var a = shown();
+        S.result = { ok: true }; S.resultSig = null; markStale(); var b = shown();
+        return JSON.stringify([a, b]);""")
+    assert out == [False, False]

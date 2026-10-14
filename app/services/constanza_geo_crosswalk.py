@@ -398,14 +398,21 @@ def _place_name_index() -> dict[str, list[tuple[str, str, str]]]:
     return by_name
 
 
-def place_in_state(name: str, state: str) -> bool:
-    """True when a city / town / CDP with this name exists in `state` and has market data bundled ("Richmond" in CA). Lets
-    the DMA matcher tell "Richmond, CA" (the city) from "the Richmond market plus California"."""
+def place_in_state(name: str, state: str, min_population: float = 0.0) -> bool:
+    """True when a city / town / CDP with this name exists in `state`, has market data bundled and at least `min_population`
+    residents ("Richmond" in CA). Lets the DMA matcher tell "Richmond, CA" (the city) from "the Richmond market plus
+    California"."""
     key = _norm_name(name)
     if not key or _unsupported_reason(state, "city") is not None:
         return False
     shares = _load_geo("place_dma.json")["shares"]
-    return any(abbr == state and gid in shares for gid, abbr, _display in _place_name_index().get(key, []))
+    acs_place = _load_acs("acs_age_sex_place.json") if min_population else None
+    for gid, abbr, _display in _place_name_index().get(key, []):
+        if abbr != state or gid not in shares:
+            continue
+        if acs_place is None or _population_for(acs_place.get(gid)) >= min_population:
+            return True
+    return False
 
 
 def _resolve_city(token: str, relaxed: bool = False) -> GeoResolution | None:

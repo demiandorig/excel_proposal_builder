@@ -126,6 +126,7 @@
     lineId: null, needTotal: false,
     resolve: null, result: null, busy: false, resSeq: 0, pullSeq: 0, taxonomy: null,
     resultCtx: null,                  // what the shown result was pulled for: the geography as typed and the areas it resolved to
+    resultSig: null,                  // the request that result was pulled with, to tell whether the form still asks for it
   };
   let resolveTimer = null, interestTimer = null, pickerActive = -1, pickerItems = [], interestHits = [], interestActive = -1;
 
@@ -191,16 +192,25 @@
     "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey", "new mexico", "new york",
     "north carolina", "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee",
     "texas", "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming"];
-  const looksLikeState = (piece) => /^[A-Z]{2}$/.test(String(piece).trim()) || US_STATES.indexOf(String(piece).trim().toLowerCase()) >= 0;
+  const US_ABBR = new Set("AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY AS GU MP PR VI".split(" "));
+  const looksLikeState = (piece) => {
+    const t = String(piece).trim();
+    return US_ABBR.has(t.toUpperCase()) || US_STATES.indexOf(t.toLowerCase()) >= 0;
+  };
+  // Conjunction words. "or" only in lowercase: OR is Oregon (the server reads it the same way), and the matching below is
+  // written out letter by letter instead of with the `i` flag so that a state code can never be taken for a word.
+  const WORD = "(?:[Aa][Nn][Dd]|[Pp][Ll][Uu][Ss]|or)";
   const SEP = "[;|\\n,&+]";
-  const CONJ = "\\s(?:and|or|plus)\\s";
+  const CONJ = "\\s" + WORD + "\\s";
+  const ci = (s) => s.replace(/[A-Za-z]|[^A-Za-z]/g, (c) => (/[A-Za-z]/.test(c) ? "[" + c.toLowerCase() + c.toUpperCase() + "]" : escRe(c)));
 
   function itemRegex(item) {
-    const body = item.trim().split(/\s*,\s*/).map((part) => part.split(/\s+/).map(escRe).join("\\s+")).join("\\s*,\\s*");
-    return new RegExp("(^|" + SEP + "|" + CONJ + ")(\\s*)(" + body + ")(?=\\s*$|\\s*" + SEP + "|\\s+(?:and|or|plus)\\s)", "gi");
+    const body = item.trim().split(/\s*,\s*/).map((part) => part.split(/\s+/).map(ci).join("\\s+")).join("\\s*,\\s*");
+    return new RegExp("(^|" + SEP + "|" + CONJ + ")(\\s*)(" + body + ")(?=\\s*$|\\s*" + SEP + "|\\s+" + WORD + "\\s)", "g");
   }
 
-  // `replacement` null removes the item. Returns the new text, or null when the item is not in the text as a whole item.
+  // `replacement` null removes the item together with the separator that joined it to the list. Returns the new text, or null when
+  // the item is not in the text as a whole item.
   function editGeoItem(text, item, replacement) {
     if (!item || !item.trim()) return null;
     const re = itemRegex(item);
@@ -212,21 +222,23 @@
         const next = /^\s*,\s*([^,;|\n&+]+)/.exec(text.slice(end));
         if (next && looksLikeState(next[1])) continue;            // "Othello" in "Othello, WA" is not the whole item
       }
-      return text.slice(0, m.index) + m[1] + m[2] + (replacement == null ? "" : replacement) + text.slice(end);
+      if (replacement != null) return text.slice(0, m.index) + m[1] + m[2] + replacement + text.slice(end);
+      if (m[1]) {                                                 // "A; X" -> "A"; "A and X" -> "A"; "A, B, or X" -> "A, B"
+        const before = text.slice(0, m.index);
+        return (/^\s/.test(m[1]) ? before.replace(/\s*,\s*$/, "") : before) + text.slice(end);
+      }
+      // the first item: its following separator goes with it ("X; A" -> "A", "X and A" -> "A")
+      return text.slice(0, m.index) + text.slice(end).replace(new RegExp("^(?:\\s*" + SEP + "|\\s+" + WORD + "(?=\\s))?\\s*"), "");
     }
     return null;
   }
 
-  // Remove the separators a removal leaves behind: "; ; B", a list that now starts or ends with "and".
+  // Remove the separators that stand with nothing between them ("; ; B"), or at either end of the text. Words are never touched.
   function tidyList(text) {
-    const sep = "(?:[;|,&+]|\\band\\b|\\bor\\b|\\bplus\\b)";
+    const sep = "[;|,&+]";
     return text
-      // a separator followed by another (or by the end) goes; if that would glue two words together, one space stays
-      .replace(new RegExp("\\s*" + sep + "\\s*(?=" + sep + "|$)", "gi"), (m, offset, whole) => {
-        const before = whole[offset - 1], after = whole[offset + m.length];
-        return before && after && /\w/.test(before) && /\w/.test(after) ? " " : "";
-      })
-      .replace(new RegExp("^\\s*" + sep + "\\s*", "i"), "")
+      .replace(new RegExp("\\s*" + sep + "\\s*(?=" + sep + "|$)", "g"), "")
+      .replace(new RegExp("^\\s*" + sep + "\\s*"), "")
       .replace(/[ \t]{2,}/g, " ")
       .trim();
   }
@@ -246,13 +258,19 @@
     return removed ? out : null;
   }
 
+  // More than one place in the text: a separator, a conjunction word, or commas that are not just "name, state".
+  function looksLikeList(text) {
+    if (/[;|\n&+]/.test(text) || new RegExp(CONJ).test(text)) return true;
+    const parts = text.split(",").map((p) => p.trim()).filter(Boolean);
+    return parts.length > 2 || (parts.length === 2 && !looksLikeState(parts[1]));
+  }
+
   // Swap one item for the planner's pick. An item that cannot be found never wipes the list: a single typed item is replaced, and
   // a list gets the place added.
   function replaceItem(text, item, replacement) {
     const next = editGeoItem(text, item, replacement);
     if (next !== null) return next;
-    const isList = /[;|\n&+]|\b(?:and|or|plus)\b/i.test(text) || (text.match(/,/g) || []).length > 1;
-    if (!isList) return replacement;
+    if (!looksLikeList(text)) return replacement;
     return editGeoItem(text, replacement, replacement) !== null ? text : `${text.replace(/[;\s]+$/, "")}; ${replacement}`;
   }
 
@@ -849,12 +867,15 @@
   }
 
   // ---- results
-  // The form changed after this result was pulled: say so on the card (the numbers are still the ones for what it names).
+  // The form no longer asks for what this result was pulled with: say so on the card (the numbers are still the ones for what it
+  // names). Judged by comparing the two requests, so opening the dock again, or changing a field and putting it back, shows nothing.
   function markStale() {
-    if (!S.result || !$("cz-result")) return;
     const box = $("cz-result");
-    if (box.querySelector(".cz-stale")) return;
-    box.insertAdjacentHTML("afterbegin", `<p class="cz-stale">The form has changed since this was pulled — pull again to update.</p>`);
+    if (!S.result || S.resultSig == null || !box) return;
+    const changed = JSON.stringify(requestBody()) !== S.resultSig;
+    const banner = box.querySelector(".cz-stale");
+    if (changed && !banner) box.insertAdjacentHTML("afterbegin", `<p class="cz-stale">The form has changed since this was pulled — pull again to update.</p>`);
+    else if (!changed && banner) banner.remove();
   }
 
   // A short status line for screen readers (the result pane itself is not a live region: it would be read out in full).
@@ -1001,9 +1022,10 @@
     S.showAllAreas = false;
     const mine = ++S.pullSeq;                     // Reset (or a newer pull) makes this answer stale: it must not repaint the dock
     const asked = { geo: S.geo.trim(), areas: ((S.resolve && S.resolve.areas) || []).map((a) => a.label || a.dma).filter(Boolean) };
+    const body = requestBody();
     let r;
     try {
-      r = await api("/api/constanza/estimate", requestBody());
+      r = await api("/api/constanza/estimate", body);
     } catch (e) {
       if (mine !== S.pullSeq) return;
       setBusy(false); renderError(String(e)); setMood("oops"); return;
@@ -1021,7 +1043,9 @@
     }
     S.result = r.data;
     S.resultCtx = asked;
+    S.resultSig = JSON.stringify(body);
     renderResult(r.data);
+    markStale();                                  // the form may have changed while the request was in flight
     announce(`Pulled ${r.data.product_name}: ${num(summarize(r.data).month.mid)} impressions per month.`);
     $("constanza-bubble").classList.add("cz-has-result");
     setMood("happy", 3200);
@@ -1033,7 +1057,7 @@
     S.pullSeq++; S.resSeq++;
     clearTimeout(resolveTimer);
     setBusy(false);
-    Object.assign(S, { geoType: "", total: "", ageMin: "", ageMax: "", gender: "", interests: [], needTotal: false, result: null, resultCtx: null });
+    Object.assign(S, { geoType: "", total: "", ageMin: "", ageMax: "", gender: "", interests: [], needTotal: false, result: null, resultCtx: null, resultSig: null });
     setGeoType("", true);
     $("cz-total").value = ""; $("cz-age-min").value = ""; $("cz-age-max").value = ""; $("cz-interest-q").value = "";
     $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === "")));
@@ -1051,7 +1075,7 @@
     S.pullSeq++; S.resSeq++;                      // discard any pull or resolve still in flight
     clearTimeout(resolveTimer);
     setBusy(false);
-    Object.assign(S, { geo: "", geoType: "", flight: 1, unit: "months", total: "", ageMin: "", ageMax: "", gender: "", interests: [], needTotal: false, resolve: null, result: null, resultCtx: null, lineId: null });
+    Object.assign(S, { geo: "", geoType: "", flight: 1, unit: "months", total: "", ageMin: "", ageMax: "", gender: "", interests: [], needTotal: false, resolve: null, result: null, resultCtx: null, resultSig: null, lineId: null });
     $("cz-geo").value = ""; $("cz-total").value = ""; $("cz-age-min").value = ""; $("cz-age-max").value = ""; $("cz-interest-q").value = "";
     setGeoType("", true); setFlight(1, "months");
     $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === "")));
@@ -1226,7 +1250,8 @@
     periodLineHtml: (series) => (isLiveSports(series) && series.period_label ? `<p class="cz-period-line">📅 Live sports period: ${esc(series.period_label)}</p>` : ""),
     _state: S,
     // Pure helpers, exposed so tests/test_constanza_frontend.py can run them without a browser.
-    _pure: { compact, editGeoItem, tidyList, removeGeoItems, replaceItem, summarize, normGeo, geoHelpHtml, badgesHtml, lineLabel, seriesMeta, notesOf },
+    _pure: { compact, editGeoItem, tidyList, removeGeoItems, replaceItem, looksLikeList, summarize, normGeo, geoHelpHtml, badgesHtml, lineLabel, seriesMeta, notesOf,
+      markStale, requestBody },
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount);

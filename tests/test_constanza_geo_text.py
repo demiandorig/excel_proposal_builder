@@ -285,10 +285,26 @@ def test_the_readings_that_were_always_lists_are_still_lists():
 
 
 def test_a_county_named_in_a_metro_that_spans_two_states_is_not_given_the_inner_places_state():
-    res = resolve_geo("Kansas City, MO and surrounding areas in Johnson County")
+    # the place has no state of its own: both Johnson Counties are in its market, so the planner picks
+    res = resolve_geo("Kansas City and surrounding areas in Johnson County")
     assert not res.resolved and [c["label"] for c in res.ambiguous[0]["candidates"]] == ["Johnson County, KS", "Johnson County, MO"]
     assert any("same TV market" in n for n in res.notes)
     assert labels(resolve_geo("Johnson County, KS")) == ["Johnson County, KS"]                               # picking one works
+
+
+def test_a_container_smaller_than_the_place_named_inside_it_is_not_the_one_meant():
+    # Kansas City, MO has ten times the people of Johnson County, MO: the county that surrounds it is the Kansas one
+    res = resolve_geo("Kansas City, MO and surrounding areas in Johnson County")
+    assert labels(res) == ["Johnson County, KS"]
+    assert any("big enough to surround" in i["why"] for i in res.interpretations)
+    alt = [s for s in res.suggestions if s["kind"] == "did_you_mean"]
+    assert [s["label"] for s in alt] == ["Johnson County, MO"] and alt[0]["replaces"] == "Kansas City, MO and surrounding areas in Johnson County"
+
+
+def test_a_container_follows_the_state_typed_with_the_place_inside_it():
+    assert labels(resolve_geo("Overland Park, KS and surrounding areas in Johnson County")) == ["Johnson County, KS"]
+    res = resolve_geo("Warrensburg, MO and surrounding areas in Johnson County")                            # small place: the MO county
+    assert labels(res) == ["Johnson County, MO"] and any("state typed with Warrensburg, MO" in i["why"] for i in res.interpretations)
 
 
 def test_a_container_name_that_exists_in_many_states_is_narrowed_to_the_one_in_the_places_market():
@@ -374,11 +390,114 @@ def test_an_overlap_offer_is_worded_as_a_possibility_for_places_that_are_not_in_
 
 
 def test_the_ambiguity_of_a_container_names_the_whole_typed_phrase_so_picking_replaces_it():
-    text = "Dallas; Kansas City, MO and surrounding areas in Johnson County; Austin"
+    text = "Dallas; Kansas City and surrounding areas in Johnson County; Austin"
     res = resolve_geo(text)
     entry = res.ambiguous[0]
-    assert entry["input"] == "Kansas City, MO and surrounding areas in Johnson County" and entry["input"] in text
+    assert entry["input"] == "Kansas City and surrounding areas in Johnson County" and entry["input"] in text
     assert [c["label"] for c in entry["candidates"]] == ["Johnson County, KS", "Johnson County, MO"]
     assert gt.prepare("Los Angeles and Orange counties, CA").origins == {}                    # several places from one phrase: none stands for the text
     assert gt.prepare("Plano in Collin County and Houston in Harris County").origins == {
         "Collin County": "Plano in Collin County", "Harris County": "Houston in Harris County"}
+
+
+# --------------------------------------------------------------------------------------------- second review
+# Regressions found in the fixes themselves.
+
+@pytest.mark.parametrize("text,expected", [
+    ("Beaverton, OR and Hillsboro, OR", ["Beaverton, OR", "Hillsboro, OR"]),
+    ("Multnomah County, OR and Washington County, OR", ["Multnomah County, OR", "Washington County, OR"]),
+    ("Dallas, Houston, or Austin", ["Dallas-Ft. Worth", "Houston", "Austin"]),
+    ("Tucson, AZ or Mesa, AZ", ["Tucson (Sierra Vista)", "Mesa, AZ"]),
+])
+def test_a_state_code_that_spells_a_conjunction_stays_a_state(text, expected):
+    """OR is Oregon: a list written '..., OR and ...' lost its state when 'OR' was read as the word."""
+    res = resolve_geo(text)
+    assert labels(res) == expected and not res.unmatched_tokens and not res.whole_states
+
+
+@pytest.mark.parametrize("text,market,inside", [
+    ("Chicago and Gary, IN", "Chicago", "Gary, IN"), ("Cincinnati and Covington, KY", "Cincinnati", "Covington, KY"),
+    ("Kansas City and Overland Park, KS", "Kansas City", "Overland Park, KS"), ("Philadelphia and Wilmington, DE", "Philadelphia", "Wilmington, DE"),
+])
+def test_a_state_at_the_end_is_not_given_to_a_market_that_needs_none(text, market, inside):
+    """'Chicago and Gary, IN' added every Indiana market: 'Chicago, IN' was read as the two states."""
+    res = resolve_geo(text)
+    assert labels(res) == [market] and not res.unmatched_tokens and not res.whole_states
+    assert any(inside in n and "counted once" in n for n in res.notes)
+
+
+def test_a_state_at_the_end_is_shared_with_every_place_that_needs_one():
+    res = resolve_geo("Mesa and Gilbert, AZ")
+    assert labels(res) == ["Mesa, AZ", "Gilbert, AZ"]
+    assert "the state at the end (AZ) applies to each place that needs one" in res.interpretations[0]["why"]
+
+
+@pytest.mark.parametrize("text,states", [("Kansas, OK", ["KS", "OK"]), ("Nevada, TX", ["NV", "TX"])])
+def test_a_pair_of_states_stays_a_pair_of_states_when_the_town_is_too_small_or_absent(text, states):
+    res = resolve_geo(text)
+    assert res.method == "state_list" and res.whole_states == states
+
+
+@pytest.mark.parametrize("text,pair", [
+    ("Delaware, OH", "The states Delaware and Ohio"), ("Washington, PA", "The states Washington and Pennsylvania"),
+    ("Indiana, PA", "The states Indiana and Pennsylvania"), ("Oregon, WI", "The states Oregon and Wisconsin"),
+])
+def test_a_state_name_and_a_state_code_is_the_town_with_the_two_states_one_click_away(text, pair):
+    res = resolve_geo(text)
+    assert res.method == "city" and len(res.areas) == 1
+    alt = next(s for s in res.suggestions if s["kind"] == "did_you_mean")
+    assert alt["label"] == pair and alt["replaces"] == text
+    assert resolve_geo(alt["resolve_hint"]).method == "state_list"                                          # the offer really resolves
+
+
+def test_a_suggestion_inside_a_list_names_the_item_it_came_from_not_the_whole_text():
+    res = resolve_geo("Travus Co., TX and Dallas, TX")
+    assert labels(res) == ["Dallas-Ft. Worth"] and res.unmatched_tokens == ["Travus County, TX"]
+    sg = next(s for s in res.suggestions if s["kind"] == "did_you_mean")
+    assert sg["label"] == "Travis County, TX" and sg["replaces"] == "Travus Co., TX"
+
+
+def test_a_long_list_of_places_resolves_each_distinct_place_once(monkeypatch):
+    from app.services import constanza_geo as geo
+    calls = []
+    real = geo._resolve_single_uncached
+    monkeypatch.setattr(geo, "_resolve_single_uncached", lambda text, hint: (calls.append(text), real(text, hint))[1])
+    towns = ["Plano", "Frisco", "Allen", "McKinney", "Garland", "Irving", "Denton", "Mesquite"]
+    res = resolve_geo("; ".join(f"{towns[i % 8]}, TX" for i in range(300)))
+    assert res.resolved and len(res.areas) == 8
+    assert len(calls) <= 2 * len(towns), calls[:20]                                                          # not one pass per repeated item
+
+
+@pytest.mark.parametrize("text,zip_label", [
+    ("Plano, TX 75024", "ZIP 75024"), ("Portland, OR 97201", "ZIP 97201"), ("Dallas, TX 75201", "ZIP 75201"),
+    ("Los Angeles, CA 90012", "ZIP 90012"), ("Plano, TX 75024-1234", "ZIP 75024"), ("New York, NY 10001", "ZIP 10001"),
+])
+def test_a_city_state_and_zip_is_the_zip(text, zip_label):
+    """'Dallas, TX 75201' was the Dallas market plus an unmatched 'TX 75201', and 'Plano, TX 75024' matched nothing."""
+    res = resolve_geo(text)
+    assert res.method == "zip" and labels(res) == [zip_label] and not res.unmatched_tokens
+    assert any("ZIP at the end" in i["why"] for i in res.interpretations)
+
+
+def test_an_address_whose_zip_is_not_in_the_data_falls_back_to_the_city_and_says_so():
+    res = resolve_geo("Phoenix AZ 85001")                                  # a PO-box ZIP: no residents, no row
+    assert labels(res) == ["Phoenix (Prescott)"] and not res.unmatched_tokens
+    assert any("not in the data" in i["why"] for i in res.interpretations)
+
+
+def test_addresses_in_a_list_are_each_their_zip():
+    assert labels(resolve_geo("Plano, TX 75024 and Frisco, TX 75034")) == ["ZIP 75024", "ZIP 75034"]
+    assert labels(resolve_geo("Plano, TX 75024; Austin, TX")) == ["ZIP 75024", "Austin"]
+    res = resolve_geo("Plano, TX 75024; Travus Co., TX")
+    sg = next(s for s in res.suggestions if s["kind"] == "did_you_mean")
+    assert sg["replaces"] == "Travus Co., TX"
+
+
+def test_text_that_only_looks_like_an_address_is_left_alone():
+    assert labels(resolve_geo("90210 94105")) == ["ZIP 90210", "ZIP 94105"]                        # two ZIPs, not an address
+    res = resolve_geo("Plano, TX 75024 Frisco, TX 75034")                                          # two addresses with nothing between
+    assert not any("ZIP at the end" in i["why"] for i in res.interpretations)
+    res = resolve_geo("Plano, TX 75024", "city")                                                   # the planner said what it is
+    assert not any("ZIP at the end" in i["why"] for i in res.interpretations)
+    assert gt.address_place("Texas 75201") is None and gt.address_place("75024") is None
+

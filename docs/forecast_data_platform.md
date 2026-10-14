@@ -179,7 +179,10 @@ database path reproduces the old bundled-workbook numbers **exactly** (a test co
 own row in the Madhive exports is nearly twice what its two home markets hold (the rest is served from Denver, Billings and
 Salt Lake City). When the series carries state rows, the markets are scaled so they add up to the platform's own state total
 and a note says so (`whole_states` on the resolution, `_state_scales` in the engine). A ZIP, county or city inside the state
-is never scaled.
+is never scaled. **Only a request that is those states and nothing else is scaled.** A state's total already holds the
+households inside it that other markets serve, so "Wyoming and Denver", or "Wyoming and Albany County" (a county Denver
+serves), would count them twice; when anything outside the whole states is in the request, no state is scaled and a note says
+why (each market is counted as the platform reports it).
 
 **A baseline-proxy product** (a Netflix targeted variant, VIX 360) forecasts from another product's series; the link's stored
 caveat ("this targeted variant will deliver fewer impressions") travels with the product's config into every estimate.
@@ -198,12 +201,23 @@ real place the resolver accepts.
   "Kansas City, KS"): never "the Richmond market plus every California market". A list written the old way ("Los Angeles, NV",
   "Washington, Oregon", "CA, NV, AZ") is still a list; "D.C." is read as DC.
 * **Containers** ("X and surrounding areas in Johnson County", "Plano in Collin County") mean the larger area. A county name
-  that exists in several states is narrowed to the one in the same TV market as the place named inside it; when two fit
-  (Johnson County, KS and MO both lie in Kansas City's market) the planner picks, and the inner place's state is never assumed.
-  A container that cannot be matched falls back to the place inside it.
+  that exists in several states is narrowed in this order: the ones in the same TV market as the place named inside it; of
+  those, the ones with at least as many people as that place (a county cannot surround a bigger city: "Kansas City, MO" is
+  not inside Johnson County, MO); then the one in the state typed with the place ("Warrensburg, MO" -> Johnson County, MO).
+  The interpretation says which rule chose, and the other counties of the market are offered as one-click alternatives. When
+  nothing separates two (no state typed with the place) the planner picks, and the inner place's state is never assumed. A
+  container that cannot be matched falls back to the place inside it.
 * **Lists** with "and" / "or" / "&", a state written once at the end ("Austin and Round Rock, TX"), plural counties
   ("Los Angeles and Orange counties, CA") and lists where only part resolved are all read; "or" is read like "and" (the places
-  are added) and says so.
+  are added) and says so. **Only a lowercase `or` with spaces around it is a word: `OR` is Oregon** ("Beaverton, OR and
+  Hillsboro, OR" is two cities). The state written at the end is shared only with the pieces that need one: a market named
+  without a state ("Chicago and Gary, IN") keeps its market, and a piece inside a listed market is counted once with a note.
+* **"City, ST ZIP" is the ZIP.** An address ("Plano, TX 75024", "Portland, OR 97201", "Phoenix AZ 85001") is read as its ZIP,
+  the exact place, and says so; when the bundled data has no such ZIP (a PO-box ZIP has no residents) the city and state before
+  it are used instead. Two ZIPs, a ZIP in the middle of a longer text, and any text typed with a geography type are left alone.
+* **A state name before a state code** ("Delaware, OH", "Washington, PA", "Indiana, PA") is the town when a town of at
+  least 5,000 people by that name exists in that state, with the two states offered as an alternative ("The states Delaware
+  and Ohio"); where there is none ("Kansas, OK", "Nevada, TX") it is the two states, written the way it always was.
 * **Suggestions name what was typed.** `replaces` and `drop_inputs` are the text in the box ("Travus Co., TX"), not the tidied
   item, so a click edits that item only; the UI edits by whole items, never by substring.
 * **Overlap offers are offers.** A city or ZIP listed beside a county it *may* sit inside (same state, same market, smaller)
@@ -267,7 +281,9 @@ the typed text inside a name ("dental"), shared words, and near-spellings ("fitn
 * **Matching never guesses.** A segment's rate is applied only when the match is strong: an exact name or team wording, a
   keyword phrase, or the typed text inside a name. One shared common word ("pet OWNERS" against "small business OWNERS") is
   shown as a suggestion, never applied; neither is a bare role word ("owners", "shoppers") or two segments that fit equally well
-  ("insurance": auto or health?). A label may not promise more than its number measures: the two segments the independent
+  ("insurance": auto or health?). A role word beside a topic does not change the audience: "mortgage shoppers" means
+  "mortgage", and the keyword "shoppers" (Retail Shoppers) only hints. Between keyword matches the one that covers more of
+  the topic words wins ("luxury car" over "car shopper"); length only breaks the rest. A label may not promise more than its number measures: the two segments the independent
   review caught (a 9% "politically engaged" and a 33% "religious") now say what they are.
 * **Confidence feeds the range.** Each applied interest widens the low/high band by its grade (high 15%, moderate 25%, low
   40%), combined with the other factors by root-sum-of-squares. Interests are multiplied as if independent, and the result
@@ -298,7 +314,10 @@ A connection the server dropped while idle is replaced, not lent. When the datab
 and further calls fail instantly for 5 seconds, so every fail-open path (offline product list, forecast defaults) stays
 quick. A busy pool is *not* treated as an outage. This holds after the pool exists too: a pool that has no connection for 2
 seconds asks one direct connect (serialised, so one failed probe fails every waiting caller) whether the database is there; if
-not, the fail-fast window opens at once instead of every request waiting out `DB_POOL_TIMEOUT`.
+not, the fail-fast window opens at once instead of every request waiting out `DB_POOL_TIMEOUT`. A probe that answered in the
+last 2 seconds speaks for the callers queued behind it, and a server that answers "too many clients" is alive and only full: both
+count as a busy pool. The window is recorded once, by whoever saw the outage first; callers that meet it do not push its end
+out, so it closes after 5 seconds even under steady traffic.
 
 A session advisory lock (the bootstrap, the migration runner) is released with `db.release_advisory_lock`: it rolls back first
 (an aborted transaction cannot run the unlock) and, if it still cannot release, closes the connection so the server drops the
@@ -318,7 +337,10 @@ export makes a new Netflix version instead of leaving it "unchanged".
   whose Admin → Forecast setting is on, grouped by data channel, with the data basis, unit and - for live sports - the season
   period), resolves the geography as the planner types (`POST /api/constanza/resolve`, debounced), and pulls with
   `POST /api/constanza/estimate`. A pick on a suggestion edits only the item it replaces; "use X only" removes exactly the
-  typed items it drops.
+  typed items it drops, together with the separator that joined each to the list. Only a lowercase `or` is a word (OR is
+  Oregon), and text with one comma is a list unless what follows it is a state. The "form has changed since this was pulled"
+  banner compares the form with the request the result was pulled with, so reopening the dock, or changing a field and putting
+  it back, shows nothing.
 * **Step 05 cards** keep the per-line "Auto-calculate avails" button (still in `app.js`, because it needs the plan's state) and
   render through the same `Constanza.renderCard`, so both places read alike. A geography the planner picks for a line lives
   only in the session (`state.constanzaGeoOverride`), never in the saved proposal.

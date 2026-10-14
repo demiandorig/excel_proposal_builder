@@ -57,7 +57,18 @@ _pool: Optional["ConnectionPool"] = None
 _pool_pid: Optional[int] = None
 _down_until = 0.0
 _down_error: Optional[str] = None
+_probe_ok_at = 0.0                  # when the database last answered a direct probe
 _FIRST_WAIT = 2.0                   # seconds to wait for a pooled connection before asking "is the database even there?"
+_PROBE_FRESH = 2.0                  # a probe that answered this recently speaks for every caller that is waiting
+
+
+class _RecentlyDown(psycopg.OperationalError):
+    """Raised by the fail-fast window itself. The outage is already recorded: whoever catches this must not record it again
+    (doing so would push the end of the window out every time a caller sees it, and under steady traffic it would never end)."""
+
+
+class _ProbeFailed(psycopg.OperationalError):
+    """The direct reachability probe failed, and it opened the fail-fast window itself."""
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -101,20 +112,29 @@ def _mark_down(exc: BaseException) -> None:
 
 def _raise_if_recently_down() -> None:
     if _down_until and time.monotonic() < _down_until:
-        raise psycopg.OperationalError(f"database unavailable (retrying shortly): {_down_error}")
+        raise _RecentlyDown(f"database unavailable (retrying shortly): {_down_error}")
 
 
 def _probe_reachable() -> None:
     """One direct connect with a short timeout. Raises OperationalError (and opens the 'database is down' window) when it
     fails. Serialised, and re-checked under the lock, so one failed probe fails every waiting caller instead of each
-    making its own."""
+    making its own; a probe that answered within the last couple of seconds answers for the callers queued behind it, so a
+    busy pool does not become a queue of direct connects. A server that answers "too many clients" is alive, only full:
+    that is a busy pool, never an outage."""
+    global _probe_ok_at
     with _probe_lock:
         _raise_if_recently_down()
+        if time.monotonic() - _probe_ok_at < _PROBE_FRESH:
+            return
         try:
             psycopg.connect(database_url(), **{**_connect_kwargs(), "connect_timeout": 2}).close()
+        except psycopg.errors.TooManyConnections:
+            _probe_ok_at = time.monotonic()
+            return
         except Exception as exc:  # noqa: BLE001
             _mark_down(exc)
-            raise psycopg.OperationalError(f"database unavailable: {type(exc).__name__}: {exc}".strip()) from exc
+            raise _ProbeFailed(f"database unavailable: {type(exc).__name__}: {exc}".strip()) from exc
+        _probe_ok_at = time.monotonic()
 
 
 def _get_pool() -> "ConnectionPool":
@@ -190,6 +210,8 @@ class _PooledConnection:
                 return self._cm.__enter__()
         except PoolTimeout:
             raise          # every connection is busy: slow, not down - do not make the next callers fail instantly
+        except (_RecentlyDown, _ProbeFailed):
+            raise          # the outage is already on record; recording it again would extend the window for everyone
         except psycopg.OperationalError as exc:
             _mark_down(exc)
             raise
@@ -262,9 +284,9 @@ def close_pool() -> None:
 
 def reset_for_tests() -> None:
     """Forget the pool and the 'database is down' memory (tests that change DATABASE_URL)."""
-    global _down_until, _down_error
+    global _down_until, _down_error, _probe_ok_at
     close_pool()
-    _down_until, _down_error = 0.0, None
+    _down_until, _down_error, _probe_ok_at = 0.0, None, 0.0
 
 
 def pool_stats() -> dict:

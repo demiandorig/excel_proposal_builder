@@ -162,6 +162,10 @@ def _clean_chunk(chunk: str) -> list[dict]:
             return [{"text": f"{n} County{tail}", "src": chunk, "context": None,
                      "why": "read 'counties' as one county for each name"} for n in names]
     reasons = []
+    cleaned = _OXFORD_OR_RE.sub(", ", chunk)
+    if cleaned != chunk:
+        reasons.append("read the 'or' before the last place as part of the list")
+        chunk = cleaned
     cleaned = _SURROUNDING_TAIL_RE.sub("", chunk)
     if cleaned != chunk:
         reasons.append("dropped 'and surrounding areas' (Constanza works from the places named)")
@@ -185,6 +189,27 @@ def _clean_chunk(chunk: str) -> list[dict]:
 
 
 _ZIP_ONLY_RE = re.compile(r"^\d{5}(?:-\d{4})?$")
+_ADDRESS_ZIP_RE = re.compile(r"^(?P<rest>.*\S)\s+(?P<zip>\d{5})(?:-\d{4})?$")
+
+
+def address_place(item: str) -> Optional[tuple[str, str]]:
+    """'Plano, TX 75024' -> ('75024', why). A place and its state followed by a ZIP is an address, and the ZIP is the exact place;
+    when the bundled data has no such ZIP the city and state before it are used instead. Not an address: two ZIPs, a ZIP in the
+    middle of a longer text ('Plano, TX 75024 Frisco, TX 75034'), a state with no place."""
+    m = _ADDRESS_ZIP_RE.match(item.strip())
+    if not m:
+        return None
+    rest = m.group("rest").strip(" ,")
+    if re.search(r"\d", rest):
+        return None
+    split = split_trailing_state(rest)
+    if split is None:
+        return None
+    zip_code = m.group("zip")
+    from app.services import constanza_geo_crosswalk
+    if zip_code in constanza_geo_crosswalk._load_geo("zcta_dma.json"):
+        return zip_code, f"read the ZIP at the end of '{item}' as the place (the city and state before it are not needed)"
+    return f"{split[0]}, {split[1]}", f"ZIP {zip_code} is not in the data Constanza has, so the city and state before it are used"
 
 
 def _split_stateful_list(chunk: str) -> list[str]:
@@ -196,7 +221,7 @@ def _split_stateful_list(chunk: str) -> list[str]:
         return [chunk]
 
     def stands_alone(p: str) -> bool:
-        return bool(_ZIP_ONLY_RE.match(p) or _trailing_state_abbr(p) or split_trailing_state(p))
+        return bool(_ZIP_ONLY_RE.match(p) or _trailing_state_abbr(p) or split_trailing_state(p) or address_place(p))
 
     return parts if all(stands_alone(p) for p in parts) else [chunk]
 
@@ -229,18 +254,36 @@ def prepare(text: str, hint: Optional[str] = None) -> Prepared:
             listed = _split_stateful_list(cleaned)
             if len(listed) > 1:
                 interps.append({"input": cleaned, "became": "; ".join(listed), "why": "read as a list of places"})
-            for item in listed:
+            typed_parts = split_conjunctions(piece["src"]) if len(listed) > 1 else []
+            for k, item in enumerate(listed):
+                address = None if hint else address_place(item)
+                if address:                        # "Plano, TX 75024": the ZIP is the exact place, the city before it is not needed
+                    became, why = address
+                    interps.append({"input": item, "became": became, "why": why})
+                    items.append(became)
+                    typed = piece["src"] if len(listed) == 1 else (typed_parts[k] if len(typed_parts) == len(listed) else None)
+                    if typed and not shared_source:
+                        origins.setdefault(became, typed)
+                    continue
                 items.append(item)
                 # A rewritten item ("Travus Co., TX" -> "Travus County, TX", "X and surrounding areas in Johnson County" ->
-                # "Johnson County") is not written in the box as it now reads: what the UI must replace or remove is the typed text.
-                if piece["why"] and not shared_source and _norm_space(item) != _norm_space(piece["src"]):
-                    origins.setdefault(item, piece["src"])
+                # "Johnson County") is not written in the box as it now reads: what the UI must replace or remove is the typed
+                # text of THAT item - the whole phrase when it was one item, its own part when one phrase was split into
+                # several ("Travus Co., TX and Dallas, TX"), nothing when the parts cannot be told apart.
+                if piece["why"] and not shared_source:
+                    typed = piece["src"] if len(listed) == 1 else (typed_parts[k] if len(typed_parts) == len(listed) else None)
+                    if typed and _norm_space(item) != _norm_space(typed):
+                        origins.setdefault(item, typed)
                 if piece["context"]:
                     context.setdefault(item, piece["context"])
     return Prepared("; ".join(items) if items else (text or ""), interps, origins, context)
 
 
-_CONJUNCTION_RE = re.compile(r"\s+(?:and|&|plus|or)\s+|\s*\+\s*", re.IGNORECASE)
+# "or" counts only as a lower-case word between two places ("Dallas or Houston"): the state code OR (Oregon) is upper case and
+# follows a comma ("Portland, OR and Salem, OR"), and "A, B, or C" is cleaned up before the list is split.
+_CONJUNCTION_RE = re.compile(r"\s+(?:and|&|plus)\s+|\s*\+\s*|(?<![,\s])\s+(?-i:or)\s+", re.IGNORECASE)
+OR_WORD_RE = re.compile(r"(?<![,\s])\s+or\s+")
+_OXFORD_OR_RE = re.compile(r",\s+or\s+")
 
 
 def split_conjunctions(item: str) -> list[str]:

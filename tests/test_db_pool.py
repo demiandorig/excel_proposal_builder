@@ -61,6 +61,66 @@ def test_stats_without_a_pool():
     assert db.pool_stats()["open"] is False
 
 
+# --------------------------------------------------------------------------- busy is not down (offline, stubbed connects)
+
+
+class _NoPool:
+    """A pool that never has a connection free: every caller times out and has to ask whether the database is there."""
+
+    def connection(self, timeout=None):
+        raise db.PoolTimeout("every connection is busy")
+
+
+class _Closable:
+    def close(self):
+        pass
+
+
+def test_a_server_that_answers_too_many_clients_is_a_busy_pool_not_an_outage(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@127.0.0.1:1/none")
+    def full(*a, **k):
+        raise psycopg.errors.TooManyConnections("sorry, too many clients already")
+    monkeypatch.setattr(db.psycopg, "connect", full)
+    db._probe_reachable()                                         # returns: the server is alive, only full
+    assert db._down_until == 0.0
+    monkeypatch.setattr(db, "_PROBE_FRESH", 0.0)
+    with pytest.raises(db.PoolTimeout):                           # the caller keeps waiting its budget and is told it was slow
+        monkeypatch.setenv("DB_POOL_TIMEOUT", "0.3")
+        db._PooledConnection(_NoPool()).__enter__()
+    assert db._down_until == 0.0                                  # and the next callers are not failed instantly
+
+
+def test_a_probe_that_just_answered_speaks_for_the_callers_queued_behind_it(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@127.0.0.1:1/none")
+    calls = []
+    monkeypatch.setattr(db.psycopg, "connect", lambda *a, **k: (calls.append(1), _Closable())[1])
+    for _ in range(6):
+        db._probe_reachable()
+    assert len(calls) == 1                                        # not one direct connect per waiting caller
+    monkeypatch.setattr(db, "_PROBE_FRESH", 0.0)
+    db._probe_reachable()
+    assert len(calls) == 2                                        # but an old answer is not trusted
+
+
+def test_a_failed_probe_opens_the_window_once_and_later_callers_do_not_extend_it(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@127.0.0.1:1/none")
+    attempts = []
+    def refuse(*a, **k):
+        attempts.append(1)
+        raise psycopg.OperationalError("connection refused")
+    monkeypatch.setattr(db.psycopg, "connect", refuse)
+    with pytest.raises(psycopg.OperationalError, match="unavailable"):
+        db._PooledConnection(_NoPool()).__enter__()
+    until = db._down_until
+    assert until > 0 and len(attempts) == 1
+    for _ in range(4):
+        time.sleep(0.01)
+        with pytest.raises(psycopg.OperationalError, match="unavailable"):
+            db._PooledConnection(_NoPool()).__enter__()
+    assert db._down_until == until, "every caller that met the window pushed its end out: under steady traffic it never closes"
+    assert len(attempts) == 1                                     # and none of them tried to connect
+
+
 # --------------------------------------------------------------------------- real database
 
 

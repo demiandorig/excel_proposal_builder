@@ -99,6 +99,35 @@ def test_two_audiences_that_fit_equally_well_are_left_for_the_planner_to_choose(
     assert taxonomy.best_match("owners") is None                          # a bare role word says who, not what
 
 
+@pytest.mark.parametrize("phrase,segment", [
+    ("mortgage shoppers", "fin_mortgage"), ("luxury car shoppers", "auto_luxury"), ("luxury car shopper", "auto_luxury"),
+    ("furniture shoppers", "home_furniture_decor"), ("beauty shoppers", "retail_beauty"), ("tire shopper", "auto_tire_shoppers"),
+    ("car shoppers", "auto_in_market"), ("video game shoppers", "video_gamer"), ("solar shoppers", "home_solar"),
+])
+def test_a_bare_role_word_beside_a_topic_does_not_change_the_audience(taxonomy, phrase, segment):
+    """'shoppers' is a keyword of Retail Shoppers (General) and tied with the topic's own keyword, so these matched nothing."""
+    assert taxonomy.best_match(phrase).segment.id == segment
+
+
+@pytest.mark.parametrize("phrase", ["grocery shoppers", "online shoppers", "holiday shoppers", "coupon shoppers"])
+def test_a_role_word_beside_a_topic_nobody_names_is_offered_never_applied(taxonomy, phrase):
+    assert taxonomy.best_match(phrase) is None
+    assert "retail_general" in [h.segment.id for h in taxonomy.search(phrase, limit=8)]
+    assert taxonomy.best_match("shoppers").segment.id == "retail_general"            # ... but the bare word is still its keyword
+
+
+def test_adding_a_role_word_to_any_name_or_keyword_never_picks_another_audience(taxonomy):
+    """It may leave the choice to the planner (two segments share a keyword); it must not choose a different segment."""
+    wrong = []
+    for seg in taxonomy.segments.values():
+        for phrase in (seg.label, *seg.keywords, *seg.company_names):
+            for suffix in ("", " shoppers", " owners"):
+                hit = taxonomy.best_match(phrase + suffix)
+                if hit is not None and hit.segment.id != seg.id:
+                    wrong.append((phrase + suffix, hit.segment.id))
+    assert not wrong, wrong[:10]
+
+
 def test_an_exact_name_still_wins_even_when_another_segment_scores_close(taxonomy):
     assert taxonomy.best_match("Sports Fans").segment.id == "sports_fan"
     assert taxonomy.best_match("Dental Care Seekers").segment.id == "health_dental"

@@ -135,6 +135,14 @@ def tokens(text: str) -> list[str]:
     return [_stem(t) for t in _fold(text).split() if t and t not in _STOP]
 
 
+_FUNCTION_WORDS = frozenset({"the", "a", "an", "of", "for", "and", "in", "to", "on", "who", "that", "with", "by"})
+
+
+def _topic_words(name: str) -> int:
+    """How many words of a folded name say WHAT the audience is: neither a function word nor a bare role word ("shoppers")."""
+    return sum(1 for w in name.split() if w not in _FUNCTION_WORDS and _stem(w) not in _GENERIC)
+
+
 def _phrase_in(needle: str, haystack: str) -> bool:
     """needle appears in haystack as whole words (both already folded)."""
     return bool(needle) and f" {needle} " in f" {haystack} "
@@ -173,7 +181,9 @@ class Taxonomy:
         collapsed_query = query.replace(" ", "")
         hits: dict[str, Hit] = {}
 
-        def offer(seg: Segment, score: float, how: str) -> None:
+        def offer(seg: Segment, score: float, how: str, weak: bool = False) -> None:
+            if weak:
+                score, how = min(score, _APPLY_THRESHOLD - 0.1), "words"
             cur = hits.get(seg.id)
             if cur is None or score > cur.score:
                 hits[seg.id] = Hit(seg, score, how)
@@ -184,14 +194,18 @@ class Taxonomy:
             for name, toks in zip(names, tokensets):
                 if not name:
                     continue
+                # A name made only of role words ("shoppers") says WHO and not WHAT. Inside a longer phrase ("mortgage shoppers")
+                # it is a hint for the planner: it neither applies a rate nor ties with the segment that names the topic.
+                weak = bool(toks) and toks <= _GENERIC and query != name
                 if query == name:
                     offer(seg, 100.0, "name" if name == _fold(seg.label) else "keyword")
                 elif _phrase_in(name, query):                      # the planner's text CONTAINS this keyword phrase
-                    offer(seg, 80.0 + min(len(name), 30) / 10, "keyword")
+                    # more of the topic words covered wins ("luxury car" over "car shopper"); length only breaks the rest
+                    offer(seg, 80.0 + 0.6 * min(_topic_words(name), 3) + min(len(name), 30) / 100, "keyword", weak)
                 elif _phrase_in(query, name) and not (qtokens and qtokens <= _GENERIC):   # the planner typed part of this name
                     offer(seg, 62.0 + min(len(query), 20) / 10, "partial")
                 elif len(name.replace(" ", "")) >= 6 and name.replace(" ", "") in collapsed_query:
-                    offer(seg, 70.0 + min(len(name.replace(" ", "")), 20) / 4, "keyword")   # "videogames" for "video games"; the longer phrase wins
+                    offer(seg, 70.0 + min(len(name.replace(" ", "")), 20) / 4, "keyword", weak)   # "videogames" for "video games"; the longer phrase wins
                 elif toks and qtokens:
                     common = toks & qtokens
                     if common:
