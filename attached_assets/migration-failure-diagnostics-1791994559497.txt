@@ -1,0 +1,330 @@
+<migration_failure>
+   Failed to run database migration statement
+ALTER TABLE "forecast_series_product" ADD CONSTRAINT "forecast_series_product_product_key_fkey" FOREIGN KEY ("product_key") REFERENCES "public"."products"("product_key") ON DELETE cascade ON UPDATE cascade;
+there is no unique constraint matching given keys for referenced table "products"
+   </migration_failure>
+
+   <generated_migration_diff>
+   CREATE TABLE "forecast_series_def" (
+"series_key" text PRIMARY KEY NOT NULL,
+"title" text NOT NULL,
+"channel" text NOT NULL,
+"targeting_key" text DEFAULT 'general' NOT NULL,
+"avails_unit" text NOT NULL,
+"description" text DEFAULT '' NOT NULL,
+"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+CONSTRAINT "forecast_series_def_avails_unit_check" CHECK (avails_unit = ANY (ARRAY['monthly'::text, 'weekly'::text])),
+CONSTRAINT "forecast_series_def_channel_check" CHECK (channel = ANY (ARRAY['ctv'::text, 'olv'::text, 'display'::text, 'pause_ads'::text, 'live_sports'::text, 'netflix'::text, 'platform_model'::text])),
+CONSTRAINT "forecast_series_def_series_key_check" CHECK (series_key ~ '^[a-z0-9][a-z0-9_-]*$'::text)
+);
+
+
+CREATE TABLE "forecast_series_version" (
+"series_id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "forecast_series_version_series_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
+"series_key" text NOT NULL,
+"version" integer NOT NULL,
+"status" text DEFAULT 'staged' NOT NULL,
+"data_basis" text NOT NULL,
+"period_label" text,
+"period_start" date,
+"period_end" date,
+"band_low" double precision DEFAULT 0.7 NOT NULL,
+"band_high" double precision DEFAULT 1.3 NOT NULL,
+"exported_on" date,
+"source_name" text,
+"source_sha256" text,
+"import_fingerprint" text,
+"batch_id" integer,
+"row_counts" jsonb DEFAULT '{}'::jsonb NOT NULL,
+"validation" jsonb DEFAULT '{}'::jsonb NOT NULL,
+"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+"published_at" timestamp with time zone,
+"published_by" text,
+"retired_at" timestamp with time zone,
+CONSTRAINT "forecast_series_version_series_key_version_key" UNIQUE("series_key","version"),
+CONSTRAINT "forecast_series_version_check" CHECK ((band_low > (0)::double precision) AND (band_high >= band_low)),
+CONSTRAINT "forecast_series_version_data_basis_check" CHECK (data_basis = ANY (ARRAY['platform_reported'::text, 'modeled'::text, 'extrapolated'::text, 'mixed'::text])),
+CONSTRAINT "forecast_series_version_status_check" CHECK (status = ANY (ARRAY['staged'::text, 'current'::text, 'retired'::text, 'failed'::text]))
+);
+
+
+CREATE TABLE "schema_migrations" (
+"version" text PRIMARY KEY NOT NULL,
+"name" text NOT NULL,
+"checksum" text NOT NULL,
+"applied_at" timestamp with time zone DEFAULT now() NOT NULL,
+"duration_ms" integer
+);
+
+
+CREATE TABLE "geo_state" (
+"state_code" char(2) PRIMARY KEY NOT NULL,
+"name" text NOT NULL,
+"fips" char(2) NOT NULL,
+CONSTRAINT "geo_state_fips_key" UNIQUE("fips"),
+CONSTRAINT "geo_state_name_key" UNIQUE("name")
+);
+
+
+CREATE TABLE "geo_dma" (
+"dma_key" text PRIMARY KEY NOT NULL,
+"name" text NOT NULL,
+"rank" smallint NOT NULL,
+"home_state" char(2) NOT NULL,
+"tv_households" double precision,
+"population" double precision,
+CONSTRAINT "geo_dma_name_key" UNIQUE("name"),
+CONSTRAINT "geo_dma_rank_key" UNIQUE("rank")
+);
+
+
+CREATE TABLE "forecast_import_batch" (
+"batch_id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "forecast_import_batch_batch_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
+"started_at" timestamp with time zone DEFAULT now() NOT NULL,
+"finished_at" timestamp with time zone,
+"requested_by" text,
+"tool_version" text NOT NULL,
+"status" text NOT NULL,
+"sources" jsonb DEFAULT '[]'::jsonb NOT NULL,
+"report" jsonb DEFAULT '{}'::jsonb NOT NULL,
+CONSTRAINT "forecast_import_batch_status_check" CHECK (status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'dry_run'::text]))
+);
+
+
+CREATE TABLE "geo_dma_alias" (
+"alias_norm" text PRIMARY KEY NOT NULL,
+"alias" text NOT NULL,
+"dma_key" text NOT NULL,
+"source" text DEFAULT 'curated' NOT NULL
+);
+
+
+CREATE TABLE "geo_congressional_district" (
+"cd_key" text PRIMARY KEY NOT NULL,
+"state_code" char(2) NOT NULL,
+"district" text NOT NULL,
+"at_large" boolean DEFAULT false NOT NULL,
+CONSTRAINT "geo_congressional_district_state_code_district_key" UNIQUE("state_code","district")
+);
+
+
+CREATE TABLE "audience_group" (
+"group_key" text PRIMARY KEY NOT NULL,
+"label" text NOT NULL,
+"sort_order" integer DEFAULT 0 NOT NULL,
+CONSTRAINT "audience_group_group_key_check" CHECK (group_key ~ '^[a-z0-9_]+$'::text)
+);
+
+
+CREATE TABLE "forecast_publisher" (
+"publisher_id" integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "forecast_publisher_publisher_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1),
+"name" text NOT NULL,
+"name_norm" text NOT NULL,
+CONSTRAINT "forecast_publisher_name_norm_key" UNIQUE("name_norm")
+);
+
+
+CREATE TABLE "forecast_avail_device" (
+"series_id" integer NOT NULL,
+"device" text NOT NULL,
+"avails" double precision NOT NULL,
+"reach_universe" double precision,
+"est_reach" double precision,
+CONSTRAINT "forecast_avail_device_pkey" PRIMARY KEY("series_id","device"),
+CONSTRAINT "forecast_avail_device_avails_check" CHECK (avails >= (0)::double precision),
+CONSTRAINT "forecast_avail_device_device_check" CHECK (device = ANY (ARRAY['connected_tv'::text, 'mobile'::text, 'desktop'::text, 'tablet'::text]))
+);
+
+
+CREATE TABLE "forecast_avail_zip" (
+"series_id" integer NOT NULL,
+"zip" text NOT NULL,
+"avails" double precision NOT NULL,
+"reach_universe" double precision,
+"est_reach" double precision,
+CONSTRAINT "forecast_avail_zip_pkey" PRIMARY KEY("series_id","zip"),
+CONSTRAINT "forecast_avail_zip_avails_check" CHECK (avails >= (0)::double precision),
+CONSTRAINT "forecast_avail_zip_zip_check" CHECK (zip ~ '^[0-9]{5}$'::text)
+);
+
+
+CREATE TABLE "audience_incidence" (
+"segment_id" text PRIMARY KEY NOT NULL,
+"status" text NOT NULL,
+"rate_all" numeric(8, 6),
+"rate_male" numeric(8, 6),
+"rate_female" numeric(8, 6),
+"definition" text DEFAULT '' NOT NULL,
+"denominator" text DEFAULT '' NOT NULL,
+"time_window" text DEFAULT '' NOT NULL,
+"source_title" text,
+"source_publisher" text,
+"source_url" text,
+"source_date" text,
+"evidence_quote" text,
+"derivation" text,
+"confidence" text DEFAULT 'none' NOT NULL,
+"caveats" text DEFAULT '' NOT NULL,
+"supporting_sources" jsonb DEFAULT '[]'::jsonb NOT NULL,
+"verification" jsonb DEFAULT '{}'::jsonb NOT NULL,
+"origin" text DEFAULT 'seed' NOT NULL,
+"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+CONSTRAINT "audience_incidence_check" CHECK ((status = 'no_public_rate'::text) = (rate_all IS NULL)),
+CONSTRAINT "audience_incidence_check1" CHECK ((status = 'no_public_rate'::text) OR ((source_url IS NOT NULL) AND (source_url <> ''::text) AND (source_title IS NOT NULL))),
+CONSTRAINT "audience_incidence_confidence_check" CHECK (confidence = ANY (ARRAY['high'::text, 'moderate'::text, 'low'::text, 'none'::text])),
+CONSTRAINT "audience_incidence_origin_check" CHECK (origin = ANY (ARRAY['seed'::text, 'admin'::text])),
+CONSTRAINT "audience_incidence_rate_all_check" CHECK ((rate_all IS NULL) OR ((rate_all > (0)::numeric) AND (rate_all <= (1)::numeric))),
+CONSTRAINT "audience_incidence_rate_female_check" CHECK ((rate_female IS NULL) OR ((rate_female > (0)::numeric) AND (rate_female <= (1)::numeric))),
+CONSTRAINT "audience_incidence_rate_male_check" CHECK ((rate_male IS NULL) OR ((rate_male > (0)::numeric) AND (rate_male <= (1)::numeric))),
+CONSTRAINT "audience_incidence_status_check" CHECK (status = ANY (ARRAY['sourced'::text, 'derived'::text, 'no_public_rate'::text]))
+);
+
+
+CREATE TABLE "audience_segment" (
+"segment_id" text PRIMARY KEY NOT NULL,
+"group_key" text NOT NULL,
+"parent_id" text,
+"label" text NOT NULL,
+"company_names" text[] DEFAULT '{}' NOT NULL,
+"keywords" text[] DEFAULT '{}' NOT NULL,
+"description" text DEFAULT '' NOT NULL,
+"sort_order" integer DEFAULT 0 NOT NULL,
+"is_active" boolean DEFAULT true NOT NULL,
+"origin" text DEFAULT 'seed' NOT NULL,
+"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+CONSTRAINT "audience_segment_origin_check" CHECK (origin = ANY (ARRAY['seed'::text, 'admin'::text])),
+CONSTRAINT "audience_segment_segment_id_check" CHECK (segment_id ~ '^[a-z0-9_]+$'::text)
+);
+
+
+CREATE TABLE "forecast_series_product" (
+"product_key" text PRIMARY KEY NOT NULL,
+"series_key" text NOT NULL,
+"relation" text DEFAULT 'primary' NOT NULL,
+"note" text,
+CONSTRAINT "forecast_series_product_relation_check" CHECK (relation = ANY (ARRAY['primary'::text, 'baseline_proxy'::text]))
+);
+
+
+CREATE TABLE "forecast_avail_dma" (
+"series_id" integer NOT NULL,
+"dma_key" text NOT NULL,
+"avails" double precision NOT NULL,
+"avails_low" double precision,
+"avails_high" double precision,
+"reach_universe" double precision,
+"est_reach" double precision,
+"unique_hh" double precision,
+"reach_pct" double precision,
+"basis" text DEFAULT 'reported' NOT NULL,
+CONSTRAINT "forecast_avail_dma_pkey" PRIMARY KEY("series_id","dma_key"),
+CONSTRAINT "forecast_avail_dma_avails_check" CHECK (avails >= (0)::double precision),
+CONSTRAINT "forecast_avail_dma_basis_check" CHECK (basis = ANY (ARRAY['reported'::text, 'modeled'::text]))
+);
+
+
+CREATE TABLE "forecast_avail_cd" (
+"series_id" integer NOT NULL,
+"cd_key" text NOT NULL,
+"avails" double precision NOT NULL,
+"reach_universe" double precision,
+"est_reach" double precision,
+CONSTRAINT "forecast_avail_cd_pkey" PRIMARY KEY("series_id","cd_key"),
+CONSTRAINT "forecast_avail_cd_avails_check" CHECK (avails >= (0)::double precision)
+);
+
+
+CREATE TABLE "forecast_avail_state" (
+"series_id" integer NOT NULL,
+"state_code" char(2) NOT NULL,
+"avails" double precision NOT NULL,
+"reach_universe" double precision,
+"est_reach" double precision,
+CONSTRAINT "forecast_avail_state_pkey" PRIMARY KEY("series_id","state_code"),
+CONSTRAINT "forecast_avail_state_avails_check" CHECK (avails >= (0)::double precision)
+);
+
+
+CREATE TABLE "forecast_avail_publisher" (
+"series_id" integer NOT NULL,
+"publisher_id" integer NOT NULL,
+"avails" double precision NOT NULL,
+"reach_universe" double precision,
+"est_reach" double precision,
+CONSTRAINT "forecast_avail_publisher_pkey" PRIMARY KEY("series_id","publisher_id"),
+CONSTRAINT "forecast_avail_publisher_avails_check" CHECK (avails >= (0)::double precision)
+);
+
+
+CREATE TABLE "forecast_avail_unknown" (
+"series_id" integer NOT NULL,
+"level" text NOT NULL,
+"avails" double precision NOT NULL,
+"reach_universe" double precision,
+"est_reach" double precision,
+CONSTRAINT "forecast_avail_unknown_pkey" PRIMARY KEY("series_id","level"),
+CONSTRAINT "forecast_avail_unknown_avails_check" CHECK (avails >= (0)::double precision),
+CONSTRAINT "forecast_avail_unknown_level_check" CHECK (level = ANY (ARRAY['dma'::text, 'state'::text, 'cd'::text, 'zip'::text]))
+);
+
+
+truncate table "products" cascade;
+
+ALTER TABLE "products" ADD COLUMN "product_key" text NOT NULL;
+
+ALTER TABLE "forecast_series_version" ADD CONSTRAINT "forecast_series_version_batch_id_fkey" FOREIGN KEY ("batch_id") REFERENCES "public"."forecast_import_batch"("batch_id") ON DELETE no action ON UPDATE no action;
+
+ALTER TABLE "forecast_series_version" ADD CONSTRAINT "forecast_series_version_series_key_fkey" FOREIGN KEY ("series_key") REFERENCES "public"."forecast_series_def"("series_key") ON DELETE cascade ON UPDATE no action;
+
+ALTER TABLE "geo_dma" ADD CONSTRAINT "geo_dma_home_state_fkey" FOREIGN KEY ("home_state") REFERENCES "public"."geo_state"("state_code") ON DELETE no action ON UPDATE no action;
+
+ALTER TABLE "geo_dma_alias" ADD CONSTRAINT "geo_dma_alias_dma_key_fkey" FOREIGN KEY ("dma_key") REFERENCES "public"."geo_dma"("dma_key") ON DELETE cascade ON UPDATE no action;
+
+ALTER TABLE "geo_congressional_district" ADD CONSTRAINT "geo_congressional_district_state_code_fkey" FOREIGN KEY ("state_code") REFERENCES "public"."geo_state"("state_code") ON DELETE no action ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_device" ADD CONSTRAINT "forecast_avail_device_series_id_fkey" FOREIGN KEY ("series_id") REFERENCES "public"."forecast_series_version"("series_id") ON DELETE cascade ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_zip" ADD CONSTRAINT "forecast_avail_zip_series_id_fkey" FOREIGN KEY ("series_id") REFERENCES "public"."forecast_series_version"("series_id") ON DELETE cascade ON UPDATE no action;
+
+ALTER TABLE "audience_incidence" ADD CONSTRAINT "audience_incidence_segment_id_fkey" FOREIGN KEY ("segment_id") REFERENCES "public"."audience_segment"("segment_id") ON DELETE cascade ON UPDATE no action;
+
+ALTER TABLE "audience_segment" ADD CONSTRAINT "audience_segment_group_key_fkey" FOREIGN KEY ("group_key") REFERENCES "public"."audience_group"("group_key") ON DELETE no action ON UPDATE no action;
+
+ALTER TABLE "audience_segment" ADD CONSTRAINT "audience_segment_parent_id_fkey" FOREIGN KEY ("parent_id") REFERENCES "public"."audience_segment"("segment_id") ON DELETE set null ON UPDATE no action;
+
+ALTER TABLE "forecast_series_product" ADD CONSTRAINT "forecast_series_product_product_key_fkey" FOREIGN KEY ("product_key") REFERENCES "public"."products"("product_key") ON DELETE cascade ON UPDATE cascade;
+
+ALTER TABLE "forecast_series_product" ADD CONSTRAINT "forecast_series_product_series_key_fkey" FOREIGN KEY ("series_key") REFERENCES "public"."forecast_series_def"("series_key") ON DELETE cascade ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_dma" ADD CONSTRAINT "forecast_avail_dma_dma_key_fkey" FOREIGN KEY ("dma_key") REFERENCES "public"."geo_dma"("dma_key") ON DELETE no action ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_dma" ADD CONSTRAINT "forecast_avail_dma_series_id_fkey" FOREIGN KEY ("series_id") REFERENCES "public"."forecast_series_version"("series_id") ON DELETE cascade ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_cd" ADD CONSTRAINT "forecast_avail_cd_cd_key_fkey" FOREIGN KEY ("cd_key") REFERENCES "public"."geo_congressional_district"("cd_key") ON DELETE no action ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_cd" ADD CONSTRAINT "forecast_avail_cd_series_id_fkey" FOREIGN KEY ("series_id") REFERENCES "public"."forecast_series_version"("series_id") ON DELETE cascade ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_state" ADD CONSTRAINT "forecast_avail_state_series_id_fkey" FOREIGN KEY ("series_id") REFERENCES "public"."forecast_series_version"("series_id") ON DELETE cascade ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_state" ADD CONSTRAINT "forecast_avail_state_state_code_fkey" FOREIGN KEY ("state_code") REFERENCES "public"."geo_state"("state_code") ON DELETE no action ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_publisher" ADD CONSTRAINT "forecast_avail_publisher_publisher_id_fkey" FOREIGN KEY ("publisher_id") REFERENCES "public"."forecast_publisher"("publisher_id") ON DELETE no action ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_publisher" ADD CONSTRAINT "forecast_avail_publisher_series_id_fkey" FOREIGN KEY ("series_id") REFERENCES "public"."forecast_series_version"("series_id") ON DELETE cascade ON UPDATE no action;
+
+ALTER TABLE "forecast_avail_unknown" ADD CONSTRAINT "forecast_avail_unknown_series_id_fkey" FOREIGN KEY ("series_id") REFERENCES "public"."forecast_series_version"("series_id") ON DELETE cascade ON UPDATE no action;
+
+CREATE UNIQUE INDEX "forecast_series_version_current_uq" ON "forecast_series_version" USING btree ("series_key") WHERE (status = 'current'::text);
+
+CREATE INDEX "forecast_series_version_fingerprint_idx" ON "forecast_series_version" USING btree ("series_key","import_fingerprint") WHERE (import_fingerprint IS NOT NULL);
+
+CREATE INDEX "geo_dma_alias_dma_idx" ON "geo_dma_alias" USING btree ("dma_key");
+
+CREATE INDEX "audience_segment_group_idx" ON "audience_segment" USING btree ("group_key","sort_order");
+
+CREATE INDEX "forecast_series_product_series_idx" ON "forecast_series_product" USING btree ("series_key");
+   </generated_migration_diff>
+
+   <migration_warnings>
+   · You're about to add not-null product_key column without default value, which contains 67 items
+   </migration_warnings>
