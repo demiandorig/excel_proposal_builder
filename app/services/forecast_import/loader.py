@@ -160,8 +160,15 @@ def prune(conn, keep: int = 2) -> int:
 def link_products(conn, payload: SeriesPayload) -> list[str]:
     """Point the catalog products named in the manifest at this series. Returns the names that are not in the catalog
     (a warning, not an error: the catalog is edited by people)."""
+    return link_spec_products(conn, payload.spec)
+
+
+def link_spec_products(conn, spec) -> list[str]:
+    """The same from a manifest entry alone, so a series the startup import skips (it already has a version) still gets its
+    products linked - on a fresh database the products table is filled only AFTER the first import, and nothing else would
+    ever link them. Idempotent; these links are the importer's defaults (an admin's own mapping is a separate table)."""
     missing: list[str] = []
-    for link in payload.spec.products:
+    for link in spec.products:
         row = conn.execute("SELECT product_key FROM products WHERE name = %s", (link.name,)).fetchone()
         if row is None:
             missing.append(link.name)
@@ -169,7 +176,7 @@ def link_products(conn, payload: SeriesPayload) -> list[str]:
         conn.execute(
             "INSERT INTO forecast_series_product (product_key, series_key, relation, note) VALUES (%s, %s, %s, %s) "
             "ON CONFLICT (product_key) DO UPDATE SET series_key = EXCLUDED.series_key, relation = EXCLUDED.relation, note = EXCLUDED.note",
-            (row["product_key"], payload.spec.series_key, link.relation, link.note or None))
+            (row["product_key"], spec.series_key, link.relation, link.note or None))
     return missing
 
 

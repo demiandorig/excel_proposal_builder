@@ -270,6 +270,31 @@ def test_extension_fills_the_missing_markets_from_the_reference_distribution(tmp
     assert abs(p.levels["dma"][some.key].avails - 0.1 * ref[some.key]) < 1
 
 
+def test_the_extended_series_fingerprint_follows_the_reference_it_was_extended_from(tmp_path):
+    """A new Connect export changes the market distribution Netflix is extended from; the Netflix series must then count as
+    changed (a new version), not 'unchanged' because its own CSV and spec are the same."""
+    ref = {d.key: 1_000_000 + 5000 * d.rank for d in geo.dma_table()}
+    names = [d.name for d in geo.dma_table()[:12]]
+    path = netflix_csv(tmp_path / "n.csv", [[n, "Netflix", "Adult 18+", "$54.00", 15, f"{int(0.1 * ref[geo.slug(n)]):,}"] for n in names])
+    nf = spec("nf", "netflix_baseline_csv", params={"length": 15})
+    same_a = readers.read_netflix_csv(nf, path, ref)
+    same_b = readers.read_netflix_csv(nf, path, dict(ref))
+    changed = readers.read_netflix_csv(nf, path, {**ref, geo.dma_table()[20].key: ref[geo.dma_table()[20].key] * 0.5})
+    assert same_a.fingerprint() == same_b.fingerprint()
+    assert same_a.fingerprint() != changed.fingerprint()
+    assert same_a.reference_hash and changed.reference_hash != same_a.reference_hash
+
+
+def test_a_series_that_is_not_extended_keeps_the_fingerprint_it_always_had(tmp_path):
+    """No reference, no change to the identity of the 38 other series (a deploy must not re-import them)."""
+    from app.services.forecast_import.model import SeriesPayload
+    p = SeriesPayload(spec=spec("plain", "madhive_zip"), source_name="a.zip", source_sha256="abc")
+    assert p.reference_hash == ""
+    import hashlib, json
+    blob = json.dumps(p.spec.fingerprint_payload(), sort_keys=True, default=str)
+    assert p.fingerprint() == hashlib.sha256(f"abc:{blob}".encode("utf-8")).hexdigest()
+
+
 def test_extension_needs_enough_reported_markets(tmp_path):
     ref = {d.key: 1_000_000 for d in geo.dma_table()}
     path = netflix_csv(tmp_path / "n.csv", [[n.name, "Netflix", "Adult 18+", "$54.00", 15, 100000] for n in geo.dma_table()[:5]])

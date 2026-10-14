@@ -82,6 +82,48 @@ def test_everyday_phrases_resolve_to_the_right_segment(phrase, expected):
     assert resolve_interest(phrase).category == expected
 
 
+@pytest.mark.parametrize("phrase", [
+    "pet owners", "dog owners", "truck owners", "home insurance", "urgent care", "health care", "personal injury", "senior living",
+    "nursing school", "phone plans", "live music", "hispanic voters", "life insurance", "insurance broker", "caregivers", "election",
+])
+def test_a_single_shared_word_is_a_suggestion_never_an_applied_rate(taxonomy, phrase):
+    """'pet owners' used to apply Small Business Owners' rate because both contain 'owners' (score 55, exactly the apply line)."""
+    assert taxonomy.best_match(phrase) is None, phrase
+    assert resolve_interest(phrase).supported is False
+
+
+def test_two_audiences_that_fit_equally_well_are_left_for_the_planner_to_choose(taxonomy):
+    assert taxonomy.best_match("insurance") is None                      # auto insurance or health insurance?
+    top = {h.segment.id for h in taxonomy.search("insurance", limit=4)}
+    assert {"auto_insurance_shoppers", "fin_health_insurance"} <= top    # ... and both are offered
+    assert taxonomy.best_match("owners") is None                          # a bare role word says who, not what
+
+
+def test_an_exact_name_still_wins_even_when_another_segment_scores_close(taxonomy):
+    assert taxonomy.best_match("Sports Fans").segment.id == "sports_fan"
+    assert taxonomy.best_match("Dental Care Seekers").segment.id == "health_dental"
+
+
+def test_the_ambiguous_single_words_the_review_found_no_longer_route_to_the_wrong_segment(taxonomy):
+    assert taxonomy.best_match("contractors").segment.id == "home_services"        # was the B2B construction workforce
+    assert taxonomy.best_match("real estate broker").segment.id == "biz_re_agents"
+    assert "broker" not in taxonomy.segments["biz_re_agents"].keywords
+    assert "caregiver" not in taxonomy.segments["health_professionals"].keywords
+    assert "contractor" not in taxonomy.segments["biz_construction"].keywords
+
+
+def test_a_label_does_not_promise_more_than_the_number_measures(taxonomy):
+    """The review found two segments whose label said 'follows politics' / 'religious or spiritual' over a rate that measures
+    something much narrower. The label and description now say what the number is."""
+    political = taxonomy.segments["civic_political_engaged"]
+    assert "highly engaged" in political.label.lower() and "narrow" in political.description
+    assert not {"voter", "election", "politics", "political news"} & set(political.keywords)
+    religious = taxonomy.segments["civic_religious"]
+    assert "attend" in religious.label.lower() and "at least once a month" in religious.description
+    assert "Spiritual & Religious Seekers" in religious.company_names              # the team's own wording still finds it
+    assert taxonomy.search("Spiritual & Religious Seekers", limit=1)[0].segment.id == "civic_religious"
+
+
 def test_spelling_mistakes_still_find_the_segment(taxonomy):
     assert taxonomy.search("chiropracter")[0].segment.id == "health_chiropractic"
     assert taxonomy.search("realestate investors")[0].segment.id == "home_re_investors"

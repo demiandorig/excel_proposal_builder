@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from app.db import get_connection
+from app.db import get_connection, release_advisory_lock
 
 log = logging.getLogger(__name__)
 
@@ -155,8 +155,7 @@ def apply_pending(directory: Optional[Path] = None, dry_run: bool = False, ledge
                 applied_now.append(m.version)
                 log.info("applied migration %s_%s in %d ms", m.version, m.name, int((time.monotonic() - started) * 1000))
         finally:
-            conn.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
-            conn.commit()
+            release_advisory_lock(conn, LOCK_KEY)
     return applied_now
 
 

@@ -13,9 +13,15 @@ def apply_to_db(conn) -> int:
     """Insert each seed product that has no row yet; returns how many were inserted."""
     existing = {r["name"] for r in conn.execute("SELECT name FROM products").fetchall()}
     if not existing:
-        # An empty table is filled, once, from the whole CATALOG (which already contains these products) on first
-        # use. Seeding only these 30 here would make the table non-empty and the base catalog would never load.
-        return 0
+        # An empty table is filled, once, from the whole CATALOG (which already contains these products). Seeding only these
+        # 30 here would make the table non-empty and the base catalog would never load - so ask the catalog to do its own
+        # seeding now, and the series imported right after this call find the products they link to (on a fresh database
+        # nothing else would have touched the table yet).
+        catalog.invalidate_product_caches()
+        catalog.load_product_rows()
+        existing = {r["name"] for r in conn.execute("SELECT name FROM products").fetchall()}
+        if not existing:
+            return 0                      # it could not be seeded (a blip); the next start tries again
     columns = ", ".join(catalog._PRODUCT_COLUMNS)
     placeholders = ", ".join(["%s"] * (len(catalog._PRODUCT_COLUMNS) + 2))
     inserted = 0

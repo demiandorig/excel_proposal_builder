@@ -103,6 +103,10 @@ class GeoResolution:
     # Places to pick from: "did you mean" candidates for text that did not resolve, and "broaden to" larger areas that
     # contain a resolved place. [{"kind", "label", "geo_type", "resolve_hint", "why", ...}]
     suggestions: list[dict] = field(default_factory=list)
+    # States the planner asked for as a WHOLE ("Texas", "WA"): their home-state DMAs are in `areas`, but a series that
+    # carries its own state rows (constanza_engine) uses those totals, which include the parts of the state served from
+    # markets homed elsewhere.
+    whole_states: list[str] = field(default_factory=list)
 
     @property
     def resolved(self) -> bool:
@@ -453,6 +457,7 @@ def _resolve_dma_or_state(text: str) -> GeoResolution | None:
         areas=[_dma_area(d) for d in deduped],
         unmatched_tokens=unmatched, geo_confidence="high", ambiguous=ambiguous, notes=notes,
         unmatched_details=unmatched_details,
+        whole_states=sorted(a for a in matched_states if a not in empty_states),
     )
 
 
@@ -527,7 +532,9 @@ def _merge_resolutions(text: str, parts: list[GeoResolution]) -> GeoResolution:
     notes: list[str] = []
     interpretations: list[dict] = []
     suggestions: list[dict] = []
+    whole_states: list[str] = []
     for part in parts:
+        whole_states.extend(st for st in part.whole_states if st not in whole_states)
         for a in part.areas:
             key = (a.source_type, a.geo_id or a.label or a.dma, a.dma)
             if key not in seen:
@@ -585,7 +592,7 @@ def _merge_resolutions(text: str, parts: list[GeoResolution]) -> GeoResolution:
     return GeoResolution(
         input_text=text, method=method, areas=areas, unmatched_tokens=unmatched,
         geo_confidence=confidence, ambiguous=ambiguous, unmatched_details=details, notes=notes,
-        interpretations=interpretations, suggestions=suggestions,
+        interpretations=interpretations, suggestions=suggestions, whole_states=whole_states,
     )
 
 

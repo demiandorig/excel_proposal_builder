@@ -33,6 +33,9 @@ DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "constanza" / "audien
 STATUSES = ("sourced", "derived", "no_public_rate")
 CONFIDENCES = ("high", "moderate", "low", "none")
 _TTL = 60.0
+_APPLY_THRESHOLD = 55.0      # best_match applies a segment's rate only at or above this score; below it the planner is shown suggestions
+# Role words that say WHO but not WHAT ("owners", "shoppers", "seekers"): typing only these is too generic to pick a segment.
+_GENERIC = frozenset({"owner", "shopper", "seeker", "intender", "user", "buyer", "lover", "enthusiast", "professional", "service", "product"})
 _RETRY_AFTER_FAILURE = 15.0
 
 
@@ -185,7 +188,7 @@ class Taxonomy:
                     offer(seg, 100.0, "name" if name == _fold(seg.label) else "keyword")
                 elif _phrase_in(name, query):                      # the planner's text CONTAINS this keyword phrase
                     offer(seg, 80.0 + min(len(name), 30) / 10, "keyword")
-                elif _phrase_in(query, name):                       # the planner typed part of this name
+                elif _phrase_in(query, name) and not (qtokens and qtokens <= _GENERIC):   # the planner typed part of this name
                     offer(seg, 62.0 + min(len(query), 20) / 10, "partial")
                 elif len(name.replace(" ", "")) >= 6 and name.replace(" ", "") in collapsed_query:
                     offer(seg, 70.0 + min(len(name.replace(" ", "")), 20) / 4, "keyword")   # "videogames" for "video games"; the longer phrase wins
@@ -194,7 +197,13 @@ class Taxonomy:
                     if common:
                         overlap = len(common) / max(len(toks), len(qtokens))
                         if overlap >= 0.5 or (len(qtokens) == 1 and len(common) == 1):
-                            offer(seg, 40.0 + 30.0 * overlap, "words")
+                            score = 40.0 + 30.0 * overlap
+                            if not toks <= qtokens:
+                                # Only part of the keyword is in what was typed ("pet OWNERS" against "small business OWNERS",
+                                # "health CARE" against "dental CARE"): a shared common word is a hint, not an answer. Offered
+                                # as a suggestion, never strong enough for best_match to apply its rate.
+                                score = min(score, _APPLY_THRESHOLD - 0.1)
+                            offer(seg, score, "words")
                 if len(query) >= 4 and abs(len(query) - len(name)) <= max(6, len(name) // 2):
                     ratio = difflib.SequenceMatcher(None, query, name).ratio()
                     if ratio >= 0.82:
@@ -206,8 +215,10 @@ class Taxonomy:
         """The one segment to apply for a phrase, or None when nothing is close enough (the caller then reports the closest
         ones instead of guessing)."""
         hits = self.search(text, limit=3)
-        if not hits or hits[0].score < 55.0:
+        if not hits or hits[0].score < _APPLY_THRESHOLD:
             return None
+        if len(hits) > 1 and hits[1].segment.id != hits[0].segment.id and hits[0].score - hits[1].score < 0.25 and hits[0].how != "name":
+            return None            # two audiences fit equally well ("insurance", "contractors"): the planner chooses, we do not
         return hits[0]
 
     def categories(self) -> list[dict]:

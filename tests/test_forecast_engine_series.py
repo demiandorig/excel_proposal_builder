@@ -38,13 +38,15 @@ def fake(monkeypatch):
         zips: dict = {}
         cds: dict = {}
         unknown: dict = {}
+        states: dict = {}
     f = Fake()
-    f.series, f.dmas, f.zips, f.cds, f.unknown = {}, {}, {}, {}, {}
+    f.series, f.dmas, f.zips, f.cds, f.unknown, f.states = {}, {}, {}, {}, {}, {}
     monkeypatch.setattr(store, "series_by_key", lambda k: f.series.get(k))
     monkeypatch.setattr(store, "dma_table", lambda sid: f.dmas.get(sid, {}))
     monkeypatch.setattr(store, "zip_rows", lambda sid, zs: {z: f.zips[(sid, z)] for z in zs if (sid, z) in f.zips})
     monkeypatch.setattr(store, "cd_rows", lambda sid, ks: {k: f.cds[(sid, k)] for k in ks if (sid, k) in f.cds})
     monkeypatch.setattr(store, "unknown_share", lambda sid: f.unknown.get(sid, {}))
+    monkeypatch.setattr(store, "state_rows", lambda sid, ss: {s: f.states[(sid, s)] for s in ss if (sid, s) in f.states})
     return f
 
 
@@ -54,8 +56,9 @@ def estimate(product, text, months=1, hint=None, config=None, **kw):
     return engine.estimate_avails(product, res, months=months, config=config, **kw)
 
 
-def cfg(platform, hispanic=False, relation="primary"):
-    return fm.ForecastConfig(enabled=True, method="platform", platform=platform, hispanic_weighted=hispanic, source="default", relation=relation)
+def cfg(platform, hispanic=False, relation="primary", link_note=None):
+    return fm.ForecastConfig(enabled=True, method="platform", platform=platform, hispanic_weighted=hispanic, source="default", relation=relation,
+                             link_note=link_note)
 
 
 def uniform_dmas(avails=1_000_000.0, basis="reported"):
@@ -215,6 +218,41 @@ def test_a_baseline_proxy_product_is_told_it_is_an_upper_bound(fake):
     fake.dmas[1] = uniform_dmas()
     est = estimate("Netflix - Age Targeted :15s Ads", "Los Angeles", config=cfg("n", relation="baseline_proxy"))
     assert any("will deliver fewer impressions" in n for n in est.notes) and est.series["relation"] == "baseline_proxy"
+
+
+def test_the_baseline_caveat_stored_with_the_product_link_reaches_the_estimate(fake):
+    """The real store returns a series as primary with no note (the link lives on the product, not the series): the config
+    carries the link, and the estimate must show it - the caveat once never appeared on a real database."""
+    fake.series["n"] = ref("n", 1)
+    fake.dmas[1] = uniform_dmas()
+    note = "Run-of-network A18+ baseline; this targeted variant will deliver fewer impressions."
+    est = estimate("Netflix - Age Targeted :15s Ads", "Los Angeles", config=cfg("n", relation="baseline_proxy", link_note=note))
+    assert note in est.notes and est.series["relation"] == "baseline_proxy" and est.series["note"] == note
+
+
+def test_a_whole_state_uses_the_platforms_own_state_total_not_just_the_markets_homed_there(fake):
+    """Wyoming's own row is far larger than its two home markets: the rest is served from markets homed elsewhere."""
+    fake.series["s"] = ref("s", 1, levels=("dma", "state"))
+    fake.dmas[1] = uniform_dmas(1000.0)
+    assert len(resolve_geo("WY").areas) == 2                              # Cheyenne-Scottsbluff and Casper-Riverton
+    fake.states[(1, "WY")] = store.Row("WY", 3800.0)                     # the two markets hold 2,000; the state row says 3,800
+    est = estimate("P", "WY", config=cfg("s"))
+    assert est.imps_mid == pytest.approx(3800.0)                          # the total is the state's own
+    assert sum(a.imps_mid for a in est.by_area) == pytest.approx(3800.0)  # and the per-market split still adds up to it
+    assert any("platform's own state totals" in n and "WY" in n and "1.90" in n for n in est.notes)
+    est_ny = estimate("P", "New York", config=cfg("s"))                   # a market is not a state: never scaled
+    assert est_ny.imps_mid == pytest.approx(1000.0)
+    one_county = estimate("P", "Albany County, WY", config=cfg("s"))      # nor is a county inside the state
+    assert one_county.imps_mid < 1000.0 and not any("state totals" in n for n in one_county.notes)
+
+
+def test_a_state_without_its_own_row_or_a_series_without_state_rows_keeps_the_market_sum(fake):
+    fake.series["s"] = ref("s", 1, levels=("dma", "state"))
+    fake.series["t"] = ref("t", 2)                                         # no state level at all
+    fake.dmas[1], fake.dmas[2] = uniform_dmas(1000.0), uniform_dmas(1000.0)
+    fake.states[(2, "WY")] = store.Row("WY", 9999.0)                       # present in the fake, but the series does not list the level
+    assert estimate("P", "WY", config=cfg("s")).imps_mid == pytest.approx(2000.0)
+    assert estimate("P", "WY", config=cfg("t")).imps_mid == pytest.approx(2000.0)
 
 
 def test_a_national_total_mentions_what_the_platform_could_not_place(fake):

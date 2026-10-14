@@ -291,6 +291,8 @@ def extend_to_all_dmas(payload: SeriesPayload, reference: dict[str, float]) -> N
     (median, so one odd market cannot move it). Rows produced this way are marked basis='modeled' and the series
     data_basis is 'extrapolated'. The fit on the reported markets themselves is recorded as a finding so a reviewer
     sees how good the extension is; when it is poor the import fails rather than inventing a bad series."""
+    payload.reference_hash = hashlib.sha256(
+        json.dumps(sorted((k, round(v, 2)) for k, v in reference.items())).encode("utf-8")).hexdigest()[:16]
     reported = {k: f.avails for k, f in payload.levels["dma"].items() if f.basis == "reported"}
     pairs = [(reported[k], reference[k]) for k in reported if reference.get(k)]
     if len(pairs) < 8:

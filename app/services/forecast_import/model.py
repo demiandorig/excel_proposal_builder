@@ -87,6 +87,9 @@ class SeriesPayload:
     source_sha256: str = ""
     findings: list[Finding] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
+    # A series extended from another one (Netflix, from Connect) is computed from THAT series' market distribution too, so
+    # its identity must change when the distribution does; otherwise a new Connect export would leave it "unchanged".
+    reference_hash: str = ""
 
     def add(self, rule: str, severity: str, message: str, where: str = "") -> None:
         self.findings.append(Finding(rule, severity, message, where))
@@ -97,7 +100,8 @@ class SeriesPayload:
 
     def fingerprint(self) -> str:
         blob = json.dumps(self.spec.fingerprint_payload(), sort_keys=True, default=str)
-        return hashlib.sha256(f"{self.source_sha256}:{blob}".encode("utf-8")).hexdigest()
+        base = f"{self.source_sha256}:{blob}" + (f":ref={self.reference_hash}" if self.reference_hash else "")
+        return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
     def row_counts(self) -> dict:
         counts = {lvl: len(rows) for lvl, rows in self.levels.items() if rows}

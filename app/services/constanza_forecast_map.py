@@ -79,6 +79,7 @@ class ForecastConfig:
     hispanic_weighted: bool        # only meaningful for method == "platform"
     source: str                    # "default" | "admin"
     relation: str = "primary"      # "baseline_proxy": the series is another product's avails used as this one's baseline
+    link_note: Optional[str] = None  # the sentence stored with that link ("this targeted variant will deliver fewer impressions")
 
     def to_public(self) -> dict:
         return {"enabled": self.enabled, "method": self.method, "platform": self.platform,
@@ -147,7 +148,8 @@ def default_config(product_name: str, family: Optional[str] = None, variants: Op
     linked = forecast_store.series_for_product([product_name] + sorted(variants - {product_name}))
     if linked is not None:
         return ForecastConfig(enabled=True, method="platform", platform=linked.series_key,
-                              hispanic_weighted=hispanic and linked.series_key == platform, source="default", relation=linked.relation)
+                              hispanic_weighted=hispanic and linked.series_key == platform, source="default", relation=linked.relation,
+                              link_note=linked.link_note)
     if family is None:
         family = _family_of(product_name)
     return ForecastConfig(
@@ -234,6 +236,7 @@ def resolve_forecast(product_name: str, family: Optional[str] = None, *, overrid
             enabled=bool(row["enabled"]), method=row["method"], platform=platform,
             hispanic_weighted=bool(row.get("hispanic_weighted")) and row["method"] == "platform", source="admin",
             relation=base.relation if platform and platform == base.platform else "primary",
+            link_note=base.link_note if platform and platform == base.platform else None,
         )
     return default_config(product_name, family, variants)
 
@@ -248,9 +251,8 @@ def forecast_for_products(products: Iterable) -> dict[str, dict]:
         public = cfg.to_public()
         ref = forecast_store.series_by_key(cfg.platform) if cfg.method == "platform" and cfg.platform else None
         if ref is not None:
-            data = ref.to_public()
-            data["relation"] = cfg.relation
-            public["series"] = data
+            # the product's own link to the series: whether the series is its baseline proxy, and the stored caveat for that
+            public["series"] = ref.with_link(cfg.relation, cfg.link_note).to_public()
         out[p.name] = public
     return out
 

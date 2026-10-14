@@ -1419,7 +1419,6 @@
     "medical professional",
     "clinician",
     "healthcare professional",
-    "caregiver",
     "enfermera"
    ],
    "description": "People working in healthcare practitioner, technical and support occupations.",
@@ -3298,23 +3297,21 @@
   {
    "id": "civic_political_engaged",
    "group": "civic",
-   "label": "Politically Engaged Users",
+   "label": "Politically Engaged Users (highly engaged)",
    "company_names": [
     "Politically Engaged Users"
    ],
    "keywords": [
-    "politics",
-    "political",
     "politically engaged",
-    "voter",
-    "news junkie",
-    "political news",
+    "highly engaged",
+    "political activism",
     "activism",
-    "campaigns",
-    "election",
+    "activists",
+    "mobilizers",
+    "civic engagement",
     "politica"
    ],
-   "description": "Adults who follow politics closely or take part in it.",
+   "description": "Adults highly engaged across politics, civic life, news and religion (Pew's 'Mobilizers'): a narrow, intense slice. Audiences that merely follow politics or vote are several times larger.",
    "sort": 770,
    "incidence": {
     "status": "sourced",
@@ -3430,7 +3427,7 @@
   {
    "id": "civic_religious",
    "group": "civic",
-   "label": "Spiritual & Religious Seekers",
+   "label": "Regular Religious Service Attendees",
    "company_names": [
     "Spiritual & Religious Seekers"
    ],
@@ -3446,7 +3443,7 @@
     "spirituality",
     "iglesia"
    ],
-   "description": "Adults who are religious or spiritual: they attend services or say faith matters to them.",
+   "description": "Adults who attend religious services at least once a month. This understates adults who describe themselves as religious or spiritual, which is roughly twice as many.",
    "sort": 800,
    "incidence": {
     "status": "sourced",
@@ -3724,7 +3721,6 @@
     "realtor",
     "real estate broker",
     "realty",
-    "broker",
     "agente de bienes raices"
    ],
    "description": "Licensed real estate agents and brokers.",
@@ -3794,7 +3790,6 @@
    ],
    "keywords": [
     "construction",
-    "contractor",
     "builder",
     "construction worker",
     "trades",

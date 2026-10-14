@@ -95,7 +95,7 @@ from app.services import constanza_forecast_map as forecast_map_svc
 from app.services import forecast_store
 from app.services.constanza_engine import estimate_avails
 from app.services import audience_taxonomy
-from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, parse_audience_text
+from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, normalize_gender, parse_audience_text
 from app.services.line_modifier import clean_line_modifier_or_none
 
 
@@ -262,6 +262,7 @@ def _bootstrap_forecast_data() -> None:
             _logger.info("forecast data bootstrap: %s", result)
         forecast_store.invalidate()
         forecast_map_svc.invalidate()
+        audience_taxonomy.invalidate()                   # the seed may just have changed the audience rows
     except Exception as e:  # noqa: BLE001
         _logger.warning("Forecast data bootstrap skipped: %s: %s", type(e).__name__, e)
 
@@ -1329,7 +1330,7 @@ def _check_constanza_estimate_input(body: "ConstanzaEstimateRequest") -> None:
     _check_constanza_text("Geography", body.geo_text)
     if not (1 <= body.months <= _CONSTANZA_MAX_MONTHS):
         raise HTTPException(status_code=422, detail=f"Months must be between 1 and {_CONSTANZA_MAX_MONTHS}.")
-    if body.flight_days is not None and not (math.isfinite(body.flight_days) and 0 < body.flight_days <= 3660):
+    if body.flight_days is not None and not (math.isfinite(body.flight_days) and 1 <= body.flight_days <= 3660):
         raise HTTPException(status_code=422, detail="Flight days must be between 1 and 3,660.")
     total = body.national_monthly_total
     if total is not None and not (math.isfinite(total) and 0 <= total <= 1e13):
@@ -1341,6 +1342,10 @@ def _check_constanza_estimate_input(body: "ConstanzaEstimateRequest") -> None:
                 raise HTTPException(status_code=422, detail=f"{name} must be between 0 and 120.")
         if a.age_min is not None and a.age_max is not None and a.age_min > a.age_max:
             raise HTTPException(status_code=422, detail="Minimum age can't be above maximum age.")
+        try:
+            a.gender = normalize_gender(a.gender)                      # "Male" -> "male", "all" -> none; a typo is a 422, not "everyone"
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         if len(a.interest_terms) > _CONSTANZA_MAX_INTERESTS or any(len(t) > 100 for t in a.interest_terms):
             raise HTTPException(status_code=422, detail=f"Give at most {_CONSTANZA_MAX_INTERESTS} interests, each under 100 characters.")
 
@@ -1470,7 +1475,7 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
                     # the rate that was applied (the gender-specific one when the source gives it)
                     "rate": (i.rate_by_gender or {}).get(body.audience.gender or "all"),
                     "definition": i.definition, "source": i.source, "source_date": i.source_date, "source_url": i.source_url,
-                    "caveats": i.caveats, "how": i.how, "suggestions": i.suggestions,
+                    "caveats": i.caveats, "how": i.how, "suggestions": i.suggestions, "gender_split": i.gender_split,
                 }
                 for i in audience_estimate.interests
             ],

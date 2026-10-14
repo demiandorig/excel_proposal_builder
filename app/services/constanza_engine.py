@@ -141,7 +141,7 @@ def _area_weights(areas: list[ResolvedArea], trait: str | None = None) -> list[f
 
 def estimate_platform_modeled(
     product_name: str, platform: str, geo: GeoResolution, months: int, hispanic_weighted: bool | None = None,
-    flight_days: float | None = None,
+    flight_days: float | None = None, relation: str = "primary", link_note: str | None = None,
 ) -> AvailsEstimate | None:
     """`hispanic_weighted` is the product's effective config (Admin -> Forecast); None = the built-in default for the name.
 
@@ -149,6 +149,8 @@ def estimate_platform_modeled(
     the original model workbook's bundled figures still answer for the seven legacy series, and any other series
     returns None (the caller falls back to the population-share estimate)."""
     series = forecast_store.series_by_key(platform)
+    if series is not None and relation != "primary":
+        series = series.with_link(relation, link_note or series.link_note)   # the "baseline for a targeted product" caveat
     if series is not None:
         try:
             return estimate_from_series(
@@ -255,6 +257,42 @@ def _series_notes(series: "forecast_store.SeriesRef", weeks: float | None, model
     return notes
 
 
+def _state_scales(series: "forecast_store.SeriesRef", geo: GeoResolution, dmas: dict, factor: float) -> tuple[dict[str, float], list[str]]:
+    """For each state requested as a whole and covered by a state row of the series: the factor that makes its home-state
+    markets add up to the platform's own state total. A state is more than the markets homed in it (Wyoming's own row is
+    nearly twice what its two markets hold: the rest is served from Denver, Billings and Salt Lake City), so summing the
+    markets alone would understate it. Returns ({state: factor}, notes); empty when the series has no state rows."""
+    if not geo.whole_states or "state" not in series.levels:
+        return {}, []
+    try:
+        rows = forecast_store.state_rows(series.series_id, geo.whole_states)
+    except Exception:  # noqa: BLE001 - the market rows still answer
+        return {}, []
+    scale: dict[str, float] = {}
+    said: list[str] = []
+    for st in geo.whole_states:
+        row = rows.get(st)
+        if row is None or not row.avails:
+            continue
+        home = 0.0
+        for a in geo.areas:
+            if a.source_type == "dma" and a.state == st and a.dma:
+                key = geo_reference.dma_key_for_label(a.dma)
+                dma_row = dmas.get(key) if key else None
+                if dma_row is not None:
+                    home += dma_row.avails * a.dma_share
+        if home > 0:
+            scale[st] = row.avails / home
+            if abs(scale[st] - 1.0) >= 0.02:
+                said.append(f"{st}: the platform's own state total is {row.avails * factor:,.0f} against {home * factor:,.0f} in the markets homed there "
+                            f"(x{scale[st]:.2f})")
+    notes = []
+    if said:
+        notes.append("Whole-state requests use the platform's own state totals, which include the parts of a state served from markets "
+                     "homed elsewhere, so each home-state market is scaled to match - " + "; ".join(said) + ".")
+    return scale, notes
+
+
 def estimate_from_series(
     product_name: str, series: "forecast_store.SeriesRef", geo: GeoResolution, months: int,
     hispanic_weighted: bool = False, flight_days: float | None = None,
@@ -276,6 +314,7 @@ def estimate_from_series(
     cds = forecast_store.cd_rows(sid, [k for k in cd_for.values() if k]) if cd_for else {}
     dmas = forecast_store.dma_table(sid)
 
+    state_scale, state_notes = _state_scales(series, geo, dmas, factor)
     weights = _area_weights(geo.areas, trait="hispanic" if hispanic_weighted else None)
     by_area: list[AreaEstimate] = []
     notes: list[str] = []
@@ -316,11 +355,14 @@ def estimate_from_series(
                 lo_mult, hi_mult = series.band_low, series.band_high
             if row.basis == "modeled" and series.data_basis == "extrapolated":
                 modeled_areas += 1
-            area_mid = row.avails * factor * share
+            # A market homed in a state the planner asked for whole is scaled so the markets add up to the platform's own
+            # state total (only DMA-typed areas carry whole-state requests; a ZIP / county / city is never scaled).
+            scale = state_scale.get(area.state, 1.0) if area.source_type == "dma" else 1.0
+            area_mid = row.avails * factor * share * scale
             area_low, area_high = area_mid * lo_mult, area_mid * hi_mult
             # reach is a per-month concept, not cumulative (the model workbook never multiplied it by months either)
-            area_uniques = row.est_reach * share if row.est_reach is not None else None
-            area_hh = row.unique_hh * share if row.unique_hh is not None else None
+            area_uniques = row.est_reach * share * scale if row.est_reach is not None else None
+            area_hh = row.unique_hh * share * scale if row.unique_hh is not None else None
         imps_low += area_low
         imps_mid += area_mid
         imps_high += area_high
@@ -336,6 +378,7 @@ def estimate_from_series(
         ))
 
     notes.extend(_series_notes(series, weeks, modeled_areas, len(by_area)))
+    notes.extend(state_notes)
     if no_row:
         shown = ", ".join(no_row[:6]) + (f" and {len(no_row) - 6} more" if len(no_row) > 6 else "")
         notes.append(f"No avails in this series for: {shown} (counted as zero).")
@@ -433,10 +476,10 @@ def estimate_avails(
     platform = cfg.platform if cfg.method == "platform" else None
     is_international = geo.geo_confidence == "low_confidence_international"
     if platform and not is_international:
-        est = estimate_platform_modeled(product_name, platform, geo, months, hispanic_weighted=cfg.hispanic_weighted, flight_days=flight_days)
+        est = estimate_platform_modeled(
+            product_name, platform, geo, months, hispanic_weighted=cfg.hispanic_weighted, flight_days=flight_days,
+            relation=cfg.relation, link_note=cfg.link_note)
         if est is not None:
-            if cfg.relation == "baseline_proxy" and est.series is not None and est.series.get("relation") != "baseline_proxy":
-                est.series = {**est.series, "relation": "baseline_proxy"}
             return est
     if national_monthly_total is None:
         return None

@@ -298,11 +298,48 @@ def _estimate(**kw):
     (dict(audience=main.ConstanzaAudienceSpecModel(age_min=40, age_max=20)), "can't be above"),
     (dict(audience=main.ConstanzaAudienceSpecModel(interest_terms=["a"] * 11)), "at most 10"),
     (dict(audience=main.ConstanzaAudienceSpecModel(interest_terms=["x" * 101])), "under 100"),
+    (dict(audience=main.ConstanzaAudienceSpecModel(gender="bogus")), "Gender must be"),
+    (dict(audience=main.ConstanzaAudienceSpecModel(gender="Mlae")), "Gender must be"),
+    (dict(flight_days=0.5), "Flight days must be between 1"),
+    (dict(flight_days=1e-9), "Flight days must be between 1"),
+    (dict(flight_days=0), "Flight days must be between 1"),
 ])
 def test_absurd_estimate_input_is_a_plain_422_not_a_500(fields, message):
     with pytest.raises(HTTPException) as e:
         main.constanza_estimate(_estimate(**fields))
     assert e.value.status_code == 422 and message in e.value.detail
+
+
+@pytest.mark.parametrize("typed,expected", [("Male", "male"), (" MEN ", "male"), ("f", "female"), ("Women", "female"), ("all", None), ("", None), (None, None)])
+def test_gender_is_read_the_way_a_person_writes_it(typed, expected):
+    from app.services.constanza_audience import normalize_gender
+    assert normalize_gender(typed) == expected
+    with pytest.raises(ValueError):
+        normalize_gender("masculine")
+
+
+def test_a_capitalised_gender_narrows_exactly_like_the_lower_case_one_and_is_counted_once():
+    """'Male' used to be read as 'everyone' yet counted as an applied cut (cuts_applied 1, a narrowed-looking tier)."""
+    spec = lambda g: main.ConstanzaAudienceSpecModel(age_min=18, age_max=24, gender=g)           # noqa: E731
+    a = main.constanza_estimate(_estimate(audience=spec("Male")))["audience"]
+    b = main.constanza_estimate(_estimate(audience=spec("male")))["audience"]
+    both = main.constanza_estimate(_estimate(audience=spec(None)))["audience"]
+    assert a["imps_mid"] == pytest.approx(b["imps_mid"]) and a["imps_mid"] < both["imps_mid"]
+
+
+def test_an_unrecognised_gender_reaching_the_audience_layer_is_reported_not_silently_counted_as_a_cut():
+    base = estimate_avails(ROKU, resolve_geo("Los Angeles"), months=1)
+    est = estimate_audience(base, AudienceSpec(gender="bogus"))
+    assert est.cuts_applied == 0 and est.confidence_tier == "audience_modeled_geo_only"
+    assert est.imps_mid == pytest.approx(base.imps_mid) and any("wasn't recognised" in n for n in est.notes)
+
+
+def test_a_gender_cut_on_an_interest_with_no_gender_split_says_the_all_adults_rate_was_used():
+    base = estimate_avails(ROKU, resolve_geo("Los Angeles"), months=1)
+    est = estimate_audience(base, AudienceSpec(gender="female", interest_terms=["construction"]))
+    assert any("no sourced male/female split" in n for n in est.notes)
+    est2 = estimate_audience(base, AudienceSpec(gender="female", interest_terms=["sports"]))          # Gallup gives both
+    assert not any("no sourced male/female split" in n for n in est2.notes)
 
 
 def test_sane_estimate_input_still_works_and_the_other_handlers_have_bounds_too():

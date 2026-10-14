@@ -159,3 +159,154 @@ def test_the_pool_can_be_switched_off(real_url, monkeypatch):
     with db.get_connection() as conn:
         assert conn.execute("SELECT 1 AS one").fetchone()["one"] == 1
     assert db.pool_stats()["open"] is False
+
+
+# --------------------------------------------------------------------------- an outage AFTER the pool exists
+
+
+class _Proxy:
+    """A TCP forwarder to the real database that can be cut, to simulate the server vanishing under a live pool."""
+
+    def __init__(self, host, port):
+        import socket
+        self.upstream = (host, port)
+        self.listener = socket.socket()
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(50)
+        self.port = self.listener.getsockname()[1]
+        self.sockets = []
+        self.alive = True
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        import socket
+        while self.alive:
+            try:
+                client, _ = self.listener.accept()
+                server = socket.create_connection(self.upstream)
+            except Exception:  # noqa: BLE001
+                return
+            self.sockets += [client, server]
+            threading.Thread(target=self._pipe, args=(client, server), daemon=True).start()
+            threading.Thread(target=self._pipe, args=(server, client), daemon=True).start()
+
+    @staticmethod
+    def _pipe(a, b):
+        try:
+            while True:
+                data = a.recv(65536)
+                if not data:
+                    break
+                b.sendall(data)
+        except Exception:  # noqa: BLE001
+            pass
+        for s in (a, b):
+            try:
+                s.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def cut(self):
+        self.alive = False
+        try:
+            self.listener.close()
+        except Exception:  # noqa: BLE001
+            pass
+        for s in self.sockets:
+            try:
+                s.shutdown(2)
+                s.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+@pytest.mark.real_db
+def test_a_database_outage_after_the_pool_exists_fails_fast_instead_of_stalling_every_call(real_url, monkeypatch):
+    """The 'database is down' window used to guard only the first connect: once a pool existed, every call waited out the
+    whole pool timeout (10 s) - threads piled up behind a database that was not coming back."""
+    from psycopg.conninfo import conninfo_to_dict
+    info = conninfo_to_dict(real_url)
+    proxy = _Proxy(info.get("host") or "127.0.0.1", int(info.get("port") or 5432))
+    try:
+        monkeypatch.setenv("DATABASE_URL", real_url.replace(f":{info.get('port', 5432)}/", f":{proxy.port}/", 1)
+                           if f":{info.get('port', 5432)}/" in real_url else real_url)
+        monkeypatch.setenv("DB_POOL_TIMEOUT", "8")
+        with db.get_connection() as conn:                       # the pool now exists, through the proxy
+            assert conn.execute("SELECT 1 AS one").fetchone()["one"] == 1
+        proxy.cut()
+        t0 = time.monotonic()
+        with pytest.raises(psycopg.OperationalError):
+            with db.get_connection() as conn:
+                conn.execute("SELECT 1")
+        assert time.monotonic() - t0 < 5.0, "the first call after the outage must not wait out the whole pool timeout"
+        t1 = time.monotonic()
+        for _ in range(40):                                      # then every caller fails at once, for the whole window
+            with pytest.raises(psycopg.OperationalError, match="unavailable"):
+                with db.get_connection():
+                    pass
+        assert time.monotonic() - t1 < 0.5
+    finally:
+        proxy.cut()
+
+
+# --------------------------------------------------------------------------- releasing a session advisory lock safely
+
+
+class _Row(dict):
+    pass
+
+
+class _FakeConn:
+    def __init__(self, unlock_works=True, rollback_works=True):
+        self.unlock_works, self.rollback_works = unlock_works, rollback_works
+        self.calls, self.closed = [], False
+
+    def rollback(self):
+        self.calls.append("rollback")
+        if not self.rollback_works:
+            raise psycopg.OperationalError("connection is gone")
+
+    def execute(self, sql, params=()):
+        self.calls.append(sql.split("(")[0].strip())
+        if not self.unlock_works:
+            raise psycopg.errors.InFailedSqlTransaction("current transaction is aborted")
+        outer = self
+
+        class Cur:
+            def fetchone(self):
+                return _Row(ok=True)
+        return Cur()
+
+    def commit(self):
+        self.calls.append("commit")
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_lock_is_released_after_a_rollback_and_the_connection_is_kept():
+    conn = _FakeConn()
+    assert db.release_advisory_lock(conn, 42) is True
+    assert conn.calls == ["rollback", "SELECT pg_advisory_unlock", "commit"] and conn.closed is False
+
+
+def test_a_lock_that_cannot_be_released_closes_the_connection_so_the_server_drops_it():
+    """Ending the session releases every lock it holds; a closed connection is replaced by the pool, never lent again."""
+    for conn in (_FakeConn(unlock_works=False), _FakeConn(rollback_works=False)):
+        assert db.release_advisory_lock(conn, 42) is False and conn.closed is True
+
+
+@pytest.mark.real_db
+def test_an_aborted_transaction_does_not_stop_the_lock_being_released(real_url):
+    other = psycopg.connect(real_url, autocommit=True)
+    try:
+        with db.get_connection() as conn:
+            conn.execute("SELECT pg_advisory_lock(%s)", (987654321,))
+            with pytest.raises(psycopg.errors.DivisionByZero):
+                conn.execute("SELECT 1/0")                        # the transaction is now aborted
+            assert db.release_advisory_lock(conn, 987654321) is True
+        assert other.execute("SELECT pg_try_advisory_lock(%s)", (987654321,)).fetchone()[0] is True
+    finally:
+        other.execute("SELECT pg_advisory_unlock_all()")
+        other.close()

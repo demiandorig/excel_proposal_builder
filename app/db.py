@@ -11,7 +11,9 @@ Behaviour that callers rely on and that is preserved:
   * `get_connection()` raises `RuntimeError` when DATABASE_URL is not set and `psycopg.OperationalError` when the
     database cannot be reached. It fails FAST: the first failed attempt records a short "database is down" window
     (`DB_RETRY_AFTER`, 5 s) during which further calls raise at once instead of each waiting out a connect timeout.
-    The many fail-open paths (offline product list, forecast defaults, ...) depend on that, as do the tests.
+    The many fail-open paths (offline product list, forecast defaults, ...) depend on that, as do the tests. That also holds
+    once the pool exists: a pool that has lost its connections and cannot make new ones is told apart from a merely busy
+    one with a single direct connect, and then every caller fails at once for the same window.
   * `with get_connection() as conn:` yields a normal psycopg connection (rows come back as dicts).
   * A caller that does not use `with` (the Drive folder lock) may call `conn.execute(...)` and `conn.close()`; the
     wrapper lends a pooled connection on first use and `close()` rolls back and returns it.
@@ -50,10 +52,12 @@ APPLICATION_NAME = "proposal-builder"
 DB_RETRY_AFTER = 5.0   # seconds a failed connect keeps later calls from trying again
 
 _lock = threading.Lock()
+_probe_lock = threading.Lock()      # one direct "is the database reachable?" connect at a time
 _pool: Optional["ConnectionPool"] = None
 _pool_pid: Optional[int] = None
 _down_until = 0.0
 _down_error: Optional[str] = None
+_FIRST_WAIT = 2.0                   # seconds to wait for a pooled connection before asking "is the database even there?"
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -100,11 +104,25 @@ def _raise_if_recently_down() -> None:
         raise psycopg.OperationalError(f"database unavailable (retrying shortly): {_down_error}")
 
 
+def _probe_reachable() -> None:
+    """One direct connect with a short timeout. Raises OperationalError (and opens the 'database is down' window) when it
+    fails. Serialised, and re-checked under the lock, so one failed probe fails every waiting caller instead of each
+    making its own."""
+    with _probe_lock:
+        _raise_if_recently_down()
+        try:
+            psycopg.connect(database_url(), **{**_connect_kwargs(), "connect_timeout": 2}).close()
+        except Exception as exc:  # noqa: BLE001
+            _mark_down(exc)
+            raise psycopg.OperationalError(f"database unavailable: {type(exc).__name__}: {exc}".strip()) from exc
+
+
 def _get_pool() -> "ConnectionPool":
     """The process-wide pool, created on first use. Raises (fast) when the database cannot be reached."""
     global _pool, _pool_pid
     url = database_url()
     if _pool is not None and _pool_pid == os.getpid() and not _pool.closed:
+        _raise_if_recently_down()
         return _pool
     with _lock:
         if _pool is not None and _pool_pid == os.getpid() and not _pool.closed:
@@ -157,9 +175,19 @@ class _PooledConnection:
         self._conn = None
 
     def __enter__(self) -> psycopg.Connection:
+        full = _env_float("DB_POOL_TIMEOUT", 10.0)
+        first = min(full, _FIRST_WAIT)
         try:
-            self._cm = self._pool.connection()
-            return self._cm.__enter__()
+            try:
+                self._cm = self._pool.connection(timeout=first)
+                return self._cm.__enter__()
+            except PoolTimeout:
+                # No connection yet. Busy, or is the database gone? One direct connect tells them apart (and when it IS
+                # gone, opens the fail-fast window for every caller at once): a busy pool just keeps waiting for the rest
+                # of its budget, as before.
+                _probe_reachable()
+                self._cm = self._pool.connection(timeout=max(0.1, full - first))
+                return self._cm.__enter__()
         except PoolTimeout:
             raise          # every connection is busy: slow, not down - do not make the next callers fail instantly
         except psycopg.OperationalError as exc:
@@ -198,6 +226,26 @@ def get_connection():
             _mark_down(exc)
             raise
     return _PooledConnection(_get_pool())
+
+
+def release_advisory_lock(conn, key: int) -> bool:
+    """Release a session-level advisory lock this connection holds, even when the work that took it failed and left the
+    transaction aborted (an aborted transaction cannot run the unlock, and a pooled connection would then go back to the
+    pool still holding it, blocking every later holder). When it cannot be released cleanly the connection is closed:
+    ending the session drops every lock it held, and the pool replaces a closed connection instead of lending it again."""
+    try:
+        conn.rollback()
+        row = conn.execute("SELECT pg_advisory_unlock(%s) AS ok", (key,)).fetchone()
+        conn.commit()
+        if row is not None and (row["ok"] if isinstance(row, dict) else row[0]):
+            return True
+    except Exception:  # noqa: BLE001
+        log.warning("could not release advisory lock %s cleanly; closing the connection", key, exc_info=True)
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+    return False
 
 
 def close_pool() -> None:

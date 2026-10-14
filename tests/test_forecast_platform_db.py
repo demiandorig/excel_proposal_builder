@@ -405,7 +405,75 @@ def test_only_one_instance_bootstraps_at_a_time(monkeypatch, db):
     assert result.get("skipped") and called == []
 
 
+def test_a_failed_bootstrap_does_not_leave_its_advisory_lock_on_a_pooled_connection(monkeypatch, db):
+    """Any SQL error aborts the transaction; the unlock then could not run, and the connection went back to the pool still
+    holding the session lock - every later bootstrap (any instance) then skipped for as long as the connection lived."""
+    from app.services.forecast_import import product_seed
+    monkeypatch.setattr(product_seed, "apply_to_db", lambda conn: conn.execute("SELECT 1/0"))
+    result = service.bootstrap()
+    assert "error" in result and "division" in result["error"].lower()          # the REAL error, not InFailedSqlTransaction
+    with psycopg.connect(os.environ["DATABASE_URL"]) as other:                    # a different session
+        got = other.execute("SELECT pg_try_advisory_lock(%s)", (service.BOOTSTRAP_LOCK_KEY,)).fetchone()[0]
+        assert got is True, "the bootstrap lock is still held by a pooled connection"
+        other.execute("SELECT pg_advisory_unlock(%s)", (service.BOOTSTRAP_LOCK_KEY,))
+
+
+def test_the_next_bootstrap_after_a_failed_one_is_not_skipped(monkeypatch, db):
+    from app.services.forecast_import import product_seed
+    monkeypatch.setattr(product_seed, "apply_to_db", lambda conn: conn.execute("SELECT 1/0"))
+    service.bootstrap()
+    monkeypatch.undo()
+    monkeypatch.setattr(service, "run_import", lambda **kw: [])
+    assert "skipped" not in service.bootstrap()
+
+
+def test_a_series_the_startup_import_skips_still_gets_its_products_linked(key, monkeypatch, db):
+    """On a fresh database the products table is filled after the first import, so the first import linked nothing - and
+    every later start skipped the series (it already has a version), so nothing ever would."""
+    p = payload_for(key, links=[ProductLink("zz-test Late Product", "primary", "Baseline note")])
+    with get_connection() as conn:
+        loader.upsert_series_def(conn, p)
+        res = loader.stage(conn, p, None)
+        loader.publish(conn, res.series_id, "t")
+        conn.commit()
+        conn.execute("INSERT INTO products (name, family, buying_model) VALUES ('zz-test Late Product', 'Test', 'CPM')")   # exists only NOW
+        conn.commit()
+        assert conn.execute("SELECT count(*) AS n FROM forecast_series_product WHERE series_key = %s", (key,)).fetchone()["n"] == 0
+    monkeypatch.setattr(service, "load_manifest", lambda path=None: ([p.spec], Path(".")))
+    monkeypatch.setattr(service, "read_all", lambda specs, d: {p.spec.series_key: p})
+    outcomes = service.run_import(only=[key], skip_existing_series=True)
+    assert outcomes == []                                                          # nothing was imported ...
+    with get_connection() as conn:
+        link = conn.execute("SELECT sp.* FROM forecast_series_product sp JOIN products pr USING (product_key) "
+                            "WHERE pr.name = 'zz-test Late Product'").fetchone()
+    assert link is not None and link["series_key"] == key and link["note"] == "Baseline note"   # ... but the link is there
+
+
 # --------------------------------------------------------------------------------------------- the product seed
+
+def test_an_empty_products_table_is_seeded_by_the_catalog_before_any_link_is_made(monkeypatch):
+    """apply_to_db used to return at once on an empty table, leaving the first import to find no products to link."""
+    from types import SimpleNamespace
+    from app.services.forecast_import import product_seed
+    calls = []
+
+    class Conn:
+        rows: list = []
+
+        def execute(self, sql, params=()):
+            assert sql.startswith("SELECT name FROM products"), sql
+            return SimpleNamespace(fetchall=lambda: [{"name": n} for n in self.rows])
+
+    conn = Conn()
+    monkeypatch.setattr(catalog, "invalidate_product_caches", lambda: calls.append("invalidate"))
+    monkeypatch.setattr(catalog, "load_product_rows", lambda: (calls.append("load"), conn.rows.extend(["A", "B"]))[1])
+    monkeypatch.setattr(catalog, "_load_forecast_seed_products", lambda: [])
+    assert product_seed.apply_to_db(conn) == 0 and calls == ["invalidate", "load"]
+    conn.rows = []
+    monkeypatch.setattr(catalog, "load_product_rows", lambda: [])                      # a database blip: nothing could be seeded
+    assert product_seed.apply_to_db(conn) == 0
+
+
 
 def test_seed_products_are_added_once_without_touching_rows_an_admin_changed(db, monkeypatch):
     """Uses THROWAWAY seed products only: deleting a real catalog product would cascade away its forecast link."""

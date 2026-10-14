@@ -93,6 +93,7 @@ def main(argv=None) -> int:
         with get_connection() as conn:
             report = audience_taxonomy.seed_to_db(conn)
             conn.commit()
+        audience_taxonomy.invalidate()
         print(f"{report['groups']} groups, {report['segments']} segments seeded ({report['deactivated']} deactivated)")
         return 0
     return 2

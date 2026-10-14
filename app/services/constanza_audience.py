@@ -109,6 +109,7 @@ class InterestResolution:
     source_url: str | None = None
     caveats: str | None = None
     how: str | None = None        # how it was matched: name | keyword | partial | words | fuzzy | llm
+    gender_split: bool = False    # True when the source gives its OWN male and female rates (else 'all' stands in for both)
     suggestions: list = field(default_factory=list)   # the closest OTHER segments, [{id, label, supported}]
 
 
@@ -169,6 +170,7 @@ def _resolution(text: str, seg: "audience_taxonomy.Segment", how: str, tax) -> I
         input_text=text, category=seg.id, supported=seg.supported, rate_by_gender=rates, source=seg.source_line() or None,
         source_date=seg.source_date, label=seg.label, group=seg.group_key, status=seg.status, confidence=seg.confidence,
         definition=seg.definition or None, source_url=seg.source_url, caveats=seg.caveats or None, how=how,
+        gender_split=seg.supported and seg.rate_male is not None and seg.rate_female is not None,
         suggestions=_suggestions(tax, text, exclude=seg.id))
 
 
@@ -202,6 +204,26 @@ def resolve_interest(text: str) -> InterestResolution:
     return InterestResolution(input_text=text, category=None, supported=False, suggestions=_suggestions(tax, text, limit=4))
 
 
+_GENDER_ALIASES = {
+    "male": "male", "m": "male", "man": "male", "men": "male", "boy": "male", "boys": "male",
+    "female": "female", "f": "female", "woman": "female", "women": "female", "girl": "female", "girls": "female",
+}
+_GENDER_ALL = {"", "all", "any", "both", "everyone", "all genders", "no preference"}
+
+
+def normalize_gender(value) -> str | None:
+    """'male' / 'female', or None for no gender cut ('all', blank). Anything else raises ValueError: a typo must be told
+    to the planner, not read as 'everyone' while still being counted as an applied cut."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in _GENDER_ALL:
+        return None
+    if text in _GENDER_ALIASES:
+        return _GENDER_ALIASES[text]
+    raise ValueError("Gender must be male, female or all.")
+
+
 def parse_audience_text(text: str) -> AudienceSpec:
     """Free text -> AudienceSpec. Falls back to a spec with only geo_text
     set (age/gender/interests left unspecified) when no LLM is configured
@@ -226,9 +248,13 @@ def parse_audience_text(text: str) -> AudienceSpec:
     except Exception:
         return AudienceSpec(geo_text=text)
 
+    try:
+        gender = normalize_gender(data.get("gender"))
+    except ValueError:
+        gender = None                                   # a model's odd answer is dropped, never applied
     return AudienceSpec(
         age_min=data.get("age_min"), age_max=data.get("age_max"),
-        gender=data.get("gender"), interest_terms=data.get("interest_terms") or [],
+        gender=gender, interest_terms=data.get("interest_terms") or [],
         geo_text=data.get("geo_text") or text, geo_type_hint=data.get("geo_type_hint"),
     )
 
@@ -303,6 +329,12 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     originating ResolvedArea fields (population/geo_id/apportionment/
     state) forward, so this never needs to re-resolve geo text or assume
     a positional match against a separate GeoResolution."""
+    try:
+        gender = normalize_gender(spec.gender)
+        gender_note = None
+    except ValueError:
+        gender = None
+        gender_note = f"Gender {spec.gender!r} wasn't recognised (use male, female or all), so no gender cut was applied."
     interests = [resolve_interest(t) for t in spec.interest_terms]
     # Two phrases that map to the same category ("sports" and "football") are ONE interest — multiplying its incidence
     # rate in twice would shrink the audience by the rate squared for no reason.
@@ -321,6 +353,8 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
 
     cvs = []
     notes = list(base.notes)
+    if gender_note:
+        notes.append(gender_note)
     known_without_rate = [i for i in unsupported if i.status == "no_public_rate"]
     unmatched = [i for i in unsupported if i.status is None]
     if known_without_rate:
@@ -342,7 +376,12 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     if duplicates:
         notes.append(f"{', '.join(duplicates)} map to an interest already counted — applied once, not stacked.")
 
-    age_gender_requested = spec.age_min is not None or spec.age_max is not None or (spec.gender not in (None, "all"))
+    age_gender_requested = spec.age_min is not None or spec.age_max is not None or gender is not None
+    if gender is not None:
+        for i in supported_interests:
+            if not i.gender_split:
+                notes.append(f"'{i.label or i.input_text}' has no sourced male/female split, so its all-adults rate was applied to the "
+                             f"{gender} audience unchanged; for a gender-skewed audience that can over- or understate it.")
     any_age_gender_applied = False
 
     total_underlying_pop = 0.0
@@ -351,14 +390,14 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     not_narrowed: list[str] = []
 
     for area_est in base.by_area:
-        share, applied = _age_gender_share(area_est, spec.age_min, spec.age_max, spec.gender)
+        share, applied = _age_gender_share(area_est, spec.age_min, spec.age_max, gender)
         any_age_gender_applied = any_age_gender_applied or applied
         if age_gender_requested and not applied:
             not_narrowed.append(area_est.area_label)
 
         interest_multiplier = 1.0
         for interest in supported_interests:
-            gender_key = spec.gender if spec.gender in interest.rate_by_gender else "all"
+            gender_key = gender if gender in interest.rate_by_gender else "all"
             interest_multiplier *= interest.rate_by_gender.get(gender_key, interest.rate_by_gender["all"])
 
         area_mid = area_est.imps_mid * share * interest_multiplier

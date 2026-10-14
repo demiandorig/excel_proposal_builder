@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
-from app.db import get_connection
+from app.db import get_connection, release_advisory_lock
 from app.services.forecast_import import TOOL_VERSION, geo_reference as geo, loader
 from app.services.forecast_import.manifest import MANIFEST_PATH, load_manifest
 from app.services.forecast_import.model import Finding, SeriesPayload, SeriesSpec, SourceError
@@ -122,6 +122,8 @@ def run_import(
         conn.commit()
         for spec in chosen:
             if skip_existing_series and spec.series_key in have:
+                loader.link_spec_products(conn, spec)        # nothing to import, but the product links are still the defaults
+                conn.commit()
                 continue
             payload = payloads[spec.series_key]
             if isinstance(payload, SourceError):
@@ -219,11 +221,11 @@ def bootstrap() -> dict:
                 from app.services import audience_taxonomy
                 result["audience"] = audience_taxonomy.seed_to_db(lock_conn)
                 lock_conn.commit()
+                audience_taxonomy.invalidate()           # after the commit: a read in between would cache the old rows
                 outcomes = run_import(requested_by="startup", skip_existing_series=True)
                 result["series"] = [(o.series_key, o.status) for o in outcomes]
             finally:
-                lock_conn.execute("SELECT pg_advisory_unlock(%s)", (BOOTSTRAP_LOCK_KEY,))
-                lock_conn.commit()
+                release_advisory_lock(lock_conn, BOOTSTRAP_LOCK_KEY)
     except Exception as exc:  # noqa: BLE001
         log.warning("forecast data bootstrap skipped: %s: %s", type(exc).__name__, exc)
         result["error"] = f"{type(exc).__name__}: {exc}"
