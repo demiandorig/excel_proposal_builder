@@ -200,15 +200,30 @@ delivered reach. Planners must check any interests, behavioral targeting, exclus
 restrictions in Ads Manager before using a live result, since those are not yet represented in this card. API errors
 are explicit; manual entry remains available. No token is sent to the browser.
 
-YouTube continues to require a separate `ReachPlanService` integration and Google allowlisting. It will produce a
+### YouTube planning rates (Step 05)
+
+The existing YouTube awareness lines use the team's **$15 retail CPM**; a distinct Demand Gen line uses **$20 retail CPM**.
+An explicit catalog or line CPM edit takes precedence in that line's model.
+The card uses the same explicit full-flight budget, optional manually entered eligible audience, 5.5 average frequency,
+and 2× retail/media relationship as the Meta model. It saves `avails_data[line_id].youtube_forecast` with a
+`youtube_manual_planning_model` tag. It does not populate monthly avails or SOV. Demand Gen must be configured with
+YouTube channel controls in Google Ads when the proposal quotes a YouTube-only line; otherwise it can serve on other
+Google surfaces. These CPMs are planning assumptions, not Google auction or reach estimates.
+The new Demand Gen catalog row is added to existing databases by migration `0004` and keeps any administrator-created
+row with that name untouched. Its minimum spend, flight range, SLA, and work-order code are provisionally patterned
+on the existing YouTube products and need Sales Planning/Ops confirmation before this draft PR is merged.
+
+YouTube live forecasting continues to require a separate `ReachPlanService` integration and Google allowlisting. It will produce a
 budget-based campaign forecast, also separate from the inventory ceiling. Product formats and supported geographies
-must be discovered through the live Google service before mapping the two YouTube catalog SKUs. On a Replit development
+must be discovered through the live Google service before mapping the three YouTube catalog SKUs. On a Replit development
 clone with the existing `GOOGLE_ADS_*` secrets set, install the optional `google-ads` Python package and run
 `python scripts/probe_youtube_reach_plan.py --location-id 2840`. This read-only probe confirms service access and prints
 the available US product codes. If Google denies the service, ask the Google representative to approve both the developer
 token and OAuth project's access to `ReachPlanService`; access to ordinary Google Ads APIs is insufficient. The two catalog
-SKUs combine formats (skippable in-stream/discovery and non-skippable :15/bumper), so choose their mapping from the live
-codes before using `GenerateReachForecast`. No YouTube estimate is shown in the proposal until that mapping is validated.
+awareness SKUs combine formats (skippable in-stream/discovery and non-skippable :15/bumper), so choose their mapping from the live
+codes before using `GenerateReachForecast`. The Demand Gen product also needs a conversion-rate input; use Google's
+`GenerateConversionRates` recommendations for its selected YouTube surfaces. No **live Google forecast** is shown in the
+proposal until those mappings and inputs are validated.
 
 For each resolved area the most direct row wins:
 

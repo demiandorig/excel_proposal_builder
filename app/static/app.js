@@ -6491,6 +6491,51 @@ function _metaForecastPanelHtml(li, p, existing) {
   </div>`;
 }
 
+function _youtubeForecastSummaryHtml(data, li, objective) {
+  if (!data) return "";
+  const n = value => Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 });
+  const money = value => "$" + Number(value).toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const product = state.productIndex[li.product_name] || {};
+  const currentCpm = _effectiveProduct(li, product).estimated_cpm_for_imps ?? (objective === "demand_gen" ? 20 : 15);
+  const stale = Math.abs(Number(data.retail_budget) - _metaFullFlightRetailBudget(li)) > 0.01
+    || data.product_name !== li.product_name || data.objective !== objective
+    || data.proposal_geo !== _constanzaGeoFor(li.id)
+    || data.target_text !== _effectiveTargetText(li)
+    || Math.abs(Number(data.retail_cpm) - Number(currentCpm)) > 0.01;
+  const audience = data.potential_audience;
+  const scenario = data.audience_scenario;
+  return `<div class="meta-plan-result">
+    <strong>${stale ? "⚠ Inputs changed — recalculate" : "YouTube planning snapshot"}</strong>
+    <p>${escapeHtml(data.objective === "demand_gen" ? "Demand Gen" : "Awareness")} · ${money(data.retail_budget)} retail → ${money(data.media_budget)} media · ${money(data.retail_cpm)} retail CPM · ${n(data.budget_impressions)} budget-based impressions over the full flight.</p>
+    ${audience ? `<p>Eligible audience entered by planner: ${n(audience.lower)}–${n(audience.upper)}. This is not forecasted reach.</p>` : ""}
+    ${scenario ? `<p>If all eligible people were reached at ${escapeHtml(data.frequency)} average frequency: ${n(scenario.at_average_frequency)} impressions, implying ${money(scenario.retail_spend_at_average_frequency)} retail (${money(scenario.media_spend_at_average_frequency)} media). At 9–10 frequency: ${n(scenario.at_frequency_9)}–${n(scenario.at_frequency_10)} impressions, or ${money(scenario.retail_spend_at_frequency_9)}–${money(scenario.retail_spend_at_frequency_10)} retail.</p>` : ""}
+    ${data.modeled_delivery ? `<p>With ${Math.round(data.modeled_delivery.reach_share * 100)}% assumed reach share: <strong>${n(data.modeled_delivery.impressions)} modeled impressions</strong> and about ${n(data.modeled_delivery.reach)} people reached.</p>` : `<p>Add a historically supported reach share to calculate a combined delivery model.</p>`}
+    <small>Illustrative full-flight CPM model · ${escapeHtml(String(data.as_of || "").slice(0, 10))} · no Google reach forecast or inventory avails. ${data.objective === "demand_gen" ? "Select YouTube channels in Google Ads when quoting a YouTube-only line." : ""}</small>
+  </div>`;
+}
+
+function _youtubeForecastPanelHtml(li, p, existing) {
+  const saved = existing.youtube_forecast || null;
+  const options = p.youtube_objectives || [];
+  const objective = saved && options.includes(saved.objective) ? saved.objective : options[0];
+  const cpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? (objective === "demand_gen" ? 20 : 15);
+  const manualAudience = saved && saved.potential_audience ? saved.potential_audience.mid : "";
+  const share = saved && saved.modeled_delivery ? Math.round(saved.modeled_delivery.reach_share * 100) : "";
+  return `<div class="meta-plan-block youtube-plan-block" data-youtube-lid="${escapeAttr(li.id)}">
+    <strong>YouTube auction planning · full flight</strong>
+    <p>Retail budget ${_metaFullFlightRetailBudget(li).toLocaleString("en-US", { style: "currency", currency: "USD" })}; retail CPM <span class="youtube-rate">$${cpm}</span>. Results stay separate from monthly inventory avails.</p>
+    <div class="meta-plan-fields">
+      <label>Planning objective <select class="youtube-objective">${options.map(value => `<option value="${escapeHtml(value)}" ${value === objective ? "selected" : ""}>${value === "demand_gen" ? "Demand Gen" : "Awareness"}</option>`).join("")}</select></label>
+      <label>Eligible audience size <input data-youtube-input class="youtube-audience" type="number" min="0" max="1000000000" placeholder="Enter from Google Ads" value="${escapeHtml(manualAudience)}" /></label>
+      <label>Expected reach share % <input data-youtube-input class="youtube-reach-share" type="number" min="0.1" max="100" step="0.1" placeholder="Use historical rate" value="${escapeHtml(share)}" /></label>
+      <label>Average frequency · full flight <input data-youtube-input class="youtube-frequency" type="number" min="0.1" max="100" step="0.1" value="${escapeHtml(saved ? saved.frequency : 5.5)}" /></label>
+    </div>
+    <button type="button" class="btn-secondary youtube-model-btn" data-lid="${escapeAttr(li.id)}">Calculate YouTube plan</button>
+    <p class="sov-helper">This uses team CPM assumptions and a manually entered audience. Demand Gen may serve outside YouTube unless its channels are restricted in Google Ads.</p>
+    <div class="meta-plan-feedback" aria-live="polite">${_youtubeForecastSummaryHtml(saved, li, objective)}</div>
+  </div>`;
+}
+
 function renderAvailsGrid() {
   renderAllTierTabStrips();
   const rt = (state.parsed.request_type || "").toLowerCase();
@@ -6602,7 +6647,8 @@ function renderAvailsGrid() {
       </div>
       <p class="sov-helper" id="sov-helper-${escapeAttr(li.id)}"></p>
       ${!isFreeform && p.meta_retail_cpm != null ? _metaForecastPanelHtml(li, p, existing) : ""}
-      ${!isFreeform && _forecastEnabled(p) && p.meta_retail_cpm == null ? `
+      ${!isFreeform && p.youtube_objectives && p.youtube_objectives.length ? _youtubeForecastPanelHtml(li, p, existing) : ""}
+      ${!isFreeform && _forecastEnabled(p) && p.meta_retail_cpm == null && !(p.youtube_objectives && p.youtube_objectives.length) ? `
       <div class="constanza-block">
         ${window.Constanza ? Constanza.periodLineHtml(p.forecast && p.forecast.series) : ""}
         <div class="cz-card-actions">
@@ -6664,7 +6710,7 @@ function renderAvailsGrid() {
   // is meaningless, always "on" per the checkbox default) and the "_text"
   // free-form inputs above (running parseFormattedInput on "50 to 100"
   // would strip the letters and glue the digits together into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input]):not([data-youtube-input])').forEach(inp => {
     inp.addEventListener("focus", e => {
       const raw = parseFormattedInput(e.target.value);
       // Frequency is legitimately fractional (5.5) — rounding it here and
@@ -6702,7 +6748,7 @@ function renderAvailsGrid() {
   // both overwrite that with a numeric parse of the same text AND mangle
   // it in the process — parseFormattedInput("50 to 100") strips the
   // letters and glues what's left into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input]):not([data-youtube-input])').forEach(inp => {
     inp.addEventListener("blur", e => {
       const lid = e.target.dataset.lid;
       const key = e.target.dataset.key;
@@ -6835,6 +6881,18 @@ function renderAvailsGrid() {
   });
   grid.querySelectorAll(".meta-search-btn").forEach(btn => {
     btn.addEventListener("click", () => onMetaGeoSearch(btn.dataset.lid));
+  });
+  grid.querySelectorAll(".youtube-model-btn").forEach(btn => {
+    btn.addEventListener("click", () => onYouTubeForecast(btn.dataset.lid));
+  });
+  grid.querySelectorAll(".youtube-objective").forEach(select => {
+    select.addEventListener("change", () => {
+      const panel = select.closest(".youtube-plan-block");
+      panel.querySelector(".youtube-rate").textContent = select.value === "demand_gen" ? "$20" : "$15";
+      const li = state.lineItems.find(x => x.id === panel.dataset.youtubeLid);
+      const saved = state.availsData[panel.dataset.youtubeLid]?.youtube_forecast;
+      if (li && saved) panel.querySelector(".meta-plan-feedback").innerHTML = _youtubeForecastSummaryHtml(saved, li, select.value);
+    });
   });
   grid.querySelectorAll(".meta-geo-type, .meta-geo-query").forEach(input => {
     input.addEventListener("input", () => {
@@ -7012,6 +7070,56 @@ async function onMetaForecast(lid, liveAudience) {
     state.availsData[lid] = state.availsData[lid] || {};
     state.availsData[lid].meta_forecast = data;
     panel.querySelector(".meta-plan-feedback").innerHTML = _metaForecastSummaryHtml(data, li, p);
+  } catch (error) {
+    _metaFeedback(panel, String(error.message || error));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function onYouTubeForecast(lid) {
+  const panel = document.querySelector(`.youtube-plan-block[data-youtube-lid="${escapeAttr(lid)}"]`);
+  const li = state.lineItems.find(x => x.id === lid);
+  if (!panel || !li) return;
+  const retailBudget = _metaFullFlightRetailBudget(li);
+  const objective = panel.querySelector(".youtube-objective").value;
+  const geoAtRequest = _constanzaGeoFor(lid);
+  const targetAtRequest = _effectiveTargetText(li);
+  if (!(retailBudget > 0)) { _metaFeedback(panel, "Set a positive retail budget for this line in Step 04 first."); return; }
+  const audienceText = panel.querySelector(".youtube-audience").value.trim();
+  const reachText = panel.querySelector(".youtube-reach-share").value.trim();
+  const audience = audienceText ? Number(audienceText) : null;
+  const reachShare = reachText ? Number(reachText) / 100 : null;
+  const frequency = Number(panel.querySelector(".youtube-frequency").value);
+  if ((audience !== null && (!Number.isSafeInteger(audience) || audience < 0)) ||
+      (reachShare !== null && (!Number.isFinite(reachShare) || reachShare <= 0 || reachShare > 1)) ||
+      !Number.isFinite(frequency) || frequency <= 0) {
+    _metaFeedback(panel, "Enter a valid audience, reach share from 0–100%, and positive full-flight frequency.");
+    return;
+  }
+  const p = state.productIndex[li.product_name] || {};
+  const retailCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? (objective === "demand_gen" ? 20 : 15);
+  const body = { product_name: li.product_name, objective, retail_budget: retailBudget, retail_cpm: retailCpm, frequency, reach_share: reachShare };
+  if (audience !== null) { body.audience_lower = audience; body.audience_upper = audience; }
+  const btn = panel.querySelector(".youtube-model-btn");
+  btn.disabled = true;
+  try {
+    const response = await fetch("/api/constanza/youtube-forecast", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+    const stillThere = state.lineItems.find(x => x.id === lid);
+    if (!stillThere || stillThere.product_name !== li.product_name ||
+        _metaFullFlightRetailBudget(stillThere) !== retailBudget ||
+        (_effectiveProduct(stillThere, p).estimated_cpm_for_imps ?? retailCpm) !== retailCpm ||
+        _constanzaGeoFor(lid) !== geoAtRequest || _effectiveTargetText(stillThere) !== targetAtRequest ||
+        panel.querySelector(".youtube-objective").value !== objective) return;
+    data.proposal_geo = geoAtRequest;
+    data.target_text = targetAtRequest;
+    state.availsData[lid] = state.availsData[lid] || {};
+    state.availsData[lid].youtube_forecast = data;
+    panel.querySelector(".meta-plan-feedback").innerHTML = _youtubeForecastSummaryHtml(data, li, objective);
   } catch (error) {
     _metaFeedback(panel, String(error.message || error));
   } finally {

@@ -92,6 +92,7 @@ from app.services import monthly_allocation
 from app.services import notion_client
 from app.services import constanza_geo
 from app.services import constanza_meta
+from app.services import constanza_youtube
 from app.services import constanza_forecast_map as forecast_map_svc
 from app.services import forecast_store
 from app.services.constanza_engine import estimate_avails
@@ -642,6 +643,7 @@ class AvailsEntry(BaseModel):
     # Separate full-flight Meta auction planning snapshot. It is informational
     # and never substitutes for max_imps/max_spend or the SOV denominator.
     meta_forecast: Optional[dict] = None
+    youtube_forecast: Optional[dict] = None
 
 
 class TierModel(BaseModel):
@@ -930,6 +932,17 @@ class MetaAuctionForecastRequest(BaseModel):
     gender: Optional[str] = None
 
 
+class YouTubeForecastRequest(BaseModel):
+    product_name: str
+    objective: str
+    retail_budget: float
+    audience_lower: Optional[int] = None
+    audience_upper: Optional[int] = None
+    reach_share: Optional[float] = None
+    frequency: float = 5.5
+    retail_cpm: Optional[float] = None
+
+
 class ConstanzaParseAudienceRequest(BaseModel):
     text: str
 
@@ -1063,6 +1076,7 @@ async def get_catalog() -> dict:
             "estimated_impressions": p.estimated_impressions,
             "estimated_cpm_for_imps": p.estimated_cpm_for_imps,
             "meta_retail_cpm": constanza_meta.product_cpm(p.name),
+            "youtube_objectives": list(constanza_youtube.objectives_for_product(p.name)),
             "sizes": p.sizes,
             "description": p.proposal_description,
             "notes": p.notes,
@@ -1572,6 +1586,20 @@ def constanza_meta_forecast(body: MetaAuctionForecastRequest) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except constanza_meta.MetaAPIError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/constanza/youtube-forecast")
+def constanza_youtube_forecast(body: YouTubeForecastRequest) -> dict:
+    """Quote YouTube planning assumptions without asserting live avails."""
+    try:
+        return constanza_youtube.model_youtube(
+            product_name=body.product_name, objective=body.objective,
+            retail_budget=body.retail_budget, audience_lower=body.audience_lower,
+            audience_upper=body.audience_upper, reach_share=body.reach_share,
+            frequency=body.frequency, retail_cpm=body.retail_cpm,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/constanza/parse-audience")

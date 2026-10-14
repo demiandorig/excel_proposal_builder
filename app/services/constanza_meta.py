@@ -6,15 +6,14 @@ ceiling and from the proposal's max_imps / max_spend fields.
 """
 from __future__ import annotations
 
-import math
 import os
 import re
-from datetime import datetime, timezone
 from typing import Optional
 
 import requests
 
 from app import catalog
+from app.services import paid_media_planning
 
 
 # Retail CPMs confirmed by the planning team. The 2x retail/media relationship
@@ -24,9 +23,7 @@ RETAIL_CPMS = {
     "Facebook & Instagram Ads | Traffic / Conversion": 18.0,
     "Facebook & Instagram Ads | Lead Gen / Calls": 35.0,
 }
-RETAIL_TO_MEDIA = 2.0
-DEFAULT_FREQUENCY = 5.5  # over the entire campaign flight
-HIGH_FREQUENCY_SCENARIOS = (9.0, 10.0)
+DEFAULT_FREQUENCY = paid_media_planning.DEFAULT_FREQUENCY  # entire campaign flight
 _GEO_FIELDS = {"country": "countries", "region": "regions", "city": "cities", "zip": "zips", "geo_market": "geo_markets"}
 
 
@@ -60,71 +57,18 @@ def model_auction(
     default_cpm = product_cpm(product_name)
     if default_cpm is None:
         raise ValueError("Choose one of the three paid Facebook & Instagram Ads products.")
-    cpm = default_cpm if retail_cpm is None else retail_cpm
-    if not math.isfinite(retail_budget) or not 0 < retail_budget <= 1e9:
-        raise ValueError("Retail budget must be between $0 and $1 billion for the full flight.")
-    if not math.isfinite(cpm) or not 0 < cpm <= 1e5:
-        raise ValueError("Retail CPM must be a positive number.")
-    if not math.isfinite(frequency) or not 0 < frequency <= 100:
-        raise ValueError("Average frequency must be between 0 and 100 for the full flight.")
-    if (audience_lower is None) != (audience_upper is None):
-        raise ValueError("Give both audience bounds, or neither.")
-    if audience_lower is not None and not (0 <= audience_lower <= audience_upper <= 1_000_000_000):
-        raise ValueError("Audience bounds must be non-negative and ordered low to high.")
-    if reach_share is not None and (not math.isfinite(reach_share) or not 0 < reach_share <= 1):
-        raise ValueError("Reach share must be greater than 0% and at most 100%.")
-    if reach_share is not None and audience_lower is None:
-        raise ValueError("An audience estimate is required to apply a reach share.")
-    if audience_source not in ("manual", "meta_api"):
-        raise ValueError("Audience source must be manual or meta_api.")
-
-    media_budget = retail_budget / RETAIL_TO_MEDIA
-    media_cpm = cpm / RETAIL_TO_MEDIA
-    budget_imps = round(media_budget * 1000 / media_cpm)
-    audience_mid = round((audience_lower + audience_upper) / 2) if audience_lower is not None else None
-    audience_scenario = None
-    delivery = None
-    if audience_mid is not None:
-        average_imps = round(audience_mid * frequency)
-        high_9_imps = round(audience_mid * HIGH_FREQUENCY_SCENARIOS[0])
-        high_10_imps = round(audience_mid * HIGH_FREQUENCY_SCENARIOS[1])
-        audience_scenario = {
-            "at_average_frequency": average_imps,
-            "at_frequency_9": high_9_imps,
-            "at_frequency_10": high_10_imps,
-            "retail_spend_at_average_frequency": round(average_imps * cpm / 1000, 2),
-            "media_spend_at_average_frequency": round(average_imps * media_cpm / 1000, 2),
-            "retail_spend_at_frequency_9": round(high_9_imps * cpm / 1000, 2),
-            "retail_spend_at_frequency_10": round(high_10_imps * cpm / 1000, 2),
-        }
-        if reach_share is not None:
-            # The budget and reachable-audience constraints are planning
-            # assumptions; neither is a platform commitment to delivery.
-            reachable = audience_mid * reach_share
-            imps = min(budget_imps, round(reachable * frequency))
-            delivery = {
-                "impressions_low": min(budget_imps, round(audience_lower * reach_share * frequency)),
-                "impressions": imps,
-                "impressions_high": min(budget_imps, round(audience_upper * reach_share * frequency)),
-                "reach": round(imps / frequency), "reach_share": reach_share,
-            }
-
-    return {
-        "metric_type": "meta_auction_planning_model", "unit": "full_flight",
-        "product_name": product_name, "as_of": datetime.now(timezone.utc).isoformat(),
-        "retail_budget": round(retail_budget, 2), "media_budget": round(media_budget, 2),
-        "retail_cpm": round(cpm, 2), "media_cpm_assumed": round(media_cpm, 2),
-        "retail_to_media_multiplier": RETAIL_TO_MEDIA, "frequency": frequency,
-        "budget_impressions": budget_imps,
-        "potential_audience": {"lower": audience_lower, "mid": audience_mid, "upper": audience_upper, "source": audience_source}
-        if audience_mid is not None else None,
-        "audience_scenario": audience_scenario, "modeled_delivery": delivery,
-        "notes": [
+    return paid_media_planning.model_paid_media(
+        product_name=product_name, retail_budget=retail_budget,
+        retail_cpm=default_cpm if retail_cpm is None else retail_cpm,
+        metric_type="meta_auction_planning_model",
+        audience_lower=audience_lower, audience_upper=audience_upper,
+        reach_share=reach_share, frequency=frequency, audience_source=audience_source,
+        notes=[
             "Meta's audience size counts eligible accounts; it is not delivered reach.",
             "Audience × frequency and its implied spend assume every eligible account is reached; the 9–10 values are scenarios, not guaranteed avails.",
             "Budget impressions use the team's retail CPM and 2× retail/media rule, not a live auction price.",
         ],
-    }
+    )
 
 
 def is_configured() -> bool:
