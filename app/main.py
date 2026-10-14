@@ -91,6 +91,8 @@ from app.services import gamma_client
 from app.services import monthly_allocation
 from app.services import notion_client
 from app.services import constanza_geo
+from app.services import constanza_meta
+from app.services import constanza_youtube
 from app.services import constanza_forecast_map as forecast_map_svc
 from app.services import forecast_store
 from app.services.constanza_engine import estimate_avails
@@ -260,6 +262,10 @@ def _bootstrap_forecast_data() -> None:
         result = forecast_import_service.bootstrap()
         if result.get("migrations") or result.get("products") or result.get("series"):
             _logger.info("forecast data bootstrap: %s", result)
+        # The Meta Awareness CPM correction is a compare-and-set migration;
+        # drop any catalog rows read before the background migration ran.
+        from app import catalog as catalog_svc
+        catalog_svc.invalidate_product_caches()
         forecast_store.invalidate()
         forecast_map_svc.invalidate()
         audience_taxonomy.invalidate()                   # the seed may just have changed the audience rows
@@ -634,6 +640,10 @@ class AvailsEntry(BaseModel):
     # what it was actually calculated from instead of just a bare number
     # indistinguishable from any other "Est." value. None otherwise.
     geo_resolution: Optional[dict] = None
+    # Separate full-flight Meta auction planning snapshot. It is informational
+    # and never substitutes for max_imps/max_spend or the SOV denominator.
+    meta_forecast: Optional[dict] = None
+    youtube_forecast: Optional[dict] = None
 
 
 class TierModel(BaseModel):
@@ -900,6 +910,39 @@ class ConstanzaEstimateRequest(BaseModel):
     audience: Optional[ConstanzaAudienceSpecModel] = None
 
 
+class MetaGeoSearchRequest(BaseModel):
+    query: str
+    location_type: str
+
+
+class MetaAuctionForecastRequest(BaseModel):
+    product_name: str
+    retail_budget: float
+    audience_lower: Optional[int] = None
+    audience_upper: Optional[int] = None
+    reach_share: Optional[float] = None
+    frequency: float = 5.5
+    retail_cpm: Optional[float] = None
+    # Select a geography returned by /meta-geos for a live audience pull.
+    # Omit both fields for a manually supplied audience or budget-only model.
+    meta_geo_type: Optional[str] = None
+    meta_geo_key: Optional[str] = None
+    age_min: Optional[int] = None
+    age_max: Optional[int] = None
+    gender: Optional[str] = None
+
+
+class YouTubeForecastRequest(BaseModel):
+    product_name: str
+    objective: str
+    retail_budget: float
+    audience_lower: Optional[int] = None
+    audience_upper: Optional[int] = None
+    reach_share: Optional[float] = None
+    frequency: float = 5.5
+    retail_cpm: Optional[float] = None
+
+
 class ConstanzaParseAudienceRequest(BaseModel):
     text: str
 
@@ -1032,6 +1075,8 @@ async def get_catalog() -> dict:
             "minimum_spend": p.minimum_spend,
             "estimated_impressions": p.estimated_impressions,
             "estimated_cpm_for_imps": p.estimated_cpm_for_imps,
+            "meta_retail_cpm": constanza_meta.product_cpm(p.name),
+            "youtube_objectives": list(constanza_youtube.objectives_for_product(p.name)),
             "sizes": p.sizes,
             "description": p.proposal_description,
             "notes": p.notes,
@@ -1490,6 +1535,71 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
             ],
         },
     }
+
+
+@app.post("/api/constanza/meta-geos")
+def constanza_meta_geos(body: MetaGeoSearchRequest) -> dict:
+    """Search Meta geography IDs for an explicit planner choice."""
+    try:
+        return {"locations": constanza_meta.search_geography(body.query, body.location_type)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except constanza_meta.MetaAPIError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/constanza/meta-forecast")
+def constanza_meta_forecast(body: MetaAuctionForecastRequest) -> dict:
+    """Full-flight Meta auction planning, kept distinct from inventory avails.
+
+    A live Meta request requires an explicitly selected Meta geo ID. This
+    endpoint models only that geography plus optional age/gender; planners
+    must verify any other campaign targeting in Ads Manager. Without the
+    selection, a planner may enter audience bounds manually.
+    """
+    if bool(body.meta_geo_type) != bool(body.meta_geo_key):
+        raise HTTPException(status_code=422, detail="Select both a Meta geography type and its key.")
+    if body.meta_geo_type and (body.audience_lower is not None or body.audience_upper is not None):
+        raise HTTPException(status_code=422, detail="Use either the live Meta audience or manually entered bounds.")
+    try:
+        audience_source = "manual"
+        lower, upper = body.audience_lower, body.audience_upper
+        if body.meta_geo_type:
+            lower, upper = constanza_meta.fetch_reach_estimate(
+                geo_type=body.meta_geo_type, geo_key=body.meta_geo_key,
+                age_min=body.age_min, age_max=body.age_max, gender=body.gender,
+            )
+            audience_source = "meta_api"
+        result = constanza_meta.model_auction(
+            product_name=body.product_name, retail_budget=body.retail_budget,
+            audience_lower=lower, audience_upper=upper, reach_share=body.reach_share,
+            frequency=body.frequency, audience_source=audience_source,
+            retail_cpm=body.retail_cpm,
+        )
+        if audience_source == "meta_api":
+            result["meta_targeting"] = {
+                "geo_type": body.meta_geo_type, "geo_key": body.meta_geo_key,
+                "age_min": body.age_min, "age_max": body.age_max, "gender": body.gender,
+            }
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except constanza_meta.MetaAPIError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/constanza/youtube-forecast")
+def constanza_youtube_forecast(body: YouTubeForecastRequest) -> dict:
+    """Quote YouTube planning assumptions without asserting live avails."""
+    try:
+        return constanza_youtube.model_youtube(
+            product_name=body.product_name, objective=body.objective,
+            retail_budget=body.retail_budget, audience_lower=body.audience_lower,
+            audience_upper=body.audience_upper, reach_share=body.reach_share,
+            frequency=body.frequency, retail_cpm=body.retail_cpm,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/api/constanza/parse-audience")

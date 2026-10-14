@@ -168,10 +168,11 @@ def _names(fake=None):
 
 # --- the YouTube split -------------------------------------------------------------------------------------------------
 
-def test_youtube_is_two_products_and_the_old_name_still_resolves():
+def test_youtube_formats_and_demand_gen_are_separate_products_and_old_name_resolves():
     names = [p.name for p in catalog.CATALOG]
     assert "YouTube Ads" not in names
     assert "YouTube Ads - Skippable" in names and "YouTube Ads - Non-Skippable" in names
+    assert "YouTube Ads - Demand Gen" in names
     assert catalog.by_name("YouTube Ads").name == "YouTube Ads - Skippable"          # saved proposals, pasted requests
     skippable, non = catalog.by_name("YouTube Ads - Skippable"), catalog.by_name("YouTube Ads - Non-Skippable")
     assert skippable.family == non.family == "Online Video"

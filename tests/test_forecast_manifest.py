@@ -96,9 +96,10 @@ def test_descriptions_reflect_each_products_real_publisher_mix():
 
 def test_the_seed_products_are_part_of_the_code_catalog_in_the_right_places():
     names = [p.name for p in catalog.CATALOG]
-    assert len(names) == len(set(names)) == 90                      # the rate card's 62 minus the 2 the seed replaces, plus 30 seed products
+    assert len(names) == len(set(names)) == 91                      # 61 base products after adding Demand Gen, plus 30 forecast seed products
     assert names.index("Entravision+ Connect - (Default)") == names.index("Netflix - Spanish Content :30s Ads") + 1
-    assert names.index("eDigital Display") == names.index("YouTube Ads - Non-Skippable") + 1          # first of the Display family
+    assert names.index("YouTube Ads - Demand Gen") == names.index("YouTube Ads - Non-Skippable") + 1
+    assert names.index("eDigital Display") == names.index("YouTube Ads - Demand Gen") + 1          # first of the Display family
     assert names.index("eDigital OLV") == names.index("Search - SEM") + 1                                # first of Online Video
     assert "eDigital Network Display - Standard IAB" not in names and "Video - Pre-roll (OLV)" not in names   # replaced, not kept beside
 
