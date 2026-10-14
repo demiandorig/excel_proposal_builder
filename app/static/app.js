@@ -6967,9 +6967,12 @@ function renderConstanzaResult(lid, data) {
 }
 
 function _constanzaGeoInfo(data) {
+  // A TikTok estimate has no per-market rows (one audience for the whole place list): the places it sent to TikTok stand in for them.
+  const fromAreas = [...new Set((data.by_area || []).map(d => d.dma).filter(Boolean))];
+  const fromTikTok = data.tiktok ? [...new Set((data.tiktok.locations || []).map(l => l.source).filter(Boolean))] : [];
   return {
     method: data.geo_method,
-    dmas: [...new Set(data.by_area.map(d => d.dma).filter(Boolean))],
+    dmas: fromAreas.length ? fromAreas : fromTikTok,
     unmatched_tokens: data.unmatched_geo_tokens || [],
   };
 }

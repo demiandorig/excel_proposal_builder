@@ -137,9 +137,19 @@ def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = False)
     add(_timed("States", states))
 
     def national():
-        out = ct.estimate(GeoResolution(input_text="National", method="national", areas=[], geo_confidence="high"), ct.Targeting(), 1, client=client)
+        res = GeoResolution(input_text="National", method="national", areas=[], geo_confidence="high")
+        try:
+            out, hint = ct.estimate(res, ct.Targeting(), 1, client=client), ""
+        except TikTokAPIError as refused:
+            if refused.kind != "invalid" or tiktok_client.optimization_goal_override():
+                raise
+            # TikTok's own documentation example pairs the Reach objective with CLICK: if that is what this account takes, say so
+            out = ct.estimate(res, ct.Targeting(), 1, client=client, goal_override="CLICK")
+            hint = (f" — but only as REACH / CLICK: TikTok refused REACH / REACH ({refused.message}). Set TIKTOK_OPTIMIZATION_GOAL=CLICK "
+                    "in the app's secrets to use it everywhere.")
         s = out.size
-        return f"{s.lower:,.0f} – {s.upper:,.0f} people (TikTok's verdict: {tiktok_client.STAGE_LABELS.get(s.stage, 'not given')}); ×{out.factor:g} = {out.monthly['mid']:,.0f} impressions a month", False
+        return (f"{s.lower:,.0f} – {s.upper:,.0f} people (TikTok's verdict: {tiktok_client.STAGE_LABELS.get(s.stage, 'not given')}); "
+                f"×{out.factor:g} = {out.monthly['mid']:,.0f} impressions a month{hint}"), bool(hint)
 
     add(_timed("Audience size · United States", national))
 

@@ -407,3 +407,21 @@ def test_the_admin_page_offers_the_tiktok_method_and_the_connection_test():
     js = (root / "app" / "static" / "admin.js").read_text(encoding="utf-8")
     assert 'id="fc-tt-test"' in html and 'id="fc-tt-checks"' in html and "TIKTOK_ACCESS_TOKEN" in html and "TIKTOK_ADVERTISER_ID" in html
     assert 'value="tiktok"' in js and "TikTok API (live)" in js and "/api/admin/tiktok/test" in js and "/api/constanza/tiktok/status" in js
+
+
+def test_the_optimization_goal_of_a_reach_estimate_can_be_replaced_by_a_setting_and_a_traffic_one_cannot(monkeypatch):
+    reach = ct.build_estimate_body(ct.Targeting(), loc("1"))
+    assert (reach["objective_type"], reach["optimization_goal"]) == ("REACH", "REACH")
+    monkeypatch.setenv("TIKTOK_OPTIMIZATION_GOAL", "click")
+    assert ct.build_estimate_body(ct.Targeting(), loc("1"))["optimization_goal"] == "CLICK"
+    traffic = ct.build_estimate_body(ct.Targeting.from_dict({"objective": "traffic"}), loc("1"))
+    assert (traffic["objective_type"], traffic["optimization_goal"]) == ("TRAFFIC", "CLICK")        # its own pair, untouched
+    assert ct.build_estimate_body(ct.Targeting(), loc("1"), goal_override="CLICK")["optimization_goal"] == "CLICK"
+
+
+def test_every_browse_tab_reads_the_one_list_tiktok_sends_by_default(tiktok):
+    kinds = ("general_interest", "purchase_intention", "video_interaction", "creator_interaction", "hashtag_interaction")
+    for kind in kinds:
+        assert main.constanza_tiktok_targeting(kind)["items"]
+    assert tiktok.fake.count("/targeting/search/") == 1
+    assert "sub_targeting_types" not in tiktok.fake.calls[0]["params"]

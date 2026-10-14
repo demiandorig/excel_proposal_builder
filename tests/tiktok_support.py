@@ -168,8 +168,13 @@ class FakeTikTok:
             return bad
         if params.get("targeting_type") != "INTEREST_AND_BEHAVIOR":
             return fail(40002, "targeting_type: Must be INTEREST_AND_BEHAVIOR.")
-        subs = _json.loads(params["sub_targeting_types"]) if params.get("sub_targeting_types") else []
         keywords = _json.loads(params["search_keywords"]) if params.get("search_keywords") else None
+        if params.get("sub_targeting_types"):
+            subs = _json.loads(params["sub_targeting_types"])
+        else:                    # TikTok's documented defaults: every kind for one keyword, all but the additional interests for a list
+            subs = ["GENERAL_INTEREST", "PURCHASE_INTENTION", "VIDEO_INTERACTION", "CREATOR_INTERACTION", "HASHTAG_INTERACTION"]
+            if keywords is not None:
+                subs.insert(1, "ADDITIONAL_INTEREST")
         tables = {"general_interest": GENERAL_INTERESTS, "purchase_intention": PURCHASE_INTENTIONS, "video_interaction": VIDEO_INTERACTIONS,
                   "creator_interaction": CREATOR_INTERACTIONS, "hashtag_interaction": HASHTAG_BUNDLES}
         sub_names = {"GENERAL_INTEREST": "general_interest", "ADDITIONAL_INTEREST": "additional_interest", "PURCHASE_INTENTION": "purchase_intention",

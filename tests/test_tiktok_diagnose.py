@@ -69,13 +69,25 @@ def test_markets_tiktok_names_differently_are_listed_as_a_warning_not_a_failure(
 
 
 def test_a_failure_in_the_middle_is_reported_and_the_run_continues():
+    from tests.tiktok_support import FakeResponse
     client = make_client()
-    client.fake.queue("/ad/audience_size/estimate/", __import__("tests.tiktok_support", fromlist=["FakeResponse"]).FakeResponse(
-        200, {"code": 40002, "message": "location_ids: invalid", "request_id": "R1"}))
+    refusal = FakeResponse(200, {"code": 40002, "message": "location_ids: invalid", "request_id": "R1"})
+    client.fake.queue("/ad/audience_size/estimate/", refusal, refusal)         # REACH / REACH refused, and CLICK too
     checks = dg.run_checks(client)
     bad = [c for c in checks if not c.ok]
     assert [c.name for c in bad] == ["Audience size · United States"] and "location_ids: invalid" in bad[0].detail and "40002" in bad[0].detail
     assert len(checks) == 8
+
+
+def test_when_tiktok_refuses_reach_reach_but_takes_reach_click_the_check_says_which_setting_to_change():
+    from tests.tiktok_support import FakeResponse
+    client = make_client()
+    client.fake.queue("/ad/audience_size/estimate/", FakeResponse(200, {"code": 40002, "message": "optimization_goal: not valid for REACH", "request_id": "R2"}))
+    checks = dg.run_checks(client)
+    national = next(c for c in checks if c.name == "Audience size · United States")
+    assert national.ok and national.warn and "TIKTOK_OPTIMIZATION_GOAL=CLICK" in national.detail and "optimization_goal: not valid for REACH" in national.detail
+    sent = [c["body"]["optimization_goal"] for c in client.fake.calls if c["path"] == "/ad/audience_size/estimate/"]
+    assert sent[:2] == ["REACH", "CLICK"]
 
 
 def test_the_command_prints_a_line_per_check_and_json_on_request(monkeypatch, capsys):

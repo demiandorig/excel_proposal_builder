@@ -375,3 +375,20 @@ def test_an_answer_with_no_audience_size_is_an_error_naming_what_it_held(data):
 def test_a_negative_audience_is_an_error():
     with pytest.raises(TikTokAPIError):
         tc.parse_audience_size({"user_count": {"lower_end": -1, "upper_end": 5}})
+
+
+def test_only_what_tiktok_itself_said_is_quoted_as_tiktoks():
+    said = TikTokAPIError("Access token is wrong", kind="auth", code=40105).public_message()
+    detail = TikTokAPIError("HTTP 502 with an unreadable body", kind="unavailable").public_message()
+    assert "TikTok said: Access token is wrong" in said
+    assert "TikTok said" not in detail and "(HTTP 502 with an unreadable body)" in detail and "try again in a moment" in detail
+
+
+def test_asking_for_every_kind_leaves_the_kinds_out_which_is_what_tiktok_defaults_to():
+    c = make_client()
+    c.targeting_list()
+    assert "sub_targeting_types" not in c.fake.calls[-1]["params"]
+    c.targeting_search("auto")
+    assert "sub_targeting_types" not in c.fake.calls[-1]["params"] and json.loads(c.fake.calls[-1]["params"]["search_keywords"]) == ["auto"]
+    c.targeting_list(["hashtag_interaction"])
+    assert json.loads(c.fake.calls[-1]["params"]["sub_targeting_types"]) == ["HASHTAG_INTERACTION"]

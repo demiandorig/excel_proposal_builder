@@ -159,11 +159,15 @@ class Targeting:
             raise ValueError("Purchase intent isn't available for a Reach campaign - choose the Traffic objective to use it.")
 
 
-def build_estimate_body(t: Targeting, mapping: Mapping) -> dict:
-    """The /ad/audience_size/estimate/ request for a targeting and its TikTok locations (the client adds the advertiser)."""
+def build_estimate_body(t: Targeting, mapping: Mapping, goal_override: Optional[str] = None) -> dict:
+    """The /ad/audience_size/estimate/ request for a targeting and its TikTok locations (the client adds the advertiser). A Reach
+    estimate's optimization goal can be replaced (TIKTOK_OPTIMIZATION_GOAL, or `goal_override` from the diagnostics)."""
     preset = OBJECTIVES[t.objective]
+    goal = preset["optimization_goal"]
+    if t.objective == DEFAULT_OBJECTIVE:
+        goal = (goal_override or tiktok_client.optimization_goal_override() or goal)
     body: dict[str, Any] = {
-        "objective_type": preset["objective_type"], "optimization_goal": preset["optimization_goal"],
+        "objective_type": preset["objective_type"], "optimization_goal": goal,
         "placement_type": "PLACEMENT_TYPE_NORMAL", "placements": list(t.placements),
     }
     if mapping.location_ids:
@@ -238,7 +242,8 @@ class TikTokEstimate:
         return out
 
 
-def estimate(res: GeoResolution, targeting: Targeting, months: int, client: Optional[TikTokClient] = None) -> TikTokEstimate:
+def estimate(res: GeoResolution, targeting: Targeting, months: int, client: Optional[TikTokClient] = None,
+             goal_override: Optional[str] = None) -> TikTokEstimate:
     """TikTok's audience size for a resolved geography and a targeting. TikTokAPIError for anything TikTok-side (not configured,
     refused, rate-limited, unreachable); ValueError for a request TikTok could not be asked (nothing placed, too many places)."""
     client = client or tiktok_client.get_client()
@@ -246,7 +251,7 @@ def estimate(res: GeoResolution, targeting: Targeting, months: int, client: Opti
     if not mapping.usable:
         why = "; ".join(f"{u['input']} ({u['reason']})" for u in mapping.unmapped[:4])
         raise ValueError("None of those places could be found in TikTok" + (f": {why}." if why else "."))
-    body = build_estimate_body(targeting, mapping)
+    body = build_estimate_body(targeting, mapping, goal_override)
     size = client.estimate_audience(body)
     return TikTokEstimate(size=size, factor=tiktok_client.impressions_per_person(), months=max(1, int(months)),
                           mapping=mapping, targeting=targeting, request=body)
@@ -307,7 +312,8 @@ def catalog(kind: str, client: Optional[TikTokClient] = None) -> list[dict]:
         return (client or tiktok_client.get_client()).languages()
     if kind not in CATALOG_KINDS:
         raise ValueError("Unknown kind of targeting.")
-    return with_paths((client or tiktok_client.get_client()).targeting_list([kind]).get(kind, []))
+    # One request answers every kind (it is what TikTok sends by default) and is cached for hours, so each browse tab reads the same answer
+    return with_paths((client or tiktok_client.get_client()).targeting_list().get(kind, []))
 
 
 def search(q: str, client: Optional[TikTokClient] = None) -> dict[str, list[dict]]:

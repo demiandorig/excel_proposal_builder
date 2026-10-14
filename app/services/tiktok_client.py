@@ -12,7 +12,9 @@ Setup (the app runs fine without it, exactly like Notion / Drive / OpenAI - ever
     TIKTOK_ADVERTISER_ID  the numeric ID of the ad account the estimates are asked through
   optional:
     TIKTOK_IMPRESSIONS_PER_PERSON   the planning factor that turns an audience into monthly impressions (default 5.5)
-    TIKTOK_OBJECTIVE_TYPE / TIKTOK_OPTIMIZATION_GOAL   what the estimate is asked for (default REACH / REACH)
+    TIKTOK_OPTIMIZATION_GOAL        replaces the optimization goal of a Reach estimate (default REACH; the diagnostics say when CLICK, the
+                                    pair in TikTok's own documentation example, is the one an account accepts)
+    TIKTOK_OBJECTIVE_TYPE           the objective used for the location look-ups (default REACH)
     TIKTOK_API_BASE                 point the client somewhere else (the offline mock used by the tests, a sandbox)
 
 Design rules (the ones that bit the previous integrations):
@@ -100,6 +102,12 @@ def optimization_goal() -> str:
     return (_env("TIKTOK_OPTIMIZATION_GOAL") or DEFAULT_OPTIMIZATION_GOAL).upper()
 
 
+def optimization_goal_override() -> str:
+    """TIKTOK_OPTIMIZATION_GOAL, when set, replaces the optimization goal sent for a Reach estimate (TikTok's own documentation example
+    pairs the Reach objective with CLICK; if an ad account rejects REACH / REACH, this is the way to change it without a release)."""
+    return _env("TIKTOK_OPTIMIZATION_GOAL").upper()
+
+
 def impressions_per_person() -> float:
     """The planning factor: monthly impressions = audience x this. 5.5 unless TIKTOK_IMPRESSIONS_PER_PERSON says otherwise
     (a value that is not a sensible number is ignored, never half-applied)."""
@@ -161,7 +169,8 @@ class TikTokAPIError(Exception):
         return {"not_configured": 503, "config": 503, "rate_limit": 429, "invalid": 422}.get(self.kind, 502)
 
     def public_message(self) -> str:
-        said = f" (TikTok said: {self.message})" if self.message else ""
+        # a message that came in TikTok's own answer is quoted as TikTok's; one this client made up (no code) is only a detail
+        said = (f" (TikTok said: {self.message})" if self.code is not None else f" ({self.message})") if self.message else ""
         if self.kind == "not_configured":
             return f"TikTok isn't connected yet — {SETUP_HINT}."
         if self.kind == "config":
@@ -438,8 +447,9 @@ class TikTokClient:
     def targeting_list(self, kinds: Iterable[str] = LIST_KINDS) -> dict[str, list[dict]]:
         """{kind: [{id, name, level, children_ids}]} - every interest / behavior category TikTok offers, for browsing."""
         kinds = [k for k in kinds if k in LIST_KINDS]
-        params = {"advertiser_id": self.advertiser, "targeting_type": "INTEREST_AND_BEHAVIOR",
-                  "sub_targeting_types": [_SUB_TYPE[k] for k in kinds]}
+        params: dict[str, Any] = {"advertiser_id": self.advertiser, "targeting_type": "INTEREST_AND_BEHAVIOR"}
+        if set(kinds) != set(LIST_KINDS):        # every kind is what TikTok sends when the field is left out: ask for that, the plainest request
+            params["sub_targeting_types"] = [_SUB_TYPE[k] for k in kinds]
         data, _, _ = self.call("GET", "/targeting/search/", params=params, cache_ttl=TTL_CATALOG)
         return {k: self._items(data.get(k), None) for k in kinds}
 
@@ -449,8 +459,9 @@ class TikTokClient:
         if not keyword:
             return {}
         kinds = [k for k in kinds if k in TARGETING_KINDS]
-        params = {"advertiser_id": self.advertiser, "targeting_type": "INTEREST_AND_BEHAVIOR",
-                  "sub_targeting_types": [_SUB_TYPE[k] for k in kinds], "search_keywords": [keyword]}
+        params = {"advertiser_id": self.advertiser, "targeting_type": "INTEREST_AND_BEHAVIOR", "search_keywords": [keyword]}
+        if set(kinds) != set(TARGETING_KINDS):   # a single keyword searches every kind unless told otherwise
+            params["sub_targeting_types"] = [_SUB_TYPE[k] for k in kinds]
         data, _, _ = self.call("GET", "/targeting/search/", params=params, cache_ttl=TTL_SEARCH)
         return {k: self._items(data.get(k), keyword) for k in kinds}
 

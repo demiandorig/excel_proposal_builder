@@ -87,10 +87,11 @@
   }
 
   // ------------------------------------------------------------------ product catalogue
-  const CHANNEL_ORDER = ["ctv", "platform_model", "live_sports", "netflix", "pause_ads", "olv", "display", "_generic"];
+  const CHANNEL_ORDER = ["ctv", "platform_model", "live_sports", "netflix", "pause_ads", "olv", "display", "tiktok", "_generic"];
   const CHANNEL_LABEL = {
     ctv: "Entravision+ Connect · Madhive", platform_model: "Streaming platforms", live_sports: "Live sports", netflix: "Netflix",
-    pause_ads: "Pause ads", olv: "Online video", display: "Display", _generic: "Other products · population-share estimate",
+    pause_ads: "Pause ads", olv: "Online video", display: "Display", tiktok: "TikTok · live audience estimate",
+    _generic: "Other products · population-share estimate",
   };
   const BASIS_LABEL = { platform_reported: "Reported avails", modeled: "Modeled", extrapolated: "Sample extended to all markets" };
   const UNIT_LABEL = { weekly: "weekly avails", monthly: "monthly avails" };
@@ -103,13 +104,14 @@
       for (const p of (cat.products_by_family || {})[fam] || []) {
         if (p.is_addon || !p.forecast || !p.forecast.enabled) continue;
         const series = p.forecast.series || null;
-        out.push({ name: p.name, family: fam, method: p.forecast.method, series, channel: series && series.channel ? series.channel : "_generic" });
+        out.push({ name: p.name, family: fam, method: p.forecast.method, series, channel: p.forecast.method === "tiktok" ? "tiktok" : (series && series.channel ? series.channel : "_generic") });
       }
     }
     return out;
   }
 
-  function seriesMeta(series) {
+  function seriesMeta(series, method) {
+    if (method === "tiktok") return "Live from TikTok";
     if (!series) return "Population-share estimate";
     const bits = [BASIS_LABEL[series.data_basis] || "", UNIT_LABEL[series.unit] || ""].filter(Boolean);
     return bits.join(" · ");
@@ -335,7 +337,9 @@
   function badgesHtml(data) {
     const series = data.series || null;
     const b = [];
-    if (series) {
+    if (data.tiktok) {
+      b.push(`<span class="cz-badge cz-reported" title="Asked of TikTok's own audience-size estimator just now">TikTok API · live</span>`);
+    } else if (series) {
       const basis = series.data_basis;
       const cls = basis === "platform_reported" ? "cz-reported" : (basis === "extrapolated" ? "cz-extended" : "cz-modeled");
       b.push(`<span class="cz-badge ${cls}">${esc(BASIS_LABEL[basis] || "Modeled")}</span>`);
@@ -432,6 +436,7 @@
   function renderCard(el, data, opts) {
     const m = summarize(data);
     const notes = notesOf(data).slice(0, 4).map((n) => `<li>${esc(n)}</li>`).join("");
+    const plug = pluginFor(data);
     const monthRow = `<tr><td>${m.aud ? "Audience imps / month" : "Imps / month"}</td><td>${num(m.month.low)}</td><td>${num(m.month.mid)}</td><td>${num(m.month.high)}</td></tr>`;
     const weekRow = m.weekly ? `<tr><td>Per week</td><td>${num(m.week.low)}</td><td>${num(m.week.mid)}</td><td>${num(m.week.high)}</td></tr>` : "";
     const totalRow = m.months > 1 || m.weekly ? `<tr><td>Flight total${m.weekly ? "" : ` · ${m.months} mo`}</td><td>${num(m.total.low)}</td><td>${num(m.total.mid)}</td><td>${num(m.total.high)}</td></tr>` : "";
@@ -439,8 +444,9 @@
     el.innerHTML = `
       <div class="cz-badges">${badgesHtml(data)}</div>
       <table class="constanza-range-table"><tr><th></th><th>Low</th><th>Mid</th><th>High</th></tr>${monthRow}${weekRow}${totalRow}</table>
+      ${plug ? plug.cardHtml(data, m) : ""}
       ${m.people != null ? `<p class="constanza-uniques">Audience (people): <strong>${num(m.people)}</strong>${m.perPerson ? ` · ${m.perPerson.toFixed(1)} impressions per person a month` : ""}</p>` : ""}
-      ${m.uniques != null ? `<p class="constanza-uniques">Est. monthly uniques: <strong>${num(m.uniques)}</strong></p>` : ""}
+      ${m.uniques != null && !plug ? `<p class="constanza-uniques">Est. monthly uniques: <strong>${num(m.uniques)}</strong></p>` : ""}
       ${audienceBoxHtml(m.aud, m)}
       ${unmatchedHtml(data)}
       <div class="cz-geohelp"></div>
@@ -459,6 +465,48 @@
     el.style.display = "block";
     el.innerHTML = `<p class="constanza-error">⚠️ ${esc(message)}</p><div class="cz-geohelp"></div>`;
     if (resolution) mountGeoHelp(el.querySelector(".cz-geohelp"), resolution, { getText: opts.getText, setText: (next) => opts.onGeoText(next) });
+  }
+
+  // ------------------------------------------------------------------ forecast methods that bring their own panel
+  // A product whose forecast method is not a loaded data series (TikTok: a live API) shows its own targeting panel in the dock and
+  // its own result card. constanza-tiktok.js registers one with registerMethod(name, factory); the factory gets `ctx` (the dock's
+  // state and helpers) and returns { formHtml, bind, onSelect, requestPart, canPull, reset, context, headlineHtml, bodyHtml, cardHtml,
+  // badgeHtml, summaryLines, aboutHtml, goLabel }.
+  const plugins = {};
+  const pluginOf = (p) => (p && plugins[p.method]) || null;
+  const pluginFor = (data) => (data && data.tiktok && plugins.tiktok) || null;
+  const activePlugin = () => pluginOf(productByName(S.product));
+  const goLabel = () => { const plug = activePlugin(); return plug && plug.goLabel ? plug.goLabel : "Pull avails →"; };
+
+  function pluginCtx() {
+    return { S, $, esc, num, compact, api, markStale, errorText, setMood, announce, summarize, productByName, requestBody: () => requestBody() };
+  }
+
+  function mountPlugin(name) {
+    const host = $("cz-method-forms");
+    if (!host || host.querySelector(`[data-method="${name}"]`)) return;
+    const panel = document.createElement("div");
+    panel.className = "cz-method-panel hidden";
+    panel.dataset.method = name;
+    panel.innerHTML = plugins[name].formHtml();
+    host.appendChild(panel);
+    plugins[name].bind(pluginCtx());
+    applyMethodUI();
+  }
+
+  function registerMethod(name, factory) {
+    plugins[name] = factory(pluginCtx());
+    if ($("cz-method-forms")) mountPlugin(name);
+  }
+
+  // Show the selected product's own panel (and hide the Entravision audience block it replaces), and name the button for it.
+  function applyMethodUI() {
+    if (!$("cz-method-forms")) return;
+    const p = productByName(S.product), plug = pluginOf(p);
+    document.querySelectorAll(".cz-method-panel").forEach((el) => el.classList.toggle("hidden", !(plug && el.dataset.method === p.method)));
+    $("cz-aud").classList.toggle("hidden", !!plug);
+    if (!S.busy) $("cz-go").innerHTML = goLabel();
+    if (plug && plug.onSelect) plug.onSelect(p);
   }
 
   // ------------------------------------------------------------------ the dock: markup
@@ -563,6 +611,7 @@
           <details class="cz-browse" id="cz-browse"><summary>Browse every audience</summary><div id="cz-browse-body"><p class="cz-note">Loading…</p></div></details>
         </div>
       </details>
+      <div id="cz-method-forms"></div>
     </div>
     <div class="cz-result" id="cz-result"></div>
   </div>
@@ -582,6 +631,7 @@
     root.innerHTML = bubbleHtml() + dockHtml();
     document.body.appendChild(root);
     bind();
+    Object.keys(plugins).forEach(mountPlugin);
     applyWide();
     renderResultWelcome();
   }
@@ -620,10 +670,10 @@
     $("cz-pname").title = p ? p.name : "";
     const note = $("cz-product-note");
     if (!p) { note.innerHTML = ""; return; }
-    const bits = [`<span class="cz-hint">${esc(seriesMeta(p.series))}</span>`];
+    const bits = [`<span class="cz-hint">${esc(seriesMeta(p.series, p.method))}</span>`];
     let html = `<p class="cz-note">${bits.join("")}</p>`;
     if (isLiveSports(p.series) && p.series.period_label) {
-      html = `<p class="cz-note"><span class="cz-badge cz-period">📅 ${esc(p.series.period_label)}</span></p>` + `<p class="cz-note">${esc(seriesMeta(p.series))} — the flight dates aren’t checked against this window.</p>`;
+      html = `<p class="cz-note"><span class="cz-badge cz-period">📅 ${esc(p.series.period_label)}</span></p>` + `<p class="cz-note">${esc(seriesMeta(p.series, p.method))} — the flight dates aren’t checked against this window.</p>`;
     } else if (p.series && p.series.relation === "baseline_proxy") {
       html += `<p class="cz-note">Uses <strong>${esc(p.series.title || p.series.key)}</strong> as its baseline.${p.series.note ? " " + esc(p.series.note) : ""}</p>`;
     } else if (p.series && p.series.data_basis === "extrapolated") {
@@ -631,6 +681,7 @@
     }
     note.innerHTML = html;
     updateTotalField();
+    applyMethodUI();
   }
 
   // ---- picker
@@ -648,7 +699,7 @@
     const html = CHANNEL_ORDER.filter((c) => groups[c]).map((c) => {
       const opts = groups[c].map((p) => {
         const idx = pickerItems.push(p) - 1;
-        const meta = [seriesMeta(p.series), isLiveSports(p.series) && p.series.period_label ? p.series.period_label : ""].filter(Boolean).join(" · ");
+        const meta = [seriesMeta(p.series, p.method), isLiveSports(p.series) && p.series.period_label ? p.series.period_label : ""].filter(Boolean).join(" · ");
         return `<div class="cz-option" role="option" id="cz-opt-${idx}" data-idx="${idx}" aria-selected="${p.name === S.product}"><span class="cz-option-name">${esc(p.name)}</span><span class="cz-option-meta">${esc(meta)}</span></div>`;
       }).join("");
       return `<div class="cz-group-label" role="presentation">${esc(CHANNEL_LABEL[c])}</div>${opts}`;
@@ -794,7 +845,7 @@
   function updateTotalField() {
     const p = productByName(S.product);
     const intl = S.resolve && S.resolve.geo_confidence === "low_confidence_international";
-    const need = !!((p && p.method === "generic") || intl || S.needTotal);
+    const need = !pluginOf(p) && !!((p && p.method === "generic") || intl || S.needTotal);
     $("cz-total-field").classList.toggle("hidden", !need);
     $("cz-total-note").textContent = intl
       ? "Platform data only exists for the U.S. Enter the impressions you want spread across the country by population (low confidence)."
@@ -946,7 +997,9 @@
       `Flight total (low / mid / high): ${num(m.total.low)} / ${num(m.total.mid)} / ${num(m.total.high)}`,
     ];
     if (m.people != null) lines.push(`Audience on this product: ${num(m.people)} people${m.perPerson ? ` (about ${m.perPerson.toFixed(1)} impressions per person a month)` : ""}`);
-    if (m.uniques != null) lines.push(`Est. uniques per month: ${num(m.uniques)}`);
+    if (m.uniques != null && !data.tiktok) lines.push(`Est. uniques per month: ${num(m.uniques)}`);
+    const plug = pluginFor(data);
+    if (plug) plug.summaryLines(data, asked).forEach((l) => lines.push(l));
     if (data.series) lines.push(`Source: ${data.series.title || data.series.key}, version ${data.series.version}${data.series.period_label ? `; period: ${data.series.period_label}` : ""}`);
     notesOf(data).slice(0, 3).forEach((n) => lines.push(`Note: ${n}`));
     return lines.join("\n");
@@ -975,24 +1028,28 @@
     if (m.aud) side.push({ label: "Before the audience filter", v: num(m.baseMonthMid) + " imps / mo", r: m.peopleBase != null ? `${num(m.peopleBase)} people` : "" });
     const notes = notesOf(data).map((n) => `<li>${esc(n)}</li>`).join("");
     const inserts = insertButtons(data, m);
+    const plug = pluginFor(data);                  // a result a forecast method brought (TikTok) draws its own headline and middle
+    const headline = plug ? plug.headlineHtml(data, m) : `<div class="cz-headline">
+        <div class="cz-metric main"><span class="cz-mlabel">${esc(main.label)}</span><span class="cz-mvalue">${num(main.v.mid)}</span><span class="cz-mrange">${compact(main.v.low)} – ${compact(main.v.high)} range</span></div>
+        ${side.map((s) => `<div class="cz-metric"><span class="cz-mlabel">${esc(s.label)}</span><span class="cz-mvalue">${esc(s.v)}</span>${s.r ? `<span class="cz-mrange">${esc(s.r)}</span>` : ""}</div>`).join("")}
+      </div>`;
+    const before = plug ? "" : audienceBoxHtml(m.aud, m);
+    const middle = plug ? plug.bodyHtml(data, m, S.resultCtx) : `<div class="cz-section-title">Where the impressions are</div>
+      ${shareBarHtml(rows, rows.reduce((s, r) => s + r.imps_mid, 0))}
+      ${rows.length ? `<table class="cz-table"><thead><tr><th>Area</th><th>Share</th><th>${m.weekly ? "Flight total" : "Per month"}</th></tr></thead><tbody>${tableRows}</tbody></table>` : ""}
+      ${rows.length > 8 ? `<p class="cz-note"><button type="button" class="cz-link" id="cz-toggle-areas">${showAll ? "Show the top 8 only" : `Show all ${rows.length} areas`}</button></p>` : ""}`;
     $("cz-result").innerHTML = `
       <div class="cz-card-head">
         <div class="cz-card-title">${esc(data.product_name)}</div>
         ${S.resultCtx && S.resultCtx.geo ? `<div class="cz-card-geo">${esc(S.resultCtx.geo)}</div>` : ""}
         <div class="cz-badges">${badgesHtml(data)}</div>
       </div>
-      <div class="cz-headline">
-        <div class="cz-metric main"><span class="cz-mlabel">${esc(main.label)}</span><span class="cz-mvalue">${num(main.v.mid)}</span><span class="cz-mrange">${compact(main.v.low)} – ${compact(main.v.high)} range</span></div>
-        ${side.map((s) => `<div class="cz-metric"><span class="cz-mlabel">${esc(s.label)}</span><span class="cz-mvalue">${esc(s.v)}</span>${s.r ? `<span class="cz-mrange">${esc(s.r)}</span>` : ""}</div>`).join("")}
-      </div>
-      ${audienceBoxHtml(m.aud, m)}
+      ${headline}
+      ${before}
       ${unmatchedHtml(data)}
-      <div class="cz-section-title">Where the impressions are</div>
-      ${shareBarHtml(rows, rows.reduce((s, r) => s + r.imps_mid, 0))}
-      ${rows.length ? `<table class="cz-table"><thead><tr><th>Area</th><th>Share</th><th>${m.weekly ? "Flight total" : "Per month"}</th></tr></thead><tbody>${tableRows}</tbody></table>` : ""}
-      ${rows.length > 8 ? `<p class="cz-note"><button type="button" class="cz-link" id="cz-toggle-areas">${showAll ? "Show the top 8 only" : `Show all ${rows.length} areas`}</button></p>` : ""}
+      ${middle}
       ${notes ? `<div class="cz-section-title">Notes</div><ul class="cz-list">${notes}</ul>` : ""}
-      ${provenanceHtml(data)}
+      ${plug && plug.aboutHtml ? plug.aboutHtml(data) : provenanceHtml(data)}
       <div class="cz-actions">${inserts}<button type="button" class="btn-secondary" id="cz-copy">Copy summary</button></div>`;
     $("cz-result").querySelectorAll(".cz-insert").forEach((btn) => btn.addEventListener("click", () => {
       const stillThere = typeof state !== "undefined" && (state.lineItems || []).some((li) => li.id === btn.dataset.lid);
@@ -1024,7 +1081,8 @@
   function requestBody() {
     const days = S.unit === "days";
     const total = parseFloat(S.total);
-    const audience = (S.ageMin !== "" || S.ageMax !== "" || S.gender || S.interests.length) ? {
+    const plug = activePlugin();
+    const audience = !plug && (S.ageMin !== "" || S.ageMax !== "" || S.gender || S.interests.length) ? {
       age_min: S.ageMin === "" ? null : parseInt(S.ageMin, 10),
       age_max: S.ageMax === "" ? null : parseInt(S.ageMax, 10),
       gender: S.gender || null,
@@ -1034,8 +1092,9 @@
       product_name: S.product, geo_text: S.geo.trim(), geo_type_hint: S.geoType || null,
       months: days ? Math.max(1, Math.round(S.flight / 30.4375)) : S.flight,
       flight_days: days ? S.flight : null,
-      national_monthly_total: total > 0 ? total : null,
+      national_monthly_total: plug ? null : (total > 0 ? total : null),
       audience,
+      ...(plug ? plug.requestPart() : {}),
     };
   }
 
@@ -1043,7 +1102,7 @@
     S.busy = on;
     const go = $("cz-go");
     go.disabled = on;
-    go.innerHTML = on ? `<span class="cz-spinner"></span>Pulling…` : "Pull avails →";
+    go.innerHTML = on ? `<span class="cz-spinner"></span>Pulling…` : goLabel();
     $("constanza-dock").setAttribute("aria-busy", String(on));
   }
 
@@ -1053,10 +1112,16 @@
     S.total = $("cz-total").value;
     if (!S.product) { renderError("Choose a product first."); setMood("oops", 3000); return; }
     if (!S.geo.trim()) { renderError("Type a geography first — a TV market, county, city, ZIP or “National”."); setMood("oops", 3000); $("cz-geo").focus(); return; }
+    const plug = activePlugin();
+    if (plug && plug.canPull) {
+      const ready = plug.canPull();
+      if (!ready.ok) { renderError(ready.reason); setMood("oops", 3000); return; }
+    }
     setBusy(true); setMood("thinking");
     S.showAllAreas = false;
     const mine = ++S.pullSeq;                     // Reset (or a newer pull) makes this answer stale: it must not repaint the dock
     const asked = { geo: S.geo.trim(), areas: ((S.resolve && S.resolve.areas) || []).map((a) => a.label || a.dma).filter(Boolean) };
+    if (plug && plug.context) asked.method = plug.context();           // what THIS result was asked with (the form may change afterwards)
     const body = requestBody();
     let r;
     try {
@@ -1095,6 +1160,7 @@
     setGeoType("", true);
     $("cz-total").value = ""; $("cz-age-min").value = ""; $("cz-age-max").value = ""; $("cz-interest-q").value = "";
     $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === "")));
+    Object.values(plugins).forEach((plug) => plug.reset && plug.reset());
     refreshAudienceUI(); hideInterestResults(); renderResultWelcome(); updateTotalField();
     $("constanza-bubble").classList.remove("cz-has-result");
   }
@@ -1114,6 +1180,7 @@
     setGeoType("", true); setFlight(1, "months");
     $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === "")));
     $("cz-sub").textContent = "Avails for any market, from the platform data we’ve loaded.";
+    Object.values(plugins).forEach((plug) => plug.reset && plug.reset());
     refreshAudienceUI(); hideInterestResults(); renderGeoStatus(); renderResultWelcome(); updateTotalField();
     $("constanza-bubble").classList.remove("cz-has-result");
     setMood("idle");
@@ -1280,9 +1347,9 @@
   // ------------------------------------------------------------------ public surface
   window.Constanza = {
     open, close, toggle, isOpen: () => S.open, hintOnce, setMood, onProposalReset, replaceGeoItem: replaceItem,
-    renderCard, renderCardError, mountGeoHelp, summarize, badgesHtml, iconHtml: () => MINI_ICON, compact, lineLabel,
+    registerMethod, renderCard, renderCardError, mountGeoHelp, summarize, badgesHtml, iconHtml: () => MINI_ICON, compact, lineLabel,
     periodLineHtml: (series) => (isLiveSports(series) && series.period_label ? `<p class="cz-period-line">📅 Live sports period: ${esc(series.period_label)}</p>` : ""),
-    _state: S,
+    _state: S, _plugin: (name) => plugins[name] || null,
     // Pure helpers, exposed so tests/test_constanza_frontend.py can run them without a browser.
     _pure: { compact, editGeoItem, tidyList, removeGeoItems, replaceItem, looksLikeList, summarize, normGeo, geoHelpHtml, badgesHtml, lineLabel, seriesMeta, notesOf,
       markStale, requestBody, audienceBoxHtml },

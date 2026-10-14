@@ -25,6 +25,10 @@ before anything is published, and tests for all of it.
 
 Nothing is edited in place. A refresh is a new version; a bad import is a rollback, not a repair.
 
+A product can also be forecast by a **live API** instead of loaded data (the forecast *method* `tiktok`: the Tiktok Ads product is
+asked TikTok's own audience-size estimator). Nothing in this document's data path applies to it; see
+[tiktok_forecasting.md](tiktok_forecasting.md).
+
 ## Tables
 
 | Table | What it holds |
