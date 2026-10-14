@@ -9,6 +9,7 @@ Orchestration: read every source in the manifest, validate, stage and publish. U
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
@@ -23,6 +24,15 @@ from app.services.forecast_import.validate import summarize, validate
 log = logging.getLogger(__name__)
 
 BOOTSTRAP_LOCK_KEY = 726_551_002
+
+
+def _apply_startup_migrations() -> list[str]:
+    """Keep production schema changes in Replit Publish, not app startup."""
+    if os.environ.get("REPLIT_DEPLOYMENT") == "1":
+        log.info("published deployment: skipping startup DDL; schema changes are handled by Publish")
+        return []
+    from app.services import migrations
+    return migrations.apply_pending()
 
 
 @dataclass
@@ -206,8 +216,7 @@ def bootstrap() -> dict:
     deliberate `import` run, reviewed like any other change."""
     result: dict = {"migrations": [], "geo": None, "products": 0, "audience": None, "series": []}
     try:
-        from app.services import migrations
-        result["migrations"] = migrations.apply_pending()
+        result["migrations"] = _apply_startup_migrations()
         # One instance loads at a time: the lock is held on this connection for the whole bootstrap.
         with get_connection() as lock_conn:
             got = lock_conn.execute("SELECT pg_try_advisory_lock(%s) AS ok", (BOOTSTRAP_LOCK_KEY,)).fetchone()["ok"]
