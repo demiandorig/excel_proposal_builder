@@ -41,6 +41,12 @@ _GENERIC = frozenset({"owner", "shopper", "seeker", "intender", "user", "buyer",
 # home services; "mortgage shoppers" is mortgage).
 _LANGUAGE = frozenset({"spanish", "english", "bilingual", "spanglish", "bilingue"})
 _MODIFIERS = _GENERIC | _LANGUAGE
+# Words that only describe how the language audience is worded ("spanish speaking households", "spanish language radio"): beside a
+# language word they are not a topic of their own, so the language segment is what the phrase means.
+_LANGUAGE_FILLER = frozenset({"speak", "speaking", "speaker", "language", "household", "family", "audience", "dominant", "radio",
+                              "tv", "television", "listener", "viewer"})
+# A lone demographic word is the audience a product is sold to, not "part of the name" of a music keyword ("hispanic music").
+_DEMOGRAPHIC = frozenset({"hispanic", "latino", "latina", "latinx"})
 # "Is in the market for" role words, and the audiences built that way (their label, the sales team's names or the one-line description
 # says shoppers / buyers / in-market / planning to buy). "<topic> shoppers" means the topic's segment only when it is one of these:
 # "Sports Fans" are not "sports shoppers", so that is offered and never applied.
@@ -154,6 +160,12 @@ def _topic_words(name: str) -> int:
     return sum(1 for w in name.split() if w not in _FUNCTION_WORDS and _stem(w) not in _GENERIC)
 
 
+def _stems_in(needle: tuple, haystack: tuple) -> bool:
+    """The words of needle, singular or plural, stand in a row in haystack ("domestic cars" in "domestic car shoppers")."""
+    n = len(needle)
+    return n > 0 and any(haystack[i:i + n] == needle for i in range(len(haystack) - n + 1))
+
+
 def _phrase_in(needle: str, haystack: str) -> bool:
     """needle appears in haystack as whole words (both already folded)."""
     return bool(needle) and f" {needle} " in f" {haystack} "
@@ -171,12 +183,13 @@ class Taxonomy:
         self.groups = sorted(groups, key=lambda g: (g.sort, g.label))
         self.segments: dict[str, Segment] = {s.id: s for s in segments}
         self._order = {g.key: i for i, g in enumerate(self.groups)}
-        self._index: list[tuple[Segment, list[str], list[set[str]], list[Counter]]] = []
+        self._index: list[tuple[Segment, list[str], list[set[str]], list[Counter], list[tuple]]] = []
         self._intent: dict[str, bool] = {}
         self._own: dict[str, frozenset] = {}                 # the folded label and sales-team names of each segment
         for s in segments:
             names = [_fold(n) for n in (s.label, *s.company_names, *s.keywords) if n]
-            self._index.append((s, names, [set(tokens(n)) for n in names], [Counter(n) for n in names]))
+            self._index.append((s, names, [set(tokens(n)) for n in names], [Counter(n) for n in names],
+                                [tuple(_stem(w) for w in n.split()) for n in names]))
             own = [_fold(n) for n in (s.label, *s.company_names) if n]
             self._own[s.id] = frozenset(own)
             self._intent[s.id] = bool(_INTENT_RE.search(" ".join([*own, _fold(s.description)])))
@@ -201,18 +214,24 @@ class Taxonomy:
             word_ends.add(pos)
         word_starts = {0} | word_ends
 
-        def collapsed_match(cname: str) -> bool:
+        def collapsed_match(cname: str, slack: int = 0) -> bool:
             """cname is in the text with its spaces closed up ("videogames" for "video games") and starts on a typed word: "car
-            shopper" is not found inside "nas-CAR SHOPPER-s". It may end a little inside a word ("contractor" in "contractors")."""
+            shopper" is not found inside "nas-CAR SHOPPER-s". A single word may end a little inside a word ("contractor" in
+            "contractors"): `slack` characters."""
             i = collapsed_query.find(cname)
             while i >= 0:
-                if i in word_starts and (i + len(cname) in word_ends or min((e - i - len(cname) for e in word_ends if e > i + len(cname)), default=99) <= 2):
+                end = i + len(cname)
+                if i in word_starts and (end in word_ends or min((e - end for e in word_ends if e > end), default=99) <= slack):
                     return True
                 i = collapsed_query.find(cname, i + 1)
             return False
 
+        qstems = tuple(_stem(w) for w in query.split())
+        conjunction = bool(re.search(r"[,/+&]|\b(?:and|or|plus)\b", text, re.IGNORECASE))     # more than one thing may be asked for
         intent_roles = qtokens & _INTENT_ROLES
-        topical = bool(qtokens - _MODIFIERS)                # the text names something besides a role or a language word
+        topic_tokens = qtokens - _MODIFIERS
+        topical = bool(topic_tokens)                        # the text names something besides a role or a language word
+        language_topical = bool(topic_tokens - _LANGUAGE_FILLER)   # ... and not just how the language audience is worded ("speaking")
         hits: dict[str, Hit] = {}
         covers: dict[str, int] = {}                         # how many of the typed topic words each hit accounts for
         bare_best: dict[str, bool] = {}                     # whether a segment's best hit came from a bare role / language word
@@ -229,33 +248,36 @@ class Taxonomy:
                 bare_best[seg.id] = bare
 
         qchars = Counter(query)
-        for seg, names, tokensets, charsets in self._index:
+        for seg, names, tokensets, charsets, stemsets in self._index:
             if seg.id == _fold(text).replace(" ", "_"):
                 offer(seg, 100.0, "name")
-            for name, toks, chars in zip(names, tokensets, charsets):
+            for name, toks, chars, name_stems in zip(names, tokensets, charsets, stemsets):
                 if not name:
                     continue
                 # A name made only of role or language words ("shoppers", "spanish") says WHO or HOW and not WHAT. Beside a topic it
                 # is a hint: it never competes with a segment that names the topic (settled after the loop). Role words alone are the
                 # weakest of all: they apply only as the last resort (the catch-all audience).
-                bare = bool(toks) and toks <= _MODIFIERS and query != name and topical
-                role_only = bare and toks <= _GENERIC
+                role_only = bool(toks) and toks <= _GENERIC and query != name and bool(qtokens - _GENERIC)
+                bare_language = bool(toks) and toks <= _LANGUAGE and query != name and language_topical
+                bare = role_only or bare_language
                 # A role word the matched keyword does not contain ("mortgage SHOPPERS") carries over only to an in-market kind of
-                # audience. A phrase that holds the segment's own full name is not that case: the planner named the segment.
-                wrong_kind = (bool(intent_roles - toks) and not self._intent.get(seg.id, False) and not bare
+                # audience. A phrase that holds the segment's own full name is not that case: the planner named the segment. And a
+                # phrase made only of role and language words has no topic to hold back ("spanish buyers").
+                wrong_kind = (language_topical and bool(intent_roles - toks) and not self._intent.get(seg.id, False) and not bare
                               and not any(_phrase_in(own, query) for own in self._own.get(seg.id, ())))
                 topic_words = _topic_words(name)
                 if query == name:
                     offer(seg, 100.0, "name" if name == _fold(seg.label) else "keyword", cover=whole)
-                elif _phrase_in(name, query):                      # the planner's text CONTAINS this keyword phrase
+                elif _phrase_in(name, query) or (len(name_stems) > 1 and _stems_in(name_stems, qstems)):   # the text CONTAINS this phrase (or its plural)
                     # more of the topic words covered wins ("luxury car" over "car shopper"); length only breaks the rest
                     score = 80.0 + 0.6 * min(topic_words, 3) + min(len(name), 30) / 100
-                    offer(seg, min(score, _ROLE_ONLY_SCORE) if role_only else score, "keyword", wrong_kind, topic_words, bare)
+                    offer(seg, _APPLY_THRESHOLD - 0.1 if bare_language else (min(score, _ROLE_ONLY_SCORE) if role_only else score),
+                          "words" if bare_language else "keyword", wrong_kind, topic_words, bare)
                     if wrong_kind:
                         held_cover = max(held_cover, topic_words)
-                elif _phrase_in(query, name) and not (qtokens and qtokens <= _GENERIC):   # the planner typed part of this name
+                elif _phrase_in(query, name) and not (qtokens and qtokens <= (_GENERIC | _DEMOGRAPHIC)):   # the planner typed part of this name
                     offer(seg, 62.0 + min(len(query), 20) / 10, "partial", cover=whole)
-                elif len(name.replace(" ", "")) >= 6 and collapsed_match(name.replace(" ", "")):
+                elif len(name.replace(" ", "")) >= 6 and collapsed_match(name.replace(" ", ""), 2 if " " not in name else 0):
                     score = 70.0 + min(len(name.replace(" ", "")), 20) / 4      # "videogames" for "video games"; the longer phrase wins
                     offer(seg, min(score, _ROLE_ONLY_SCORE) if role_only else score, "keyword", wrong_kind, topic_words, bare)
                     if wrong_kind:
@@ -288,10 +310,12 @@ class Taxonomy:
             # A topic's own segment was held back for being the wrong kind ("college football" for "college football shoppers"):
             # a segment that accounts for LESS of the typed topic ("college" -> higher education) must not take its place. One that
             # accounts for as much ("loan" against "student" in "student loan shoppers") is the in-market reading of the same words.
+            # With two things asked for ("golf and mortgage shoppers") one half applying would drop the other silently: equal counts too.
             for sid, h in list(hits.items()):
-                if _APPLY_THRESHOLD <= h.score < 100.0 and not bare_best.get(sid) and covers.get(sid, 0) < held_cover:   # (exact names are never blocked)
+                if (_APPLY_THRESHOLD <= h.score < 100.0 and not bare_best.get(sid)
+                        and (covers.get(sid, 0) < held_cover or (conjunction and covers.get(sid, 0) <= held_cover))):   # (exact names are never blocked)
                     hits[sid] = Hit(h.segment, _APPLY_THRESHOLD - 0.1, "words")
-        bare_ids = [sid for sid, b in bare_best.items() if b]
+        bare_ids = [sid for sid, b in bare_best.items() if b]                            # (language-only ones were capped when offered)
         if bare_ids and (held_cover >= 0 or any(h.score >= _APPLY_THRESHOLD and not bare_best.get(sid) for sid, h in hits.items())):
             # Something else in the phrase names the topic: a role or language word never competes with it ("mortgage shoppers",
             # "home services in Spanish"). On their own they apply ("spanish speaking", "online shoppers").
@@ -308,7 +332,11 @@ class Taxonomy:
             return None
         if len(hits) > 1 and hits[1].segment.id != hits[0].segment.id and hits[0].score - hits[1].score < 0.25 and hits[0].how != "name":
             return None            # two audiences fit equally well ("insurance", "contractors"): the planner chooses, we do not
-        return hits[0]
+        if (len(hits) > 1 and hits[1].segment.id != hits[0].segment.id and hits[1].score >= 80.0 and hits[0].score < 100.0
+                and re.search(r"[,/+&]|\b(?:and|or|plus)\b", text, re.IGNORECASE)
+                and not any(_phrase_in(own, _fold(text)) for own in self._own.get(hits[0].segment.id, ()))):
+            return None            # "golf and tennis fans": two audiences were named, one must not silently stand for both
+        return hits[0]                                  # (a segment's own name may hold an "&" or a "/": "Beauty & Cosmetics ...")
 
     def categories(self) -> list[dict]:
         """The shape the audience layer has always used (one dict per segment with a sourced rate)."""

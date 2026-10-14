@@ -627,3 +627,76 @@ def test_no_alternative_is_offered_when_the_bare_place_names_no_market():
     res = resolve_geo("Mesa and Gilbert, AZ")
     assert not [s for s in res.suggestions if s["label"].startswith("Each place as typed")]
 
+
+# --------------------------------------------------------------------------------------------- fifth review
+
+@pytest.mark.parametrize("text,zip_label", [
+    ("dallas tx 75201", "ZIP 75201"), ("chicago il 60601", "ZIP 60601"), ("boise id 83702", "ZIP 83702"), ("washington dc 20001", "ZIP 20001"),
+    ("Dallas tx 75201", "ZIP 75201"), ("plano tx 75024", "ZIP 75024"),
+])
+def test_a_lowercase_state_code_after_a_space_is_a_state_before_a_zip(text, zip_label):
+    """Narrowing the lowercase rule to 'after a comma' (to keep 'or' a word) made every pasted 'city st zip' match nothing."""
+    res = resolve_geo(text)
+    assert labels(res) == [zip_label] and not res.unmatched_tokens, (text, labels(res))
+
+
+def test_a_lowercase_pasted_address_list_is_read_line_by_line():
+    assert labels(resolve_geo("dallas tx 75201\nphoenix az 85004")) == ["ZIP 75201", "ZIP 85004"]
+
+
+@pytest.mark.parametrize("text", ["Dallas, TX 75201, USA, Houston, TX 77002, USA", "Dallas, TX 75201, US, Houston, TX 77002, US",
+                                  "Dallas TX 75201, Houston, TX 77002, USA"])
+def test_a_country_after_a_zip_is_never_split_off_as_the_whole_country(text):
+    """The comma-after-ZIP split cut 'USA' loose: 'Dallas, TX 75201, USA, Houston, TX 77002, USA' added all ~200 TV markets."""
+    res = resolve_geo(text)
+    assert len(res.areas) <= 4 and res.method != "national", (text, len(res.areas))
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("90210, Los Angeles County, CA, 90001", {"ZIP 90210", "Los Angeles County, CA", "ZIP 90001"}),
+    ("98101, King County, WA, 98102", {"ZIP 98101", "King County, WA", "ZIP 98102"}),
+    ("75201, Dallas, TX, 75202, Houston, TX", {"Dallas-Ft. Worth", "Houston"}),
+])
+def test_a_county_or_market_typed_between_zips_is_never_swallowed_by_the_next_zip(text, expected):
+    """A ZIP followed by a comma was an address boundary, so 'Los Angeles County, CA, 90001' read as an address and kept only the ZIP
+    (the estimate fell ~130x)."""
+    res = resolve_geo(text)
+    assert expected <= set(labels(res)), (text, labels(res))
+
+
+def test_a_county_is_not_the_place_of_an_address():
+    assert gt.address_place("Harris County, TX 77002") is None and gt.address_place("Orleans Parish, LA 70112") is None
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Plano, TX, Frisco, TX, Allen, TX", ["Plano, TX", "Frisco, TX", "Allen, TX"]), ("Naperville, IL, Aurora, IL", ["Naperville, IL", "Aurora, IL"]),
+    ("Plano, TX, Frisco, TX", ["Plano, TX", "Frisco, TX"]), ("Lostine, OR, Joseph, OR", ["Lostine, OR", "Joseph, OR"]),
+])
+def test_a_comma_list_of_places_each_with_its_state_is_a_list(text, expected):
+    """Only the first place was read ('Plano, TX, Frisco, TX, Allen, TX' was Plano), with nothing reported."""
+    res = resolve_geo(text)
+    assert labels(res) == expected and not res.unmatched_tokens, (text, labels(res))
+
+
+@pytest.mark.parametrize("text", ["CA, NV, AZ, TX", "Los Angeles, San Diego", "Washington, Oregon"])
+def test_state_lists_and_market_lists_are_still_not_paired_up(text):
+    res = resolve_geo(text)
+    assert res.method in ("state_list", "exact_dma") and not res.unmatched_tokens
+
+
+def test_washington_dc_and_new_york_ny_are_a_list_of_two_places():
+    assert labels(resolve_geo("Washington, DC, New York, NY")) == ["Washington, DC (Hagerstown)", "New York"]
+
+
+@pytest.mark.parametrize("text", ["Las Vegas and Henderson, NV", "Bend and Redmond, OR", "Lostine and Dallas, OR", "Boise and Meridian, ID"])
+def test_the_places_as_typed_are_not_offered_when_they_read_the_same(text):
+    """The alternative was often a no-op ('Las Vegas; Henderson, NV' re-resolved to the same market) with a false 'own TV market' why."""
+    res = resolve_geo(text)
+    assert not [sg for sg in res.suggestions if sg["label"].startswith("Each place as typed")], (text, res.suggestions)
+
+
+def test_the_places_as_typed_say_what_they_would_give_instead():
+    res = resolve_geo("Dallas and Lostine, OR")
+    sg = next(sg for sg in res.suggestions if sg["label"].startswith("Each place as typed"))
+    assert sg["why"] == "e.g. Dallas-Ft. Worth instead of Dallas, OR"
+

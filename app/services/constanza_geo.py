@@ -547,7 +547,13 @@ def _split_items(text: str, hint: str | None) -> list[str]:
         if len(pieces) > 1 and (hint is not None or any(has_strong_signal(p) for p in pieces)):
             items.extend(pieces if hint in ("zip", "congressional_district", "country") else _pair_states(pieces, places_only=hint in ("city", "county")))
         else:
-            items.append(chunk)
+            paired = _pair_states(pieces, places_only=True) if len(pieces) >= 4 and len(pieces) % 2 == 0 else []
+            # "Plano, TX, Frisco, TX, Allen, TX": every place with its state is a list of places (only the first was read, silently).
+            # Not "CA, NV, AZ, TX" (state codes pair with each other): the first piece of a pair must not be a two-letter state code.
+            if paired and len(paired) * 2 == len(pieces) and not any(len(q.split(",")[0].strip()) == 2 and _match_state(q.split(",")[0].strip()) for q in paired):
+                items.extend(paired)
+            else:
+                items.append(chunk)
     return items
 
 
@@ -871,14 +877,19 @@ def _resolve_as_list(item: str, hint: str | None, res: GeoResolution, context: d
     if not merged.areas:
         return None
     if qualified_pieces:
-        # "Dallas and Lostine, OR" read as Dallas, OR: the places as typed (Dallas as its whole TV market) are one click away.
-        bare = [typed for typed, _ in qualified_pieces if _resolve_single(typed, hint).areas]
-        if bare:
-            as_typed = "; ".join(typed_pieces)
+        # "Dallas and Lostine, OR" read as Dallas, OR: the places as typed (Dallas as its whole TV market) are one click away - when
+        # they really read differently.
+        differing = []
+        for typed, now in qualified_pieces:
+            bare_areas = _resolve_single(typed, hint).areas
+            now_areas = _resolve_single(now, hint).areas
+            if bare_areas and {(a.dma, a.geo_id, a.label) for a in bare_areas} != {(a.dma, a.geo_id, a.label) for a in now_areas}:
+                differing.append((bare_areas[0].label or typed, now_areas[0].label or now if now_areas else now))
+        if differing:
             merged.suggestions.append({
-                "kind": "did_you_mean", "label": "Each place as typed, without sharing " + state, "geo_type": "", "resolve_hint": as_typed,
+                "kind": "did_you_mean", "label": "Each place as typed, without sharing " + state, "geo_type": "", "resolve_hint": "; ".join(typed_pieces),
                 "state": None, "population": 0, "replaces": item,
-                "why": f"e.g. {bare[0]} as its own TV market instead of {bare[0]}, {state}"})
+                "why": f"e.g. {differing[0][0]} instead of {differing[0][1]}"})
     if res.areas and (len(merged.unmatched_tokens) > len(res.unmatched_tokens)
                       or (len(merged.unmatched_tokens) == len(res.unmatched_tokens) and len(merged.areas) <= len(res.areas))):
         return None

@@ -186,7 +186,9 @@ def _clean_chunk(chunk: str) -> list[dict]:
 
 _ZIP_ONLY_RE = re.compile(r"^\d{5}(?:-\d{4})?$")
 _ANY_ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
-_ZIP_COMMA_RE = re.compile(r"(\b\d{5}(?:-\d{4})?)[ \t]*,[ \t]*(?=[A-Za-z])")
+# a comma after a ZIP that is followed by the NEXT address ("... 60601, Chicago, IL 60602"), not by a country or a county
+_ZIP_COMMA_RE = re.compile(r"(\b\d{5}(?:-\d{4})?)[ \t]*,[ \t]*(?=[A-Za-z][A-Za-z .'-]*,[ \t]*[A-Za-z]{2}[ \t]+\d{5})")
+_CONTAINER_WORD_RE = re.compile(r"\b(?:county|parish|borough|census area|municipality)\b", re.IGNORECASE)
 
 
 def _split_addresses(chunk: str) -> list[str]:
@@ -211,9 +213,15 @@ def address_place(item: str) -> Optional[tuple[str, str]]:
     rest = m.group("rest").strip(" ,")
     if re.search(r"\d", rest) or len(split_conjunctions(rest)) > 1:
         return None
-    rest_cased = re.sub(r",(\s*)([A-Za-z]{2})$", lambda t: "," + t.group(1) + t.group(2).upper(), rest)   # "bend, or" is Bend, OR
-    split = split_trailing_state(rest_cased)                     # ("Dallas or 75201": the 'or' is a word, not Oregon)
+    # A lowercase state code is read as one after a comma ("bend, or") and after a space ("dallas tx 75201") - except the words "or"
+    # and "in" there ("Dallas or 75201", "Austin in 78701" are not Oregon and Indiana).
+    rest_cased = re.sub(r"(,\s*|\s+)([A-Za-z]{2})$",
+                        lambda t: t.group(1) + (t.group(2).upper() if "," in t.group(1) or t.group(2).lower() not in ("or", "in") else t.group(2)),
+                        rest)
+    split = split_trailing_state(rest_cased)
     if split is None or len([p for p in rest.split(",") if p.strip()]) > 2:       # "Place, ST" or "Place ST", nothing more
+        return None
+    if _CONTAINER_WORD_RE.search(split[0]):                      # a county is not a city: "Harris County, TX 77002" keeps the county
         return None
     zip_code = m.group("zip")
     from app.services import constanza_geo_crosswalk

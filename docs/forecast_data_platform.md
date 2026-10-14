@@ -214,17 +214,21 @@ real place the resolver accepts.
   separates the places; a lowercase "or" after a comma that is followed by "and", "&", "+", a ZIP or the end of the line is
   still the state ("portland, or and seattle", a pasted list with "portland, or" on one line). The state typed once at the end
   belongs to each place that exists in it ("Lincoln and Springfield, IL" is Lincoln, IL, not the Nebraska market), and when
-  that turns a TV market into a town ("Dallas and Lostine, OR") the places as typed are offered as one click; where the
+  that turns a TV market into a town ("Dallas and Lostine, OR") the places as typed are offered as one click (only when they
+  really read differently, and worded from what they give); where the
   qualified form is not a place - it would become the whole state ("Chicago, IN") or leaves the state unmatched
   ("Philadelphia, DE") - the piece stays a market of its own, and a piece inside a listed market is counted once with a note.
 * **"City, ST ZIP" is the ZIP.** An address ("Plano, TX 75024", "Portland, OR 97201", "Phoenix AZ 85001") with exactly one
   place and its state before the ZIP is read as its ZIP, the exact place, and the note names the ZIP's market (so a
-  contradiction - "Dallas, TX 77002" is a Houston ZIP - shows); a lowercase state code counts only after a comma ("bend, or
-  97701" is Bend, OR; "Dallas or 75201" is Dallas or a ZIP). When the bundled data has no such ZIP (a PO-box ZIP has no
-  residents) the city and state before it are used instead, if that city exists in that state. A comma right after a ZIP ends
-  an address where the text holds several ("Chicago, IL 60601, Chicago, IL 60602" is two addresses). Places before a state and
-  ZIP ("Dallas and Houston, TX 77002"), two ZIPs, a ZIP in the middle of a longer text, and any text typed with a geography
-  type are left to the other readings: nothing the planner typed is dropped for a ZIP.
+  contradiction - "Dallas, TX 77002" is a Houston ZIP - shows); a lowercase state code counts after a comma ("bend, or
+  97701") and after a space ("dallas tx 75201"), except the words "or" and "in" there ("Dallas or 75201" is Dallas or a ZIP).
+  When the bundled data has no such ZIP (a PO-box ZIP has no residents) the city and state before it are used instead, if that
+  city exists in that state. A comma right after a ZIP ends an address only where the next thing is another "Name, ST ZIP"
+  ("Chicago, IL 60601, Chicago, IL 60602" is two addresses; a country or a county after a ZIP is not an address). A county
+  is not an address's place ("Harris County, TX 77002"). Places before a state and ZIP ("Dallas and Houston, TX 77002"), two
+  ZIPs, a ZIP in the middle of a longer text, and any text typed with a geography type are left to the other readings:
+  nothing the planner typed is dropped for a ZIP. A comma list of places each with its state ("Plano, TX, Frisco, TX,
+  Allen, TX") is a list of places (only the first used to be read); a list of state codes ("CA, NV, AZ, TX") is not paired up.
 * **A state name before a state code** ("Delaware, OH", "Washington, PA", "Kansas, OK") is the town when one by that name
   exists in that state, at any size, with the two states offered as an alternative ("The states Kansas and Oklahoma"): the
   other reading is the one that would be silently huge when wrong. Two state names ("Washington, Oregon") or a state with no
@@ -293,16 +297,22 @@ the typed text inside a name ("dental"), shared words, and near-spellings ("fitn
   keyword phrase, or the typed text inside a name. One shared common word ("pet OWNERS" against "small business OWNERS") is
   shown as a suggestion, never applied; neither is a bare role word ("owners", "shoppers") or two segments that fit equally well
   ("insurance": auto or health?). Role and language words never compete with a topic: "mortgage shoppers" means "mortgage",
-  "home services in Spanish" means home services; the keywords "shoppers" (Retail Shoppers) and "spanish" (Bilingual
-  Speakers) apply only when nothing else in the phrase names an audience ("online shoppers", "spanish speaking"; the role word
-  alone is the weaker of the two). A shopper / buyer / seeker word carries over only to an in-market kind of audience (its
+  "home services in Spanish" means home services. The keyword "shoppers" (Retail Shoppers) applies only when nothing else in
+  the phrase names an audience ("online shoppers"), and "spanish" (Bilingual Speakers) only when nothing else is a topic: its
+  filler ("spanish speaking", "spanish language radio", "bilingual households") is not one, but "wine fans in Spanish" or
+  "spanish speaking moms" name a topic no segment covers, so nothing is applied; the language audience wins over the bare
+  role word ("spanish shoppers"). Two audiences named with and / & / a comma ("golf and mortgage shoppers", "golf and tennis
+  fans") are left to the planner: one half must not silently stand for both. A lone demographic word ("hispanic", "latino")
+  is the audience the product is sold to, never "part of the name" of a music keyword. A shopper / buyer / seeker word carries over only to an in-market kind of audience (its
   label, the sales team's names or its description say shoppers, buyers, in-market, planning to buy): "Sports Fans" are not
   "sports shoppers", so that phrase offers Sports Fans and applies nothing. A topic held back this way is not replaced by a
   segment that accounts for LESS of the typed words ("college" -> higher education for "college football shoppers"); one that
   accounts for as much is the in-market reading ("student loan shoppers" is Financial In-Market). Only a name typed in full
   holds a topic back, never a one-word overlap. Between keyword matches the one that covers more of the topic words wins
-  ("luxury car" over "car shopper"); length only breaks the rest. A keyword closed up of its spaces ("videogames") is found
-  when it starts on a typed word, not across two ("car shopper" is not inside "nascar shoppers"). A label may not promise more than its number measures: the
+  ("luxury car" over "car shopper"); length only breaks the rest. The words of a multi-word keyword match singular or plural
+  ("domestic cars" is found in "domestic car shoppers"); a single word may end a little inside a typed word ("contractor" in
+  "contractors") but "plays" is not "play". A keyword closed up of its spaces ("videogames") is found when it starts on a typed
+  word, not across two ("car shopper" is not inside "nascar shoppers"). A label may not promise more than its number measures: the
   two segments the independent review caught (a 9% "politically engaged" and a 33% "religious") now say what they are.
 * **Confidence feeds the range.** Each applied interest widens the low/high band by its grade (high 15%, moderate 25%, low
   40%), combined with the other factors by root-sum-of-squares. Interests are multiplied as if independent, and the result

@@ -163,7 +163,7 @@ def test_a_plural_in_market_phrase_is_not_blocked_by_a_one_word_overlap_with_a_w
 @pytest.mark.parametrize("phrase", [
     "spanish speaking", "spanish-speaking", "spanish language", "bilingual households", "speaks spanish", "spanglish speakers",
     "bilingual families", "spanish dominant", "spanish speaking audience", "spanish language radio", "spanish speaking shoppers",
-    "spanish speaking parents",
+    "spanish shoppers", "spanish buyers", "bilingual shoppers", "shoppers in Spanish",
 ])
 def test_a_language_word_with_only_filler_beside_it_is_the_language_audience(taxonomy, phrase):
     """Language words are modifiers only when something else names a topic: 'speaking', 'language' or 'households' do not."""
@@ -202,6 +202,55 @@ def test_language_alone_is_still_the_bilingual_audience(taxonomy, phrase):
     assert taxonomy.best_match(phrase).segment.id == "tech_bilingual", phrase
 
 
+@pytest.mark.parametrize("phrase", [
+    "wine fans in Spanish", "liquor shoppers in Spanish", "boats in Spanish", "spanish speaking moms", "spanish speaking seniors",
+    "spanish speaking diabetics", "spanish speaking homeowners", "spanish speaking parents",
+])
+def test_a_language_word_beside_an_unexplained_topic_is_not_the_language_audience(taxonomy, phrase):
+    """'wine fans in Spanish' matched Bilingual Speakers and dropped the wine: no segment names the topic, so nothing is applied for
+    it (the role-only catch-all may still apply: 'liquor shoppers in Spanish' is Retail Shoppers)."""
+    hit = taxonomy.best_match(phrase)
+    assert hit is None or hit.segment.id == "retail_general", (phrase, hit and hit.segment.id)
+
+
+@pytest.mark.parametrize("phrase,segment", [
+    ("domestic car shoppers", "auto_new_domestic"), ("japanese car shoppers", "auto_new_import"), ("domestic cars shoppers", "auto_new_domestic"),
+    ("domestic car buyers", "auto_new_domestic"), ("luxury cars", "auto_luxury"),
+])
+def test_a_singular_phrase_finds_the_plural_keyword_of_a_brand_group(taxonomy, phrase, segment):
+    """The plural keyword 'domestic cars' was only found by accident (closed up spaces across 'car' + the s of 'shoppers'); words
+    are now matched by their stems, so 'domestic car shoppers' is New Domestic Brands, not generic Auto Intenders."""
+    assert taxonomy.best_match(phrase).segment.id == segment, phrase
+
+
+def test_a_word_is_not_matched_to_a_different_sense_of_its_stem(taxonomy):
+    """Stems only join the words of a multi-word keyword: 'plays' (theatre) is not 'play' in 'play station'."""
+    assert taxonomy.best_match("play station").segment.id == "video_gamer"
+
+
+@pytest.mark.parametrize("phrase", ["golf and mortgage shoppers", "gym and tire shoppers", "tennis shoppers and mortgage shoppers",
+                                    "nascar and tire shoppers", "golf and tennis fans", "mortgage and golf fans"])
+def test_two_audiences_named_with_and_are_left_for_the_planner_to_choose(taxonomy, phrase):
+    """One half applying (a mortgage rate for 'golf and mortgage shoppers') would drop the other half silently."""
+    assert taxonomy.best_match(phrase) is None, phrase
+
+
+def test_a_name_that_holds_an_ampersand_or_a_slash_is_still_one_audience(taxonomy):
+    assert taxonomy.best_match("Auto Intenders - New Domestic Cars (Ford/GM/Chrysler) shoppers").segment.id == "auto_new_domestic"
+    assert taxonomy.best_match("Beauty & Cosmetics Aficionados").segment.id == "retail_beauty"
+    assert taxonomy.best_match("health and wellness").segment.id == "health_wellness"
+
+
+@pytest.mark.parametrize("phrase", ["hispanic", "latino", "hispanics", "latina", "latinx"])
+def test_a_lone_demographic_word_is_not_part_of_the_name_of_a_music_audience(taxonomy, phrase):
+    """'hispanic' sits inside the keyword 'hispanic music': Latin Music Concert Goers (4%) was applied to the audience the product is
+    sold to, a 96% cut. It is offered, never applied."""
+    assert taxonomy.best_match(phrase) is None
+    assert all(h.score < 55 for h in taxonomy.search(phrase, limit=4))
+    assert "ent_latin_concerts" in [h.segment.id for h in taxonomy.search("hispanic", limit=4)]
+    assert taxonomy.best_match("latin music").segment.id == "ent_latin_concerts"
+
+
 SUFFIXES = (" shoppers", " owners", " buyers", " in Spanish")
 
 
@@ -209,7 +258,7 @@ def test_adding_a_role_or_language_word_to_any_name_or_keyword_never_picks_anoth
     """It may leave the choice to the planner (the role word does not fit the segment); it must never choose a different segment -
     except where another segment has the very same phrase ('masters': golf or higher education), which a shopper / seeker word
     settles in favour of the in-market one."""
-    from app.services.audience_taxonomy import _fold
+    from app.services.audience_taxonomy import _fold, _MODIFIERS, tokens
     owners: dict = {}
     for seg in taxonomy.segments.values():
         for phrase in (seg.label, *seg.keywords, *seg.company_names):
@@ -217,7 +266,7 @@ def test_adding_a_role_or_language_word_to_any_name_or_keyword_never_picks_anoth
     wrong = []
     for seg in taxonomy.segments.values():
         for phrase in (seg.label, *seg.keywords, *seg.company_names):
-            if len(owners[_fold(phrase)]) > 1:
+            if len(owners[_fold(phrase)]) > 1 or set(tokens(phrase)) <= _MODIFIERS:      # ("shoppers in Spanish" is the language audience)
                 continue
             for suffix in ("",) + SUFFIXES:
                 hit = taxonomy.best_match(phrase + suffix)
