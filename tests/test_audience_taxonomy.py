@@ -102,30 +102,92 @@ def test_two_audiences_that_fit_equally_well_are_left_for_the_planner_to_choose(
 @pytest.mark.parametrize("phrase,segment", [
     ("mortgage shoppers", "fin_mortgage"), ("luxury car shoppers", "auto_luxury"), ("luxury car shopper", "auto_luxury"),
     ("furniture shoppers", "home_furniture_decor"), ("beauty shoppers", "retail_beauty"), ("tire shopper", "auto_tire_shoppers"),
-    ("car shoppers", "auto_in_market"), ("video game shoppers", "video_gamer"), ("solar shoppers", "home_solar"),
+    ("car shoppers", "auto_in_market"), ("solar shoppers", "home_solar"), ("wedding shoppers", "fam_wedding_planning"),
+    ("organic shoppers", "health_natural_organic"), ("dental shoppers", "health_dental"),
 ])
 def test_a_bare_role_word_beside_a_topic_does_not_change_the_audience(taxonomy, phrase, segment):
     """'shoppers' is a keyword of Retail Shoppers (General) and tied with the topic's own keyword, so these matched nothing."""
     assert taxonomy.best_match(phrase).segment.id == segment
 
 
-@pytest.mark.parametrize("phrase", ["grocery shoppers", "online shoppers", "holiday shoppers", "coupon shoppers"])
-def test_a_role_word_beside_a_topic_nobody_names_is_offered_never_applied(taxonomy, phrase):
-    assert taxonomy.best_match(phrase) is None
-    assert "retail_general" in [h.segment.id for h in taxonomy.search(phrase, limit=8)]
-    assert taxonomy.best_match("shoppers").segment.id == "retail_general"            # ... but the bare word is still its keyword
+@pytest.mark.parametrize("phrase", ["grocery shoppers", "online shoppers", "holiday shoppers", "coupon shoppers", "fashion shoppers", "women shoppers"])
+def test_a_role_word_beside_a_topic_nobody_names_means_the_catch_all_audience(taxonomy, phrase):
+    """No segment is about 'online' or 'grocery': Retail Shoppers (General) is the best there is, as it was before the role-word rule
+    capped it (the cap had made these match nothing, and dropped the catch-all from the suggestions too)."""
+    hit = taxonomy.best_match(phrase)
+    assert hit is not None and hit.segment.id == "retail_general", phrase
+    assert taxonomy.best_match("shoppers").segment.id == "retail_general"
 
 
-def test_adding_a_role_word_to_any_name_or_keyword_never_picks_another_audience(taxonomy):
-    """It may leave the choice to the planner (two segments share a keyword); it must not choose a different segment."""
+@pytest.mark.parametrize("phrase,topic", [
+    ("sports shoppers", "sports_fan"), ("sports apparel shoppers", "sports_fan"), ("golf shoppers", "sports_golf"),
+    ("video game shoppers", "video_gamer"), ("hotel shoppers", "travel_frequent"), ("casino shoppers", "ent_casino"),
+    ("fitness shoppers", "health_fitness"), ("college football shoppers", "sports_football_college"),
+])
+def test_a_role_word_carries_over_only_to_an_in_market_kind_of_audience(taxonomy, phrase, topic):
+    """Sports Fans are not 'sports shoppers': a fan or interest audience is offered for the phrase, never applied to it (a real
+    Gallup sports-fan rate was being applied to a shopping phrase)."""
+    assert taxonomy.best_match(phrase) is None, phrase
+    assert topic in [h.segment.id for h in taxonomy.search(phrase, limit=6)], phrase
+
+
+@pytest.mark.parametrize("phrase", ["nascar shoppers", "masters shoppers", "college football buyers", "student loan shoppers", "home improvement buyers"])
+def test_a_held_back_topic_is_not_replaced_by_a_looser_match(taxonomy, phrase):
+    """With 'Sports Fans - College Football' held back, 'college' alone matched Higher Education Seekers, and 'car shopper' was
+    found inside 'nas-CAR SHOPPER-s'."""
+    assert taxonomy.best_match(phrase) is None, phrase
+
+
+def test_a_phrase_that_holds_a_segments_own_full_name_is_that_segment_whatever_the_role_word(taxonomy):
+    assert taxonomy.best_match("New Homeowners shoppers").segment.id == "home_new_owners"
+    assert taxonomy.best_match("Beauty & Cosmetics Aficionados shoppers").segment.id == "retail_beauty"
+
+
+@pytest.mark.parametrize("phrase,segment", [
+    ("home services in Spanish", "home_services"), ("contractor in Spanish", "home_services"), ("automotive in Spanish", "auto_in_market"),
+    ("quiropractico in Spanish", "health_chiropractic"), ("ford in Spanish", "auto_new_domestic"), ("golf fans in Spanish", "sports_golf"),
+    ("tax prep in Spanish", "fin_tax"), ("new mom in Spanish", "fam_new_parents"), ("vehicle shopper in Spanish", "auto_in_market"),
+])
+def test_a_language_word_beside_a_topic_never_competes_with_it(taxonomy, phrase, segment):
+    """'<audience> in Spanish' tied with the 'spanish' keyword of Bilingual Speakers and matched nothing (or, for a short keyword,
+    matched Bilingual Speakers)."""
+    assert taxonomy.best_match(phrase).segment.id == segment, phrase
+
+
+@pytest.mark.parametrize("phrase", ["spanish", "bilingual", "spanish speakers", "bilingual spanish", "spanglish"])
+def test_language_alone_is_still_the_bilingual_audience(taxonomy, phrase):
+    assert taxonomy.best_match(phrase).segment.id == "tech_bilingual", phrase
+
+
+SUFFIXES = (" shoppers", " owners", " buyers", " in Spanish")
+
+
+def test_adding_a_role_or_language_word_to_any_name_or_keyword_never_picks_another_audience(taxonomy):
+    """It may leave the choice to the planner (two segments share a keyword, or the role word does not fit the segment); it must
+    never choose a different segment."""
     wrong = []
     for seg in taxonomy.segments.values():
         for phrase in (seg.label, *seg.keywords, *seg.company_names):
-            for suffix in ("", " shoppers", " owners"):
+            for suffix in ("",) + SUFFIXES:
                 hit = taxonomy.best_match(phrase + suffix)
                 if hit is not None and hit.segment.id != seg.id:
                     wrong.append((phrase + suffix, hit.segment.id))
     assert not wrong, wrong[:10]
+
+
+def test_an_exact_label_or_keyword_always_finds_its_segment_unless_another_segment_has_the_very_same_phrase(taxonomy):
+    from app.services.audience_taxonomy import _fold
+    owners: dict = {}
+    for seg in taxonomy.segments.values():
+        for phrase in (seg.label, *seg.keywords, *seg.company_names):
+            owners.setdefault(_fold(phrase), set()).add(seg.id)
+    missed = []
+    for seg in taxonomy.segments.values():
+        for phrase in (seg.label, *seg.keywords, *seg.company_names):
+            hit = taxonomy.best_match(phrase)
+            if (hit is None or hit.segment.id != seg.id) and owners[_fold(phrase)] == {seg.id}:
+                missed.append((phrase, hit.segment.id if hit else None))
+    assert not missed, missed[:10]
 
 
 def test_an_exact_name_still_wins_even_when_another_segment_scores_close(taxonomy):

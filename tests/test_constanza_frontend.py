@@ -229,12 +229,22 @@ def test_notes_that_repeat_the_unmatched_warning_are_not_shown_twice():
     ("Multnomah County, OR; Washington County, OR; Linn County, OR", ["Washington County, OR"], "Multnomah County, OR; Linn County, OR"),
     # the separator goes with the item, wherever the item stands
     ("Dallas, Houston, or Austin", ["Austin"], "Dallas, Houston"),
-    ("Dallas, Houston, or Austin", ["Houston"], "Dallas, or Austin"),
+    ("Dallas, Houston, or Austin", ["Houston"], "Dallas or Austin"),
     ("Dallas and Houston", ["Dallas"], "Houston"),
     ("Dallas or Houston or Austin", ["Houston"], "Dallas or Austin"),
     ("Dallas plus Houston", ["Houston"], "Dallas"),
     ("Dallas AND Houston", ["Houston"], "Dallas"),
     ("Dallas; Houston & Austin", ["Dallas"], "Houston & Austin"),
+    # an Oxford comma after the item goes with it: nothing is left dangling
+    ("Dallas, Austin, and Houston", ["Austin"], "Dallas and Houston"),
+    ("Dallas, Austin, or Houston", ["Austin"], "Dallas or Houston"),
+    ("Dallas, Austin, and Houston", ["Dallas"], "Austin, and Houston"),
+    ("Dallas, and Austin", ["Dallas"], "Austin"),
+    ("Dallas, or Austin", ["Dallas"], "Austin"),
+    ("Dallas, Austin, and Houston", ["Houston"], "Dallas, Austin"),
+    ("Dallas, Austin, and Houston", ["Dallas", "Austin"], "Houston"),
+    ("Plano, TX, Frisco, TX, and Allen, TX", ["Frisco, TX"], "Plano, TX and Allen, TX"),
+    ("Andover, MA, Austin, TX", ["Andover, MA"], "Austin, TX"),                       # a name that starts with "And" is not a word
 ])
 def test_dropping_items_matches_whole_items_never_substrings(text, drop, expected):
     assert run(f"return JSON.stringify(P.removeGeoItems({json.dumps(text)}, {json.dumps(drop)}));") == expected
@@ -342,7 +352,8 @@ def test_picking_the_right_county_replaces_the_whole_phrase_it_was_read_from_and
 @pytest.mark.parametrize("text,expected", [
     ("Dallas", False), ("Othello, WA", False), ("Portland, OR", False), ("portland, or", False), ("Adams County, Washington", False),
     ("Washington, Oregon", False), ("New York, NY", False), ("Kansas City, MO", False), ("90210", False),
-    ("Dallas, Houston", True), ("90210, 94105", True), ("Dallas and Houston", True), ("Dallas or Houston", True), ("Dallas AND Houston", True),
+    ("Dallas, TX 75201", False), ("Washington, D.C.", False), ("Dallas, USA", False), ("Plano, 75024", False), ("Dallas, DC", False),
+    ("Dallas, Houston", True), ("90210, 94105", True), ("Dallas, Fort Worth", True), ("Dallas and Houston", True), ("Dallas or Houston", True), ("Dallas AND Houston", True),
     ("Dallas; Houston", True), ("Plano, TX, Frisco, TX", True), ("Dallas\nHouston", True), ("Beaverton, OR and Hillsboro, OR", True),
 ])
 def test_text_is_a_list_when_it_names_more_than_one_place(text, expected):
@@ -388,3 +399,11 @@ def test_there_is_no_banner_without_a_result_or_for_a_result_that_has_no_request
         S.result = { ok: true }; S.resultSig = null; markStale(); var b = shown();
         return JSON.stringify([a, b]);""")
     assert out == [False, False]
+
+
+def test_a_repaint_of_the_result_keeps_the_banner_when_the_form_has_changed():
+    """The 'show all areas' toggle repaints the result, which used to drop the 'form has changed' banner: the repaint itself now
+    ends by judging the form again (so a form that changed while a pull was in flight shows it too)."""
+    render = _between(CZ_JS, "  function renderResult(data) {", "  function renderError(message)")
+    assert "markStale();" in render.split('$("cz-copy").addEventListener')[-1]
+    assert "tog.addEventListener(\"click\", () => { S.showAllAreas = !S.showAllAreas; renderResult(data); })" in render

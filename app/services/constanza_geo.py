@@ -287,18 +287,15 @@ def _dma_area(d: DMA) -> ResolvedArea:
     )
 
 
-_MIN_TOWN_FOR_A_STATES_NAME = 5000      # "Washington, PA" (13,000) is a town; "Kansas, OK" (a few hundred) is two states
-
-
 def _is_place_in_state(prev: dict, state: str, state_token: str) -> bool:
     """A name that matched no market in `state`: is it a real city / town there? Then "Name, ST" is that place. When the
-    name is itself a state's name ("Washington", "Indiana"), only a two-letter code after it counts ("Washington, PA") and
-    only a town of some size: "Washington, Oregon" and "Kansas, OK" stay two states."""
+    name is itself a state's name ("Washington", "Indiana"), only a two-letter code after it counts ("Washington, PA"):
+    "Washington, Oregon" stays two states. The town is the default at any size, because the other reading ("the two whole
+    states") is the one that would be silently huge when wrong; the two states are always offered as the alternative
+    (`_state_pair_alternative`)."""
     from app.services import constanza_geo_crosswalk
-    if prev["is_state"]:
-        if not (len(state_token) == 2 and state_token.isupper()):
-            return False
-        return constanza_geo_crosswalk.place_in_state(prev["token"], state, _MIN_TOWN_FOR_A_STATES_NAME)
+    if prev["is_state"] and not (len(state_token) == 2 and state_token.isupper()):
+        return False
     return constanza_geo_crosswalk.place_in_state(prev["token"], state)
 
 
@@ -856,12 +853,13 @@ def _resolve_as_list(item: str, hint: str | None, res: GeoResolution, context: d
     if state:
         shared = []
         for p in pieces[:-1]:
-            if _resolve_single(p, hint).areas:
-                shared.append(p)                 # "Chicago" is the Chicago market already: "Chicago, IN" would add all of Indiana
-                continue
+            # The state typed once at the end belongs to a place that exists in it ("Lincoln and Springfield, IL" is Lincoln, IL, not
+            # the Nebraska market). Where the qualified form does not name a place - it turns into "that whole state" ("Chicago, IN"
+            # would add every Indiana market) or leaves the state unmatched ("Philadelphia, DE") - the piece stays as typed: it is a
+            # market of its own.
             qualified = f"{p}, {state}"
             q = _resolve_single(qualified, hint)
-            shared.append(qualified if q.areas and not q.whole_states else p)
+            shared.append(qualified if q.areas and not q.whole_states and not q.unmatched_tokens else p)
         pieces = shared + [pieces[-1]]
         if pieces[:-1] != gtext.split_conjunctions(item)[:-1]:
             why += f"; the state at the end ({state}) applies to each place that needs one"

@@ -196,18 +196,22 @@ class _PooledConnection:
 
     def __enter__(self) -> psycopg.Connection:
         full = _env_float("DB_POOL_TIMEOUT", 10.0)
-        first = min(full, _FIRST_WAIT)
+        deadline = time.monotonic() + full
+        wait = min(full, _FIRST_WAIT)
         try:
-            try:
-                self._cm = self._pool.connection(timeout=first)
-                return self._cm.__enter__()
-            except PoolTimeout:
-                # No connection yet. Busy, or is the database gone? One direct connect tells them apart (and when it IS
-                # gone, opens the fail-fast window for every caller at once): a busy pool just keeps waiting for the rest
-                # of its budget, as before.
-                _probe_reachable()
-                self._cm = self._pool.connection(timeout=max(0.1, full - first))
-                return self._cm.__enter__()
+            while True:
+                try:
+                    self._cm = self._pool.connection(timeout=wait)
+                    return self._cm.__enter__()
+                except PoolTimeout:
+                    left = deadline - time.monotonic()
+                    if left <= 0.05:
+                        raise
+                    # No connection yet. Busy, or is the database gone? One direct connect tells them apart (and when it IS gone,
+                    # opens the fail-fast window for every caller at once); a busy pool keeps waiting for the rest of its budget, as
+                    # before - in slices, so a window another caller opens while this one waits ends this wait too.
+                    _probe_reachable()
+                    wait = max(0.1, min(_FIRST_WAIT, left))
         except PoolTimeout:
             raise          # every connection is busy: slow, not down - do not make the next callers fail instantly
         except (_RecentlyDown, _ProbeFailed):

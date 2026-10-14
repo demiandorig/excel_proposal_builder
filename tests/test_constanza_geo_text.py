@@ -417,7 +417,7 @@ def test_a_state_code_that_spells_a_conjunction_stays_a_state(text, expected):
 
 @pytest.mark.parametrize("text,market,inside", [
     ("Chicago and Gary, IN", "Chicago", "Gary, IN"), ("Cincinnati and Covington, KY", "Cincinnati", "Covington, KY"),
-    ("Kansas City and Overland Park, KS", "Kansas City", "Overland Park, KS"), ("Philadelphia and Wilmington, DE", "Philadelphia", "Wilmington, DE"),
+    ("Philadelphia and Wilmington, DE", "Philadelphia", "Wilmington, DE"),
 ])
 def test_a_state_at_the_end_is_not_given_to_a_market_that_needs_none(text, market, inside):
     """'Chicago and Gary, IN' added every Indiana market: 'Chicago, IN' was read as the two states."""
@@ -432,10 +432,29 @@ def test_a_state_at_the_end_is_shared_with_every_place_that_needs_one():
     assert "the state at the end (AZ) applies to each place that needs one" in res.interpretations[0]["why"]
 
 
-@pytest.mark.parametrize("text,states", [("Kansas, OK", ["KS", "OK"]), ("Nevada, TX", ["NV", "TX"])])
-def test_a_pair_of_states_stays_a_pair_of_states_when_the_town_is_too_small_or_absent(text, states):
+@pytest.mark.parametrize("text,expected", [
+    ("Lincoln and Springfield, IL", ["Lincoln, IL", "Springfield, IL"]), ("Lincoln and Roseville, CA", ["Lincoln, CA", "Roseville, CA"]),
+    ("Birmingham and Troy, MI", ["Birmingham, MI", "Troy, MI"]), ("Alexandria and Washington, VA", ["Alexandria, VA", "Washington, VA"]),
+    ("Kansas City and Overland Park, KS", ["Kansas City, KS", "Overland Park, KS"]),
+])
+def test_the_state_typed_at_the_end_wins_over_a_same_named_market_elsewhere(text, expected):
+    """'Lincoln and Springfield, IL' kept 'Lincoln' bare because it names a Nebraska market, and added the whole Nebraska market."""
     res = resolve_geo(text)
-    assert res.method == "state_list" and res.whole_states == states
+    assert labels(res) == expected and not res.unmatched_tokens and not res.whole_states
+
+
+@pytest.mark.parametrize("text,town", [("Kansas, OK", "Kansas, OK"), ("Nevada, TX", "Nevada, TX"), ("Oregon, IL", "Oregon, IL"), ("Washington, VA", "Washington, VA")])
+def test_a_small_town_named_like_a_state_is_still_the_town_with_the_two_states_offered(text, town):
+    """A cutoff by town size sent 'Oregon, IL' to two whole states (15M) with no way back; the town is the default at any size
+    because the other reading is the one that is silently huge when wrong."""
+    res = resolve_geo(text)
+    assert res.method == "city" and labels(res) == [town]
+    assert any(sg["kind"] == "did_you_mean" and sg["label"].startswith("The states") and sg["replaces"] == text for sg in res.suggestions)
+
+
+@pytest.mark.parametrize("text", ["Washington, Oregon", "Oklahoma, TX", "Washington, OR, Idaho"])
+def test_two_state_names_or_a_state_with_no_such_town_stay_states(text):
+    assert resolve_geo(text).method == "state_list"
 
 
 @pytest.mark.parametrize("text,pair", [
@@ -471,12 +490,32 @@ def test_a_long_list_of_places_resolves_each_distinct_place_once(monkeypatch):
 @pytest.mark.parametrize("text,zip_label", [
     ("Plano, TX 75024", "ZIP 75024"), ("Portland, OR 97201", "ZIP 97201"), ("Dallas, TX 75201", "ZIP 75201"),
     ("Los Angeles, CA 90012", "ZIP 90012"), ("Plano, TX 75024-1234", "ZIP 75024"), ("New York, NY 10001", "ZIP 10001"),
+    ("plano, tx 75024", "ZIP 75024"), ("portland, or 97201", "ZIP 97201"), ("bend, or 97701", "ZIP 97701"),     # lowercase: "or" is Oregon
 ])
 def test_a_city_state_and_zip_is_the_zip(text, zip_label):
     """'Dallas, TX 75201' was the Dallas market plus an unmatched 'TX 75201', and 'Plano, TX 75024' matched nothing."""
     res = resolve_geo(text)
     assert res.method == "zip" and labels(res) == [zip_label] and not res.unmatched_tokens
-    assert any("ZIP at the end" in i["why"] for i in res.interpretations)
+    assert any(f"read '{text}' as {zip_label}" in i["why"] and "were not used" in i["why"] for i in res.interpretations)
+
+
+def test_the_address_note_names_the_market_of_the_zip_so_a_contradiction_shows():
+    """'Dallas, TX 77002' is a Houston ZIP: the ZIP wins (it is the exact place) and the note says which market that is."""
+    res = resolve_geo("Dallas, TX 77002")
+    assert labels(res) == ["ZIP 77002"]
+    assert any("in the Houston market" in i["why"] for i in res.interpretations)
+
+
+@pytest.mark.parametrize("text,markets", [
+    ("Dallas and Houston, TX 77002", {"Dallas-Ft. Worth", "Houston"}), ("Houston, Dallas, Austin, TX 78701", {"Houston", "Dallas-Ft. Worth", "Austin"}),
+    ("Dallas, TX, Houston, TX 77002", {"Dallas-Ft. Worth", "Houston"}), ("Miami and Orlando, FL 32801", {"Miami-Ft. Lauderdale", "Orlando-Daytona Bch-Melbrn"}),
+    ("Dallas or Houston, TX 77002", {"Dallas-Ft. Worth", "Houston"}),
+])
+def test_places_typed_before_a_state_and_zip_are_never_dropped_for_the_zip(text, markets):
+    """Only ONE place and its state before a ZIP is an address. 'Dallas and Houston, TX 77002' became the ZIP alone, silently."""
+    res = resolve_geo(text)
+    assert markets <= set(labels(res)), (text, labels(res))
+    assert not any("as ZIP" in i["why"] for i in res.interpretations)
 
 
 def test_an_address_whose_zip_is_not_in_the_data_falls_back_to_the_city_and_says_so():
@@ -496,8 +535,40 @@ def test_addresses_in_a_list_are_each_their_zip():
 def test_text_that_only_looks_like_an_address_is_left_alone():
     assert labels(resolve_geo("90210 94105")) == ["ZIP 90210", "ZIP 94105"]                        # two ZIPs, not an address
     res = resolve_geo("Plano, TX 75024 Frisco, TX 75034")                                          # two addresses with nothing between
-    assert not any("ZIP at the end" in i["why"] for i in res.interpretations)
+    assert not any("as ZIP" in i["why"] for i in res.interpretations)
     res = resolve_geo("Plano, TX 75024", "city")                                                   # the planner said what it is
-    assert not any("ZIP at the end" in i["why"] for i in res.interpretations)
+    assert not any("as ZIP" in i["why"] for i in res.interpretations)
     assert gt.address_place("Texas 75201") is None and gt.address_place("75024") is None
+
+
+@pytest.mark.parametrize("text,markets", [
+    ("portland, or and seattle", {"Portland, OR", "Seattle-Tacoma"}), ("portland, or & salem, or", {"Portland, OR"}),
+    ("portland, or and boise, id", {"Portland, OR", "Boise"}), ("portland, or and vancouver, wa", {"Portland, OR"}),
+])
+def test_a_lowercase_or_after_a_comma_is_oregon_when_a_conjunction_follows(text, markets):
+    """The Oxford-comma rewrite deleted the state of 'portland, or and seattle' and left an ambiguous 'portland'."""
+    res = resolve_geo(text)
+    assert markets <= set(labels(res)) and not res.ambiguous, (text, labels(res), res.ambiguous)
+
+
+def test_a_lowercase_or_before_a_zip_is_oregon_and_the_address_is_the_zip():
+    res = resolve_geo("bend, or 97701")
+    assert labels(res) == ["ZIP 97701"] and not res.ambiguous and not res.unmatched_tokens
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Portland, OR, or Salem, OR", {"Portland, OR"}), ("Eugene, OR, or Salem, OR", {"Eugene", "Salem, OR"}),
+    ("Austin, TX, or Round Rock, TX", {"Austin"}), ("Dallas, Houston, or Austin", {"Dallas-Ft. Worth", "Houston", "Austin"}),
+    ("Chicago, Dallas, or Miami", {"Chicago", "Dallas-Ft. Worth", "Miami-Ft. Lauderdale"}),
+])
+def test_an_oxford_or_separates_the_places_instead_of_gluing_them_into_one_comma_list(text, expected):
+    """'A, ST, or B, ST' became 'A, ST, B, ST', a comma list that is not split: the second place came back unmatched."""
+    res = resolve_geo(text)
+    assert expected <= set(labels(res)) and not res.unmatched_tokens, (text, labels(res), res.unmatched_tokens)
+    assert any("read the 'or' before the last place as part of the list" in i["why"] for i in res.interpretations)
+
+
+def test_an_oxford_or_between_addresses_makes_each_its_zip():
+    assert labels(resolve_geo("Bend, OR 97701, or Salem, OR 97301")) == ["ZIP 97701", "ZIP 97301"]
+    assert labels(resolve_geo("Plano in Collin County, or Houston in Harris County")) == ["Collin County, TX", "Harris County, TX"]
 

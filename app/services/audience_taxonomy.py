@@ -23,6 +23,7 @@ import re
 import threading
 import time
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -36,6 +37,15 @@ _TTL = 60.0
 _APPLY_THRESHOLD = 55.0      # best_match applies a segment's rate only at or above this score; below it the planner is shown suggestions
 # Role words that say WHO but not WHAT ("owners", "shoppers", "seekers"): typing only these is too generic to pick a segment.
 _GENERIC = frozenset({"owner", "shopper", "seeker", "intender", "user", "buyer", "lover", "enthusiast", "professional", "service", "product"})
+# Words that say WHO or in WHAT LANGUAGE, not WHAT: inside a longer phrase they never decide the audience ("home services in Spanish" is
+# home services; "mortgage shoppers" is mortgage).
+_LANGUAGE = frozenset({"spanish", "english", "bilingual", "spanglish", "bilingue"})
+_MODIFIERS = _GENERIC | _LANGUAGE
+# "Is in the market for" role words, and the audiences built that way (their label, the sales team's names or the one-line description
+# says shoppers / buyers / in-market / planning to buy). "<topic> shoppers" means the topic's segment only when it is one of these:
+# "Sports Fans" are not "sports shoppers", so that is offered and never applied.
+_INTENT_ROLES = frozenset({"shopper", "buyer", "intender", "seeker"})
+_INTENT_RE = re.compile(r"\b(?:shop\w*|buy\w*|bought|purchas\w*|in market|intend\w*|planning|seek\w*|hunt\w*|compar\w*|considered|considering)\b")
 _RETRY_AFTER_FAILURE = 15.0
 
 
@@ -160,10 +170,15 @@ class Taxonomy:
         self.groups = sorted(groups, key=lambda g: (g.sort, g.label))
         self.segments: dict[str, Segment] = {s.id: s for s in segments}
         self._order = {g.key: i for i, g in enumerate(self.groups)}
-        self._index: list[tuple[Segment, list[str], list[set[str]]]] = []
+        self._index: list[tuple[Segment, list[str], list[set[str]], list[Counter]]] = []
+        self._intent: dict[str, bool] = {}
+        self._own: dict[str, frozenset] = {}                 # the folded label and sales-team names of each segment
         for s in segments:
             names = [_fold(n) for n in (s.label, *s.company_names, *s.keywords) if n]
-            self._index.append((s, names, [set(tokens(n)) for n in names]))
+            self._index.append((s, names, [set(tokens(n)) for n in names], [Counter(n) for n in names]))
+            own = [_fold(n) for n in (s.label, *s.company_names) if n]
+            self._own[s.id] = frozenset(own)
+            self._intent[s.id] = bool(_INTENT_RE.search(" ".join([*own, _fold(s.description)])))
 
     def ordered(self) -> list[Segment]:
         return sorted(self.segments.values(), key=lambda s: (self._order.get(s.group_key, 99), s.sort, s.label))
@@ -179,35 +194,60 @@ class Taxonomy:
         if not query:
             return []
         collapsed_query = query.replace(" ", "")
+        intent_roles = qtokens & _INTENT_ROLES
+        topical = bool(qtokens - _MODIFIERS)                # the text names something besides a role or a language word
         hits: dict[str, Hit] = {}
+        covers: dict[str, int] = {}                         # how many of the typed topic words each hit accounts for
+        role_only: list[Segment] = []                       # matched only through a bare role word ("shoppers")
+        held_cover = -1                                     # topic words of a segment held back for being the wrong kind (-1: none)
+        whole = len(qtokens - _MODIFIERS)
 
-        def offer(seg: Segment, score: float, how: str, weak: bool = False) -> None:
+        def offer(seg: Segment, score: float, how: str, weak: bool = False, cover: int = 0) -> None:
             if weak:
                 score, how = min(score, _APPLY_THRESHOLD - 0.1), "words"
             cur = hits.get(seg.id)
             if cur is None or score > cur.score:
                 hits[seg.id] = Hit(seg, score, how)
+                covers[seg.id] = cover
 
-        for seg, names, tokensets in self._index:
+        qchars = Counter(query)
+        for seg, names, tokensets, charsets in self._index:
             if seg.id == _fold(text).replace(" ", "_"):
                 offer(seg, 100.0, "name")
-            for name, toks in zip(names, tokensets):
+            for name, toks, chars in zip(names, tokensets, charsets):
                 if not name:
                     continue
-                # A name made only of role words ("shoppers") says WHO and not WHAT. Inside a longer phrase ("mortgage shoppers")
-                # it is a hint for the planner: it neither applies a rate nor ties with the segment that names the topic.
-                weak = bool(toks) and toks <= _GENERIC and query != name
+                # A name made only of role or language words ("shoppers", "spanish") says WHO or HOW and not WHAT. Inside a longer
+                # phrase it is a hint: it neither applies a rate nor ties with the segment that names the topic. Role words alone
+                # apply only when nothing else does (the catch-all audience, below).
+                bare = bool(toks) and toks <= _MODIFIERS and query != name and topical
+                # A role word the matched keyword does not contain ("mortgage SHOPPERS") carries over only to an in-market kind of
+                # audience. A phrase that holds the segment's own full name is not that case: the planner named the segment.
+                wrong_kind = (bool(intent_roles - toks) and not self._intent.get(seg.id, False) and not bare
+                              and not any(_phrase_in(own, query) for own in self._own.get(seg.id, ())))
+                weak = bare or wrong_kind
+                topic_words = _topic_words(name)
                 if query == name:
-                    offer(seg, 100.0, "name" if name == _fold(seg.label) else "keyword")
+                    offer(seg, 100.0, "name" if name == _fold(seg.label) else "keyword", cover=whole)
                 elif _phrase_in(name, query):                      # the planner's text CONTAINS this keyword phrase
                     # more of the topic words covered wins ("luxury car" over "car shopper"); length only breaks the rest
-                    offer(seg, 80.0 + 0.6 * min(_topic_words(name), 3) + min(len(name), 30) / 100, "keyword", weak)
+                    offer(seg, 80.0 + 0.6 * min(topic_words, 3) + min(len(name), 30) / 100, "keyword", weak, topic_words)
+                    if bare and toks <= _GENERIC:
+                        role_only.append(seg)
+                    if wrong_kind:
+                        held_cover = max(held_cover, topic_words)
                 elif _phrase_in(query, name) and not (qtokens and qtokens <= _GENERIC):   # the planner typed part of this name
-                    offer(seg, 62.0 + min(len(query), 20) / 10, "partial")
+                    offer(seg, 62.0 + min(len(query), 20) / 10, "partial", cover=whole)
                 elif len(name.replace(" ", "")) >= 6 and name.replace(" ", "") in collapsed_query:
-                    offer(seg, 70.0 + min(len(name.replace(" ", "")), 20) / 4, "keyword", weak)   # "videogames" for "video games"; the longer phrase wins
+                    offer(seg, 70.0 + min(len(name.replace(" ", "")), 20) / 4, "keyword", weak, topic_words)   # "videogames" for "video games"; the longer phrase wins
+                    if bare and toks <= _GENERIC:
+                        role_only.append(seg)
+                    if wrong_kind:
+                        held_cover = max(held_cover, topic_words)
                 elif toks and qtokens:
                     common = toks & qtokens
+                    if topical and not toks <= qtokens:
+                        common = common - _MODIFIERS          # a shared role word is not evidence once the text names a topic
                     if common:
                         overlap = len(common) / max(len(toks), len(qtokens))
                         if overlap >= 0.5 or (len(qtokens) == 1 and len(common) == 1):
@@ -217,11 +257,28 @@ class Taxonomy:
                                 # "health CARE" against "dental CARE"): a shared common word is a hint, not an answer. Offered
                                 # as a suggestion, never strong enough for best_match to apply its rate.
                                 score = min(score, _APPLY_THRESHOLD - 0.1)
-                            offer(seg, score, "words")
+                            offer(seg, score, "words", weak, len(common - _MODIFIERS))
+                            if bare and toks <= _GENERIC:
+                                role_only.append(seg)
+                            if wrong_kind:
+                                held_cover = max(held_cover, len(common - _MODIFIERS))
                 if len(query) >= 4 and abs(len(query) - len(name)) <= max(6, len(name) // 2):
-                    ratio = difflib.SequenceMatcher(None, query, name).ratio()
-                    if ratio >= 0.82:
-                        offer(seg, 45.0 * ratio, "fuzzy")
+                    # Both of these are upper bounds of the similarity ratio (difflib's own quick_ratio idea, on counts kept per
+                    # name): a pair that cannot reach 0.82 by them is not worth the slow comparison.
+                    total = len(query) + len(name)
+                    if 2.0 * min(len(query), len(name)) / total >= 0.82 and 2.0 * sum((qchars & chars).values()) / total >= 0.82:
+                        ratio = difflib.SequenceMatcher(None, query, name).ratio()
+                        if ratio >= 0.82:
+                            offer(seg, 45.0 * ratio, "fuzzy")
+        if held_cover >= 0:
+            # A topic's own segment was held back for being the wrong kind ("college football" for "college football shoppers"):
+            # a segment that accounts for no more of the typed topic ("college" -> higher education) must not take its place.
+            for sid, h in list(hits.items()):
+                if _APPLY_THRESHOLD <= h.score < 100.0 and covers.get(sid, 0) <= held_cover:         # (an exact name or keyword is never blocked)
+                    hits[sid] = Hit(h.segment, _APPLY_THRESHOLD - 0.1, "words")
+        elif role_only and not any(h.score >= _APPLY_THRESHOLD for h in hits.values()):
+            for seg in role_only:                              # nothing names the topic: the catch-all audience is the best there is
+                hits[seg.id] = Hit(seg, _APPLY_THRESHOLD + 0.5, "keyword")
         ranked = sorted(hits.values(), key=lambda h: (-h.score, 0 if h.segment.supported else 1, self._order.get(h.segment.group_key, 99), h.segment.label))
         return ranked[:limit]
 

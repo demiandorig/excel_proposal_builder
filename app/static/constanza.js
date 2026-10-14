@@ -225,10 +225,12 @@
       if (replacement != null) return text.slice(0, m.index) + m[1] + m[2] + replacement + text.slice(end);
       if (m[1]) {                                                 // "A; X" -> "A"; "A and X" -> "A"; "A, B, or X" -> "A, B"
         const before = text.slice(0, m.index);
-        return (/^\s/.test(m[1]) ? before.replace(/\s*,\s*$/, "") : before) + text.slice(end);
+        // ... and an Oxford comma after the item goes too: "A, X, and B" -> "A and B"
+        const after = text.slice(end).replace(new RegExp("^\\s*,(?=\\s+" + WORD + "\\s)"), "");
+        return (/^\s/.test(m[1]) ? before.replace(/\s*,\s*$/, "") : before) + after;
       }
-      // the first item: its following separator goes with it ("X; A" -> "A", "X and A" -> "A")
-      return text.slice(0, m.index) + text.slice(end).replace(new RegExp("^(?:\\s*" + SEP + "|\\s+" + WORD + "(?=\\s))?\\s*"), "");
+      // the first item: its following separator goes with it ("X; A" -> "A", "X and A" -> "A", "X, and A" -> "A")
+      return text.slice(0, m.index) + text.slice(end).replace(new RegExp("^(?:\\s*,?\\s*" + WORD + "(?=\\s)|\\s*" + SEP + ")?\\s*"), "");
     }
     return null;
   }
@@ -258,11 +260,18 @@
     return removed ? out : null;
   }
 
+  // The tail of "City, <tail>" that qualifies the place instead of naming another one: a state, a state with a ZIP, a ZIP, "D.C." or
+  // the country.
+  const looksLikeQualifier = (piece) => {
+    const t = String(piece).trim().replace(/\s*\b\d{5}(?:-\d{4})?$/, "");
+    return t === "" || looksLikeState(t) || /^(?:d\.?\s?c\.?|u\.?s\.?a?\.?|united states)$/i.test(t);
+  };
+
   // More than one place in the text: a separator, a conjunction word, or commas that are not just "name, state".
   function looksLikeList(text) {
     if (/[;|\n&+]/.test(text) || new RegExp(CONJ).test(text)) return true;
     const parts = text.split(",").map((p) => p.trim()).filter(Boolean);
-    return parts.length > 2 || (parts.length === 2 && !looksLikeState(parts[1]));
+    return parts.length > 2 || (parts.length === 2 && (/^\d{5}(?:-\d{4})?$/.test(parts[0]) || !looksLikeQualifier(parts[1])));
   }
 
   // Swap one item for the planner's pick. An item that cannot be found never wipes the list: a single typed item is replaced, and
@@ -972,6 +981,7 @@
       try { await navigator.clipboard.writeText(summaryText(data)); ev.target.textContent = "Copied ✓"; } catch (e) { ev.target.textContent = "Couldn’t copy"; }
       setTimeout(() => { ev.target.textContent = "Copy summary"; }, 1800);
     });
+    markStale();                                  // a repaint (or a form that changed while the request was in flight) keeps the banner
   }
 
   function renderError(message) {
@@ -1045,7 +1055,6 @@
     S.resultCtx = asked;
     S.resultSig = JSON.stringify(body);
     renderResult(r.data);
-    markStale();                                  // the form may have changed while the request was in flight
     announce(`Pulled ${r.data.product_name}: ${num(summarize(r.data).month.mid)} impressions per month.`);
     $("constanza-bubble").classList.add("cz-has-result");
     setMood("happy", 3200);

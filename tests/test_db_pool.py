@@ -121,6 +121,50 @@ def test_a_failed_probe_opens_the_window_once_and_later_callers_do_not_extend_it
     assert len(attempts) == 1                                     # and none of them tried to connect
 
 
+class _SleepyPool:
+    """A pool with no connection free: the caller waits out the timeout it asked for inside the context manager, as the real one does."""
+
+    def connection(self, timeout=None):
+        class _Wait:
+            def __enter__(self):
+                time.sleep(timeout or 0)
+                raise db.PoolTimeout("every connection is busy")
+
+            def __exit__(self, *exc):
+                return False
+        return _Wait()
+
+
+def test_a_waiting_caller_stops_waiting_when_another_caller_opens_the_outage_window(monkeypatch):
+    """A caller whose own probe was skipped (one answered a moment ago) used to sit out the whole pool timeout, look nowhere, and
+    fail as 'busy' (PoolTimeout) long after the database was known to be gone."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@127.0.0.1:1/none")
+    monkeypatch.setenv("DB_POOL_TIMEOUT", "6")
+    monkeypatch.setattr(db, "_FIRST_WAIT", 0.2)
+    monkeypatch.setattr(db, "_probe_ok_at", time.monotonic())               # fresh: this caller's own probes return at once
+    timer = threading.Timer(0.5, lambda: db._mark_down(psycopg.OperationalError("server gone")))
+    timer.start()
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(psycopg.OperationalError, match="unavailable"):
+            db._PooledConnection(_SleepyPool()).__enter__()
+    finally:
+        timer.cancel()
+    assert time.monotonic() - t0 < 2.0, "it waited out its whole budget without looking again"
+
+
+def test_a_busy_pool_is_still_waited_on_for_the_whole_budget_and_is_not_an_outage(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@127.0.0.1:1/none")
+    monkeypatch.setenv("DB_POOL_TIMEOUT", "0.7")
+    monkeypatch.setattr(db, "_FIRST_WAIT", 0.2)
+    monkeypatch.setattr(db, "_probe_ok_at", time.monotonic())
+    t0 = time.monotonic()
+    with pytest.raises(db.PoolTimeout):
+        db._PooledConnection(_SleepyPool()).__enter__()
+    assert 0.6 < time.monotonic() - t0 < 1.6
+    assert db._down_until == 0.0                                            # slow is not down
+
+
 # --------------------------------------------------------------------------- real database
 
 
