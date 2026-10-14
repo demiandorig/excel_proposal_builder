@@ -101,14 +101,17 @@ def _body(name, **kw):
 # 1. Defaults == Phase 1
 # ---------------------------------------------------------------------------------------------------------------------
 
-def test_with_no_admin_rows_every_product_behaves_exactly_as_phase_1_hard_coded_it():
+def test_with_no_admin_rows_every_product_behaves_exactly_as_phase_1_hard_coded_it_plus_the_live_api_products():
     seen = 0
     for p in catalog.CATALOG:
         cfg = fm.resolve_forecast(p.name, p.family)
         expected_platform = fm.DEFAULT_PLATFORM_PRODUCTS.get(p.name)
-        assert cfg.enabled == (p.family == "Entravision Plus"), p.name           # the button: the whole family, nothing else
-        assert cfg.platform == expected_platform and cfg.method == ("platform" if expected_platform else "generic"), p.name
-        assert cfg.hispanic_weighted == (p.name in fm.DEFAULT_HISPANIC_PRODUCTS), p.name
+        if p.name in fm.DEFAULT_API_PRODUCTS:                       # the one addition since: a product forecast by a live API (TikTok)
+            assert (cfg.enabled, cfg.method, cfg.platform, cfg.hispanic_weighted) == (True, fm.DEFAULT_API_PRODUCTS[p.name], None, False), p.name
+        else:
+            assert cfg.enabled == (p.family == "Entravision Plus"), p.name           # the button: the whole family, nothing else
+            assert cfg.platform == expected_platform and cfg.method == ("platform" if expected_platform else "generic"), p.name
+            assert cfg.hispanic_weighted == (p.name in fm.DEFAULT_HISPANIC_PRODUCTS), p.name
         assert cfg.source == "default"
         seen += 1
     assert seen == len(catalog.CATALOG)
@@ -345,7 +348,8 @@ def test_every_product_in_the_catalog_payload_carries_its_forecast_config():
     assert products[ROKU]["forecast"] == {"enabled": True, "method": "platform", "platform": "roku", "hispanic_weighted": False, "source": "default", "relation": "primary"}
     assert products[VIX]["forecast"]["method"] == "generic" and products[VIX]["forecast"]["enabled"] is True
     assert products[SEARCH]["forecast"]["enabled"] is False
-    assert sum(1 for p in products.values() if p["forecast"]["enabled"]) == 22 + len(NEW_EP)
+    assert products["Tiktok Ads"]["forecast"]["method"] == "tiktok" and products["Tiktok Ads"]["forecast"]["platform"] is None
+    assert sum(1 for p in products.values() if p["forecast"]["enabled"]) == 22 + len(NEW_EP) + len(fm.DEFAULT_API_PRODUCTS)
 
 
 def test_an_admin_change_reaches_the_catalog_payload(store):
@@ -371,7 +375,7 @@ def test_the_platform_products_endpoint_is_the_live_mapping(store):
 
 def test_the_admin_payload_lists_every_product_with_coverage_and_totals(store):
     data = asyncio.run(main.admin_get_forecast_map())
-    assert data["summary"] == {"total": len(catalog.effective_catalog()), "enabled": 22 + len(NEW_EP), "platform_modeled": 10, "generic": 12 + len(NEW_EP), "customized": 0}
+    assert data["summary"] == {"total": len(catalog.effective_catalog()), "enabled": 22 + len(NEW_EP) + 1, "platform_modeled": 10, "generic": 12 + len(NEW_EP), "tiktok": 1, "customized": 0}
     rows = {r["name"]: r for r in data["products"]}
     assert rows[ROKU]["enabled"] and rows[ROKU]["method"] == "platform" and rows[ROKU]["platform"] == "roku" and not rows[ROKU]["customized"]
     assert rows[SEARCH]["enabled"] is False and rows[SEARCH]["default"]["enabled"] is False
@@ -386,7 +390,7 @@ def test_the_admin_payload_lists_every_product_with_coverage_and_totals(store):
 
 def test_saving_a_choice_answers_with_the_refreshed_list(store):
     data = asyncio.run(main.admin_set_forecast_map(_body(SEARCH, method="generic", platform=None), _request("planner@x.com")))
-    assert data["saved"] is True and data["summary"]["customized"] == 1 and data["summary"]["enabled"] == 23 + len(NEW_EP)
+    assert data["saved"] is True and data["summary"]["customized"] == 1 and data["summary"]["enabled"] == 24 + len(NEW_EP)
     row = next(r for r in data["products"] if r["name"] == SEARCH)
     assert row["enabled"] and row["method"] == "generic" and row["customized"]
     assert store.rows[SEARCH]["updated_by"] == "planner@x.com"
@@ -507,7 +511,7 @@ def test_the_table_is_created_by_the_startup_bootstrap():
     mine = [s for s in statements if s["target"] == "forecast_product_map"]
     assert len(mine) == 1 and mine[0]["kind"] == "table"
     sql = re.sub(r"\s+", " ", mine[0]["sql"])
-    for column in ("product_name TEXT PRIMARY KEY", "enabled BOOLEAN NOT NULL", "method TEXT NOT NULL CHECK (method IN ('platform', 'generic'))",
+    for column in ("product_name TEXT PRIMARY KEY", "enabled BOOLEAN NOT NULL", "method TEXT NOT NULL CHECK (method IN ('platform', 'generic', 'tiktok'))",
                    "platform TEXT", "hispanic_weighted BOOLEAN NOT NULL DEFAULT FALSE"):
         assert column in sql, column
 

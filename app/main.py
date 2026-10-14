@@ -95,6 +95,10 @@ from app.services import constanza_forecast_map as forecast_map_svc
 from app.services import forecast_store
 from app.services.constanza_engine import estimate_avails
 from app.services import audience_taxonomy
+from app.services import constanza_tiktok as tiktok_svc
+from app.services import tiktok_client
+from app.services import tiktok_diagnose
+from app.services.tiktok_client import TikTokAPIError
 from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, normalize_gender, parse_audience_text
 from app.services.line_modifier import clean_line_modifier_or_none
 
@@ -882,6 +886,27 @@ class ConstanzaAudienceSpecModel(BaseModel):
     interest_terms: list[str] = []
 
 
+class TikTokTargetingModel(BaseModel):
+    """The audience set up the way TikTok Ads Manager sets up an ad group (see constanza_tiktok.Targeting, which validates it).
+    Every list empty / every field None means "not narrowed"."""
+    gender: Optional[str] = None
+    age_groups: list[str] = []
+    languages: list[str] = []
+    interest_category_ids: list[str] = []
+    interest_keyword_ids: list[str] = []
+    purchase_intention_ids: list[str] = []
+    video_interaction_ids: list[str] = []
+    creator_interaction_ids: list[str] = []
+    hashtag_ids: list[str] = []
+    video_period: int = 15
+    spending_power: Optional[str] = None
+    household_income: list[str] = []
+    operating_system: Optional[str] = None
+    network_types: list[str] = []
+    placements: list[str] = []
+    objective: str = "reach"
+
+
 class ConstanzaEstimateRequest(BaseModel):
     product_name: str
     geo_text: str
@@ -898,6 +923,9 @@ class ConstanzaEstimateRequest(BaseModel):
     # When present, routes through constanza_audience.py's age/gender/
     # interest layer instead of the plain geo/platform estimate.
     audience: Optional[ConstanzaAudienceSpecModel] = None
+    # Only used for a product whose forecast method is "tiktok" (Admin -> Forecast): the targeting to ask TikTok's
+    # audience-size estimator about. None asks about the geography alone.
+    tiktok: Optional[TikTokTargetingModel] = None
 
 
 class ConstanzaParseAudienceRequest(BaseModel):
@@ -1434,6 +1462,8 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
     resolution = constanza_geo.resolve_geo(body.geo_text, geo_type_hint=body.geo_type_hint)
     if resolution.ambiguous or not resolution.resolved:
         raise HTTPException(status_code=422, detail=_geo_failure_detail(body.geo_text, resolution))
+    if forecast_map_svc.resolve_forecast(body.product_name).method == tiktok_svc.PRODUCT_KEY:
+        return _constanza_tiktok_estimate(body, resolution)
     estimate = estimate_avails(
         body.product_name, resolution, months=body.months,
         national_monthly_total=body.national_monthly_total, flight_days=body.flight_days,
@@ -1499,6 +1529,94 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
             ],
         },
     }
+
+
+def _tiktok_error(exc: Exception) -> HTTPException:
+    """A failed TikTok call or an unusable TikTok request as the clean 4xx / 5xx the dock shows (never a stack trace)."""
+    if isinstance(exc, TikTokAPIError):
+        return HTTPException(status_code=exc.status_code, detail=exc.public_message())
+    return HTTPException(status_code=422, detail=str(exc))
+
+
+def _constanza_tiktok_estimate(body: "ConstanzaEstimateRequest", resolution) -> dict:
+    """The estimate of a product forecast by TikTok's audience-size API. Shaped like every other estimate (impressions low / mid /
+    high over the flight, est. uniques, notes, what could not be matched) so the dock and the Step 05 card read it the same way,
+    plus a `tiktok` block with the audience range, TikTok's own verdict, the locations that were sent and the planning factor."""
+    try:
+        targeting = tiktok_svc.Targeting.from_dict(body.tiktok.model_dump() if body.tiktok else None)
+        result = tiktok_svc.estimate(resolution, targeting, body.months)
+    except (TikTokAPIError, ValueError) as exc:
+        raise _tiktok_error(exc)
+    size, monthly, total = result.size, result.monthly, result.total
+    unmapped = result.mapping.unmapped
+    notes = _geo_warning_notes(resolution) + result.mapping.notes + result.notes()
+    if unmapped:
+        dropped = "; ".join(f"{u['input']!r} ({u['reason']})" for u in unmapped)
+        notes.insert(0, f"NOT INCLUDED in this estimate — couldn't be placed in TikTok: {dropped}")
+    details = [{"input": d["input"], "reason": d["reason"]} for d in resolution.unmatched_details]
+    return {
+        "product_name": body.product_name,
+        "platform": tiktok_svc.PRODUCT_KEY,
+        "confidence": "live_api",
+        "geo_method": resolution.method,
+        "geo_confidence": resolution.geo_confidence,
+        "months": result.months,
+        "imps_low": total["low"], "imps_mid": total["mid"], "imps_high": total["high"],
+        # est. uniques is the audience itself (a head count, not cumulative), so the Avails step's frequency is the planning factor
+        "est_uniques": size.mid,
+        "reach_universe": None,
+        "series": None,
+        "weeks": None,
+        "notes": notes,
+        "unmatched_geo_tokens": list(resolution.unmatched_tokens) + [u["input"] for u in unmapped],
+        "unmatched_geo_details": details + [{"input": u["input"], "reason": u["reason"]} for u in unmapped],
+        "ambiguous": resolution.ambiguous,
+        "geo_interpretations": resolution.interpretations,
+        "geo_suggestions": resolution.suggestions,
+        "by_area": [],
+        "tiktok": {
+            "audience": {"low": size.lower, "mid": size.mid, "high": size.upper},
+            "stage": size.stage,
+            "stage_label": tiktok_client.STAGE_LABELS.get(size.stage),
+            "stage_note": tiktok_client.STAGE_NOTES.get(size.stage),
+            "impressions_per_person": result.factor,
+            "monthly": monthly,
+            "locations": [loc.to_public() for loc in result.mapping.locations],
+            "unmapped": unmapped,
+            "objective": tiktok_svc.OBJECTIVES[result.targeting.objective]["label"],
+            "placements": list(result.targeting.placements),
+            "request_id": size.request_id,
+            "cached": size.cached,
+        },
+    }
+
+
+@app.get("/api/constanza/tiktok/status")
+def constanza_tiktok_status() -> dict:
+    """Whether the TikTok connection is set up (which settings are missing, never their values), the planning factor, and the
+    fixed menus of the TikTok panel (age groups, objectives, placements, household income, ...)."""
+    return tiktok_svc.status()
+
+
+@app.get("/api/constanza/tiktok/targeting")
+def constanza_tiktok_targeting(kind: str) -> dict:
+    """One list of what TikTok can target - `languages`, or the interest / behavior categories `general_interest`,
+    `purchase_intention`, `video_interaction`, `creator_interaction`, `hashtag_interaction` - straight from TikTok (cached for
+    hours), so the panel offers exactly what Ads Manager would."""
+    try:
+        return {"kind": kind, "items": tiktok_svc.catalog(kind)}
+    except (TikTokAPIError, ValueError) as exc:
+        raise _tiktok_error(exc)
+
+
+@app.get("/api/constanza/tiktok/search")
+def constanza_tiktok_search(q: str = "") -> dict:
+    """What a keyword finds across TikTok's targeting: interest categories, additional interests, purchase intent, and video /
+    creator / hashtag interactions, as {kind: [{id, name, path}]}."""
+    try:
+        return {"query": q.strip()[:100], "results": tiktok_svc.search(q)}
+    except (TikTokAPIError, ValueError) as exc:
+        raise _tiktok_error(exc)
 
 
 @app.post("/api/constanza/parse-audience")
@@ -3594,6 +3712,15 @@ async def admin_delete_product(product_id: int) -> dict:
 # Admin -> Forecast: which products get Constanza's "Auto-calculate avails" button (Step 05) and what it computes.
 # See app/services/constanza_forecast_map.py. Admin-only through the blanket /api/admin/* rule.
 # ---------------------------------------------------------------------------
+
+@app.post("/api/admin/tiktok/test")
+def admin_tiktok_test() -> dict:
+    """Admin -> Forecast, "Test the connection": the same end-to-end checks as `python -m app.services.tiktok_diagnose` (token and
+    ad account, the targeting catalogs, TV markets by name, ZIP codes, an audience-size estimate). Plain `def`: it makes about a
+    dozen blocking calls to TikTok. Admin-only through the blanket /api/admin/* rule; no secret is ever in the answer."""
+    checks = tiktok_diagnose.run_checks()
+    return {"ok": all(c.ok for c in checks), "checks": [c.to_public() for c in checks], "status": tiktok_svc.status()}
+
 
 @app.get("/api/admin/forecast-map")
 async def admin_get_forecast_map() -> dict:

@@ -288,10 +288,19 @@
       <div class="panel-head">
         <div class="kicker">Admin</div>
         <h1 class="display">Avails Forecast</h1>
-        <p class="lede">The Avails step (Step 05) shows a <strong>🛰️ Auto-calculate avails (Constanza)</strong> button on a line only for the products switched <strong>On</strong> below, and each product decides <em>what the button computes</em>: <strong>platform data</strong> (the DMA-level avails model for Roku, Prime Video, Hulu, Peacock, Other FAST, vMVPD or the blended Madhive total) or a <strong>population share</strong> of the line's own budget (rougher — it isn't validated against any platform). A product you haven't touched keeps the built-in default: everything in the <em>Entravision Plus</em> family has the button. Changes save as you make them and reach planners the next time they open the app. (A line whose avails are set to <em>free-form</em> — the default for Search products — never shows the button, whatever is set here.)</p>
+        <p class="lede">The Avails step (Step 05) shows a <strong>🛰️ Auto-calculate avails (Constanza)</strong> button on a line only for the products switched <strong>On</strong> below, and each product decides <em>what the button computes</em>: <strong>platform data</strong> (the DMA-level avails model for Roku, Prime Video, Hulu, Peacock, Other FAST, vMVPD or the blended Madhive total), a <strong>population share</strong> of the line's own budget (rougher — it isn't validated against any platform), or <strong>TikTok API</strong> (a live audience-size estimate from TikTok). A product you haven't touched keeps the built-in default: everything in the <em>Entravision Plus</em> family has the button. Changes save as you make them and reach planners the next time they open the app. (A line whose avails are set to <em>free-form</em> — the default for Search products — never shows the button, whatever is set here.)</p>
       </div>
 
       <div class="analytics-stat-grid" id="fc-summary"></div>
+
+      <h2 class="fc-subhead">TikTok connection</h2>
+      <p class="rs-hint">The <strong>Tiktok Ads</strong> product asks TikTok's own audience-size estimator (the one in TikTok Ads Manager) how many people match a targeting, then turns that audience into monthly impressions (&times; the planning factor). It needs two secrets in the app's environment (Replit &rarr; Secrets): <code>TIKTOK_ACCESS_TOKEN</code> and <code>TIKTOK_ADVERTISER_ID</code>. Nothing is ever written to TikTok.</p>
+      <div class="fc-tt" id="fc-tt">
+        <span class="fc-tt-state" id="fc-tt-state">Checking…</span>
+        <button type="button" class="btn-secondary" id="fc-tt-test" disabled>Test the connection</button>
+        <span class="fc-saved" id="fc-tt-note"></span>
+      </div>
+      <ul class="fc-tt-checks" id="fc-tt-checks" aria-live="polite"></ul>
 
       <h2 class="fc-subhead">Platform data &rarr; products</h2>
       <p class="rs-hint">Which catalog products read each bundled platform series. A series no product uses can't be reached from an avails card.</p>
@@ -326,7 +335,7 @@
               <th>Product</th>
               <th>Family</th>
               <th>Button</th>
-              <th title="Platform data: the DMA-level avails model. Population share: the line's own budget, converted to impressions and spread across the geo by population (rougher, not validated against any platform).">What it computes</th>
+              <th title="Platform data: the DMA-level avails model. Population share: the line's own budget, converted to impressions and spread across the geo by population (rougher, not validated against any platform). TikTok API: TikTok's own audience-size estimate, times the planning factor.">What it computes</th>
               <th>Platform data</th>
               <th title="Re-weights the areas by each state's Hispanic population % (a proxy — the source data has no DMA-level demographic breakout). Only for platform data.">Hispanic weighting</th>
               <th>Status</th>

@@ -517,12 +517,12 @@ CREATE INDEX IF NOT EXISTS faq_entries_sort_idx ON faq_entries (section, sort_or
 -- rename doesn't orphan the row). A product with NO row keeps the built-in default: the "Entravision Plus" family gets
 -- the button, ten named products use their platform's DMA data, everything else is a population-share estimate of the
 -- line's own budget. method 'platform' needs a `platform` key (roku, prime, hulu, peacock, other_fast, vmvpd,
--- cumulative); 'generic' has none. Idempotent.
+-- cumulative); 'generic' and 'tiktok' (a live audience-size estimate from TikTok's API) have none. Idempotent.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS forecast_product_map (
     product_name       TEXT PRIMARY KEY,
     enabled            BOOLEAN NOT NULL,
-    method             TEXT NOT NULL CHECK (method IN ('platform', 'generic')),
+    method             TEXT NOT NULL CHECK (method IN ('platform', 'generic', 'tiktok')),
     platform           TEXT,
     hispanic_weighted  BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),

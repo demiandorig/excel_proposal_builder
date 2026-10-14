@@ -7,8 +7,9 @@ Two layers, so nothing changes until an admin chooses to change it:
   DEFAULT (a product with no row in `forecast_product_map`) — exactly what Phase 1 hard-coded:
       * enabled   : the product is in the "Entravision Plus" family
       * method    : "platform" for the ten products in DEFAULT_PLATFORM_PRODUCTS (the Roku / Prime / Hulu / Peacock /
-                    Other-FAST / vMVPD pools and the four blended Madhive CTV/OTT products), else "generic" (the planner's
-                    own budget apportioned by population share — VIX 360, Netflix, OLV Blend, ...)
+                    Other-FAST / vMVPD pools and the four blended Madhive CTV/OTT products), "tiktok" for the products in
+                    DEFAULT_API_PRODUCTS (a live audience-size estimate from TikTok's own API, tiktok_client.py), else
+                    "generic" (the planner's own budget apportioned by population share — VIX 360, Netflix, OLV Blend, ...)
       * hispanic  : DEFAULT_HISPANIC_PRODUCTS (re-weight by state Hispanic population %)
   OVERRIDE (a row) — the admin's explicit choice for that one product. Rows are keyed by the product's NAME and looked up
       through catalog.name_variants, so renaming a product (or splitting it) never orphans its row — the same convention as
@@ -68,13 +69,20 @@ DEFAULT_PLATFORM_PRODUCTS: dict[str, str] = {
 # the workbook has no DMA-level demographic breakout) instead of general population share.
 DEFAULT_HISPANIC_PRODUCTS = frozenset({"Entravision Plus - Hispanics CTV/OTT"})
 
-METHODS = ("platform", "generic")
+# Products forecast by a LIVE API instead of loaded data: catalog product name -> the provider's method name. TikTok's
+# audience-size estimator answers for the TikTok ads product (the "on Entravision News and Radio Pages" product runs on
+# Entravision's own TikTok accounts, which an ad-account audience estimate does not describe, so it is not listed).
+DEFAULT_API_PRODUCTS: dict[str, str] = {
+    "Tiktok Ads": "tiktok",
+}
+
+METHODS = ("platform", "generic", "tiktok")
 
 
 @dataclass(frozen=True)
 class ForecastConfig:
     enabled: bool                  # does the avails card show the button
-    method: str                    # "platform" | "generic"
+    method: str                    # "platform" | "generic" | "tiktok"
     platform: Optional[str]        # a platform key when method == "platform"
     hispanic_weighted: bool        # only meaningful for method == "platform"
     source: str                    # "default" | "admin"
@@ -150,6 +158,9 @@ def default_config(product_name: str, family: Optional[str] = None, variants: Op
         return ForecastConfig(enabled=True, method="platform", platform=linked.series_key,
                               hispanic_weighted=hispanic and linked.series_key == platform, source="default", relation=linked.relation,
                               link_note=linked.link_note)
+    api = DEFAULT_API_PRODUCTS.get(product_name) or next((DEFAULT_API_PRODUCTS[v] for v in sorted(variants) if v in DEFAULT_API_PRODUCTS), None)
+    if api is not None:
+        return ForecastConfig(enabled=True, method=api, platform=None, hispanic_weighted=False, source="default")
     if family is None:
         family = _family_of(product_name)
     return ForecastConfig(
@@ -194,7 +205,7 @@ def _valid_row(row: dict) -> bool:
         return False
     if row["method"] == "platform":
         return bool(row.get("platform")) and row["platform"] in platform_keys()
-    return True
+    return True            # "generic" and "tiktok" carry no platform
 
 
 def load_overrides() -> dict[str, dict]:
@@ -278,7 +289,7 @@ def clean_config(payload: dict) -> dict:
     message. A generic estimate has no platform and no Hispanic weighting, so those are cleared rather than kept."""
     method = payload.get("method")
     if method not in METHODS:
-        raise ValueError("Choose what the button computes: platform data, or a population-share estimate.")
+        raise ValueError("Choose what the button computes: platform data, a population-share estimate, or TikTok's live audience estimate.")
     platform = (payload.get("platform") or "").strip() or None
     hispanic = bool(payload.get("hispanic_weighted"))
     if method == "platform":
@@ -442,6 +453,7 @@ def admin_payload() -> dict:
             "total": len(rows), "enabled": len(enabled),
             "platform_modeled": sum(1 for r in enabled if r["method"] == "platform"),
             "generic": sum(1 for r in enabled if r["method"] == "generic"),
+            "tiktok": sum(1 for r in enabled if r["method"] == "tiktok"),
             "customized": sum(1 for r in rows if r["customized"]),
         },
     }

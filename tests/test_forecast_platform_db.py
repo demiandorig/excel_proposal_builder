@@ -538,6 +538,42 @@ def test_a_replaced_product_still_resolves_by_name_for_a_saved_proposal(db, monk
 
 # --------------------------------------------------------------------------------------------- the migration runner, isolated
 
+def test_the_forecast_map_accepts_the_tiktok_method_and_still_rejects_any_other(db):
+    """Migration 0003 widens the method check to 'tiktok'; the schema.sql baseline says the same, and the migration is re-runnable."""
+    mine = "zz-test Tiktok map"
+    with get_connection() as conn:
+        conn.execute("DELETE FROM forecast_product_map WHERE product_name = %s", (mine,))
+        try:
+            for method, platform in (("tiktok", None), ("generic", None), ("platform", "roku")):
+                conn.execute("INSERT INTO forecast_product_map (product_name, enabled, method, platform) VALUES (%s, TRUE, %s, %s) "
+                             "ON CONFLICT (product_name) DO UPDATE SET method = EXCLUDED.method, platform = EXCLUDED.platform", (mine, method, platform))
+            conn.execute("UPDATE forecast_product_map SET method = 'tiktok', platform = NULL WHERE product_name = %s", (mine,))
+            assert conn.execute("SELECT method FROM forecast_product_map WHERE product_name = %s", (mine,)).fetchone()["method"] == "tiktok"
+            with pytest.raises(psycopg.errors.CheckViolation):
+                with conn.transaction():
+                    conn.execute("UPDATE forecast_product_map SET method = 'magic' WHERE product_name = %s", (mine,))
+            sql = next(m for m in migrations.discover() if m.version == "0003").sql
+            conn.execute(sql)                                                  # run again over the already-widened check: nothing breaks
+            conn.execute(sql)
+            assert conn.execute("SELECT method FROM forecast_product_map WHERE product_name = %s", (mine,)).fetchone()["method"] == "tiktok"
+        finally:
+            conn.execute("DELETE FROM forecast_product_map WHERE product_name = %s", (mine,))
+
+
+def test_an_admin_choice_of_the_tiktok_method_is_stored_and_read_back(db):
+    from app.services import constanza_forecast_map as fm
+    name = next(p.name for p in catalog.CATALOG if p.family == "Search")
+    fm.invalidate()
+    try:
+        cfg = fm.set_override(name, {"enabled": True, "method": "tiktok"}, "zz-test")
+        assert (cfg.enabled, cfg.method, cfg.platform, cfg.source) == (True, "tiktok", None, "admin")
+        assert fm.resolve_forecast(name).method == "tiktok"
+    finally:
+        fm.clear_override(name)
+        fm.invalidate()
+    assert fm.resolve_forecast(name).method == "generic"
+
+
 def test_the_migration_runner_applies_in_order_rolls_back_a_failure_and_detects_drift(db, tmp_path):
     suffix = uuid.uuid4().hex[:8]
     ledger = f"zz_test_ledger_{suffix}"

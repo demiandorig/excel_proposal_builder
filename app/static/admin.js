@@ -1802,6 +1802,56 @@ function wireForecast() {
   document.getElementById("fc-search").addEventListener("input", renderForecastRows);
   document.getElementById("fc-family-filter").addEventListener("change", renderForecastRows);
   document.getElementById("fc-only-on").addEventListener("change", renderForecastRows);
+  document.getElementById("fc-tt-test").addEventListener("click", testTikTokConnection);
+}
+
+// ---- TikTok connection (Admin -> Forecast): is it set up, and a one-click end-to-end check. No secret is ever shown. ----------
+async function loadTikTokStatus() {
+  const state = document.getElementById("fc-tt-state");
+  const btn = document.getElementById("fc-tt-test");
+  try {
+    const res = await fetch("/api/constanza/tiktok/status");
+    const s = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(s.detail, res.statusText));
+    if (s.configured) {
+      state.innerHTML = `<span class="fc-badge fc-custom">Connected</span> ad account ${escapeHtml(s.advertiser || "")} · impressions = audience × ${escapeHtml(String(s.impressions_per_person))}`;
+    } else {
+      state.innerHTML = `<span class="fc-badge fc-default">Not connected</span> add <code>${s.missing.map(escapeHtml).join("</code> and <code>")}</code> to the app's secrets`;
+    }
+    btn.disabled = !s.configured;
+    btn.title = s.configured ? "" : "Add the TikTok secrets first";
+  } catch (e) {
+    state.textContent = `Couldn't read the TikTok status: ${e.message}`;
+  }
+}
+
+async function testTikTokConnection() {
+  const btn = document.getElementById("fc-tt-test");
+  const list = document.getElementById("fc-tt-checks");
+  const note = document.getElementById("fc-tt-note");
+  btn.disabled = true;
+  note.classList.remove("fc-err");
+  note.textContent = "Checking with TikTok… (about 10–20 seconds)";
+  list.innerHTML = "";
+  try {
+    const res = await fetch("/api/admin/tiktok/test", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    list.innerHTML = (data.checks || []).map(c => {
+      const mark = !c.ok ? "✗" : (c.warn ? "!" : "✓");
+      const cls = !c.ok ? "fc-chk-bad" : (c.warn ? "fc-chk-warn" : "fc-chk-ok");
+      return `<li class="${cls}"><strong>${mark} ${escapeHtml(c.name)}</strong> <span class="mono">${c.seconds}s</span><div>${escapeHtml(c.detail)}</div></li>`;
+    }).join("");
+    const bad = (data.checks || []).some(c => !c.ok), warn = (data.checks || []).some(c => c.warn);
+    note.textContent = bad ? "Something failed — see below." : (warn ? "Works, with something to look at." : "Everything works ✓");
+    note.classList.toggle("fc-err", bad);
+  } catch (e) {
+    note.textContent = e.message;
+    note.classList.add("fc-err");
+  } finally {
+    btn.disabled = false;
+    loadTikTokStatus();
+  }
 }
 
 async function loadForecast() {
@@ -1811,6 +1861,7 @@ async function loadForecast() {
     if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
     adminState.forecastLoaded = true;
     applyForecastPayload(data);
+    loadTikTokStatus();
   } catch (e) {
     document.getElementById("fc-body").innerHTML = `<tr><td colspan="8" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
     document.getElementById("fc-coverage-body").innerHTML = `<tr><td colspan="4" class="admin-empty">—</td></tr>`;
@@ -1835,6 +1886,7 @@ function renderForecastSummary() {
     _analyticsStatCard("Products with the button", sm.enabled, `of ${sm.total} in the catalog`) +
     _analyticsStatCard("Platform data", sm.platform_modeled, "modeled from the DMA avails data") +
     _analyticsStatCard("Population share", sm.generic, "the line's budget, spread by population") +
+    (sm.tiktok ? _analyticsStatCard("TikTok API", sm.tiktok, "a live audience-size estimate from TikTok") : "") +
     _analyticsStatCard("Customized", sm.customized, "differ from the built-in default");
 }
 
@@ -1872,7 +1924,7 @@ function _forecastRowHtml(p) {
   const isPlatform = p.method === "platform";
   const def = p.default || {};
   const defaultText = def.enabled
-    ? `On · ${def.method === "platform" ? "platform data" : "population share"}`
+    ? `On · ${def.method === "platform" ? "platform data" : (def.method === "tiktok" ? "TikTok API (live)" : "population share")}`
     : "Off";
   return `
     <tr class="fc-row ${p.enabled ? "fc-on" : "fc-off"}" data-fc-product="${escapeAttr(p.name)}">
@@ -1882,7 +1934,8 @@ function _forecastRowHtml(p) {
       <td>
         <select data-fc="method" aria-label="What it computes">
           <option value="platform" ${isPlatform ? "selected" : ""}>Platform data</option>
-          <option value="generic" ${isPlatform ? "" : "selected"}>Population share</option>
+          <option value="generic" ${p.method === "generic" ? "selected" : ""}>Population share</option>
+          <option value="tiktok" ${p.method === "tiktok" ? "selected" : ""}>TikTok API (live)</option>
         </select>
       </td>
       <td>
