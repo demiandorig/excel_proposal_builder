@@ -860,12 +860,25 @@ def _resolve_as_list(item: str, hint: str | None, res: GeoResolution, context: d
             qualified = f"{p}, {state}"
             q = _resolve_single(qualified, hint)
             shared.append(qualified if q.areas and not q.whole_states and not q.unmatched_tokens else p)
+        typed_pieces = gtext.split_conjunctions(item)
+        qualified_pieces = [(typed, now) for typed, now in zip(typed_pieces[:-1], shared) if typed != now]
         pieces = shared + [pieces[-1]]
-        if pieces[:-1] != gtext.split_conjunctions(item)[:-1]:
+        if qualified_pieces:
             why += f"; the state at the end ({state}) applies to each place that needs one"
+    else:
+        qualified_pieces = []
     merged = _merge_resolutions(item, [_resolve_item(p, hint, allow_split=False, context=context) for p in pieces])
     if not merged.areas:
         return None
+    if qualified_pieces:
+        # "Dallas and Lostine, OR" read as Dallas, OR: the places as typed (Dallas as its whole TV market) are one click away.
+        bare = [typed for typed, _ in qualified_pieces if _resolve_single(typed, hint).areas]
+        if bare:
+            as_typed = "; ".join(typed_pieces)
+            merged.suggestions.append({
+                "kind": "did_you_mean", "label": "Each place as typed, without sharing " + state, "geo_type": "", "resolve_hint": as_typed,
+                "state": None, "population": 0, "replaces": item,
+                "why": f"e.g. {bare[0]} as its own TV market instead of {bare[0]}, {state}"})
     if res.areas and (len(merged.unmatched_tokens) > len(res.unmatched_tokens)
                       or (len(merged.unmatched_tokens) == len(res.unmatched_tokens) and len(merged.areas) <= len(res.areas))):
         return None

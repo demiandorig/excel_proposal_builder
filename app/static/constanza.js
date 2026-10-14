@@ -200,6 +200,7 @@
   // Conjunction words. "or" only in lowercase: OR is Oregon (the server reads it the same way), and the matching below is
   // written out letter by letter instead of with the `i` flag so that a state code can never be taken for a word.
   const WORD = "(?:[Aa][Nn][Dd]|[Pp][Ll][Uu][Ss]|or)";
+  const WORD_LC = "(?:and|plus|or)";                          // after a comma only lower case is a conjunction: "Dallas, Plus Ultra" is a name
   const SEP = "[;|\\n,&+]";
   const CONJ = "\\s" + WORD + "\\s";
   const ci = (s) => s.replace(/[A-Za-z]|[^A-Za-z]/g, (c) => (/[A-Za-z]/.test(c) ? "[" + c.toLowerCase() + c.toUpperCase() + "]" : escRe(c)));
@@ -226,11 +227,11 @@
       if (m[1]) {                                                 // "A; X" -> "A"; "A and X" -> "A"; "A, B, or X" -> "A, B"
         const before = text.slice(0, m.index);
         // ... and an Oxford comma after the item goes too: "A, X, and B" -> "A and B"
-        const after = text.slice(end).replace(new RegExp("^\\s*,(?=\\s+" + WORD + "\\s)"), "");
+        const after = text.slice(end).replace(new RegExp("^\\s*,(?=\\s+" + WORD_LC + "\\s)"), "");
         return (/^\s/.test(m[1]) ? before.replace(/\s*,\s*$/, "") : before) + after;
       }
       // the first item: its following separator goes with it ("X; A" -> "A", "X and A" -> "A", "X, and A" -> "A")
-      return text.slice(0, m.index) + text.slice(end).replace(new RegExp("^(?:\\s*,?\\s*" + WORD + "(?=\\s)|\\s*" + SEP + ")?\\s*"), "");
+      return text.slice(0, m.index) + text.slice(end).replace(new RegExp("^(?:\\s*,\\s*" + WORD_LC + "(?=\\s)|\\s+" + WORD + "(?=\\s)|\\s*" + SEP + ")?\\s*"), "");
     }
     return null;
   }

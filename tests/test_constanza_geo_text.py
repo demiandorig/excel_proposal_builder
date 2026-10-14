@@ -572,3 +572,58 @@ def test_an_oxford_or_between_addresses_makes_each_its_zip():
     assert labels(resolve_geo("Bend, OR 97701, or Salem, OR 97301")) == ["ZIP 97701", "ZIP 97301"]
     assert labels(resolve_geo("Plano in Collin County, or Houston in Harris County")) == ["Collin County, TX", "Harris County, TX"]
 
+
+# --------------------------------------------------------------------------------------------- fourth review
+
+@pytest.mark.parametrize("text,market", [("Dallas or 75201", "Dallas-Ft. Worth"), ("Houston or 77002", "Houston"), ("Los Angeles or 90001", "Los Angeles")])
+def test_a_lowercase_or_between_a_city_and_a_zip_is_a_word_not_oregon(text, market):
+    """Upper-casing every trailing two-letter word read 'or' as OR: 'Dallas or 75201' became the ZIP alone (the city dropped)."""
+    res = resolve_geo(text)
+    assert market in labels(res) and not any("as ZIP" in i["why"] for i in res.interpretations), (text, labels(res))
+
+
+def test_an_address_built_from_a_city_that_does_not_exist_in_that_state_is_left_to_the_other_readings():
+    """'Miami, OR 33101' with a ZIP the data lacks fell back to 'Miami, OR' and added every Oregon market."""
+    res = resolve_geo("Miami, or 33101")
+    assert "Portland, OR" not in labels(res) and "Eugene" not in labels(res)
+    assert gt.address_place("Miami, OR 33101") is None
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("portland, or\nseattle, wa", {"Portland, OR", "Seattle-Tacoma"}), ("bend, or\nsalem, or\neugene, or", {"Bend, OR", "Salem, OR", "Eugene"}),
+    ("Bend, or\r\nSalem, or", {"Bend, OR", "Salem, OR"}), ("portland, or\n\nseattle, wa", {"Portland, OR", "Seattle-Tacoma"}),
+])
+def test_a_lowercase_state_code_at_the_end_of_a_line_stays_the_state(text, expected):
+    """The Oxford rewrite ran across line breaks: ', or<newline>seattle' lost the state of every line but the last."""
+    res = resolve_geo(text)
+    assert expected <= set(labels(res)) and not res.ambiguous, (text, labels(res), res.ambiguous)
+
+
+def test_a_comma_after_a_zip_ends_an_address_when_the_text_holds_several():
+    """Only the last address of a comma-separated list became a ZIP (it followed ', or'); the earlier ones stayed one chunk."""
+    assert labels(resolve_geo("Chicago, IL 60601, Chicago, IL 60602, or Chicago, IL 60603")) == ["ZIP 60601", "ZIP 60602", "ZIP 60603"]
+    assert labels(resolve_geo("Houston, TX 77002, Austin, TX 78701, or San Antonio, TX 78205")) == ["ZIP 77002", "ZIP 78701", "ZIP 78205"]
+    assert labels(resolve_geo("Plano, TX 75024, Frisco, TX 75034")) == ["ZIP 75024", "ZIP 75034"]
+    res = resolve_geo("Washington, DC 20001, USA")                                           # one ZIP: one address, nothing is split
+    assert not any("end of an address" in i["why"] for i in res.interpretations)
+    assert labels(resolve_geo("90210, 94105")) == ["ZIP 90210", "ZIP 94105"]                 # plain ZIP lists are untouched
+
+
+@pytest.mark.parametrize("text,as_typed,market", [
+    ("Kansas City and Overland Park, KS", "Kansas City; Overland Park, KS", "Kansas City"),
+    ("Dallas and Lostine, OR", "Dallas; Lostine, OR", "Dallas-Ft. Worth"),
+    ("Lincoln and Springfield, IL", "Lincoln; Springfield, IL", "Lincoln & Hastings-Krny"),
+])
+def test_the_places_as_typed_are_one_click_away_when_the_shared_state_turned_a_market_into_a_town(text, as_typed, market):
+    """'Dallas and Lostine, OR' is Dallas, OR + Lostine, OR (the state typed once belongs to each place) - and the TV market the
+    planner may have meant is offered, not silently lost (8.96M became 17k)."""
+    res = resolve_geo(text)
+    sg = next(s for s in res.suggestions if s["label"].startswith("Each place as typed"))
+    assert sg["resolve_hint"] == as_typed and sg["replaces"] == text and sg["kind"] == "did_you_mean"
+    assert market in labels(resolve_geo(sg["resolve_hint"]))                                 # and it really resolves that way
+
+
+def test_no_alternative_is_offered_when_the_bare_place_names_no_market():
+    res = resolve_geo("Mesa and Gilbert, AZ")
+    assert not [s for s in res.suggestions if s["label"].startswith("Each place as typed")]
+

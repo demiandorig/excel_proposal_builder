@@ -211,17 +211,20 @@ real place the resolver accepts.
   ("Los Angeles and Orange counties, CA") and lists where only part resolved are all read; "or" is read like "and" (the places
   are added) and says so. **Only a lowercase `or` with spaces around it is a word: `OR` is Oregon** ("Beaverton, OR and
   Hillsboro, OR" is two cities). An Oxford ", or" before a place ("Dallas, Houston, or Austin", "Eugene, OR, or Salem, OR")
-  separates the places; a lowercase "or" after a comma that is followed by "and", "&", "+" or a ZIP is still the state
-  ("portland, or and seattle"). The state typed once at the end belongs to each place that exists in it ("Lincoln and
-  Springfield, IL" is Lincoln, IL, not the Nebraska market); where the qualified form is not a place - it would become the
-  whole state ("Chicago, IN") or leaves the state unmatched ("Philadelphia, DE") - the piece stays a market of its own, and a
-  piece inside a listed market is counted once with a note.
+  separates the places; a lowercase "or" after a comma that is followed by "and", "&", "+", a ZIP or the end of the line is
+  still the state ("portland, or and seattle", a pasted list with "portland, or" on one line). The state typed once at the end
+  belongs to each place that exists in it ("Lincoln and Springfield, IL" is Lincoln, IL, not the Nebraska market), and when
+  that turns a TV market into a town ("Dallas and Lostine, OR") the places as typed are offered as one click; where the
+  qualified form is not a place - it would become the whole state ("Chicago, IN") or leaves the state unmatched
+  ("Philadelphia, DE") - the piece stays a market of its own, and a piece inside a listed market is counted once with a note.
 * **"City, ST ZIP" is the ZIP.** An address ("Plano, TX 75024", "Portland, OR 97201", "Phoenix AZ 85001") with exactly one
   place and its state before the ZIP is read as its ZIP, the exact place, and the note names the ZIP's market (so a
-  contradiction - "Dallas, TX 77002" is a Houston ZIP - shows). When the bundled data has no such ZIP (a PO-box ZIP has no
-  residents) the city and state before it are used instead. Places before a state and ZIP ("Dallas and Houston, TX 77002"),
-  two ZIPs, a ZIP in the middle of a longer text, and any text typed with a geography type are left to the other readings: nothing
-  the planner typed is dropped for a ZIP.
+  contradiction - "Dallas, TX 77002" is a Houston ZIP - shows); a lowercase state code counts only after a comma ("bend, or
+  97701" is Bend, OR; "Dallas or 75201" is Dallas or a ZIP). When the bundled data has no such ZIP (a PO-box ZIP has no
+  residents) the city and state before it are used instead, if that city exists in that state. A comma right after a ZIP ends
+  an address where the text holds several ("Chicago, IL 60601, Chicago, IL 60602" is two addresses). Places before a state and
+  ZIP ("Dallas and Houston, TX 77002"), two ZIPs, a ZIP in the middle of a longer text, and any text typed with a geography
+  type are left to the other readings: nothing the planner typed is dropped for a ZIP.
 * **A state name before a state code** ("Delaware, OH", "Washington, PA", "Kansas, OK") is the town when one by that name
   exists in that state, at any size, with the two states offered as an alternative ("The states Kansas and Oklahoma"): the
   other reading is the one that would be silently huge when wrong. Two state names ("Washington, Oregon") or a state with no
@@ -289,14 +292,17 @@ the typed text inside a name ("dental"), shared words, and near-spellings ("fitn
 * **Matching never guesses.** A segment's rate is applied only when the match is strong: an exact name or team wording, a
   keyword phrase, or the typed text inside a name. One shared common word ("pet OWNERS" against "small business OWNERS") is
   shown as a suggestion, never applied; neither is a bare role word ("owners", "shoppers") or two segments that fit equally well
-  ("insurance": auto or health?). Role and language words do not decide the audience beside a topic: "mortgage shoppers" means
-  "mortgage", "home services in Spanish" means home services, and the keywords "shoppers" (Retail Shoppers) and "spanish"
-  (Bilingual Speakers) only hint - the catch-all applies only when nothing names the topic ("online shoppers"). A shopper /
-  buyer / seeker word carries over only to an in-market kind of audience (its label, the sales team's names or its
-  description say shoppers, buyers, in-market, planning to buy): "Sports Fans" are not "sports shoppers", so that phrase offers
-  Sports Fans and applies nothing; a topic held back this way is not replaced by a looser match ("college" -> higher
-  education for "college football shoppers"). Between keyword matches the one that covers more of the topic words wins
-  ("luxury car" over "car shopper"); length only breaks the rest. A label may not promise more than its number measures: the
+  ("insurance": auto or health?). Role and language words never compete with a topic: "mortgage shoppers" means "mortgage",
+  "home services in Spanish" means home services; the keywords "shoppers" (Retail Shoppers) and "spanish" (Bilingual
+  Speakers) apply only when nothing else in the phrase names an audience ("online shoppers", "spanish speaking"; the role word
+  alone is the weaker of the two). A shopper / buyer / seeker word carries over only to an in-market kind of audience (its
+  label, the sales team's names or its description say shoppers, buyers, in-market, planning to buy): "Sports Fans" are not
+  "sports shoppers", so that phrase offers Sports Fans and applies nothing. A topic held back this way is not replaced by a
+  segment that accounts for LESS of the typed words ("college" -> higher education for "college football shoppers"); one that
+  accounts for as much is the in-market reading ("student loan shoppers" is Financial In-Market). Only a name typed in full
+  holds a topic back, never a one-word overlap. Between keyword matches the one that covers more of the topic words wins
+  ("luxury car" over "car shopper"); length only breaks the rest. A keyword closed up of its spaces ("videogames") is found
+  when it starts on a typed word, not across two ("car shopper" is not inside "nascar shoppers"). A label may not promise more than its number measures: the
   two segments the independent review caught (a 9% "politically engaged" and a 33% "religious") now say what they are.
 * **Confidence feeds the range.** Each applied interest widens the low/high band by its grade (high 15%, moderate 25%, low
   40%), combined with the other factors by root-sum-of-squares. Interests are multiplied as if independent, and the result
@@ -329,8 +335,8 @@ quick. A busy pool is *not* treated as an outage. This holds after the pool exis
 seconds asks one direct connect (serialised, so one failed probe fails every waiting caller) whether the database is there; if
 not, the fail-fast window opens at once instead of every request waiting out `DB_POOL_TIMEOUT`. A probe that answered in the
 last 2 seconds speaks for the callers queued behind it, and a server that answers "too many clients" is alive and only full: both
-count as a busy pool. A busy pool is waited on for the rest of the budget in 2-second slices, so a window another caller opens
-meanwhile ends that wait too. The window is recorded once, by whoever saw the outage first; callers that meet it do not push its
+count as a busy pool. The probe is asked at least once however short `DB_POOL_TIMEOUT` is, and a busy pool is waited on for the
+rest of the budget in 2-second slices, so a window another caller opens meanwhile ends that wait too. The window is recorded once, by whoever saw the outage first; callers that meet it do not push its
 end out, so it closes after 5 seconds even under steady traffic.
 
 A session advisory lock (the bootstrap, the migration runner) is released with `db.release_advisory_lock`: it rolls back first
@@ -352,7 +358,7 @@ export makes a new Netflix version instead of leaving it "unchanged".
   period), resolves the geography as the planner types (`POST /api/constanza/resolve`, debounced), and pulls with
   `POST /api/constanza/estimate`. A pick on a suggestion edits only the item it replaces; "use X only" removes exactly the
   typed items it drops, together with the separator that joined each to the list (and an Oxford comma after it: "A, X, and
-  B" -> "A and B"). Only a lowercase `or` is a word (OR is Oregon), and text with one comma is a list unless what follows it
+  B" -> "A and B"; after a comma only a lower-case and / or / plus is a conjunction, so "Dallas, Plus Ultra" keeps its name). Only a lowercase `or` is a word (OR is Oregon), and text with one comma is a list unless what follows it
   only qualifies the place (a state, a state and ZIP, "D.C.", the country). The "form has changed since this was pulled"
   banner compares the form with the request the result was pulled with, so reopening the dock, or changing a field and putting
   it back, shows nothing.

@@ -131,11 +131,54 @@ def test_a_role_word_carries_over_only_to_an_in_market_kind_of_audience(taxonomy
     assert topic in [h.segment.id for h in taxonomy.search(phrase, limit=6)], phrase
 
 
-@pytest.mark.parametrize("phrase", ["nascar shoppers", "masters shoppers", "college football buyers", "student loan shoppers", "home improvement buyers"])
+@pytest.mark.parametrize("phrase", ["nascar shoppers", "college football shoppers", "college football buyers", "home improvement buyers"])
 def test_a_held_back_topic_is_not_replaced_by_a_looser_match(taxonomy, phrase):
     """With 'Sports Fans - College Football' held back, 'college' alone matched Higher Education Seekers, and 'car shopper' was
     found inside 'nas-CAR SHOPPER-s'."""
     assert taxonomy.best_match(phrase) is None, phrase
+
+
+@pytest.mark.parametrize("phrase,segment", [
+    ("student loan shoppers", "fin_in_market"), ("contractor shoppers", "home_services"), ("contractor buyers", "home_services"),
+    ("masters shoppers", "edu_higher_ed_seekers"),
+])
+def test_a_segment_that_accounts_for_as_much_of_the_topic_and_is_in_market_is_the_reading_of_a_shopper_phrase(taxonomy, phrase, segment):
+    """The wrong-kind segment (College Students, the B2B construction workforce, Masters golf) is held back; an in-market segment
+    that covers the same words is what 'shoppers' means. The bare word stays ambiguous where two segments share it."""
+    assert taxonomy.best_match(phrase).segment.id == segment, phrase
+    assert taxonomy.best_match("masters") is None
+
+
+@pytest.mark.parametrize("phrase,segment", [
+    ("home buyers", "home_buyers_movers"), ("homes buyers", "home_buyers_movers"), ("auto intenders", "auto_in_market"),
+    ("college seekers", "edu_higher_ed_seekers"), ("college buyers", "edu_higher_ed_seekers"), ("university seekers", "edu_higher_ed_seekers"),
+    ("degree seekers", "edu_higher_ed_seekers"),
+])
+def test_a_plural_in_market_phrase_is_not_blocked_by_a_one_word_overlap_with_a_wrong_kind_segment(taxonomy, phrase, segment):
+    """'home buyers' shares 'home' with Smart Home and Home Improvement, 'auto intenders' shares 'auto' with Auto Racing: those
+    one-word overlaps were never going to apply, yet they were 'held back' and blocked the real segment (a blocker)."""
+    assert taxonomy.best_match(phrase).segment.id == segment, phrase
+
+
+@pytest.mark.parametrize("phrase", [
+    "spanish speaking", "spanish-speaking", "spanish language", "bilingual households", "speaks spanish", "spanglish speakers",
+    "bilingual families", "spanish dominant", "spanish speaking audience", "spanish language radio", "spanish speaking shoppers",
+    "spanish speaking parents",
+])
+def test_a_language_word_with_only_filler_beside_it_is_the_language_audience(taxonomy, phrase):
+    """Language words are modifiers only when something else names a topic: 'speaking', 'language' or 'households' do not."""
+    assert taxonomy.best_match(phrase).segment.id == "tech_bilingual", phrase
+
+
+@pytest.mark.parametrize("text,plural", [("contractor", "contractors"), ("dentist", "dentists"), ("plumber", "plumbers"), ("playstation", "playstations")])
+def test_a_typed_plural_still_finds_the_keyword_it_is_a_plural_of(taxonomy, text, plural):
+    assert taxonomy.best_match(plural).segment.id == taxonomy.best_match(text).segment.id
+
+
+def test_a_keyword_is_not_found_across_the_boundary_of_two_typed_words(taxonomy):
+    """'car shopper' sits inside 'nas-CAR SHOPPER-s'; 'videogames' for 'video games' (closed-up spaces) still works."""
+    assert taxonomy.best_match("videogames").segment.id == "video_gamer" and taxonomy.best_match("play station").segment.id == "video_gamer"
+    assert "auto_in_market" not in [h.segment.id for h in taxonomy.search("nascar shoppers", limit=3) if h.score >= 55]
 
 
 def test_a_phrase_that_holds_a_segments_own_full_name_is_that_segment_whatever_the_role_word(taxonomy):
@@ -163,11 +206,19 @@ SUFFIXES = (" shoppers", " owners", " buyers", " in Spanish")
 
 
 def test_adding_a_role_or_language_word_to_any_name_or_keyword_never_picks_another_audience(taxonomy):
-    """It may leave the choice to the planner (two segments share a keyword, or the role word does not fit the segment); it must
-    never choose a different segment."""
+    """It may leave the choice to the planner (the role word does not fit the segment); it must never choose a different segment -
+    except where another segment has the very same phrase ('masters': golf or higher education), which a shopper / seeker word
+    settles in favour of the in-market one."""
+    from app.services.audience_taxonomy import _fold
+    owners: dict = {}
+    for seg in taxonomy.segments.values():
+        for phrase in (seg.label, *seg.keywords, *seg.company_names):
+            owners.setdefault(_fold(phrase), set()).add(seg.id)
     wrong = []
     for seg in taxonomy.segments.values():
         for phrase in (seg.label, *seg.keywords, *seg.company_names):
+            if len(owners[_fold(phrase)]) > 1:
+                continue
             for suffix in ("",) + SUFFIXES:
                 hit = taxonomy.best_match(phrase + suffix)
                 if hit is not None and hit.segment.id != seg.id:

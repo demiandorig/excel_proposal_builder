@@ -165,6 +165,20 @@ def test_a_busy_pool_is_still_waited_on_for_the_whole_budget_and_is_not_an_outag
     assert db._down_until == 0.0                                            # slow is not down
 
 
+@pytest.mark.parametrize("budget", ["0.4", "1.0"])
+def test_even_a_short_pool_budget_asks_whether_the_database_is_there(monkeypatch, budget):
+    """With DB_POOL_TIMEOUT at or below the first slice the probe was skipped: a dead database was reported as 'busy' (PoolTimeout)
+    every time and no window opened, so every caller waited the whole budget again."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@127.0.0.1:1/none")
+    monkeypatch.setenv("DB_POOL_TIMEOUT", budget)
+    def refuse(*a, **k):
+        raise psycopg.OperationalError("connection refused")
+    monkeypatch.setattr(db.psycopg, "connect", refuse)
+    with pytest.raises(psycopg.OperationalError, match="unavailable"):
+        db._PooledConnection(_SleepyPool()).__enter__()
+    assert db._down_until > 0                                               # the window is open for everyone
+
+
 # --------------------------------------------------------------------------- real database
 
 

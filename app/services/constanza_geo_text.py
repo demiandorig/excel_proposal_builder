@@ -185,6 +185,18 @@ def _clean_chunk(chunk: str) -> list[dict]:
 
 
 _ZIP_ONLY_RE = re.compile(r"^\d{5}(?:-\d{4})?$")
+_ANY_ZIP_RE = re.compile(r"\b\d{5}(?:-\d{4})?\b")
+_ZIP_COMMA_RE = re.compile(r"(\b\d{5}(?:-\d{4})?)[ \t]*,[ \t]*(?=[A-Za-z])")
+
+
+def _split_addresses(chunk: str) -> list[str]:
+    """'Chicago, IL 60601, Chicago, IL 60602' -> two items: a comma right after a ZIP ends an address. Only where the text holds
+    several ZIPs ('Washington, DC 20001, USA' is one address)."""
+    if len(_ANY_ZIP_RE.findall(chunk)) < 2:
+        return [chunk]
+    return [part.strip() for part in _ZIP_COMMA_RE.sub(r"\1;", chunk).split(";") if part.strip()]
+
+
 _ADDRESS_ZIP_RE = re.compile(r"^(?P<rest>.*\S)\s+(?P<zip>\d{5})(?:-\d{4})?$")
 
 
@@ -199,8 +211,8 @@ def address_place(item: str) -> Optional[tuple[str, str]]:
     rest = m.group("rest").strip(" ,")
     if re.search(r"\d", rest) or len(split_conjunctions(rest)) > 1:
         return None
-    rest_cased = re.sub(r"(?<=[\s,])([A-Za-z]{2})$", lambda t: t.group(1).upper(), rest)      # "bend, or" is Bend, OR
-    split = split_trailing_state(rest_cased)
+    rest_cased = re.sub(r",(\s*)([A-Za-z]{2})$", lambda t: "," + t.group(1) + t.group(2).upper(), rest)   # "bend, or" is Bend, OR
+    split = split_trailing_state(rest_cased)                     # ("Dallas or 75201": the 'or' is a word, not Oregon)
     if split is None or len([p for p in rest.split(",") if p.strip()]) > 2:       # "Place, ST" or "Place ST", nothing more
         return None
     zip_code = m.group("zip")
@@ -209,6 +221,8 @@ def address_place(item: str) -> Optional[tuple[str, str]]:
     if shares:
         markets = " / ".join(dict.fromkeys(s["dma"] for s in shares[:3]))
         return zip_code, f"read '{item}' as ZIP {zip_code} (in the {markets} market); the city and state typed before it were not used"
+    if not constanza_geo_crosswalk.place_in_state(split[0], split[1]):
+        return None                                              # "Miami, OR 33101" names no place: leave it to the other readings
     return f"{split[0]}, {split[1]}", f"ZIP {zip_code} is not in the data Constanza has, so the city and state before it are used"
 
 
@@ -243,10 +257,16 @@ def prepare(text: str, hint: Optional[str] = None) -> Prepared:
     spaced = _OXFORD_OR_RE.sub("; ", text or "")
     if spaced != (text or ""):
         interps.append({"input": text, "became": spaced, "why": "read the 'or' before the last place as part of the list"})
-    for chunk in re.split(r"[\n;|]+", spaced):
-        chunk = chunk.strip()
-        if not chunk:
+    chunks: list[str] = []
+    for raw in re.split(r"[\n;|]+", spaced):
+        raw = raw.strip()
+        if not raw:
             continue
+        parts = _split_addresses(raw)
+        if len(parts) > 1:
+            interps.append({"input": raw, "became": "; ".join(parts), "why": "read the comma after each ZIP as the end of an address"})
+        chunks.extend(parts)
+    for chunk in chunks:
         pieces = _clean_chunk(chunk)
         # One chunk that became SEVERAL places from the same words ("Los Angeles and Orange counties"): none of them stands for
         # the whole text, so replacing "the typed text of one" would take the others with it.
@@ -289,7 +309,7 @@ _CONJUNCTION_RE = re.compile(r"\s+(?:and|&|plus)\s+|\s*\+\s*|(?<![,\s])\s+(?-i:o
 OR_WORD_RE = re.compile(r"(?<![,\s])\s+or\s+")
 # ", or Austin" (a place follows): the conjunction of "A, B, or C". Not when what follows could only continue a state code - "and",
 # "plus", "&", "+" or a ZIP ("portland, or and seattle", "bend, or 97701") - where the lowercase "or" is Oregon.
-_OXFORD_OR_RE = re.compile(r",\s+or\s+(?=[A-Za-z])(?!(?:and|plus)\b)")
+_OXFORD_OR_RE = re.compile(r",[ \t]+or[ \t]+(?=[A-Za-z])(?!(?:and|plus)\b)")            # (one line: "portland, or" at the end of a line is Oregon)
 
 
 def split_conjunctions(item: str) -> list[str]:

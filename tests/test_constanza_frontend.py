@@ -245,6 +245,11 @@ def test_notes_that_repeat_the_unmatched_warning_are_not_shown_twice():
     ("Dallas, Austin, and Houston", ["Dallas", "Austin"], "Houston"),
     ("Plano, TX, Frisco, TX, and Allen, TX", ["Frisco, TX"], "Plano, TX and Allen, TX"),
     ("Andover, MA, Austin, TX", ["Andover, MA"], "Austin, TX"),                       # a name that starts with "And" is not a word
+    # a capitalised And / Plus after a comma starts a name, it is not a conjunction
+    ("Dallas, Plus Ultra", ["Dallas"], "Plus Ultra"),
+    ("Dallas, Plus Ultra, Waco", ["Dallas"], "Plus Ultra, Waco"),
+    ("Dallas, And Co Ranch", ["Dallas"], "And Co Ranch"),
+    ("Waco, Dallas, Plus Ultra", ["Dallas"], "Waco, Plus Ultra"),
 ])
 def test_dropping_items_matches_whole_items_never_substrings(text, drop, expected):
     assert run(f"return JSON.stringify(P.removeGeoItems({json.dumps(text)}, {json.dumps(drop)}));") == expected
