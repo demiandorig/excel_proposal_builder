@@ -32,7 +32,7 @@ def _mock_catalog_db(monkeypatch):
     monkeypatch.setattr("app.market_config.load_market_config", lambda: {})
 
 
-DISPLAY = "eDigital Network Display - Standard IAB"
+DISPLAY = "eDigital Display"
 
 
 def _req(**kw):

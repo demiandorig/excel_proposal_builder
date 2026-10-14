@@ -1012,7 +1012,8 @@
   },
   {
    "name": "eDigital Display",
-   "after": "eDigital Network Display - Standard IAB",
+   "after": "YouTube Ads - Non-Skippable",
+   "replaces": "eDigital Network Display - Standard IAB",
    "family": "Display",
    "short_label": "Awareness / Retargeting",
    "proposal_description": "Entravision's eDigital display network: standard IAB units across thousands of sites and apps, led by Yahoo, MobilePosse, The Weather Channel, WeatherBug, Audacy, Fox News, iHeartRadio and NewsBreak. Primarily mobile, with desktop and tablet. Access to 1st party data and premium quality inventory. Geo targeting; additional targeting layers per Sales Planning.",
@@ -1048,7 +1049,8 @@
   },
   {
    "name": "eDigital OLV",
-   "after": "Video - Pre-roll (OLV)",
+   "after": "Search - SEM",
+   "replaces": "Video - Pre-roll (OLV)",
    "family": "Online Video",
    "short_label": "Awareness / Retargeting",
    "proposal_description": "Online video (OLV) on Entravision's eDigital network: pre-roll across thousands of sites and apps, including Yahoo, MobilePosse, NewsBreak, The Weather Channel, FOX News, CBS Sports, New York Post and Fandom. Primarily mobile, with desktop and tablet. Video messages of 15 or 30 seconds shown before video content. Geo targeting; additional targeting layers per Sales Planning.",

@@ -55,7 +55,7 @@ NOTE_B = "Brand terms"
 NOTE_AV = "Bonus: weekend geofence"
 
 SEM = "Search - SEM"
-VIDEO = "Video - Pre-roll (OLV)"
+VIDEO = "eDigital OLV"
 GEOFENCE = "Display - Geo Fence"
 EMAIL = "Email Campaigns - Display Re-targeting"
 

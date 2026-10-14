@@ -88,17 +88,17 @@ def test_flat_denials_of_an_allowed_vertical_are_caught(sentence):
 
 
 def test_denials_are_scrubbed_from_the_mitigation_and_summary_and_the_risk_level_is_recomputed(builtin_state):
-    items = _items("Video - Pre-roll (OLV)", "YouTube Ads")
+    items = _items("eDigital OLV", "YouTube Ads")
     matrix = rs.build_matrix([li.product_name for li in items], ["Political"])
     result = _result(
-        {"product_name": "Video - Pre-roll (OLV)", "risk_level": "high",
+        {"product_name": "eDigital OLV", "risk_level": "high",
          "risks": [{"issue": "Political ads not feasible", "detail": "Political ads are not allowed on OLV.", "source": "x"},
                    {"issue": "Additional: disclosure", "detail": "Political ads cannot run without a Paid for by disclaimer.", "source": "y"}],
          "recommended_mitigation": "Do not run political ads on OLV. Add the Paid for by disclaimer to every creative."},
         summary="Political ads are not allowed on OLV. Plan for creative approval lead time.",
     )
     rb._apply_matrix(result, matrix, items)
-    entry = next(r for r in result["product_roadblocks"] if r["product_name"] == "Video - Pre-roll (OLV)")
+    entry = next(r for r in result["product_roadblocks"] if r["product_name"] == "eDigital OLV")
     assert [r["issue"] for r in entry["risks"]] == ["Additional: disclosure"]     # the caveat stayed, the denial went
     assert "Do not run" not in entry["recommended_mitigation"] and "disclaimer" in entry["recommended_mitigation"]
     assert entry["risk_level"] == "medium"                                          # no longer "high" off a claim that was removed
@@ -106,16 +106,16 @@ def test_denials_are_scrubbed_from_the_mitigation_and_summary_and_the_risk_level
 
 
 def test_a_summary_that_was_only_a_denial_gets_a_neutral_replacement(builtin_state):
-    items = _items("Video - Pre-roll (OLV)")
-    matrix = rs.build_matrix(["Video - Pre-roll (OLV)"], ["Political"])
-    result = _result({"product_name": "Video - Pre-roll (OLV)", "risk_level": "low", "risks": [], "recommended_mitigation": ""},
+    items = _items("eDigital OLV")
+    matrix = rs.build_matrix(["eDigital OLV"], ["Political"])
+    result = _result({"product_name": "eDigital OLV", "risk_level": "low", "risks": [], "recommended_mitigation": ""},
                      summary="Political ads cannot be run on OLV.")
     rb._apply_matrix(result, matrix, items)
     assert "Restricted verticals confirmed: Political" in result["overall_summary"]
 
 
 def test_a_summary_sentence_about_a_refused_product_is_left_alone(builtin_state):
-    items = _items("Video - Pre-roll (OLV)", "YouTube Ads")
+    items = _items("eDigital OLV", "YouTube Ads")
     matrix = rs.build_matrix([li.product_name for li in items], ["Political"])
     summary = "Political ads are not allowed on YouTube."
     result = _result(summary=summary)
@@ -145,13 +145,13 @@ def test_confirmed_verticals_missing_from_the_sheet_are_reported(builtin_state):
 def test_a_renamed_product_keeps_its_sheet_verdict(monkeypatch, builtin_state):
     # A rename in Admin -> Product Catalog changes the name and records the old one as an alias.
     monkeypatch.setattr("app.catalog.load_rate_overrides",
-                        lambda: {"Video - Pre-roll (OLV)": {"name": "Pre-Roll Video (OLV)"}})
-    monkeypatch.setattr("app.catalog.all_product_aliases", lambda: {"Video - Pre-roll (OLV)": "Pre-Roll Video (OLV)"})
+                        lambda: {"eDigital OLV": {"name": "Pre-Roll Video (OLV)"}})
+    monkeypatch.setattr("app.catalog.all_product_aliases", lambda: {"eDigital OLV": "Pre-Roll Video (OLV)"})
     from app import catalog
     catalog.invalidate_product_caches()
-    matrix = rs.build_matrix(["Pre-Roll Video (OLV)", "Video - Pre-roll (OLV)"], ["Political"])
+    matrix = rs.build_matrix(["Pre-Roll Video (OLV)", "eDigital OLV"], ["Political"])
     assert matrix["verdicts"]["Pre-Roll Video (OLV)"]["verdict"] == "allowed"
-    assert matrix["verdicts"]["Video - Pre-roll (OLV)"]["verdict"] == "allowed"
+    assert matrix["verdicts"]["eDigital OLV"]["verdict"] == "allowed"
 
 
 def test_a_new_product_the_sheet_doesnt_list_reads_not_accepted_with_a_hint_to_map_it(monkeypatch, builtin_state):
@@ -290,7 +290,7 @@ def test_a_resync_keeps_admin_keyword_and_mapping_edits():
     old = rs.Category(name="Political", kind="allowlist", keywords=["my custom keyword"], items=["eDigital Display", "Gone"],
                       product_map={"eDigital Display": ["My Custom Display"], "Gone": ["X"]})
     new = rs.Category(name="political", kind="allowlist", keywords=["political"], items=["eDigital Display", "New Item"],
-                      product_map={"eDigital Display": ["eDigital Network Display - Standard IAB"], "New Item": []})
+                      product_map={"eDigital Display": ["eDigital Display"], "New Item": []})
     rs.carry_over_admin_edits([new], [old])
     assert new.keywords == ["my custom keyword"]
     assert new.product_map["eDigital Display"] == ["My Custom Display"]
@@ -468,7 +468,7 @@ def test_forced_dooh_tabs_are_not_discarded_by_the_all_off_guard(tmp_path):
 
 def test_added_value_lines_leave_the_sov_cell_blank_not_a_green_zero(tmp_path):
     paid = LineItem(product_name="Search - SEM", monthly_budget=1000.0, months=3, id="p")
-    gift = LineItem(product_name="eDigital Network Display - Standard IAB", monthly_budget=0.0, months=3, id="g", is_added_value=True)
+    gift = LineItem(product_name="eDigital Display", monthly_budget=0.0, months=3, id="g", is_added_value=True)
     out = tmp_path / "av.xlsx"
     generate_proposal(_req(), [paid, gift], out, avails_data={"p": {"max_imps": 100000, "max_spend": 5000},
                                                               "g": {"max_imps": 200000, "max_spend": 9000}})
@@ -477,7 +477,7 @@ def test_added_value_lines_leave_the_sov_cell_blank_not_a_green_zero(tmp_path):
     def row_of(name):
         return next(r for r in range(1, ws.max_row + 1) if str(ws.cell(row=r, column=3).value or "").startswith(name))
     assert str(ws.cell(row=row_of("Search - SEM"), column=17).value).startswith("=IFERROR(L")     # paid line: live SOV
-    assert ws.cell(row=row_of("eDigital Network Display"), column=17).value is None             # Added Value: nothing, not 0.0%
+    assert ws.cell(row=row_of("eDigital Display"), column=17).value is None             # Added Value: nothing, not 0.0%
 
 
 def test_an_avails_only_line_with_just_uniques_keeps_its_live_formulas_and_the_uniques(tmp_path):

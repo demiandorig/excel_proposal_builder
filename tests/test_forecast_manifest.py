@@ -96,10 +96,11 @@ def test_descriptions_reflect_each_products_real_publisher_mix():
 
 def test_the_seed_products_are_part_of_the_code_catalog_in_the_right_places():
     names = [p.name for p in catalog.CATALOG]
-    assert len(names) == len(set(names)) == 92
+    assert len(names) == len(set(names)) == 90                      # the rate card's 62 minus the 2 the seed replaces, plus 30 seed products
     assert names.index("Entravision+ Connect - (Default)") == names.index("Netflix - Spanish Content :30s Ads") + 1
-    assert names.index("eDigital Display") == names.index("eDigital Network Display - Standard IAB") + 1
-    assert names.index("eDigital OLV") == names.index("Video - Pre-roll (OLV)") + 1
+    assert names.index("eDigital Display") == names.index("YouTube Ads - Non-Skippable") + 1          # first of the Display family
+    assert names.index("eDigital OLV") == names.index("Search - SEM") + 1                                # first of Online Video
+    assert "eDigital Network Display - Standard IAB" not in names and "Video - Pre-roll (OLV)" not in names   # replaced, not kept beside
 
 
 def test_a_missing_or_broken_seed_file_leaves_the_catalog_as_before(monkeypatch, tmp_path):
@@ -138,3 +139,48 @@ def test_manifest_errors_are_reported_before_anything_runs():
 def test_a_missing_manifest_file_is_a_clear_error(tmp_path):
     with pytest.raises(mf.ManifestError, match="cannot read manifest"):
         mf.load_manifest(tmp_path / "missing.json")
+
+
+# --------------------------------------------------------------------------------------------- eDigital Display / OLV replace the older products
+
+OLD_DISPLAY, OLD_OLV = "eDigital Network Display - Standard IAB", "Video - Pre-roll (OLV)"
+
+
+def test_the_new_edigital_products_say_which_older_product_they_replace():
+    assert catalog.forecast_seed_replacements() == {"eDigital Display": OLD_DISPLAY, "eDigital OLV": OLD_OLV}
+    # the field is metadata about the seed: it is not a Product field, so the products still load
+    assert {p.name for p, _ in catalog._load_forecast_seed_products()} >= {"eDigital Display", "eDigital OLV"}
+
+
+def test_a_missing_seed_file_replaces_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(catalog, "_FORECAST_SEED_PATH", tmp_path / "nope.json")
+    assert catalog.forecast_seed_replacements() == {}
+
+
+def test_the_older_products_are_gone_from_the_code_catalog_and_the_series_links():
+    assert OLD_DISPLAY not in {p.name for p in catalog.CATALOG} and OLD_OLV not in {p.name for p in catalog.CATALOG}
+    specs, _ = mf.load_manifest()
+    assert not [(s.series_key, l.name) for s in specs for l in s.products if l.name in (OLD_DISPLAY, OLD_OLV)]
+    linked = {l.name: l.relation for s in specs if s.series_key in ("edigital-display", "edigital-olv") for l in s.products}
+    assert linked == {"eDigital Display": "primary", "eDigital OLV": "primary"}
+
+
+def test_a_pasted_request_for_display_or_pre_roll_names_the_new_products():
+    from app.services.notion_parser import PRODUCT_ALIASES
+    for phrase in ("display", "edigital display", "edigital network display", "display banner", "programmatic display"):
+        assert PRODUCT_ALIASES[phrase] == "eDigital Display", phrase
+    for phrase in ("olv", "edigital olv", "online video", "pre-roll", "preroll", "video pre-roll"):
+        assert PRODUCT_ALIASES[phrase] == "eDigital OLV", phrase
+
+
+def test_the_recommender_suggests_the_new_products():
+    from app.services.recommender import GOAL_PRIORITIES
+    suggested = {name for names in GOAL_PRIORITIES.values() for name in names}
+    assert {"eDigital Display", "eDigital OLV"} <= suggested and not ({OLD_DISPLAY, OLD_OLV} & suggested)
+
+
+def test_the_restrictions_sheet_entries_for_display_and_olv_map_to_the_new_products_alone():
+    from app.services import restrictions as rs
+    assert rs.match_catalog_products("eDigital Display") == ["eDigital Display"]
+    assert rs.match_catalog_products("eDigital OLV") == ["eDigital OLV"]
+

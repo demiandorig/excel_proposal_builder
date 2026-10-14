@@ -151,7 +151,7 @@ def test_lines_that_disagree_on_months_fall_back_to_the_calendar_span(tmp_path):
     req = ProposalRequest(client_name="Acme Corp", request_type="New Business",
                           start_date="2026-09-01", end_date="2026-11-30", total_months=3, agency_fee=None)
     lis = [LineItem(product_name="Search - SEM", monthly_budget=1000.0, months=3, id="a1"),
-           LineItem(product_name="eDigital Network Display - Standard IAB", monthly_budget=1000.0, months=2, id="a2")]
+           LineItem(product_name="eDigital Display", monthly_budget=1000.0, months=2, id="a2")]
     tiers = [{"label": "A", "line_items": lis, "avails_data": {},
               "start_date": "2026-09-01", "end_date": "2026-11-30"}]
     out = tmp_path / "mixed.xlsx"

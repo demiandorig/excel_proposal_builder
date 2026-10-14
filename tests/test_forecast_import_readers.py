@@ -109,6 +109,18 @@ def test_netflix_sample_is_extended_to_every_dma_and_reported_rows_are_untouched
     assert 0.9 < p30.stats["extension"]["k"] / ext["k"] < 0.95           # the :30 market level is ~92% of the :15
 
 
+def test_the_netflix_files_rate_column_is_a_statistic_and_the_catalogs_44_and_54_are_what_proposals_use():
+    """The sample CSV says $54 (:15) and $60 (:30). The catalog's run-of-network rates - $44 and $54, confirmed as the correct ones -
+    are what a proposal prices with, and nothing in the import changes them."""
+    from app import catalog
+    assert payload("netflix-15s").stats["rate_cpm"] == [54.0] and payload("netflix-30s").stats["rate_cpm"] == [60.0]
+    assert catalog.by_name("Netflix - Run Of Network Untargeted :15s Ads").base_rate == 44.0
+    assert catalog.by_name("Netflix - Run Of Network Untargeted :30s Ads").base_rate == 54.0
+    import app.services.forecast_import.loader as loader
+    import inspect
+    assert "base_rate" not in inspect.getsource(loader)              # the importer never writes a product's price
+
+
 def test_netflix_new_york_oddity_is_reported_not_corrected():
     p = payload("netflix-15s")
     assert p.levels["dma"]["new-york"].avails == 15_185_009               # as the source has it

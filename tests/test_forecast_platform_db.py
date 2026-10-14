@@ -496,6 +496,46 @@ def test_seed_products_are_added_once_without_touching_rows_an_admin_changed(db,
         assert order[a.name] == order[anchor["name"]] + 1 and order[b.name] == order[a.name] + 1             # placed after their anchors
 
 
+def test_a_seed_product_that_replaces_an_older_one_hides_it_once_and_an_admin_who_brings_it_back_is_left_alone(db, monkeypatch):
+    """eDigital Display / OLV replace the earlier display and pre-roll products: at the moment the new row is inserted the older
+    one is hidden (a saved proposal still resolves it) and its category approvals are copied; the next start does not hide it again."""
+    from dataclasses import replace
+    from app.services import restrictions
+    from app.services.forecast_import import product_seed
+    template = catalog.CATALOG[0]
+    old, new = (replace(template, name=f"zz-test {x}", base_rate=rate) for x, rate in (("Old Display", 9.0), ("New Display", 40.0)))
+    monkeypatch.setattr(catalog, "_load_forecast_seed_products", lambda: [(new, None)])
+    monkeypatch.setattr(catalog, "forecast_seed_replacements", lambda: {new.name: old.name})
+    carried = []
+    monkeypatch.setattr(restrictions, "inherit_product_approvals", lambda o, n, by: carried.append((o, n, by)) or 3)
+
+    def hidden(conn, name):
+        return conn.execute("SELECT is_deleted FROM products WHERE name = %s", (name,)).fetchone()["is_deleted"]
+
+    with get_connection() as conn:
+        conn.execute("INSERT INTO products (name, family, buying_model, base_rate, is_deleted) VALUES (%s, 'Test', 'CPM', 9, FALSE)", (old.name,))
+        assert product_seed.apply_to_db(conn) == 1                           # the new product is inserted ...
+        assert hidden(conn, old.name) is True and hidden(conn, new.name) is False    # ... and the older one is hidden, not deleted
+    assert carried == [(old.name, new.name, "forecast seed")]                # its approvals went to the new one
+    with get_connection() as conn:                                           # an admin brings the older product back
+        conn.execute("UPDATE products SET is_deleted = FALSE WHERE name = %s", (old.name,))
+        assert product_seed.apply_to_db(conn) == 0                           # the new one already exists: nothing to do ...
+        assert hidden(conn, old.name) is False                               # ... and the admin's decision stands
+    assert len(carried) == 1
+
+
+def test_a_replaced_product_still_resolves_by_name_for_a_saved_proposal(db, monkeypatch):
+    """A hidden product keeps its row, so a proposal that already names it keeps its line (and its old rate)."""
+    from dataclasses import replace
+    name = f"zz-test Hidden {uuid.uuid4().hex[:6]}"
+    with get_connection() as conn:
+        conn.execute("INSERT INTO products (name, family, buying_model, base_rate, is_deleted) VALUES (%s, 'Test', 'CPM', 9, TRUE)", (name,))
+    catalog.invalidate_product_caches()
+    found = catalog.by_name(name)
+    assert found is not None and found.base_rate == 9
+    assert name not in [p.name for p in catalog.effective_catalog()]         # ... while nothing new can pick it
+
+
 # --------------------------------------------------------------------------------------------- the migration runner, isolated
 
 def test_the_migration_runner_applies_in_order_rolls_back_a_failure_and_detects_drift(db, tmp_path):

@@ -382,7 +382,7 @@ def _level(value: Any) -> str:
 
 def _canonical_product_name(raw_name: Any, canon: dict[str, str]) -> Optional[str]:
     """The line item a model-written product name stands for — exact (case/space-insensitive), else the single
-    best token match ("eDigital Display" for "eDigital Network Display - Standard IAB"). Two equally good
+    best token match ("Display Geo Fence" for "Display - Geo Fence"). Two equally good
     candidates, or a weak match, is no match."""
     key = _norm_key(raw_name)
     if not key:

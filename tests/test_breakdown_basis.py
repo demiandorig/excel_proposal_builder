@@ -25,7 +25,7 @@ from app.services.notion_parser import ProposalRequest
 from app.services.proposal_generator import LineItem, generate_proposal
 
 EMAIL = "Email Campaigns - Display Re-targeting"
-IAB = "eDigital Network Display - Standard IAB"
+IAB = "eDigital Display"
 PLAN = {EMAIL: 680.0, IAB: 5470.0}          # net flight totals
 FEE = 0.15
 START, END = "2026-11-24", "2026-12-31"      # two calendar months, six weeks, one calendar quarter

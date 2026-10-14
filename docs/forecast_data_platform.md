@@ -155,6 +155,10 @@ is about 92.5% of its :15; that is flagged (X003), not corrected.
 The ten Netflix products map to the two series: the run-of-network products are `primary`; the age-, gender-, genre- and
 Spanish-targeted variants are `baseline_proxy` (an upper bound, and the estimate says so).
 
+**Prices come from the catalog, never from the CSV.** The file's `Rate` column ($54 / $60 in the sample) is read only to be
+shown in the import's statistics; the rates a proposal uses are the catalog's ($44 for the :15s and $54 for the :30s
+run-of-network products, confirmed as the correct ones), and nothing in the import can change them.
+
 ## Live sports
 
 Each tab of `Live Sports Estimates- Entravision.xlsx` is its own series and its own catalog product. The values are
@@ -385,8 +389,14 @@ export makes a new Netflix version instead of leaving it "unchanged".
 
 * Pull → the post-merge hook installs `requirements.txt` (adds `psycopg-pool`), runs the tests and the import. On app start the
   migrations and the first-time load run in the background.
-* **Decisions the data owners should confirm** are listed in the pull request: the unit of the Live Sports playoff tabs
-  (headed "Estimates"; treated as weekly), the overlap of the new `eDigital Display` / `eDigital OLV` products with the
-  existing eDigital Network Display / Video - Pre-roll products, and the Netflix rates in the CSV ($54 / $60) versus the
-  catalog ($44 / $54).
+* **eDigital Display and eDigital OLV replace the earlier products** (`eDigital Network Display - Standard IAB`, `Video - Pre-roll
+  (OLV)`); they are not offered beside them. The seed records say so (`replaces` in `app/data/forecast/products.json`). The
+  first time the new rows are inserted into a database that has the older ones, the older rows are hidden - the same state as
+  an admin's delete, so a saved proposal that names one still resolves it with its old rate - and their category approvals
+  (the Restricted Verticals mapping, keyed by product name) are copied to the new product. It happens once, on the insert: an
+  admin who brings an older product back is not overruled by the next start. A fresh database never has the older products
+  (they are gone from `catalog.CATALOG`), the Notion parser maps "display" / "olv" / "pre-roll" to the new names, and so does
+  the recommender. **The new products carry the $40 placeholder below, where the older ones were $9-$11 (display) and
+  $23-$25 (OLV): confirm the rate card before proposals go out.**
+* **Still to confirm with the data owners:** the unit of the Live Sports playoff tabs (headed "Estimates"; treated as weekly).
 * All 30 new products carry a **$40 CPM placeholder** and a "PLACEHOLDER RATE" note until the rate card is confirmed.

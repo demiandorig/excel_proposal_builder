@@ -350,11 +350,11 @@ def test_creating_a_copy_carries_the_originals_vertical_approvals_over(monkeypat
     import app.main as m
     seen = {}
     monkeypatch.setattr(m, "catalog_create_product",
-                        lambda fields, copy_from_id=None: {"id": 9, "name": fields["name"], "copied_from": "Video - Pre-roll (OLV)"})
+                        lambda fields, copy_from_id=None: {"id": 9, "name": fields["name"], "copied_from": "eDigital OLV"})
     monkeypatch.setattr(m.restrictions_svc, "inherit_product_approvals",
                         lambda src, new, by: seen.update(src=src, new=new, by=by) or 2)
     out = asyncio.run(m.admin_create_product(m.ProductRequest(name="Pre-roll Hispanic", copy_from_id=4), _Req()))
-    assert out["restrictions_inherited"] == 2 and seen == {"src": "Video - Pre-roll (OLV)", "new": "Pre-roll Hispanic", "by": "admin@entravision.com"}
+    assert out["restrictions_inherited"] == 2 and seen == {"src": "eDigital OLV", "new": "Pre-roll Hispanic", "by": "admin@entravision.com"}
 
 
 def test_a_failed_approvals_carry_over_never_fails_the_copy(monkeypatch):
@@ -438,10 +438,10 @@ def test_a_copy_inherits_every_sheet_entry_its_original_is_mapped_under(monkeypa
         def execute(self, sql, params=()):
             executed.append((" ".join(sql.split()), params))
     monkeypatch.setattr(rs, "get_connection", lambda: _Conn())
-    added = rs.inherit_product_approvals("Video - Pre-roll (OLV)", "Pre-roll - Hispanic", "a@x")
+    added = rs.inherit_product_approvals("eDigital OLV", "Pre-roll - Hispanic", "a@x")
     assert added >= 1 and executed and "UPDATE restriction_categories SET product_map" in executed[0][0]
     political = next(c for c in cats if c.name == "Political")
-    mapped = [item for item, names in political.product_map.items() if "Video - Pre-roll (OLV)" in names]
+    mapped = [item for item, names in political.product_map.items() if "eDigital OLV" in names]
     assert mapped, "the original is mapped in the built-in Political list"
     assert rs.inherit_product_approvals("Not In Any List", "Whatever", "a@x") == 0
 
@@ -463,7 +463,7 @@ def test_the_built_in_snapshot_is_persisted_first_when_a_copy_inherits(monkeypat
         def execute(self, *a, **k):
             return None
     monkeypatch.setattr(rs, "get_connection", lambda: _Conn())
-    rs.inherit_product_approvals("Video - Pre-roll (OLV)", "Pre-roll - Hispanic", "a@x")
+    rs.inherit_product_approvals("eDigital OLV", "Pre-roll - Hispanic", "a@x")
     assert seeded == ["a@x"]
 
 

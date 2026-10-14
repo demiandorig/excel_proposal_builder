@@ -238,11 +238,6 @@
     {
      "name": "eDigital Display",
      "relation": "primary"
-    },
-    {
-     "name": "eDigital Network Display - Standard IAB",
-     "relation": "baseline_proxy",
-     "note": "The eDigital network's display avails; the older product's own rate and targeting layers still apply."
     }
    ]
   },

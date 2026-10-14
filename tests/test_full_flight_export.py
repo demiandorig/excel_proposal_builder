@@ -27,7 +27,7 @@ from app.services.proposal_generator import AddonItem, LineItem, generate_propos
 
 EMAIL = "Email Campaigns - Display Re-targeting"
 REDROP = "Email Campaigns and/or Email Campaigns - Re-Drop"
-IAB = "eDigital Network Display - Standard IAB"
+IAB = "eDigital Display"
 GEOFENCE = "Display - Geo Fence"
 FLIGHT_NET = {EMAIL: 680.0, REDROP: 3600.0, IAB: 5470.0, GEOFENCE: 3000.0}   # sums to 12,750 net = 15,000 gross at 15%
 

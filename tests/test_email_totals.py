@@ -50,7 +50,7 @@ APP_JS = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "app" / "templates" / "index.html").read_text(encoding="utf-8")
 
 EMAIL = "Email Campaigns - Display Re-targeting"
-IAB = "eDigital Network Display - Standard IAB"
+IAB = "eDigital Display"
 GEOFENCE = "Display - Geo Fence"
 
 

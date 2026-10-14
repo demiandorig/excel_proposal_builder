@@ -26,7 +26,7 @@ from app.services.notion_parser import ProposalRequest
 from app.services.recommender import recommend_line_items
 
 EMAIL = "Email Campaigns - Display Re-targeting"
-IAB = "eDigital Network Display - Standard IAB"
+IAB = "eDigital Display"
 
 
 @pytest.fixture(autouse=True)

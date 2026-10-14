@@ -30,12 +30,12 @@ GOAL_PRIORITIES: dict[str, list[str]] = {
     "traffic": [
         "Search - SEM",
         "Facebook & Instagram Ads | Traffic / Conversion",
-        "eDigital Network Display - Standard IAB",
+        "eDigital Display",
         "YouTube Ads - Skippable",
     ],
     "awareness": [
         "Entravision Plus CTV/OTT - English Content",
-        "Video - Pre-roll (OLV)",
+        "eDigital OLV",
         "YouTube Ads - Skippable",
         "AudioEngage",
         "Facebook & Instagram Ads | Awareness",
@@ -43,7 +43,7 @@ GOAL_PRIORITIES: dict[str, list[str]] = {
     "conversions": [
         "Search - SEM",
         "Facebook & Instagram Ads | Traffic / Conversion",
-        "eDigital Network Display - Standard IAB",
+        "eDigital Display",
     ],
     "lead_gen": [
         "Search - SEM",
@@ -61,7 +61,7 @@ GOAL_PRIORITIES: dict[str, list[str]] = {
         "Search - SEM",
         "Facebook & Instagram Ads | Awareness",
         "Entravision Plus CTV/OTT - English Content",
-        "eDigital Network Display - Standard IAB",
+        "eDigital Display",
     ],
 }
 

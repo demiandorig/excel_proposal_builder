@@ -72,7 +72,7 @@ line_items = [
         target_override="Hispanic A21+ — Los Angeles",
     ),
     LineItem(
-        product_name="eDigital Network Display - Standard IAB",
+        product_name="eDigital Display",
         monthly_budget=1500.0,
         months=1,
         target_override="Hispanic A21+ — Northern California",

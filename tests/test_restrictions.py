@@ -141,9 +141,9 @@ def test_suggest_categories_reads_the_plan_text():
 # --- sheet entry -> catalog product matching ------------------------------------------------
 
 @pytest.mark.parametrize("item,expected", [
-    ("eDigital Display", ["eDigital Network Display - Standard IAB", "eDigital Display"]),
+    ("eDigital Display", ["eDigital Display"]),
     ("eDigital Display Geo Fence", ["Display - Geo Fence"]),
-    ("eDigital OLV", ["Video - Pre-roll (OLV)", "eDigital OLV"]),
+    ("eDigital OLV", ["eDigital OLV"]),
     ("Entravision O&O Audio Streaming", ["Audio - EVC Audio Streaming"]),
     ("Audio Engage", ["AudioEngage"]),
     ("Email Marketing Campaigns", ["Email Campaigns and/or Email Campaigns - Re-Drop"]),
@@ -180,7 +180,7 @@ def _political():
 
 def test_political_is_allowed_on_display_and_olv_per_the_sheet_even_though_the_old_catalog_flags_said_no():
     from app.catalog import by_name
-    for name in ("Video - Pre-roll (OLV)", "eDigital Network Display - Standard IAB"):
+    for name in ("eDigital OLV", "eDigital Display"):
         assert by_name(name).political_policy == "not_allowed"     # the stale flag this replaces
         verdict = rs.evaluate_product(name, by_name(name).family, _political())
         assert verdict["verdict"] == "allowed", name
@@ -207,7 +207,7 @@ def test_the_allowed_note_carries_the_sheets_own_conditions():
 def test_cannabis_is_not_accepted_anywhere_and_the_worst_verdict_wins_across_verticals():
     from app.catalog import by_name
     cats = rs.builtin_categories()
-    olv = by_name("Video - Pre-roll (OLV)")
+    olv = by_name("eDigital OLV")
     both = rs.evaluate_product(olv.name, olv.family, cats)
     assert both["verdict"] == "not_allowed"                          # allowed for Political, not for Cannabis
     assert {c["category"]: c["status"] for c in both["checks"]} == {"Political": "allowed", "Cannabis": "not_allowed"}
@@ -246,11 +246,11 @@ def _items(*names):
 
 
 def test_prompt_states_the_sheets_verdicts_as_facts_and_drops_the_stale_catalog_flags(builtin_state):
-    items = _items("Video - Pre-roll (OLV)", "YouTube Ads")
+    items = _items("eDigital OLV", "YouTube Ads")
     matrix = rs.build_matrix([li.product_name for li in items], ["Political"])
     prompt = rb._build_prompt(_req(), items, None, matrix)
     assert "RESTRICTED VERTICALS MATRIX — AUTHORITATIVE" in prompt
-    assert "- Video - Pre-roll (OLV): Political — ALLOWED" in prompt
+    assert "- eDigital OLV: Political — ALLOWED" in prompt
     assert "- YouTube Ads: Political — NOT ACCEPTED" in prompt
     assert "Never contradict the Restricted Verticals Matrix" in prompt
     assert "KNOWN INTERNAL POLICY FLAGS" not in prompt
@@ -258,8 +258,8 @@ def test_prompt_states_the_sheets_verdicts_as_facts_and_drops_the_stale_catalog_
 
 
 def test_prompt_without_confirmed_verticals_forbids_inferring_restrictions_from_the_industry(builtin_state):
-    items = _items("Video - Pre-roll (OLV)")
-    prompt = rb._build_prompt(_req(), items, None, rs.build_matrix(["Video - Pre-roll (OLV)"], []))
+    items = _items("eDigital OLV")
+    prompt = rb._build_prompt(_req(), items, None, rs.build_matrix(["eDigital OLV"], []))
     assert "NONE CONFIRMED" in prompt and "never cite Entravision internal flags" in prompt
 
 
@@ -270,10 +270,10 @@ def _result(*roadblocks):
 
 
 def test_a_model_risk_claiming_political_is_not_allowed_on_an_allowed_product_is_removed(builtin_state):
-    items = _items("Video - Pre-roll (OLV)")
-    matrix = rs.build_matrix(["Video - Pre-roll (OLV)"], ["Political"])
+    items = _items("eDigital OLV")
+    matrix = rs.build_matrix(["eDigital OLV"], ["Political"])
     result = _result({
-        "product_name": "Video - Pre-roll (OLV)", "risk_level": "high",
+        "product_name": "eDigital OLV", "risk_level": "high",
         "risks": [
             {"issue": "Political ads not feasible", "detail": "Political advertising is not allowed on OLV.", "source": "x"},
             {"issue": "Additional: ID verification", "detail": "Political ads on OLV partners need advertiser verification before launch.", "source": "y"},
@@ -321,10 +321,10 @@ def test_guidance_raises_a_low_risk_to_medium_but_never_lowers_a_high_one(builti
 
 
 def test_risks_that_dont_mention_the_allowed_vertical_are_untouched(builtin_state):
-    items = _items("Video - Pre-roll (OLV)")
-    matrix = rs.build_matrix(["Video - Pre-roll (OLV)"], ["Political"])
+    items = _items("eDigital OLV")
+    matrix = rs.build_matrix(["eDigital OLV"], ["Political"])
     unrelated = {"issue": "Skippable ads not allowed over 30s", "detail": "Pre-roll longer than 30 seconds is not allowed.", "source": "z"}
-    result = _result({"product_name": "Video - Pre-roll (OLV)", "risk_level": "medium", "risks": [unrelated], "recommended_mitigation": ""})
+    result = _result({"product_name": "eDigital OLV", "risk_level": "medium", "risks": [unrelated], "recommended_mitigation": ""})
     rb._apply_matrix(result, matrix, items)
     assert result["product_roadblocks"][0]["risks"] == [unrelated]
 
@@ -343,13 +343,13 @@ def test_generate_roadblocks_never_returns_a_political_not_feasible_claim_for_an
     model_says = json.dumps({
         "overall_summary": "Political is risky.",
         "product_roadblocks": [
-            {"product_name": "eDigital Network Display - Standard IAB", "risk_level": "high",
+            {"product_name": "eDigital Display", "risk_level": "high",
              "risks": [{"issue": "Political ads not feasible on Display", "detail": "Political advertising is not allowed on Display.", "source": "s, 2025"}],
              "recommended_mitigation": "Avoid."},
         ],
     })
     monkeypatch.setattr(rb.llm_utils, "responses_text", lambda *a, **k: model_says)
-    result = rb.generate_roadblocks(_req(), _items("eDigital Network Display - Standard IAB"), categories=["Political"])
+    result = rb.generate_roadblocks(_req(), _items("eDigital Display"), categories=["Political"])
     entry = result["product_roadblocks"][0]
     assert entry["risks"] == [] and entry["risk_level"] == "low"
     assert entry["matrix"]["verdict"] == "allowed"
@@ -359,10 +359,10 @@ def test_generate_roadblocks_never_returns_a_political_not_feasible_claim_for_an
 def test_when_the_model_is_unavailable_the_sheets_verdicts_still_come_back(monkeypatch, builtin_state):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(rb, "_HAS_OPENAI", True)
-    result = rb.generate_roadblocks(_req(), _items("YouTube Ads", "Video - Pre-roll (OLV)"), categories=["Political"])
+    result = rb.generate_roadblocks(_req(), _items("YouTube Ads", "eDigital OLV"), categories=["Political"])
     assert "OPENAI_API_KEY" in result["error"]
     verdicts = {r["product_name"]: r["matrix"]["verdict"] for r in result["product_roadblocks"]}
-    assert verdicts == {"YouTube Ads": "not_allowed", "Video - Pre-roll (OLV)": "allowed"}
+    assert verdicts == {"YouTube Ads": "not_allowed", "eDigital OLV": "allowed"}
 
 
 # --- endpoints ------------------------------------------------------------------------------------
