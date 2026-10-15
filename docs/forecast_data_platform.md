@@ -231,7 +231,9 @@ higher). That is a modelling choice nobody has confirmed, so it was left as it w
 
 **A whole state asked for as a whole** scales a home market's avails to the platform's own state row (above); its people and
 reach are scaled to the state row's *own* `reach_universe` / `est_reach` when it has them (they do not add across markets: a
-household served from Denver is in Denver's universe), and to the avails ratio only when the state row has none.
+household served from Denver is in Denver's universe). When the state row carries only some of those figures, the others follow the
+one it has (reach follows the universe's ratio and the other way round, unique households the reach's), so the people reached can
+never exceed the people there are; the avails ratio is only the last resort, when it has none of them.
 
 ## Geography matching
 

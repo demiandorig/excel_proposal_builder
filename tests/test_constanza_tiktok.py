@@ -395,7 +395,7 @@ def test_the_admin_connection_test_runs_the_checks_and_never_returns_a_secret(mo
     monkeypatch.setenv("TIKTOK_ACCESS_TOKEN", "SECRET-TOKEN-VALUE")
     monkeypatch.setenv("TIKTOK_ADVERTISER_ID", "7000000000000000001")
     out = main.admin_tiktok_test()
-    assert out["ok"] is True and len(out["checks"]) == 8 and out["status"]["configured"] is True
+    assert out["ok"] is True and len(out["checks"]) == 10 and out["status"]["configured"] is True
     blob = json.dumps(out)
     assert "SECRET-TOKEN-VALUE" not in blob and "7000000000000000001" not in blob and GOOD_TOKEN not in blob
 
@@ -478,6 +478,18 @@ def test_when_tiktok_asks_for_the_age_groups_to_be_spelled_out_they_are_sent_and
     ct.estimate(resolve_geo("Chicago"), t, 1, client=tiktok)
     estimates = [c for c in tiktok.fake.calls if c["path"] == ESTIMATE]
     assert len(estimates) == 3 and estimates[2]["body"]["age_groups"]            # remembered: no failing call first
+
+
+def test_what_was_learned_from_one_age_refusal_only_reaches_requests_that_use_the_restricted_options(tiktok):
+    """The "spell the adult ages out" memory is not a process-wide switch: a request with no interests, behaviors or income is asked exactly
+    as the planner set it up (no age groups, no note about interests), whatever was asked before."""
+    ct.estimate(resolve_geo("Los Angeles"), ct.Targeting.from_dict({"interest_category_ids": ["12100"]}), 1, client=tiktok)
+    assert tiktok.adult_ages_needed
+    plain = ct.estimate(resolve_geo("National"), ct.Targeting.from_dict({"gender": "female"}), 1, client=tiktok)
+    assert "age_groups" not in tiktok.fake.calls[-1]["body"] and not plain.adult_ages_sent
+    assert not any("age groups spelled out" in n for n in plain.notes())
+    income = ct.estimate(resolve_geo("Chicago"), ct.Targeting.from_dict({"household_income": ["TOP25_50"]}), 1, client=tiktok)
+    assert tiktok.fake.calls[-1]["body"]["age_groups"] and income.adult_ages_sent          # income is restricted too: said up front
 
 
 def test_a_planners_own_age_groups_are_never_replaced(tiktok):

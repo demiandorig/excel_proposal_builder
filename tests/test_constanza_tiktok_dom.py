@@ -83,13 +83,28 @@ def browser():
 
 
 class World:
-    """What the harness's /api answers: the TikTok panel's routes through the real service over the fake TikTok."""
+    """What the harness's /api answers: the TikTok panel's routes through the real service over the fake TikTok.
+
+    A test can park an answer (`hold`) and release it later, make a route fail (`fail`), or replace what a catalog / the search returns."""
+
+    NAMES = {"api/constanza/tiktok/status": "status", "api/constanza/tiktok/targeting": "targeting", "api/constanza/tiktok/search": "search",
+             "api/constanza/estimate": "estimate", "api/constanza/resolve": "resolve"}
 
     def __init__(self):
         self.client = make_client()
         self.configured = True
         self.search_override = None
+        self.catalog_override: dict = {}                   # kind -> items
+        self.fail: dict = {}                               # route name -> (status, body)
+        self.hold: set = set()
+        self.pending: list = []
+        self.hits: list[str] = []
         self.requests: list[dict] = []
+
+    def release(self, name) -> None:
+        for item in [p for p in self.pending if p[0] == name]:
+            self.pending.remove(item)
+            item[1].fulfill(status=item[2], content_type="application/json", body=json.dumps(item[3]))
 
     def answer(self, route) -> None:
         req = route.request
@@ -97,12 +112,18 @@ class World:
         url = req.url
         body = None
         status = 200
+        name = self.NAMES.get(path, "other")
+        self.hits.append(name)
+        if name in self.fail:
+            status, body = self.fail[name]
+            route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+            return
         if path == "api/constanza/tiktok/status":
             body = {"configured": self.configured, "missing": [] if self.configured else ["TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID"],
                     "advertiser": "…0001", "impressions_per_person": 5.5, "setup_hint": "x", "options": ct.static_options()}
         elif path == "api/constanza/tiktok/targeting":
             kind = url.split("kind=", 1)[1].split("&")[0]
-            body = {"kind": kind, "items": ct.catalog(kind, client=self.client)}
+            body = {"kind": kind, "items": self.catalog_override[kind] if kind in self.catalog_override else ct.catalog(kind, client=self.client)}
         elif path == "api/constanza/tiktok/search":
             q = url.split("q=", 1)[1].split("&")[0]
             body = {"query": q, "results": self.search_override if self.search_override is not None else ct.search(q, client=self.client)}
@@ -116,6 +137,9 @@ class World:
                 body = ESTIMATE
         else:
             status, body = 404, {"detail": "not found"}
+        if name in self.hold:
+            self.pending.append((name, route, status, body))
+            return
         route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
 
 
@@ -335,3 +359,312 @@ def test_text_from_tiktok_runs_nothing_even_when_it_is_hostile(dock):
     dock.wait_for_timeout(300)
     assert dock.evaluate("window.__xss === undefined")
     assert evil in dock.inner_text("#cz-tt-chips")                  # shown as text
+
+
+# --------------------------------------------------------------------------------------------- the second review: keyboard, races, focus
+
+def hits_of(kind, n, prefix=None):
+    return [{"id": str(1000 + i), "name": f"{prefix or kind} {i}", "path": ""} for i in range(n)]
+
+
+def test_tabbing_out_of_the_language_box_closes_its_list_and_escape_then_closes_the_dock_as_usual(dock):
+    """The list stayed open after Tab, so Escape (pressed with the focus elsewhere in the dock) closed the whole dock instead of the list."""
+    dock.click("#cz-tt-lang-q")
+    dock.wait_for_selector("#cz-tt-lang-results .cz-interest-item")
+    dock.keyboard.press("Tab")
+    assert dock.is_hidden("#cz-tt-lang-results") and dock.get_attribute("#cz-tt-lang-q", "aria-expanded") == "false"
+    dock.keyboard.press("Escape")
+    assert dock.is_hidden("#constanza-dock")
+
+
+def test_tabbing_out_of_the_interest_box_closes_its_list_too(dock):
+    dock.fill("#cz-tt-q", "skin")
+    dock.wait_for_selector("#cz-tt-results .cz-interest-item")
+    dock.keyboard.press("Tab")
+    assert dock.is_hidden("#cz-tt-results") and dock.get_attribute("#cz-tt-q", "aria-expanded") == "false"
+    assert dock.get_attribute("#cz-tt-q", "aria-activedescendant") is None
+
+
+def test_tabbing_into_the_language_box_does_not_open_its_list_but_arrow_down_does(dock):
+    dock.focus("#cz-tt-lang-q")
+    dock.wait_for_timeout(150)
+    assert dock.is_hidden("#cz-tt-lang-results")
+    dock.keyboard.press("ArrowDown")
+    dock.wait_for_selector("#cz-tt-lang-results .cz-interest-item")
+    assert dock.get_attribute("#cz-tt-lang-q", "aria-expanded") == "true"
+
+
+def test_a_mouse_click_on_an_option_still_lands_though_the_list_closes_when_the_focus_leaves(dock):
+    """The list closes on focusout; choosing an option with the mouse must not move the focus out from under it first."""
+    dock.fill("#cz-tt-q", "skin")
+    dock.click("#cz-tt-results .cz-interest-item")
+    assert picks(dock) == ["Skincare"]
+    dock.click("#cz-tt-lang-q")
+    dock.click("#cz-tt-lang-results .cz-interest-item >> nth=1")
+    assert dock.inner_text("#cz-tt-lang-chips").strip().startswith("Spanish")
+
+
+def visible_in(page, item_selector, box_selector):
+    return page.evaluate("""([i, b]) => { const r = document.querySelector(i).getBoundingClientRect(), c = document.querySelector(b).getBoundingClientRect();
+        return r.top >= c.top - 1 && r.bottom <= c.bottom + 1; }""", [item_selector, box_selector])
+
+
+def test_the_highlighted_option_always_scrolls_into_view_in_the_category_list(dock):
+    kinds = ("general_interest", "additional_interest", "purchase_intention", "video_interaction", "creator_interaction", "hashtag_interaction")
+    dock.world.search_override = {k: hits_of(k, 8) for k in kinds}                                # type: ignore[attr-defined]  six of each kind: 36 rows
+    dock.fill("#cz-tt-q", "many")
+    dock.wait_for_selector("#cz-tt-results .cz-interest-item")
+    for _ in range(14):
+        dock.keyboard.press("ArrowDown")
+    assert visible_in(dock, "#cz-tt-results .cz-active", "#cz-tt-results")
+    assert dock.evaluate("document.getElementById('cz-tt-results').scrollTop") > 0
+
+
+def test_the_highlighted_option_always_scrolls_into_view_in_the_language_list(dock):
+    dock.world.catalog_override["languages"] = [{"code": f"l{i:02d}", "name": f"Language {i:02d}"} for i in range(30)]       # type: ignore[attr-defined]
+    dock.click("#cz-tt-lang-q")
+    dock.wait_for_selector("#cz-tt-lang-results .cz-interest-item")
+    for _ in range(10):
+        dock.keyboard.press("ArrowDown")
+    assert visible_in(dock, "#cz-tt-lang-results .cz-active", "#cz-tt-lang-results")
+
+
+def test_a_category_search_answer_for_older_text_is_never_picked(dock):
+    """Results for "skin" were on screen while "soccer" was being searched for, and Enter added Skincare."""
+    world = dock.world                                                                              # type: ignore[attr-defined]
+    dock.fill("#cz-tt-q", "skin")
+    dock.wait_for_selector("#cz-tt-results .cz-interest-item")
+    world.hold.add("search")
+    dock.fill("#cz-tt-q", "soccer")                                                                 # the answer for this text is parked
+    dock.keyboard.press("Enter")
+    assert picks(dock) == []
+    dock.click("#cz-tt-results .cz-interest-item", force=True)                                      # a click on the old list does not pick either
+    assert picks(dock) == []
+    assert dock.evaluate("document.getElementById('cz-tt-results').classList.contains('cz-pending')")
+    world.hold.discard("search")
+    world.release("search")
+    dock.wait_for_function("document.querySelector('#cz-tt-results .cz-interest-item') && !document.getElementById('cz-tt-results').classList.contains('cz-pending')")
+    assert "Soccer" in dock.inner_text("#cz-tt-results")
+    dock.keyboard.press("Enter")
+    assert picks(dock) == ["Soccer"]
+
+
+def test_an_answer_that_arrives_after_the_person_moved_on_opens_nothing(dock):
+    world = dock.world                                                                              # type: ignore[attr-defined]
+    world.hold.add("search")
+    dock.fill("#cz-tt-q", "skin")
+    dock.wait_for_function("true")
+    dock.wait_for_timeout(400)                                                                      # the request is out
+    dock.click('#cz-tt-age [data-v="AGE_25_34"]')                                                   # and the person has gone to something else
+    world.hold.discard("search")
+    world.release("search")
+    dock.wait_for_timeout(200)
+    assert dock.is_hidden("#cz-tt-results") and dock.get_attribute("#cz-tt-q", "aria-expanded") == "false"
+
+
+def test_a_slow_first_language_list_does_not_open_after_reset(dock):
+    world = dock.world                                                                              # type: ignore[attr-defined]
+    world.hold.add("targeting")
+    dock.click("#cz-tt-lang-q")
+    dock.click("#cz-reset")
+    world.hold.discard("targeting")
+    world.release("targeting")
+    dock.wait_for_timeout(200)
+    assert dock.is_hidden("#cz-tt-lang-results") and dock.get_attribute("#cz-tt-lang-q", "aria-expanded") == "false"
+
+
+def test_an_empty_language_list_is_not_remembered_for_the_life_of_the_page(dock):
+    world = dock.world                                                                              # type: ignore[attr-defined]
+    world.catalog_override["languages"] = []
+    dock.click("#cz-tt-lang-q")
+    dock.wait_for_selector("#cz-tt-lang-results .cz-empty")
+    assert "came back empty" in dock.inner_text("#cz-tt-lang-results")
+    world.catalog_override.clear()                                                                  # TikTok recovers
+    dock.keyboard.press("ArrowDown")
+    dock.wait_for_selector("#cz-tt-lang-results .cz-interest-item")
+
+
+def test_no_option_is_announced_after_the_list_was_replaced_by_an_error(dock):
+    dock.fill("#cz-tt-q", "skin")
+    dock.wait_for_selector("#cz-tt-results .cz-interest-item")
+    assert dock.get_attribute("#cz-tt-q", "aria-activedescendant")
+    dock.world.fail["search"] = (503, {"detail": "TikTok is down"})                                  # type: ignore[attr-defined]
+    dock.fill("#cz-tt-q", "skincare")
+    dock.wait_for_selector("#cz-tt-results .cz-empty")
+    assert dock.get_attribute("#cz-tt-q", "aria-activedescendant") is None
+
+
+def test_a_search_that_found_more_than_it_shows_says_how_many_more(dock):
+    dock.world.search_override = {"general_interest": hits_of("Interest", 25), "additional_interest": hits_of("Keyword", 8)}        # type: ignore[attr-defined]
+    dock.fill("#cz-tt-q", "many")
+    dock.wait_for_selector("#cz-tt-results .cz-more")
+    text = dock.inner_text("#cz-tt-results .cz-more")
+    assert "19 more interests" in text and "2 more interest keywords" in text
+    assert dock.locator("#cz-tt-results .cz-interest-item").count() == 12                            # six of each kind; the note is not an option
+
+
+def test_removing_a_chip_from_the_keyboard_moves_the_focus_to_the_next_chip_then_the_box(dock):
+    open_browse(dock)
+    dock.click('#cz-tt-browse-body [data-id="12100"]')
+    dock.click('#cz-tt-browse-body [data-id="12200"]')
+    dock.focus('#cz-tt-chips .cz-chip:nth-child(1) .cz-x')
+    dock.keyboard.press("Enter")
+    assert chips(dock) == ["Makeup"]
+    assert dock.evaluate("document.activeElement === document.querySelector('#cz-tt-chips .cz-x')")
+    dock.keyboard.press("Enter")
+    assert chips(dock) == [] and dock.evaluate("document.activeElement.id") == "cz-tt-q"
+
+
+def test_removing_a_language_chip_from_the_keyboard_keeps_the_focus_in_the_field(dock):
+    dock.click("#cz-tt-lang-q")
+    dock.click("#cz-tt-lang-results .cz-interest-item >> nth=0")
+    dock.focus("#cz-tt-lang-chips .cz-x")
+    dock.keyboard.press("Enter")
+    assert dock.evaluate("document.activeElement.id") == "cz-tt-lang-q"
+
+
+def test_using_the_traffic_objective_from_its_warning_keeps_the_focus_in_the_panel(dock):
+    open_browse(dock, "purchase_intention")
+    dock.click('#cz-tt-browse-body [data-tt="browse-add"]')
+    dock.click("#cz-tt-more > summary")                                                             # the objective is on screen: the focus goes to it
+    dock.focus('#cz-tt-pick-note [data-tt="fix-objective"]')
+    dock.keyboard.press("Enter")
+    assert dock.evaluate("document.activeElement === document.querySelector('#cz-tt-obj [data-v=traffic]')")
+    assert "Traffic" in dock.inner_text("#cz-status")
+
+
+def test_using_the_traffic_objective_while_that_part_of_the_panel_is_folded_keeps_the_focus_in_the_search_box(dock):
+    open_browse(dock, "purchase_intention")
+    dock.click('#cz-tt-browse-body [data-tt="browse-add"]')
+    dock.focus('#cz-tt-pick-note [data-tt="fix-objective"]')
+    dock.keyboard.press("Enter")
+    assert dock.evaluate("document.activeElement.id") == "cz-tt-q"
+    assert "Traffic" in dock.inner_text("#cz-status")
+
+
+def test_the_estimate_button_keeps_the_keyboard_focus_while_it_works(dock):
+    world = dock.world                                                                              # type: ignore[attr-defined]
+    dock.fill("#cz-geo", "Los Angeles")
+    world.hold.add("estimate")
+    dock.focus("#cz-go")
+    dock.keyboard.press("Enter")
+    dock.wait_for_function("document.getElementById('cz-go').getAttribute('aria-disabled') === 'true'")
+    assert dock.evaluate("document.activeElement.id") == "cz-go"
+    dock.keyboard.press("Enter")                                                                    # a second press while busy does nothing
+    assert world.hits.count("estimate") == 1
+    world.hold.discard("estimate")
+    world.release("estimate")
+    dock.wait_for_selector("#cz-result .cz-headline")
+    assert dock.evaluate("document.activeElement.id") == "cz-go" and dock.get_attribute("#cz-go", "aria-disabled") == "false"
+
+
+def test_a_pressed_button_keeps_the_focus_even_when_a_menu_arrives_late_and_the_group_is_rebuilt(dock):
+    dock.focus('#cz-tt-age [data-v="AGE_25_34"]')
+    dock.keyboard.press("Enter")
+    dock.evaluate("""() => { const T = Constanza._plugin('tiktok')._pure.T; T.status.options.age_groups[0].label = 'Eighteen'; Constanza._plugin('tiktok').onSelect(); }""")
+    assert dock.inner_text('#cz-tt-age [data-v="AGE_18_24"]').strip() == "Eighteen"                  # the group WAS rebuilt ...
+    assert dock.evaluate("document.activeElement === document.querySelector('#cz-tt-age [data-v=AGE_25_34]')")      # ... and the focus came back
+    assert dock.get_attribute('#cz-tt-age [data-v="AGE_25_34"]', "aria-pressed") == "true"
+
+
+def test_the_menus_the_panel_draws_before_the_server_answers_are_the_servers_menus_to_the_letter(dock):
+    """A difference (a curly apostrophe once) made the first answer rebuild every group."""
+    fallback = dock.evaluate("Constanza._plugin('tiktok')._pure.FALLBACK")
+    for key, items in ct.static_options().items():
+        if key in fallback:
+            assert fallback[key] == [[i["id"], i["label"]] for i in items], key
+
+
+def test_the_banner_stops_saying_not_connected_once_a_pull_works_and_a_bad_status_is_never_remembered(dock):
+    world = dock.world                                                                              # type: ignore[attr-defined]
+    world.configured = False
+    dock.evaluate("() => { Constanza._plugin('tiktok')._pure.T.statusAt = 0; }")
+    dock.click("#cz-product-btn"); dock.fill("#cz-picker-search", "roku"); dock.click("#cz-picker-list .cz-option")        # away ...
+    dock.click("#cz-product-btn"); dock.fill("#cz-picker-search", "tiktok"); dock.click("#cz-picker-list .cz-option")      # ... and back
+    dock.wait_for_selector("#cz-tt-status.cz-tt-off")
+    asked = world.hits.count("status")
+    dock.click("#cz-product-btn"); dock.fill("#cz-picker-search", "roku"); dock.click("#cz-picker-list .cz-option")
+    dock.click("#cz-product-btn"); dock.fill("#cz-picker-search", "tiktok"); dock.click("#cz-picker-list .cz-option")
+    dock.wait_for_function(f"true")
+    assert world.hits.count("status") > asked                                                       # a "not connected" answer is asked again, not kept for 30 s
+    world.configured = True                                                                         # the admin adds the secrets
+    dock.fill("#cz-geo", "Los Angeles")
+    dock.click("#cz-go")
+    dock.wait_for_selector("#cz-result .cz-headline")
+    dock.wait_for_selector("#cz-tt-status.cz-tt-on")                                                # the banner follows the pull that worked
+
+
+def test_the_same_choices_in_another_order_do_not_raise_the_form_changed_banner(dock):
+    dock.fill("#cz-geo", "Los Angeles")
+    dock.click("#cz-tt-lang-q")
+    dock.click("#cz-tt-lang-results .cz-interest-item >> nth=0")                                     # English
+    dock.click("#cz-tt-lang-q")
+    dock.click("#cz-tt-lang-results .cz-interest-item >> nth=0")                                     # then Spanish
+    open_browse(dock)
+    dock.click('#cz-tt-browse-body [data-id="12100"]')
+    dock.click('#cz-tt-browse-body [data-id="12200"]')
+    dock.click("#cz-go")
+    dock.wait_for_selector("#cz-result .cz-headline")
+    assert dock.locator("#cz-result .cz-stale").count() == 0
+    dock.click('#cz-tt-browse-body [data-id="12100"]')                                              # untick and tick again: the picks are now in the other order
+    dock.click('#cz-tt-browse-body [data-id="12100"]')
+    dock.click('#cz-tt-lang-chips .cz-x >> nth=0')                                                   # and the languages too
+    dock.click("#cz-tt-lang-q")
+    dock.click("#cz-tt-lang-results .cz-interest-item >> nth=0")
+    assert dock.locator("#cz-result .cz-stale").count() == 0
+
+
+def test_a_long_unbreakable_name_stays_inside_its_chip_and_its_remove_button_is_a_real_target(dock):
+    dock.set_viewport_size({"width": 390, "height": 800})
+    long = "#" + "x" * 70
+    dock.world.search_override = {"hashtag_interaction": [{"id": "7", "name": long, "path": ""}]}      # type: ignore[attr-defined]
+    dock.fill("#cz-tt-q", "long")
+    dock.click("#cz-tt-results .cz-interest-item")
+    box = dock.eval_on_selector("#cz-tt-chips .cz-chip", "e => { const r = e.getBoundingClientRect(); return { left: r.left, right: r.right }; }")
+    x = dock.eval_on_selector("#cz-tt-chips .cz-x", "e => { const r = e.getBoundingClientRect(); return { w: r.width, h: r.height, right: r.right }; }")
+    assert box["right"] <= 390 and x["right"] <= 390
+    assert x["w"] >= 24 and x["h"] >= 24
+
+
+def _contrast(a, b):
+    def lum(rgb):
+        out = []
+        for c in rgb:
+            c = c / 255
+            out.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]
+    hi, lo = max(lum(a), lum(b)), min(lum(a), lum(b))
+    return (hi + 0.05) / (lo + 0.05)
+
+
+@pytest.mark.parametrize("stage", [1, 2, 3, 4])
+def test_the_white_text_of_the_verdict_pill_reads_on_every_verdict_color(dock, stage):
+    rgb = dock.evaluate("""(s) => { const e = document.createElement('span'); e.className = 'cz-stage on s' + s; e.textContent = 'x'; document.body.appendChild(e);
+        const m = getComputedStyle(e).backgroundColor.match(/\\d+/g).slice(0, 3).map(Number); e.remove(); return m; }""", stage)
+    assert _contrast(rgb, (255, 255, 255)) >= 4.5
+
+
+def test_a_pressed_button_still_looks_pressed_in_forced_colors(dock):
+    dock.emulate_media(forced_colors="active")
+    dock.click('#cz-tt-gender [data-v="female"]')
+    colors = dock.evaluate("""() => ['female', 'male'].map((v) => { const b = document.querySelector('#cz-tt-gender [data-v=' + v + ']');
+        const s = getComputedStyle(b); return s.backgroundColor + '|' + s.color; })""")
+    assert colors[0] != colors[1]
+
+
+def test_a_list_that_is_still_loading_is_not_fetched_again_by_the_next_keystroke(dock):
+    world = dock.world                                                                              # type: ignore[attr-defined]
+    world.hold.add("targeting")
+    before = world.hits.count("targeting")
+    dock.click("#cz-tt-browse > summary")
+    for ch in "skin":
+        dock.type("#cz-tt-filter", ch)
+    assert world.hits.count("targeting") - before == 1
+    world.hold.discard("targeting")
+    world.release("targeting")
+    dock.wait_for_selector('#cz-tt-browse-body [data-tt="browse-add"]')
+
+
+def test_the_popups_close_on_focus_alone_so_no_page_wide_listener_is_added_per_registration(dock):
+    src = dock.evaluate("fetch('/static/constanza-tiktok.js').then(r => r.text())")
+    assert 'document.addEventListener("mousedown"' not in src

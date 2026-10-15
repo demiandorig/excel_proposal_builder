@@ -14,7 +14,7 @@ from app.services.constanza_geo import GeoResolution, ResolvedArea, resolve_geo
 from tests import tiktok_support as ts
 from tests.tiktok_support import STATE_IDS, US_ID, FakeResponse, FakeTikTok, dma_id, make_client, ok
 
-STYLES = ["plain", "state", "comma_state", "dma_suffix", "full_plain", "full_state"]
+STYLES = ["plain", "state", "comma_state", "dma_suffix", "full_plain", "full_state", "google", "state_name"]
 DMAS = list(load_dma_reference())
 BY_NAME = {d.dma: d for d in DMAS}
 
@@ -135,8 +135,13 @@ def test_every_one_of_the_210_markets_lands_on_its_own_market_in_one_go(style, r
     wrong = [(l.source, l.name) for l, d in zip(out.locations, [d for d in DMAS if d.dma in {x.source for x in out.locations}]) if l.tiktok_id != dma_id(BY_NAME[l.source].rank)]
     assert wrong == []
     assert out.market_source == ("list" if region_list else "search")
-    # "Santa Barbra" is a misspelling in the workbook: a search by words cannot find it in a written-out name, and says so
-    allowed = {"Santa Barbra-Sntmra-Slobs"} if (not region_list and style.startswith("full")) else set()
+    # "Santa Barbra" is a misspelling in the workbook: a search by words cannot find it in a written-out name, and says so (and "Idaho Fals",
+    # the same with a name written short, in Google's convention). Through TikTok's market list - every name side by side - nothing is missed.
+    allowed = set()
+    if not region_list and style in ("full_plain", "full_state", "google", "state_name"):
+        allowed.add("Santa Barbra-Sntmra-Slobs")
+    if not region_list and style == "google":
+        allowed.add("Idaho Fals-Pocatllo(Jcksn)")
     assert {u["input"] for u in out.unmapped} == allowed, out.unmapped[:5]
     assert len(out.locations) == 210 - len(allowed)
 
@@ -160,6 +165,92 @@ def test_the_two_portlands_and_the_three_columbuses_each_find_their_own():
     assert ids(out) == [dma_id(BY_NAME[n].rank) for n in names] and out.unmapped == []
 
 
+# A market TikTok does not list must come back as missing - never as the neighbour that shares its first city. The review's repro: with
+# TikTok's names carrying no state, Chicago went to Chico-Redding, Columbus OH to Columbus-Tupelo, Albany GA to Albany-Schenectady-Troy...
+LOOK_ALIKES = [("Chicago", "Chico-Redding"), ("Chico-Redding", "Chicago"), ("Columbus, OH", "Columbus-Tupelo-W Pnt-Hstn"), ("Columbus-Tupelo-W Pnt-Hstn", "Columbus, OH"),
+               ("Springfield, MO", "Springfield-Holyoke"), ("Springfield-Holyoke", "Springfield, MO"), ("Albany, GA", "Albany-Schenectady-Troy"),
+               ("Albany-Schenectady-Troy", "Albany, GA"), ("Charlottesville", "Charlotte"), ("Charlotte", "Charlottesville"), ("Harrisonburg", "Harrisburg-Lncstr-Leb-York"),
+               ("Jackson, TN", "Jacksonville"), ("Rochester, NY", "Rochestr-Mason City-Austin"), ("Greenville-N.Bern-Washngtn", "Greenville-Spart-Ashevll-And")]
+
+
+@pytest.mark.parametrize("style", ["plain", "google", "state_name"])
+@pytest.mark.parametrize("asked,only_other", LOOK_ALIKES)
+def test_a_market_tiktok_does_not_list_is_reported_missing_not_swapped_for_its_look_alike(style, asked, only_other):
+    fake = FakeTikTok(market_style=style)
+    fake.dmas = [d for d in fake.dmas if d.dma != asked]                      # TikTok has the neighbour, not this market
+    assert any(d.dma == only_other for d in fake.dmas)
+    out = tg.map_resolution(resolution([market(BY_NAME[asked])]), make_client(fake))
+    assert out.locations == [] and [u["input"] for u in out.unmapped] == [asked], out.locations
+    assert "no market" in out.unmapped[0]["reason"]
+
+
+@pytest.mark.parametrize("style", ["plain", "google", "state_name", "full_plain"])
+def test_whichever_single_market_tiktok_lacks_it_is_never_given_another_one(style):
+    """Every one of the 210 markets, in turn, missing from TikTok's list: none may land on a different market."""
+    swapped = []
+    for d in DMAS:
+        tg.forget_everything()
+        fake = FakeTikTok(market_style=style)
+        fake.dmas = [x for x in fake.dmas if x.rank != d.rank]
+        out = tg.map_resolution(resolution([market(d)]), make_client(fake))
+        if out.locations:
+            swapped.append((d.dma, out.locations[0].name))
+    assert swapped == []
+
+
+@pytest.mark.parametrize("style", ["plain", "google"])
+def test_a_list_with_only_the_biggest_150_markets_never_gives_the_missing_ones_another_market(style):
+    swapped, placed = [], 0
+    for d in DMAS:
+        tg.forget_everything()
+        fake = FakeTikTok(market_style=style)
+        fake.dmas = [x for x in fake.dmas if x.rank <= 150]
+        out = tg.map_resolution(resolution([market(d)]), make_client(fake))
+        if out.locations and d.rank > 150:
+            swapped.append((d.dma, out.locations[0].name))
+        placed += bool(out.locations) and d.rank <= 150
+    assert swapped == [] and placed == 150
+
+
+def test_a_market_is_the_rivals_when_another_market_fits_the_tiktok_name_at_least_as_well():
+    """pick_market on its own, with a TikTok name that carries no state: it fits Chico-Redding better than it fits Chicago, so Chicago may not have it."""
+    cands = [candidate("Chico-Redding", "1")]
+    assert tg.pick_market("Chicago", "IL", cands)[0]["geo_id"] == "1"                                   # nobody else was asked about
+    best, why = tg.pick_market("Chicago", "IL", cands, rivals=[("Chico-Redding", "CA"), ("Chicago", "IL")])
+    assert best is None and "fits Chico-Redding at least as well" in why
+    assert tg.pick_market("Chico-Redding", "CA", cands, rivals=[("Chicago", "IL")])[0]["geo_id"] == "1"
+
+
+def test_a_complete_list_lets_every_market_through_the_comparison_with_every_other():
+    """The comparison must not turn good matches into misses: all 210 against all 209 others, in the conventions where TikTok names carry no state."""
+    for style in ("plain", "google", "state_name", "full_plain"):
+        tg.forget_everything()
+        out = tg.map_resolution(resolution([market(d) for d in DMAS]), make_client(FakeTikTok(market_style=style)))
+        assert len(out.locations) == 210 and out.unmapped == [], (style, out.unmapped[:3])
+
+
+def test_a_written_out_state_dc_and_a_typeset_dash_are_read_like_their_short_forms():
+    assert tg._words("Columbus Ohio", True) == ((("columbus",), frozenset({"OH"})))
+    assert tg._words("Greenville-Spartanburg South Carolina-Asheville North Carolina", True)[1] == {"SC", "NC"}
+    assert tg._words("Washington D.C. (Hagerstown)", True) == tg._words("Washington, DC (Hagerstown)", True) == (("washington", "hagerstown"), frozenset({"DC"}))
+    assert tg._words("Albany\u2013Schenectady\u2013Troy NY", True) == tg._words("Albany-Schenectady-Troy NY", True)
+    assert tg._words("Washington District of Columbia", True)[1] == {"DC"}
+    # a state's name that IS the name stays a word: the lead city of "Kansas City", "Oklahoma City" and "New York", and a piece like "Washington NC"
+    assert tg._words("New York", True)[0] == ("new", "york") and tg._words("Oklahoma City", True)[0] == ("oklahoma",)
+    assert "washington" in tg._words("Greenville-New Bern-Washington NC", True)[0]
+    # place names (counties, cities) keep their words: Fort Washington is not "Fort" in Washington state
+    assert tg._words("Fort Washington")[0] == ("fort", "washington")
+    assert tg._place_key("Fort Washington") == "fort washington"
+
+
+@pytest.mark.parametrize("asked,written", [("Washington, DC (Hagerstown)", "Washington D.C. (Hagerstown MD)"),
+                                           ("Albany-Schenectady-Troy", "Albany\u2013Schenectady\u2013Troy NY"), ("Columbus, OH", "Columbus Ohio")])
+def test_markets_whose_names_are_written_with_dc_dashes_or_the_state_in_full_find_their_market(monkeypatch, asked, written):
+    monkeypatch.setattr(ts, "market_name", lambda d, style: written if d.dma == asked else d.dma)        # TikTok writes this one market its own way
+    out = tg.map_resolution(resolution([market(BY_NAME[asked])]), make_client(FakeTikTok(market_style="plain")))
+    assert ids(out) == [dma_id(BY_NAME[asked].rank)], out.unmapped
+
+
 def _columbus_only_once(monkeypatch):
     """A TikTok that lists ONE market called "Columbus" (no state in the name), while the planner's list has two Columbuses."""
     monkeypatch.setattr(ts, "market_name", lambda d, style: "Columbus" if d.dma == "Columbus, OH" else d.dma)
@@ -168,8 +259,19 @@ def _columbus_only_once(monkeypatch):
     return make_client(fake)
 
 
-def test_two_of_your_markets_that_land_on_one_tiktok_market_are_both_reported_and_neither_is_used(monkeypatch):
-    """TikTok knowing one "Columbus": which of the planner's two Columbuses is it? Not guessed: neither goes into the estimate."""
+def test_when_tiktok_lists_one_columbus_the_market_named_exactly_that_gets_it_and_the_other_is_reported(monkeypatch):
+    """TikTok knowing one "Columbus" (no state in the name), while the planner's list has two: the market whose name that is gets it, the
+    other is reported as not found - it is never handed the same TikTok market."""
+    client = _columbus_only_once(monkeypatch)
+    out = tg.map_resolution(resolution([market(BY_NAME["Columbus, OH"]), market(BY_NAME["Columbus, GA (Opelika, AL)"]), market(BY_NAME["Chicago"])]), client)
+    assert [l.source for l in out.locations] == ["Columbus, OH", "Chicago"]
+    assert [u["input"] for u in out.unmapped] == ["Columbus, GA (Opelika, AL)"] and "fits Columbus, OH at least as well" in out.unmapped[0]["reason"]
+
+
+def test_two_markets_that_land_on_one_tiktok_market_are_both_reported_and_neither_is_used_when_nothing_tells_them_apart(monkeypatch):
+    """The last line of defence, with the comparison against the other markets switched off: two of the planner's markets that picked ONE
+    TikTok market cannot both be right, and which one is wrong is not known - neither goes into the estimate."""
+    monkeypatch.setattr(tg, "_reference_markets", lambda: ())
     client = _columbus_only_once(monkeypatch)
     out = tg.map_resolution(resolution([market(BY_NAME["Columbus, OH"]), market(BY_NAME["Columbus, GA (Opelika, AL)"]), market(BY_NAME["Chicago"])]), client)
     assert [l.source for l in out.locations] == ["Chicago"]
@@ -184,6 +286,7 @@ def test_when_tiktok_has_two_markets_of_that_name_the_market_is_reported_as_ambi
 
 
 def test_a_market_that_clashed_is_not_remembered_for_the_next_estimate(monkeypatch):
+    monkeypatch.setattr(tg, "_reference_markets", lambda: ())
     client = _columbus_only_once(monkeypatch)
     tg.map_resolution(resolution([market(BY_NAME["Columbus, OH"]), market(BY_NAME["Columbus, GA (Opelika, AL)"]), market(BY_NAME["Chicago"])]), client)
     assert tg._recall(("dma", "columbus, oh")) is None and tg._recall(("dma", "columbus, ga (opelika, al)")) is None
@@ -380,6 +483,59 @@ def test_a_county_is_not_taken_for_a_city_of_the_same_name_and_the_other_way_rou
     city = tg.map_resolution(resolution([area("city", "Sacramento, CA", state="CA")], method="city"), client)
     county = tg.map_resolution(resolution([area("county", "Sacramento County, CA", state="CA")], method="county"), client)
     assert ids(city) == ["920001"] and ids(county) == ["910006"]
+
+
+def _tag(name, geo_id, parent, desc="County", geo_type="CITY"):
+    return {"keyword": "x", "name": name, "targeting_type": "GEO", "status_info": {"status": "ENABLED", "reason": None},
+            "geo": {"geo_id": geo_id, "geo_type": geo_type, "parent_id": parent, "region_code": "US", "description": desc}}
+
+
+@pytest.mark.parametrize("text,county_text,city_id,county_id", [("Baltimore city, MD", "Baltimore County, MD", "920101", "910013"),
+                                                                 ("Fairfax city, VA", "Fairfax County, VA", "920102", "910014"),
+                                                                 ("St. Louis city, MO", "St. Louis County, MO", "920103", "910010")])
+def test_an_independent_city_is_never_the_county_of_the_same_name(text, county_text, city_id, county_id):
+    """Baltimore city, Fairfax city and St. Louis city are Census "independent cities": county-sized areas that ARE cities, next to a county of the
+    same name that is a different (and often much bigger) place. TikTok has both; each finds its own, in either order, with the memory shared."""
+    client = make_client()
+    city = tg.map_resolution(resolve_geo(text, "county"), client)
+    county = tg.map_resolution(resolve_geo(county_text, "county"), client)
+    assert ids(city) == [city_id] and ids(county) == [county_id], (city.unmapped, county.unmapped)
+    again = tg.map_resolution(resolve_geo(text, "county"), client)                 # remembered: the county did not overwrite the city
+    assert ids(again) == [city_id]
+
+
+@pytest.mark.parametrize("text,state,county_name,county_id", [("Baltimore city, MD", "MD", "Baltimore County", "910013"), ("Fairfax city, VA", "VA", "Fairfax County", "910014"),
+                                                               ("St. Louis city, MO", "MO", "St. Louis County", "910010")])
+def test_an_independent_city_is_reported_not_mapped_when_tiktok_answers_only_with_the_county(text, state, county_name, county_id):
+    """The review's repro: TikTok's answer held only the county, and the city was handed it (Fairfax city is about 24,000 people, Fairfax County
+    about 1.1 million). "City" and "County" are not part of a name's identity when two places are compared, but they decide WHICH kind it is."""
+    client = make_client()
+    client.fake.queue("/tool/targeting/search/", FakeResponse(200, ok({"targeting_tag_list": [_tag(county_name, county_id, STATE_IDS[state])], "parent_tags": []})))
+    out = tg.map_resolution(resolve_geo(text, "county"), client)
+    assert out.locations == [] and "no city with that name" in out.unmapped[0]["reason"], out.locations
+
+
+def test_a_county_with_no_suffix_in_tiktoks_name_is_still_told_from_a_city_by_its_description():
+    client = make_client()
+    client.fake.queue("/tool/targeting/search/", FakeResponse(200, ok({"targeting_tag_list": [_tag("Baltimore", "1", STATE_IDS["MD"], desc="County"),
+                                                                                              _tag("Baltimore", "2", STATE_IDS["MD"], desc="City", geo_type="DISTRICT")],
+                                                                      "parent_tags": []})))
+    city = tg.map_resolution(resolve_geo("Baltimore city, MD", "county"), client)
+    assert ids(city) == ["2"]
+
+
+def test_parishes_and_boroughs_map_as_counties():
+    client = make_client()
+    parish = tg.map_resolution(resolve_geo("Orleans Parish, LA", "county"), client)
+    borough = tg.map_resolution(resolution([area("county", "Anchorage Borough, AK", state="AK")], method="county"), client)
+    assert ids(parish) == ["910015"] and ids(borough) == ["910016"], (parish.unmapped, borough.unmapped)
+
+
+def test_what_a_place_name_says_it_is():
+    assert tg._place_class("Baltimore County") == "county" and tg._place_class("Orleans Parish") == "county" and tg._place_class("Anchorage Borough") == "county"
+    assert tg._place_class("Baltimore city") == "city" and tg._place_class("Carson City") == "city" and tg._place_class("Kansas City") == "city"
+    assert tg._place_class("Baltimore") is None and tg._place_class("Baltimore", "City") == "city" and tg._place_class("Baltimore", "County") == "county"
+    assert tg._place_class("Orleans", "Parish") == "county" and tg._place_class("Springfield", "") is None
 
 
 def test_saint_and_st_and_accents_do_not_matter_when_a_county_or_city_name_is_compared():

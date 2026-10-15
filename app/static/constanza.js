@@ -1113,7 +1113,7 @@
   function setBusy(on) {
     S.busy = on;
     const go = $("cz-go");
-    go.disabled = on;
+    go.setAttribute("aria-disabled", String(on));             // not `disabled`: that would drop the keyboard focus of the person who just pressed it (pull() ignores a press while busy)
     go.innerHTML = on ? `<span class="cz-spinner"></span>Pulling…` : goLabel();
     $("constanza-dock").setAttribute("aria-busy", String(on));
   }
@@ -1158,6 +1158,7 @@
     S.resultCtx = asked;
     S.resultSig = JSON.stringify(body);
     renderResult(r.data);
+    if (plug && plug.onResult) plug.onResult(r.data);
     announce(`Pulled ${r.data.product_name}: ${num(summarize(r.data).month.mid)} impressions per month.`);
     $("constanza-bubble").classList.add("cz-has-result");
     setMood("happy", 3200);

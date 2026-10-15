@@ -39,7 +39,10 @@ planner sets up the audience in the dock ─► /api/constanza/estimate ─► T
 
 3. Open **Admin → Forecast → TikTok connection → Test the connection**. It checks, with the real account: the token and ad
    account; the interest and behavior categories; a keyword search; **all 210 TV markets by name** (and where the names came
-   from: TikTok's own market list, or a search); ZIP codes; a state; a U.S.-wide estimate; and a narrow audience. The same run is
+   from: TikTok's own market list, or a search); the **look-alike markets** side by side (read this line by eye: Columbus, Portland,
+   Springfield, Charlotte / Charlottesville… must each show a *different* TikTok market, the right one); ZIP codes; a state; a
+   U.S.-wide estimate; a narrow audience; and **interests with no ages chosen** (which shows whether TikTok asks for the age groups,
+   see below). The same run is
    `python -m app.services.tiktok_diagnose` (`--sample` tries about 40 markets instead of all 210; `--json` for a machine-readable
    answer).
 
@@ -87,18 +90,26 @@ TikTok identifies a place by an ID, not a name, so the geography the planner typ
   `METROPOLITAN_OR_DMA`, one call cached for hours) so every market is compared with every other; if that list is not there the
   search (`/tool/targeting/search/`, `geo_types: DMA`, five results a keyword) is used. A market matches on its **first city**
   ("Charlotte" is never "Charlottesville"; "St." is "Saint", "Ft." is "Fort", and a word written short — "Lncstr" for "Lancaster" —
-  is the same word) and its **home state** (a candidate that names another state is not this market). **A wrong place is worse
-  than a missing one**, so these are reported, never guessed: a market that fits two TikTok markets equally, one TikTok has
-  switched off, and two of *your* markets that land on one TikTok market (neither is used). All 210 markets are checked
-  in the tests against six naming conventions (with and without a state, abbreviated and written out) through the list and
-  through the search, but **TikTok's real market names could only be seen with an ad account**, so the first thing to do after
-  connecting is *Test the connection*: its *TV markets by name* line lists any market that did not match, and that list is the
-  whole of what could still need a rule.
+  is the same word), a state written as a code or in full ("Columbus OH", "Columbus Ohio"), "D.C." and any dash are read alike, and
+  its **home state** (a candidate that names another state is not this market). **A wrong place is worse than a missing one**, so
+  these are reported, never guessed: a market that fits two TikTok markets equally, one TikTok has switched off, and two of
+  *your* markets that land on one TikTok market (neither is used). A TikTok market is also given to a market **only if no other
+  of the 210 fits it as well**: when TikTok does not list a market, the neighbour that shares its first city (Chicago and
+  Chico-Redding, Albany GA and Albany-Schenectady-Troy, Columbus OH and Columbus-Tupelo) is not handed to it, the market is
+  reported as missing. All 210 markets are checked in the tests against eight naming conventions (with and without a state,
+  abbreviated and written out, Google's, the state written in full) through the list and through the search, and each market is
+  also left out of TikTok's list in turn to see that none lands on another one; but **TikTok's real market names could only be
+  seen with an ad account**, so the first thing to do after connecting is *Test the connection*: its *TV markets by name* line
+  lists any market that did not match, and the *look-alike* line shows the pairs that a name match could confuse.
 * **ZIP codes** → `zipcode_ids` (TikTok's ZIP search, 1,000 at a time). **Counties and cities** are looked up one at a time and told
   apart by **state**: a county's parent is its state, but a **city's parent is its county** (TikTok's own example: Frankfort →
   Franklin County → Kentucky), so the state is read from the chain of parents TikTok sends (`parent_tags`). A place whose state
   cannot be confirmed is reported ("TikTok did not say which state its Springfield is in"), never swapped for the same name in
-  another state. **Congressional districts** are not something TikTok can target. **Other countries** are found by name.
+  another state. A **county is never taken for a city of the same name, nor the other way round**: the words *County*, *Parish*
+  and *Borough* (or TikTok's own description) say which a place is, and a Census **independent city** (Baltimore city, Fairfax
+  city, St. Louis city: county-sized, but a city, beside a county of the same name) is looked up as a city. Up to twelve counties
+  and cities are looked up per estimate (one call each; the rest are reported). **Congressional districts** are not something
+  TikTok can target. **Other countries** are found by name.
 * TikTok takes at most 3,000 places per estimate and does not accept overlapping places (the U.S. and a state together).
 
 ## Safety and limits
@@ -112,9 +123,12 @@ TikTok identifies a place by an ID, not a name, so the geography the planner typ
   has a plain-language message (HTTP 503 not connected / 502 TikTok trouble / 429 rate limit / 422 settings).
 * **U.S. interest targeting needs the age groups spelled out** (return code `40065`: "specify an `age_groups` value that does not
   contain `AGE_13_17`"). A request without ages that TikTok refuses for that reason is repeated once with the five adult groups
-  (the estimate leaves out under-18s, so it is the same audience), remembered, and the card says so.
+  (the estimate leaves out under-18s, so it is the same audience), remembered, and the card says so. What is remembered applies
+  only to requests that use interests, behaviors, income or spending power (the options TikTok restricts): a plain location /
+  age / gender request is always asked as the planner set it up.
 * **Calls are bounded**: at most 6 in flight, a call that cannot get a turn within 5 seconds is refused, and one call (retries
-  included) is given up after 45 seconds, so a slow TikTok cannot hold every worker of the app. Answers TikTok sent empty (a
+  included, and the wait for a turn) is given up after 45 seconds (a retry is begun only if its whole connect and read time still
+  fits), so a slow TikTok cannot hold every worker of the app. Answers TikTok sent empty (a
   category list, a market list) are not remembered, so the next pull asks again. TikTok's error messages are shown with the
   token and any ad account ID removed.
 * **If TikTok refuses `REACH` / `REACH`** for an account (its own documentation example pairs the Reach objective with `CLICK`),
@@ -142,7 +156,8 @@ where the docs say string, an objective / goal pair that does not exist, overlap
 on Pangle, more than 3,000 places, U.S. interests without ages — `40065` — a wrong token) and docs-shaped (a city's parent is its
 county, `parent_tags` carries the ancestors). `test_constanza_tiktok_frontend.py` checks the panel's pure functions, and
 `test_constanza_tiktok_dom.py` drives the real panel in headless Chromium (Playwright; skipped when it is not installed) for what a
-stub page cannot show: keyboard focus, chips that match the request, Escape, Reset.
+stub page cannot show: keyboard focus, chips that match the request, Escape, Reset, answers that arrive late or for older text;
+`test_admin_tiktok_card_dom.py` does the same for the Admin → Forecast connection card.
 
 ## Still to confirm with a real account
 

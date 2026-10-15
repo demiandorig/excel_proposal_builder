@@ -14,6 +14,7 @@ What it can NOT do is know TikTok's real market names or numbers: the names of t
 from __future__ import annotations
 
 import json as _json
+import re
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qsl, urlsplit
 
@@ -43,7 +44,10 @@ COUNTIES = [
     ("910001", "Los Angeles County", "CA"), ("910002", "Adams County", "WA"), ("910003", "Adams County", "CO"), ("910004", "Adams County", "IL"),
     ("910005", "Harris County", "TX"), ("910006", "Sacramento County", "CA"), ("910007", "Collin County", "TX"), ("910008", "Franklin County", "KY"),
     ("910009", "Franklin County", "OH"), ("910010", "St. Louis County", "MO"), ("910011", "Sangamon County", "IL"), ("910012", "Greene County", "MO"),
+    ("910013", "Baltimore County", "MD"), ("910014", "Fairfax County", "VA"), ("910015", "Orleans Parish", "LA"), ("910016", "Anchorage Borough", "AK"),
 ]
+# independent cities (Baltimore, Fairfax, St. Louis): cities with no county, so their parent is the STATE - and a county of the same name next door
+INDEPENDENT_CITIES = [("920101", "Baltimore", "MD"), ("920102", "Fairfax", "VA"), ("920103", "St. Louis", "MO")]
 # cities (id, name, county id): their parent is their COUNTY (the docs' example: Frankfort -> Franklin County -> Kentucky)
 CITIES = [
     ("920001", "Sacramento", "910006"), ("920002", "Springfield", "910011"), ("920003", "Springfield", "910012"), ("920004", "Plano", "910007"),
@@ -71,6 +75,10 @@ AGE_WEIGHT = {"AGE_18_24": 0.22, "AGE_25_34": 0.27, "AGE_35_44": 0.21, "AGE_45_5
 # the objective -> optimization goals that exist (Enumerations - Advertising objective / Optimization goal)
 GOALS = {"REACH": {"REACH"}, "VIDEO_VIEWS": {"ENGAGED_VIEW", "ENGAGED_VIEW_FIFTEEN"}, "TRAFFIC": {"CLICK", "TRAFFIC_LANDING_PAGE_VIEW"}}
 PLACEMENTS = {"PLACEMENT_TIKTOK", "PLACEMENT_PANGLE", "PLACEMENT_GLOBAL_APP_BUNDLE"}
+# Enumeration - Promotion Type (Optimization location): the values the docs list, and no others
+PROMOTION_TYPES = {"APP_ANDROID", "APP_IOS", "MINI_APP", "MINI_GAME", "GAME", "WEBSITE", "LEAD_GENERATION", "LEAD_GEN_CLICK_TO_TT_DIRECT_MESSAGE",
+                   "LEAD_GEN_CLICK_TO_SOCIAL_MEDIA_APP_MESSAGE", "LEAD_GEN_CLICK_TO_CALL", "WEBSITE_OR_DISPLAY", "TIKTOK_SHOP", "VIDEO_SHOPPING",
+                   "LIVE_SHOPPING", "PSA_PRODUCT"}
 ESTIMATE_FIELDS = {
     "advertiser_id", "placement_type", "placements", "app_id", "pixel_id", "ios14_targeting", "objective_type", "optimization_goal", "promotion_type",
     "product_source", "catalog_id", "product_set_id", "catalog_authorized_bc_id", "shopping_ads_retargeting_type", "shopping_ads_retargeting_actions_days",
@@ -109,6 +117,11 @@ def market_name(dma, style: str) -> str:
     name = dma.dma
     if style == "plain":
         return name
+    if style == "google":
+        from tests.tiktok_market_names import GOOGLE_NAMES
+        return GOOGLE_NAMES[dma.rank]
+    if style == "state_name":                                  # the home state written out after the full name: "Columbus Ohio"
+        return f"{re.sub(r',?\s*[A-Z]{2}\b', '', FULL_NAMES.get(name, name)).strip()} {_STATE_NAME.get(dma.state, dma.state)}"
     if style == "state":
         return f"{name} {dma.state}"
     if style == "comma_state":
@@ -264,9 +277,12 @@ class FakeTikTok:
             out.append({"id": dma_id(d.rank), "name": market_name(d, self.market_style), "type": "DMA", "parent": US_ID, "region": "US", "description": "DMA",
                         "area": "METROPOLITAN_OR_DMA", "level": "PROVINCE"})
         for ident, name, state in COUNTIES:
-            out.append({"id": ident, "name": name, "type": "CITY", "parent": STATE_IDS[state], "region": "US", "description": "County", "area": "ADMIN", "level": "CITY"})
+            kind = name.rsplit(" ", 1)[1]                                       # County / Parish / Borough: TikTok describes it that way
+            out.append({"id": ident, "name": name, "type": "CITY", "parent": STATE_IDS[state], "region": "US", "description": kind, "area": "ADMIN", "level": "CITY"})
         for ident, name, county in CITIES:
             out.append({"id": ident, "name": name, "type": "DISTRICT", "parent": county, "region": "US", "description": "City", "area": "ADMIN", "level": "DISTRICT"})
+        for ident, name, state in INDEPENDENT_CITIES:
+            out.append({"id": ident, "name": name, "type": "DISTRICT", "parent": STATE_IDS[state], "region": "US", "description": "City", "area": "ADMIN", "level": "DISTRICT"})
         return out
 
     @staticmethod
@@ -407,6 +423,8 @@ class FakeTikTok:
             return fail(40002, f"optimization_goal: {goal} is not valid for objective_type {objective}.")
         if objective not in ("REACH", "VIDEO_VIEWS", "ENGAGEMENT") and not body.get("promotion_type"):
             return fail(40002, f"promotion_type: Required when objective_type is {objective}.")
+        if body.get("promotion_type") and body["promotion_type"] not in PROMOTION_TYPES:
+            return fail(40002, "promotion_type: Invalid value.")
         for field in ("location_ids", "zipcode_ids", "age_groups", "languages", "interest_category_ids", "interest_keyword_ids",
                       "purchase_intention_keyword_ids", "placements", "household_income", "operating_systems", "network_types"):
             err = self._strings(body, field)

@@ -119,6 +119,13 @@ class Targeting:
     def interactions(self) -> bool:
         return bool(self.video_interaction_ids or self.creator_interaction_ids or self.hashtag_ids)
 
+    @property
+    def age_restricted(self) -> bool:
+        """Does this targeting use options TikTok restricts for U.S. teens (interests, behaviors, income, spending power)? Those are the
+        ones its return code 40065 is about - a plain location / age / gender / language request never meets it."""
+        return bool(self.interest_category_ids or self.interest_keyword_ids or self.purchase_intention_ids or self.interactions
+                    or self.household_income or self.spending_power)
+
     @classmethod
     def from_dict(cls, raw: Optional[dict]) -> "Targeting":
         """Validate a request body's targeting. ValueError carries a planner-readable message; nothing is silently corrected."""
@@ -286,7 +293,9 @@ def estimate(res: GeoResolution, targeting: Targeting, months: int, client: Opti
     if not mapping.usable:
         why = "; ".join(f"{u['input']} ({u['reason']})" for u in mapping.unmapped[:4])
         raise ValueError("None of those places could be found in TikTok" + (f": {why}." if why else "."))
-    adult = bool(getattr(client, "adult_ages_needed", False)) and not targeting.age_groups
+    # once TikTok has asked for the ages (40065) the next request that carries such options says so up front - one that does not is asked
+    # exactly as the planner set it up, so what is sent never depends on what was asked before
+    adult = bool(getattr(client, "adult_ages_needed", False)) and not targeting.age_groups and targeting.age_restricted
     body = build_estimate_body(targeting, mapping, goal_override, adult_ages=adult)
     try:
         size = client.estimate_audience(body)

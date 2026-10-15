@@ -1810,7 +1810,8 @@ input[readonly] {
 .mix-readout.mix-over { color: var(--red); background: var(--red-soft); }
 .mix-edit-hint { margin: 0; font-size: 12px; color: var(--ink-soft); }
 /* A disabled button used to look exactly like an enabled one. */
-.btn-primary:disabled, .btn-secondary:disabled {
+.btn-primary:disabled, .btn-secondary:disabled,
+.btn-primary[aria-disabled="true"], .btn-secondary[aria-disabled="true"] {
   opacity: 0.45;
   cursor: not-allowed;
 }

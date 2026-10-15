@@ -84,6 +84,28 @@ def sample_markets(dmas: list) -> list:
     return out[:SAMPLE_SIZE]
 
 
+def lookalike_families(dmas: list) -> list[list]:
+    """Groups of two or more markets whose first city is the same word, or one written short for the other: the three Columbuses, the two
+    Portlands, Charlotte and Charlottesville. These are the ones a name match could swap, so the line that lists them is the one to read by eye."""
+    leads = [tiktok_geo._lead(d.dma, True) for d in dmas]
+    parent = list(range(len(dmas)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(dmas)):
+        for j in range(i + 1, len(dmas)):
+            if tiktok_geo._same_lead(leads[i], leads[j]):
+                parent[find(j)] = find(i)
+    groups: dict[int, list] = {}
+    for i, d in enumerate(dmas):
+        groups.setdefault(find(i), []).append(d)
+    return [g for g in groups.values() if len(g) > 1]
+
+
 def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = True) -> list[Check]:
     """The checks, in order; a failure that every later check would share (a bad token) stops the run there. All 210 TV markets are
     tried by default: against TikTok's market list that is one call, and the line says which markets did not match."""
@@ -93,8 +115,10 @@ def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = True) 
             return [Check("Settings", False, "Missing: " + ", ".join(missing) + f" — {tiktok_client.SETUP_HINT}.")]
         client = tiktok_client.get_client()
     client.clear_cache()
+    client.adult_ages_needed = False          # let the "interests, no ages" check find out what this account says
     tiktok_geo.forget_everything()
     checks: list[Check] = []
+    placed: dict[str, tiktok_geo.Mapping] = {}
 
     def add(check: Check) -> bool:
         checks.append(check)
@@ -130,6 +154,7 @@ def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = True) 
 
     def markets():
         out = tiktok_geo.map_resolution(_resolution([_area(d) for d in wanted], "exact_dma"), client)
+        placed["markets"] = out
         shown = "; ".join(f"{l.source} → “{l.name}”" for l in out.locations[:4])
         missed = out.unmapped
         how = {"list": "from TikTok's own market list", "search": "by searching: TikTok's market list was not available"}.get(out.market_source, "")
@@ -139,6 +164,31 @@ def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = True) 
         return detail, bool(missed)
 
     add(_timed("TV markets by name", markets))
+
+    def lookalikes():
+        out = placed.get("markets")
+        if out is None:
+            return "skipped: the market line above did not run", True
+        got = {l.source: l for l in out.locations}
+        tried = {_a for _a in (d.dma for d in wanted)}
+        parts, unplaced = [], 0
+        for family in lookalike_families(dmas):
+            cells = []
+            for d in family:
+                if d.dma in got:
+                    cells.append(f"{d.dma} → “{got[d.dma].name}”")
+                elif d.dma in tried:
+                    cells.append(f"{d.dma} → not placed")
+                    unplaced += 1
+                else:
+                    cells.append(f"{d.dma} → not tried")
+            parts.append("; ".join(cells))
+        text = " | ".join(parts)
+        if len(text) > 1800:
+            text = text[:1800] + "…"
+        return (f"{len(parts)} groups of markets that share a first city - each line must show DIFFERENT TikTok markets, the right ones: {text}"), bool(unplaced)
+
+    add(_timed("Look-alike TV markets", lookalikes))
 
     def zips():
         out = tiktok_geo.map_resolution(_resolution([_zip_area("90210"), _zip_area("10001")], "zip"), client)
@@ -191,6 +241,20 @@ def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = True) 
                 + (" (Los Angeles could not be placed, see the markets line)" if fallback else "")), fallback
 
     add(_timed("Audience size · a narrow audience", narrow))
+
+    def interests_without_ages():
+        interests = client.targeting_list(["general_interest"]).get("general_interest") or []
+        pick = next((i for i in interests if (i.get("level") or 1) > 1), interests[0] if interests else None)
+        if pick is None:
+            return "TikTok listed no interest category to try", True
+        national = GeoResolution(input_text="National", method="national", areas=[], geo_confidence="high")
+        out = ct.estimate(national, ct.Targeting.from_dict({"interest_category_ids": [pick["id"]]}), 1, client=client)
+        s = out.size
+        how = ("TikTok asked for the age groups to be spelled out (code 40065), so the five adult groups were sent - the app does that by itself"
+               if out.adult_ages_sent else "TikTok took it with no age groups")
+        return f"{pick['name']}, no ages chosen: {s.lower:,.0f} – {s.upper:,.0f} people; {how}", False
+
+    add(_timed("Audience size · interests, no ages chosen", interests_without_ages))
     return checks
 
 

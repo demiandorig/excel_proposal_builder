@@ -121,7 +121,7 @@ def test_list_parameters_of_a_get_are_sent_as_json_like_tiktoks_own_examples():
 
 def test_the_repr_and_the_logs_never_show_the_token(caplog):
     c = make_client()
-    assert GOOD_TOKEN not in repr(c) and ADVERTISER in repr(c)
+    assert GOOD_TOKEN not in repr(c) and ADVERTISER not in repr(c) and ADVERTISER[-4:] in repr(c)
     caplog.set_level(logging.DEBUG)
     c.estimate_audience(US_BODY)
     c.fake.queue(ESTIMATE, FakeResponse(200, fail(40105, "bad token")))
@@ -483,6 +483,34 @@ def test_a_call_that_cannot_finish_inside_its_deadline_is_not_retried():
     with pytest.raises(TikTokAPIError) as err:
         c.estimate_audience(US_BODY)
     assert err.value.kind == "rate_limit" and c.fake.count(ESTIMATE) <= 2
+
+
+def test_a_retry_that_needs_its_whole_connect_and_read_time_is_not_started_when_it_cannot_finish_by_the_deadline():
+    """Another attempt can take CONNECT_TIMEOUT + READ_TIMEOUT (30 s): after 15 s spent, a retry that could end at 45.6 s is not begun."""
+    clock = Clock()
+    c = make_client(clock=clock)
+    c.fake.queue(ESTIMATE, timeout_error(), timeout_error(), timeout_error())
+    inner = c._session
+
+    class Slow:
+        def request(self, *a, **k):
+            clock.now += 15                              # the attempt ran 15 s before it timed out
+            return inner.request(*a, **k)
+
+    c._session = Slow()
+    with pytest.raises(TikTokAPIError) as err:
+        c.estimate_audience(US_BODY)
+    assert err.value.kind == "unavailable" and c.fake.count(ESTIMATE) == 1
+    assert clock.now - 1000.0 <= tc.CALL_DEADLINE
+
+
+def test_an_ad_account_id_is_scrubbed_even_when_letters_or_an_underscore_touch_it():
+    c = make_client()
+    c.fake.queue(ESTIMATE, FakeResponse(200, fail(40001, "advertiser_7000000000000001234 and id7000000000000001234x are not allowed")))
+    with pytest.raises(TikTokAPIError) as err:
+        c.estimate_audience(US_BODY)
+    shown = err.value.public_message() + " " + str(err.value)
+    assert "7000000000000001234" not in shown and "advertiser_…1234" in shown and "id…1234x" in shown
 
 
 def test_calls_in_flight_are_capped_and_a_queue_that_would_wait_too_long_is_refused():

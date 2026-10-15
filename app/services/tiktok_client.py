@@ -59,7 +59,8 @@ RATE_LIMIT_BACKOFF = (1.0, 2.5)
 MIN_INTERVAL = 0.12          # seconds between calls leaving this process (TikTok limits calls per second per app)
 MAX_CONCURRENT = 6           # calls in flight at once: a slow TikTok must not hold every worker thread of the app
 MAX_QUEUE_WAIT = 5.0         # a call that would have to wait longer than this for its turn is refused instead of queued
-CALL_DEADLINE = 45.0         # seconds one call may take in all, retries included
+CALL_DEADLINE = 45.0         # seconds one call may take in all, retries and the wait for a turn included (the timeouts are per connect / per
+                             # read, so a server that drips its answer a few bytes at a time could still run past it)
 
 BATCH_LIMIT = 1000         # keywords per location search (TikTok's own limit for the batch search types)
 
@@ -276,7 +277,7 @@ class _Throttle:
             self._sleep(start - now)
 
 
-_LONG_DIGITS = re.compile(r"\b\d{15,}\b")           # an ad account / business center ID; a place ID (7-13 digits) is not one
+_LONG_DIGITS = re.compile(r"(?<!\d)\d{15,}(?!\d)")   # an ad account / business center ID (letters or an underscore may touch it); a place ID (7-13 digits) is not one
 
 
 def _scrub(message: str, token: str) -> str:
@@ -362,8 +363,9 @@ class TikTokClient:
         """Forget every answer held in memory (the diagnostics want TikTok's real answer, not yesterday's)."""
         self._cache.clear()
 
-    def __repr__(self) -> str:                                    # never show the token
-        return f"TikTokClient(advertiser={self.advertiser!r}, base={self.base!r})"
+    def __repr__(self) -> str:                                    # never show the token, nor the whole ad account ID
+        tail = self.advertiser[-4:] if len(self.advertiser) > 4 else ""
+        return f"TikTokClient(advertiser='…{tail}', base={self.base!r})"
 
     # ---- the one place a request is made --------------------------------------------------------------------------------
     def call(self, method: str, path: str, *, params: Optional[dict] = None, body: Optional[dict] = None,
@@ -383,14 +385,15 @@ class TikTokClient:
 
     def _send(self, method: str, path: str, params: Optional[dict], body: Optional[dict]) -> tuple[dict, Optional[str]]:
         # at most MAX_CONCURRENT calls in flight, and one that cannot get a slot soon is refused: a slow TikTok must not pin every worker
+        began = self._clock()
         if not self._slots.acquire(timeout=MAX_QUEUE_WAIT):
             raise TikTokAPIError("too many requests are waiting for TikTok", kind="rate_limit")
         try:
-            return self._send_locked(method, path, params, body)
+            return self._send_locked(method, path, params, body, began)
         finally:
             self._slots.release()
 
-    def _send_locked(self, method: str, path: str, params: Optional[dict], body: Optional[dict]) -> tuple[dict, Optional[str]]:
+    def _send_locked(self, method: str, path: str, params: Optional[dict], body: Optional[dict], began: float) -> tuple[dict, Optional[str]]:
         url = f"{self.base}{path}"
         headers = {"Access-Token": self._token, "Accept": "application/json", "User-Agent": "constanza-proposal-builder/1"}
         # allow_redirects is off: requests would carry our custom Access-Token header to whatever host a redirect names
@@ -402,11 +405,11 @@ class TikTokClient:
             headers["Content-Type"] = "application/json"
             kwargs["json"] = body
 
-        began = self._clock()
         attempt = 0
 
         def can_retry(delay: float) -> bool:
-            return attempt < self.max_retries and (self._clock() - began) + delay + READ_TIMEOUT <= CALL_DEADLINE
+            # another attempt may need the whole connect and read time: start one only if it can finish inside the deadline
+            return attempt < self.max_retries and (self._clock() - began) + delay + CONNECT_TIMEOUT + READ_TIMEOUT <= CALL_DEADLINE
 
         while True:
             self._throttle.wait(MAX_QUEUE_WAIT)

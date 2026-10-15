@@ -1820,7 +1820,7 @@ async function loadTikTokStatus() {
     } else {
       state.innerHTML = `<span class="fc-badge fc-default">Not connected</span> add <code>${s.missing.map(escapeHtml).join("</code> and <code>")}</code> to the app's secrets`;
     }
-    btn.disabled = _ttTesting || !s.configured;
+    btn.disabled = !s.configured;                  // (a running test holds the button off with aria-disabled instead: see testTikTokConnection)
     btn.title = s.configured ? "" : "Add the TikTok secrets first";
   } catch (e) {
     state.textContent = `Couldn't read the TikTok status: ${e.message}`;
@@ -1833,7 +1833,7 @@ async function testTikTokConnection() {
   const note = document.getElementById("fc-tt-note");
   if (_ttTesting) return;
   _ttTesting = true;
-  btn.disabled = true;
+  btn.setAttribute("aria-disabled", "true");     // not `disabled`: that would drop the keyboard focus of the person who just pressed it
   note.classList.remove("fc-err");
   note.textContent = "Checking with TikTok… (about 10–20 seconds)";
   list.innerHTML = "";
@@ -1844,7 +1844,7 @@ async function testTikTokConnection() {
     list.innerHTML = (data.checks || []).map(c => {
       const mark = !c.ok ? "✗" : (c.warn ? "!" : "✓");
       const cls = !c.ok ? "fc-chk-bad" : (c.warn ? "fc-chk-warn" : "fc-chk-ok");
-      return `<li class="${cls}"><strong>${mark} ${escapeHtml(c.name)}</strong> <span class="mono">${c.seconds}s</span><div>${escapeHtml(c.detail)}</div></li>`;
+      return `<li class="${cls}"><strong>${mark} ${escapeHtml(c.name)}</strong> <span class="mono">${escapeHtml(String(c.seconds))}s</span><div>${escapeHtml(c.detail)}</div></li>`;
     }).join("");
     const bad = (data.checks || []).some(c => !c.ok), warn = (data.checks || []).some(c => c.warn);
     note.textContent = bad ? "Something failed — see below." : (warn ? "Works, with something to look at." : "Everything works ✓");
@@ -1854,23 +1854,22 @@ async function testTikTokConnection() {
     note.classList.add("fc-err");
   } finally {
     _ttTesting = false;
-    btn.disabled = false;
+    btn.removeAttribute("aria-disabled");
     loadTikTokStatus();
   }
 }
 
 async function loadForecast() {
+  loadTikTokStatus();                      // the connection card does not wait for the product table (or depend on it): it says what it can at once
   try {
     const res = await fetch("/api/admin/forecast-map");
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
     adminState.forecastLoaded = true;
     applyForecastPayload(data);
-    loadTikTokStatus();
   } catch (e) {
     document.getElementById("fc-body").innerHTML = `<tr><td colspan="8" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
     document.getElementById("fc-coverage-body").innerHTML = `<tr><td colspan="4" class="admin-empty">—</td></tr>`;
-    loadTikTokStatus();                    // the connection card does not depend on the product table: it still says what it can
   }
 }
 

@@ -23,8 +23,9 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Optional
+from typing import Iterable, Optional
 
+from app.data.constanza import load_dma_reference
 from app.services.constanza_geo import GeoResolution, ResolvedArea, _STATE_NAMES_TO_ABBR, _VALID_STATE_ABBR
 from app.services.tiktok_client import TTL_LOCATION, TikTokAPIError, TikTokClient
 
@@ -42,7 +43,10 @@ for _name, _abbr in _STATE_NAMES_TO_ABBR.items():
         _ABBR_TO_STATE[_abbr] = _name.title().replace(" Of ", " of ")
 
 _STOP = {"dma", "market", "metro", "area", "the", "of", "and", "city", "county", "parish", "borough"}
-_SEPARATORS = re.compile(r"[-(/,;)]+")
+_SEPARATORS = re.compile(r"[-\u2010-\u2015\u2212(/,;)]+")              # a hyphen, or any of the dashes a typeset name may use
+_COUNTY_WORDS = {"county", "parish", "borough"}
+# A state written out after a name ("Columbus Ohio"), as the words it leaves once the filler words are gone ("district of columbia" -> district columbia)
+_STATE_TAILS: dict[tuple[str, ...], str] = {tuple(t for t in re.findall(r"[a-z]+", n) if t not in _STOP): a for n, a in _STATE_NAMES_TO_ABBR.items()}
 
 
 @dataclass
@@ -89,14 +93,15 @@ def _unique(items) -> list[str]:
 # ------------------------------------------------------------------------------------------------------------- name matching
 
 def _fold(text: str) -> str:
-    """Lower case, accents off ("Doña Ana" -> "dona ana"), "&" read as "and"."""
+    """Lower case, accents off ("Doña Ana" -> "dona ana"), "&" read as "and", "D.C." as "DC"."""
     plain = "".join(c for c in unicodedata.normalize("NFKD", text or "") if not unicodedata.combining(c))
-    return plain.lower().replace("&", " and ")
+    return re.sub(r"\bd\.\s?c\b\.?", "dc", plain.lower().replace("&", " and "))
 
 
-def _segment_words(segment: str, states: Optional[set], started: bool) -> list[str]:
+def _segment_words(segment: str, states: Optional[set], started: bool, tails: bool = False) -> list[str]:
     """The words of one piece of a name. "St." / "Ft." are read as Saint / Fort ("Mt." as Mount at the start of a longer piece); a
-    two-letter state code that follows a name is collected into `states` instead of being a word."""
+    two-letter state code that follows a name is collected into `states` instead of being a word. With `tails` (a TV market's name), a
+    state written out after a word of the same piece ("Columbus Ohio") is one too; a piece that IS a state's name ("Washington") stays a word."""
     toks = re.findall(r"[a-z0-9]+", segment)
     words: list[str] = []
     for i, t in enumerate(toks):
@@ -112,25 +117,31 @@ def _segment_words(segment: str, states: Optional[set], started: bool) -> list[s
             states.add(t.upper())                         # only after a name has started: "la crosse" keeps its "la"
         else:
             words.append(t)
+    if tails and states is not None:
+        for n in (3, 2, 1):
+            if len(words) > n and tuple(words[-n:]) in _STATE_TAILS:
+                states.add(_STATE_TAILS[tuple(words[-n:])])
+                del words[-n:]
+                break
     return words
 
 
 @lru_cache(maxsize=4096)
-def _words(name: str) -> tuple[tuple[str, ...], frozenset]:
+def _words(name: str, tails: bool = False) -> tuple[tuple[str, ...], frozenset]:
     """(the words of a place name without filler or state codes, the state codes in it): "Los Angeles, CA" -> (("los", "angeles"),
     {"CA"}); "Boston MA-Manchester NH" -> (("boston", "manchester"), {"MA", "NH"}); "St. Louis" -> (("saint", "louis"), {})."""
     words: list[str] = []
     states: set = set()
     for segment in _SEPARATORS.split(_fold(name)):
-        words.extend(_segment_words(segment, states, bool(words)))
+        words.extend(_segment_words(segment, states, bool(words), tails))
     return tuple(words), frozenset(states)
 
 
 @lru_cache(maxsize=4096)
-def _lead(name: str) -> tuple[str, ...]:
+def _lead(name: str, tails: bool = False) -> tuple[str, ...]:
     """The words of the first city of a market's name: "Dallas-Ft. Worth" -> ("dallas",), "Phoenix (Prescott)" -> ("phoenix",)."""
     for segment in _SEPARATORS.split(_fold(name)):
-        words = _segment_words(segment, set(), False)           # a state code after the city ("Columbus GA") is not part of the city
+        words = _segment_words(segment, set(), False, tails)    # a state code after the city ("Columbus GA") is not part of the city
         if words:
             return tuple(words)
     return ()
@@ -171,43 +182,69 @@ def _primary(dma_name: str) -> str:
     return re.split(r"[-(/,]", dma_name)[0].strip() or dma_name
 
 
-def pick_market(dma_name: str, state: Optional[str], candidates: list[dict]) -> tuple[Optional[dict], Optional[str]]:
+@lru_cache(maxsize=1)
+def _reference_markets() -> tuple[tuple[str, Optional[str]], ...]:
+    """Every TV market the app knows, as (name, home state): what a TikTok market name must be told apart from."""
+    return tuple((d.dma, d.state) for d in load_dma_reference())
+
+
+@lru_cache(maxsize=1 << 16)
+def _fit(name: str, state: Optional[str], tiktok_name: str) -> Optional[float]:
+    """How well a TikTok market name fits a TV market, or None when it does not fit at all.
+
+    It must lead with the same first city (or share most of the words) and must not name a state the market is not in. The very same
+    first city beats one written short ("Idaho Fals") or long, so "Charlotte" is never confused with "Charlottesville"; naming one of the
+    market's own states is a small plus. The market's states are its home state and any state its own name carries
+    ("Washington, DC (Hagerstown)": DC and MD)."""
+    wanted, wanted_codes = _words(name, True)
+    words, codes = _words(tiktok_name, True)
+    if not words or not wanted:
+        return None
+    home = {c for c in (set(wanted_codes) | {state}) if c}
+    if codes and home and not (codes & home):
+        return None                                       # it names another state: not this market
+    overlap = _overlap(wanted, words)
+    wanted_lead, lead = _lead(name, True), _lead(tiktok_name, True)
+    if wanted_lead and lead == wanted_lead:
+        score = 1.0 + overlap                             # the very same first city
+    elif _same_lead(wanted_lead, lead):
+        score = 0.5 + overlap                             # written short or long: weaker than the very same city, but a whole name that matches
+                                                          # word for word ("Rochestr-Mason City-Austin") still beats a lone "Rochester"
+    elif overlap >= 0.6:
+        score = overlap
+    else:
+        return None
+    if codes & home:
+        score += 0.15
+    return score
+
+
+def pick_market(dma_name: str, state: Optional[str], candidates: list[dict],
+                rivals: Optional[Iterable[tuple[str, Optional[str]]]] = None) -> tuple[Optional[dict], Optional[str]]:
     """The one TikTok market that is `dma_name`, or (None, why not).
 
-    A candidate must lead with the same first city (or share most of the words), must not name a state the market is not in, and must
-    clearly beat every other candidate; one TikTok has switched off is never chosen. The market's states are its home state and any
-    state its own name carries ("Washington, DC (Hagerstown)": DC and MD)."""
-    wanted, wanted_codes = _words(dma_name)
-    wanted_lead = _lead(dma_name)
-    home = {c for c in (set(wanted_codes) | {state}) if c}
+    A candidate must fit the name (see `_fit`) and clearly beat every other candidate; one TikTok has switched off is never chosen. And it
+    must be THIS market's: `rivals` are the other TV markets the app knows, and when one of them fits the candidate at least as well, the
+    candidate is that market's, not this one's - so a market TikTok does not list is reported as missing instead of being handed the
+    neighbour that shares its first city (Chicago / Chico-Redding, Albany GA / Albany-Schenectady-Troy, Columbus OH / Columbus-Tupelo)."""
     ranked = []
     for c in candidates:
-        words, codes = _words(c["name"])
-        if not words or not wanted:
-            continue
-        if codes and home and not (codes & home):
-            continue                                      # it names another state: not this market
-        overlap = _overlap(wanted, words)
-        lead = _lead(c["name"])
-        if wanted_lead and lead == wanted_lead:
-            score = 2.0 + overlap                         # the very same first city
-        elif _same_lead(wanted_lead, lead):
-            score = 1.0 + overlap                         # a first city written short ("Idaho Fals") or long: weaker than the very same one,
-                                                          # so "Charlotte" is never confused with "Charlottesville"
-        elif overlap >= 0.6:
-            score = overlap
-        else:
-            continue
-        if codes & home:
-            score += 0.15
-        ranked.append((score, c))
+        score = _fit(dma_name, state, c["name"])
+        if score is not None:
+            ranked.append((score, c))
     if not ranked:
         return None, "TikTok has no market with that name"
     ranked.sort(key=lambda x: -x[0])
     best_score, best = ranked[0]
-    rivals = [c for s, c in ranked[1:] if s >= best_score - 0.1 and c["geo_id"] != best["geo_id"]]
-    if rivals:
-        return None, "more than one TikTok market fits (" + ", ".join(sorted({best["name"]} | {r["name"] for r in rivals}))[:160] + ")"
+    rival_candidates = [c for s, c in ranked[1:] if s >= best_score - 0.1 and c["geo_id"] != best["geo_id"]]
+    if rival_candidates:
+        return None, "more than one TikTok market fits (" + ", ".join(sorted({best["name"]} | {r["name"] for r in rival_candidates}))[:160] + ")"
+    for other, other_state in (rivals or ()):
+        if other == dma_name:
+            continue
+        theirs = _fit(other, other_state, best["name"])
+        if theirs is not None and theirs >= best_score - 1e-9:
+            return None, f"TikTok has no market that is clearly this one: its “{best['name']}” fits {other} at least as well"
     if not best.get("enabled", True):
         return None, f"TikTok lists “{best['name']}” but it is not available for targeting"
     return best, None
@@ -218,6 +255,18 @@ def _place_key(name: str) -> str:
     """A county or city name for comparing: accents, "St." / "Saint", and the words County / Parish / Borough / City do not matter."""
     words, _ = _words(name)
     return " ".join(words)
+
+
+def _place_class(name: str, description: str = "") -> Optional[str]:
+    """"county" or "city" when a name or TikTok's description says which it is, else None. "Baltimore County" and "Orleans Parish" are counties;
+    "Baltimore" and "Baltimore city" (a Census independent city) are not - the word that _place_key throws away is what tells them apart."""
+    desc = (description or "").strip().lower()
+    last = (re.findall(r"[a-z]+", _fold(name)) or [""])[-1]
+    if desc in _COUNTY_WORDS or last in _COUNTY_WORDS:
+        return "county"
+    if desc or last == "city":
+        return "city"
+    return None
 
 
 # ------------------------------------------------------------------------------------------------------------- a day's memory
@@ -395,11 +444,11 @@ def _map_markets(areas: list[ResolvedArea], client: TikTokClient, out: Mapping, 
             else:
                 candidates = [t for k in keywords_for(name) for t in by_keyword.get(k.lower(), [])] or tags
                 candidates = list({c["geo_id"]: c for c in candidates if c["geo_type"] in ("DMA", "")}.values())
-            best, why = pick_market(name, wanted[name], candidates)
+            best, why = pick_market(name, wanted[name], candidates, rivals=_reference_markets())
             if best is None and why == "TikTok has no market with that name" and budget["one_by_one"] > 0:
                 budget["one_by_one"] -= 1
                 full = client.search_locations([name], geo_types=["DMA"], region_codes=["US"], search_type="FUZZY_SEARCH")
-                best, why = pick_market(name, wanted[name], [c for c in full if c["geo_type"] in ("DMA", "")])
+                best, why = pick_market(name, wanted[name], [c for c in full if c["geo_type"] in ("DMA", "")], rivals=_reference_markets())
             if best is None:
                 out.unmapped.append({"input": name, "reason": f"{why} (a TikTok market named like “{name}”)"})
                 continue
@@ -484,25 +533,28 @@ def _is_in_state(tag: dict, state_id: str) -> Optional[bool]:
 
 
 def _map_places(areas: list[ResolvedArea], kind: str, client: TikTokClient, out: Mapping, budget: dict) -> None:
-    geo_types = ["CITY"] if kind == "county" else ["CITY", "DISTRICT"]
-    what = "county" if kind == "county" else "city"
     for a in areas:
         label = a.label or ""
         name = _place_name(a)
-        key = (kind, _place_key(name), a.state or "")
+        # What the planner means: a county, or a city. A Census "independent city" (Baltimore city, Fairfax city, St. Louis city) arrives as a
+        # county-sized area but IS a city: it is never the county of the same name (Fairfax city is about 24,000 people, Fairfax County
+        # about 1.1 million) - the words City / County are what tell them apart, and _place_key leaves them out.
+        wanted = "city" if kind == "city" or _place_class(name) == "city" else "county"
+        geo_types = ["CITY"] if wanted == "county" else ["CITY", "DISTRICT"]
+        keyword = name[:-5] if (wanted == "city" and kind == "county" and name.endswith(" city")) else name
+        key = (kind, wanted, _place_key(name), a.state or "")
         loc = _recall(key)
         if loc is None:
             if budget["one_by_one"] <= 0:
                 out.unmapped.append({"input": label or name, "reason": "too many places to look up one by one - use the TV market or ZIP codes"})
                 continue
             budget["one_by_one"] -= 1
-            tags = client.search_locations([name], geo_types=geo_types, region_codes=["US"], search_type="FUZZY_SEARCH")
+            tags = client.search_locations([keyword], geo_types=geo_types, region_codes=["US"], search_type="FUZZY_SEARCH")
             same = []
             for t in tags:
                 if not (t["enabled"] and _place_key(t["name"]) == _place_key(name)):
                     continue
-                desc = t["description"].lower()
-                if desc and ((kind == "county") != (desc == "county")):
+                if _place_class(t["name"], t["description"]) not in (wanted, None):
                     continue                              # a county is not a city of the same name, and the other way round
                 same.append(t)
             state_id = _state_id(a.state, client, budget) if a.state else None
@@ -517,19 +569,19 @@ def _map_places(areas: list[ResolvedArea], kind: str, client: TikTokClient, out:
                     if len(inside) == 1:
                         chosen = inside[0]
                     elif len(inside) > 1:
-                        why = f"more than one {what} with that name in the state"
+                        why = f"more than one {wanted} with that name in the state"
                     elif unknown:
                         why = f"TikTok did not say which state its {name} is in"
                     else:
-                        why = f"TikTok has no {what} with that name in that state"
+                        why = f"TikTok has no {wanted} with that name in that state"
             elif len(same) == 1:
                 chosen = same[0]                          # no state was given: only a name that is unique across TikTok's answer is used
             else:
-                why = f"more than one {what} with that name and no state was given" if same else f"TikTok has no {what} with that name"
+                why = f"more than one {wanted} with that name and no state was given" if same else f"TikTok has no {wanted} with that name"
             if chosen is not None:
                 loc = Location(label or name, chosen["name"], chosen["geo_id"], chosen["geo_type"] or geo_types[0], "location_id")
                 _remember(key, loc)
             else:
-                out.unmapped.append({"input": label or name, "reason": f"couldn't tell which TikTok {what} that is ({why}) - use its TV market or ZIP codes"})
+                out.unmapped.append({"input": label or name, "reason": f"couldn't tell which TikTok {wanted} that is ({why}) - use its TV market or ZIP codes"})
                 continue
         out.locations.append(Location(label or name, loc.name, loc.tiktok_id, loc.geo_type, loc.kind))

@@ -26,8 +26,8 @@ def clean(monkeypatch):
 def test_every_check_passes_against_a_healthy_account():
     checks = dg.run_checks(make_client())
     assert [c.name for c in checks] == [
-        "Access token and ad account", "Interest and behavior categories", "Keyword search", "TV markets by name", "ZIP codes", "States",
-        "Audience size · United States", "Audience size · a narrow audience"]
+        "Access token and ad account", "Interest and behavior categories", "Keyword search", "TV markets by name", "Look-alike TV markets", "ZIP codes",
+        "States", "Audience size · United States", "Audience size · a narrow audience", "Audience size · interests, no ages chosen"]
     assert all(c.ok and not c.warn for c in checks), [(c.name, c.detail) for c in checks if not c.ok or c.warn]
     by = {c.name: c for c in checks}
     assert "×5.5" in by["Audience size · United States"].detail and "Los Angeles" in by["Audience size · a narrow audience"].detail
@@ -76,7 +76,7 @@ def test_a_failure_in_the_middle_is_reported_and_the_run_continues():
     checks = dg.run_checks(client)
     bad = [c for c in checks if not c.ok]
     assert [c.name for c in bad] == ["Audience size · United States"] and "location_ids: invalid" in bad[0].detail and "40002" in bad[0].detail
-    assert len(checks) == 8
+    assert len(checks) == 10
 
 
 def test_when_tiktok_refuses_reach_reach_but_takes_reach_click_the_check_says_which_setting_to_change():
@@ -107,7 +107,7 @@ def test_the_command_prints_a_line_per_check_and_json_on_request(monkeypatch, ca
     assert "✓ Access token and ad account" in out and "All checks passed." in out
     assert dg.main(["--json"]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert len(data) == 8 and all(d["ok"] for d in data) and set(data[0]) == {"name", "ok", "warn", "detail", "seconds"}
+    assert len(data) == 10 and all(d["ok"] for d in data) and set(data[0]) == {"name", "ok", "warn", "detail", "seconds"}
 
 
 def test_the_command_exits_nonzero_when_something_failed(capsys):
@@ -138,3 +138,44 @@ def test_a_sample_run_tries_fewer_markets_than_the_default(capsys, monkeypatch):
     assert dg.main(["--sample", "--json"]) == 0
     sample = next(d for d in __import__("json").loads(capsys.readouterr().out) if d["name"] == "TV markets by name")["detail"]
     assert " of " in sample and "210" not in sample.split(" of ")[1].split(" ")[0]
+
+
+def test_the_look_alike_markets_are_listed_with_the_tiktok_market_each_was_given():
+    """The one thing a name match can get wrong without any error is the wrong neighbour: the line to read by eye puts every group of markets
+    that share a first city side by side with the TikTok name each landed on."""
+    checks = dg.run_checks(make_client(FakeTikTok(market_style="state")))
+    line = next(c for c in checks if c.name == "Look-alike TV markets")
+    assert line.ok and not line.warn
+    for expected in ("Columbus, OH → “Columbus, OH OH”", "Columbus, GA (Opelika, AL) → “Columbus, GA (Opelika, AL) GA”", "Charlotte → “Charlotte NC”",
+                     "Charlottesville → “Charlottesville VA”", "Portland-Auburn → “Portland-Auburn ME”"):
+        assert expected in line.detail, expected
+
+
+def test_a_look_alike_market_tiktok_does_not_have_makes_that_line_a_warning():
+    fake = FakeTikTok(market_style="state")
+    fake.dmas = [d for d in fake.dmas if d.dma != "Chico-Redding"]
+    checks = dg.run_checks(make_client(fake))
+    line = next(c for c in checks if c.name == "Look-alike TV markets")
+    assert line.ok and line.warn and "Chico-Redding → not placed" in line.detail and "Chicago → “Chicago IL”" in line.detail
+
+
+def test_the_look_alike_groups_are_the_markets_that_share_a_first_city():
+    from app.data.constanza import load_dma_reference
+    groups = [{d.dma for d in g} for g in dg.lookalike_families(list(load_dma_reference()))]
+    assert {"Columbus, OH", "Columbus, GA (Opelika, AL)", "Columbus-Tupelo-W Pnt-Hstn"} in groups
+    assert {"Portland, OR", "Portland-Auburn"} in groups and {"Charlotte", "Charlottesville"} in groups
+    assert not any("Los Angeles" in g for g in groups)
+
+
+def test_the_interests_without_ages_line_says_whether_tiktok_asked_for_the_age_groups():
+    client = make_client()
+    line = next(c for c in dg.run_checks(client) if c.name == "Audience size · interests, no ages chosen")
+    assert line.ok and not line.warn and "code 40065" in line.detail and "no ages chosen" in line.detail
+    assert client.adult_ages_needed
+
+
+def test_the_check_starts_from_what_the_account_says_not_from_what_an_earlier_request_learned():
+    client = make_client()
+    client.adult_ages_needed = True                          # learned earlier in this process
+    line = next(c for c in dg.run_checks(client) if c.name == "Audience size · interests, no ages chosen")
+    assert "code 40065" in line.detail                       # still asked first without ages, so the account's own answer is what is reported

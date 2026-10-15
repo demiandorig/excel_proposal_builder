@@ -269,6 +269,17 @@ class StateScale:
     avails: float                      # makes the home markets' avails add up to the state's avails
     universe: float | None = None      # ... their reach universes up to the state's own (None: the state row has none)
     reach: float | None = None         # ... their est. reach up to the state's own
+    unique_hh: float | None = None     # ... their unique households up to the state's own
+
+    def people(self) -> float:
+        """The factor for a count of PEOPLE or households (reach, universe, unique households) when its own ratio is missing. They are all
+        "who is there / who is reached" counts and are not additive across markets, so whichever of them the state row does carry is the
+        right scale for the others - the avails ratio is only the last resort (using it for one of them and a state figure for another
+        could put the reached people above the people there are)."""
+        for ratio in (self.reach, self.universe, self.unique_hh):
+            if ratio is not None:
+                return ratio
+        return self.avails
 
 
 def _state_scales(series: "forecast_store.SeriesRef", geo: GeoResolution, dmas: dict, factor: float) -> tuple[dict[str, StateScale], list[str]]:
@@ -301,7 +312,7 @@ def _state_scales(series: "forecast_store.SeriesRef", geo: GeoResolution, dmas: 
         row = rows.get(st)
         if row is None or not row.avails:
             continue
-        home = home_universe = home_reach = 0.0
+        home = home_universe = home_reach = home_hh = 0.0
         for a in geo.areas:
             if a.source_type == "dma" and a.state == st and a.dma:
                 key = geo_reference.dma_key_for_label(a.dma)
@@ -310,13 +321,15 @@ def _state_scales(series: "forecast_store.SeriesRef", geo: GeoResolution, dmas: 
                     home += dma_row.avails * a.dma_share
                     home_universe += (dma_row.reach_universe or 0.0) * a.dma_share
                     home_reach += (dma_row.est_reach or 0.0) * a.dma_share
+                    home_hh += (dma_row.unique_hh or 0.0) * a.dma_share
         if home > 0:
             # People and reach are scaled to the STATE ROW'S OWN figures when it has them: they are not additive across markets (a household
             # served from Denver is in Denver's universe, not Wyoming's), so the avails ratio is the wrong factor for them.
             scale[st] = StateScale(
                 avails=row.avails / home,
                 universe=row.reach_universe / home_universe if row.reach_universe and home_universe > 0 else None,
-                reach=row.est_reach / home_reach if row.est_reach and home_reach > 0 else None)
+                reach=row.est_reach / home_reach if row.est_reach and home_reach > 0 else None,
+                unique_hh=row.unique_hh / home_hh if row.unique_hh and home_hh > 0 else None)
             if abs(scale[st].avails - 1.0) >= 0.02:
                 said.append(f"{st}: the platform's own state total is {row.avails * factor:,.0f} against {home * factor:,.0f} in the markets homed there "
                             f"(x{scale[st].avails:.2f})")
@@ -396,13 +409,15 @@ def estimate_from_series(
             # state total (only DMA-typed areas carry whole-state requests; a ZIP / county / city is never scaled).
             sscale = state_scale.get(area.state) if area.source_type == "dma" else None
             scale = sscale.avails if sscale else 1.0
-            reach_scale = sscale.reach if sscale and sscale.reach is not None else scale
-            universe_scale = sscale.universe if sscale and sscale.universe is not None else scale
+            people = sscale.people() if sscale else 1.0
+            reach_scale = sscale.reach if sscale and sscale.reach is not None else people
+            universe_scale = sscale.universe if sscale and sscale.universe is not None else people
+            hh_scale = sscale.unique_hh if sscale and sscale.unique_hh is not None else people
             area_mid = row.avails * factor * share * scale
             area_low, area_high = area_mid * lo_mult, area_mid * hi_mult
             # reach is a per-month concept, not cumulative (the model workbook never multiplied it by months either)
             area_uniques = row.est_reach * share * reach_scale if row.est_reach is not None else None
-            area_hh = row.unique_hh * share * scale if row.unique_hh is not None else None
+            area_hh = row.unique_hh * share * hh_scale if row.unique_hh is not None else None
             # people, like reach, are a per-period count: never multiplied by the months of the flight
             area_universe = row.reach_universe * share * universe_scale if row.reach_universe is not None else None
         imps_low += area_low

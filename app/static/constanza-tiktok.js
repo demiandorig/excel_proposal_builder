@@ -15,7 +15,7 @@
   if (!window.Constanza || typeof window.Constanza.registerMethod !== "function") return;
 
   window.Constanza.registerMethod("tiktok", function (ctx) {
-    const { S, $, esc, num, compact, api, markStale, errorText } = ctx;
+    const { S, $, esc, num, compact, api, markStale, errorText, announce } = ctx;
 
     // ---------------------------------------------------------------- what TikTok can target (the lists that come from TikTok are fetched on demand)
     const KINDS = {
@@ -30,7 +30,7 @@
       household_income: [["TOP5", "Top 5% of ZIP codes"], ["TOP10", "Top 10%"], ["TOP10_25", "Top 10–25%"], ["TOP25_50", "Top 25–50%"]],
       network_types: [["WIFI", "Wi-Fi"], ["4G", "4G"], ["5G", "5G"], ["3G", "3G"], ["2G", "2G"]],
       operating_systems: [["IOS", "iOS"], ["ANDROID", "Android"]],
-      placements: [["PLACEMENT_TIKTOK", "TikTok"], ["PLACEMENT_PANGLE", "Pangle (TikTok’s partner apps)"]],
+      placements: [["PLACEMENT_TIKTOK", "TikTok"], ["PLACEMENT_PANGLE", "Pangle (TikTok's partner apps)"]],       // the server's menus, to the letter: a rebuild on the first answer would drop the focus
     };
     const STAGES = { 1: "Too narrow", 2: "Narrow", 3: "Balanced", 4: "Fairly broad" };
     const TYPE_LABEL = { COUNTRY: "country", PROVINCE: "state", DMA: "TV market", CITY: "county / city", DISTRICT: "city", ZIP_CODE: "ZIP" };
@@ -40,22 +40,24 @@
       age: [], gender: "", languages: [], picks: [], spending: "", income: [], os: "", networks: [], placements: ["PLACEMENT_TIKTOK"],
       objective: "reach", videoPeriod: 15,
     });
-    const T = Object.assign(fresh(), { status: null, statusAt: 0, catalog: {}, languagesAll: null, searchSeq: 0, hits: [], active: -1, langHits: [], langActive: -1, tab: "general_interest" });
+    const T = Object.assign(fresh(), { status: null, statusAt: 0, catalog: {}, languagesAll: null, searchSeq: 0, hits: [], hitsFor: null, active: -1, langHits: [], langActive: -1, tab: "general_interest" });
     let searchTimer = null;
+    const PER_KIND = 6;                                              // hits shown of each kind (the rest is counted under the list)
 
     const options = (key) => ((T.status && T.status.options && T.status.options[key]) ? T.status.options[key].map((o) => [o.id, o.label]) : FALLBACK[key]);
     const labelOf = (key, id) => { const hit = options(key).find((o) => o[0] === id); return hit ? hit[1] : id; };
     const toggled = (arr, v) => (arr.includes(v) ? arr.filter((x) => x !== v) : arr.concat(v));
     const kindIds = (kind) => T.picks.filter((p) => p.kind === kind).map((p) => p.id);
+    const sortedIds = (kind) => kindIds(kind).sort();                // the request does not depend on the order things were clicked in
     const interactionPicked = () => T.picks.some((p) => ["video_interaction", "creator_interaction", "hashtag_interaction"].includes(p.kind));
 
     // ---------------------------------------------------------------- the request
     function targeting() {
       return {
-        gender: T.gender || null, age_groups: T.age.slice().sort(), languages: T.languages.map((l) => l.code),
-        interest_category_ids: kindIds("general_interest"), interest_keyword_ids: kindIds("additional_interest"),
-        purchase_intention_ids: kindIds("purchase_intention"), video_interaction_ids: kindIds("video_interaction"),
-        creator_interaction_ids: kindIds("creator_interaction"), hashtag_ids: kindIds("hashtag_interaction"),
+        gender: T.gender || null, age_groups: T.age.slice().sort(), languages: T.languages.map((l) => l.code).sort(),
+        interest_category_ids: sortedIds("general_interest"), interest_keyword_ids: sortedIds("additional_interest"),
+        purchase_intention_ids: sortedIds("purchase_intention"), video_interaction_ids: sortedIds("video_interaction"),
+        creator_interaction_ids: sortedIds("creator_interaction"), hashtag_ids: sortedIds("hashtag_interaction"),
         video_period: T.videoPeriod, spending_power: T.spending || null, household_income: T.income.slice().sort(),
         operating_system: T.os || null, network_types: T.networks.slice().sort(), placements: T.placements.slice().sort(), objective: T.objective,
       };
@@ -191,12 +193,20 @@
       if (sig === builtFor) return;
       builtFor = sig;
       const off = () => false;
-      $("cz-tt-age").innerHTML = seg("age", options("age_groups"), off);
-      $("cz-tt-income").innerHTML = seg("income", options("household_income"), off);
-      $("cz-tt-os").innerHTML = seg("os", [["", "Any device"]].concat(options("operating_systems")), off);
-      $("cz-tt-net").innerHTML = seg("network", options("network_types"), off);
-      $("cz-tt-place").innerHTML = seg("place", options("placements"), off);
-      $("cz-tt-obj").innerHTML = seg("objective", options("objectives"), off);
+      // a group that holds the focus gets it back on the same button once it is rebuilt (the first answer from the server can arrive after a keypress)
+      const fill = (id, html) => {
+        const el = $(id), at = document.activeElement;
+        const had = at && el.contains(at) && at.dataset ? { tt: at.dataset.tt, v: at.dataset.v } : null;
+        el.innerHTML = html;
+        const back = had && Array.from(el.querySelectorAll("button")).find((b) => b.dataset.tt === had.tt && b.dataset.v === had.v);
+        if (back) back.focus({ preventScroll: true });
+      };
+      fill("cz-tt-age", seg("age", options("age_groups"), off));
+      fill("cz-tt-income", seg("income", options("household_income"), off));
+      fill("cz-tt-os", seg("os", [["", "Any device"]].concat(options("operating_systems")), off));
+      fill("cz-tt-net", seg("network", options("network_types"), off));
+      fill("cz-tt-place", seg("place", options("placements"), off));
+      fill("cz-tt-obj", seg("objective", options("objectives"), off));
     }
 
     const press = (el, on) => el.querySelectorAll("button[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(on(b.dataset.v))));
@@ -269,7 +279,7 @@
 
     // ---------------------------------------------------------------- the connection
     async function loadStatus(force) {
-      if (!force && T.status && !T.status.error && Date.now() - T.statusAt < 30000) return;
+      if (!force && T.status && T.status.configured && Date.now() - T.statusAt < 30000) return;      // only a good answer is kept: an admin may add the secrets any minute
       try {
         const r = await api("/api/constanza/tiktok/status");
         T.status = r.ok ? r.data : { error: errorText(r.data, "The status couldn’t be read."), options: null };
@@ -300,51 +310,77 @@
     }
 
     function hideHits() {
-      $("cz-tt-results").classList.add("hidden");
+      const box = $("cz-tt-results");
+      box.classList.add("hidden"); box.classList.remove("cz-pending");
       $("cz-tt-q").setAttribute("aria-expanded", "false");
       $("cz-tt-q").removeAttribute("aria-activedescendant");
-      T.hits = []; T.active = -1;
+      T.hits = []; T.active = -1; T.hitsFor = null;
     }
 
+    // The list on screen is an answer for some text: it may be picked from only while the box still holds that text (a newer search is
+    // pending otherwise, and Enter or a click would add a category the person is no longer looking for).
+    const hitsAreFresh = () => T.hits.length > 0 && T.hitsFor === $("cz-tt-q").value.trim();
+
     function markHit() {
-      $("cz-tt-results").querySelectorAll(".cz-interest-item").forEach((el, i) => el.classList.toggle("cz-active", i === T.active));
+      const items = $("cz-tt-results").querySelectorAll(".cz-interest-item");
+      items.forEach((el, i) => el.classList.toggle("cz-active", i === T.active));
       const input = $("cz-tt-q");
-      if (T.active >= 0 && T.hits[T.active]) input.setAttribute("aria-activedescendant", `cz-tt-hit-${T.active}`); else input.removeAttribute("aria-activedescendant");
+      if (T.active >= 0 && T.hits[T.active]) {
+        input.setAttribute("aria-activedescendant", `cz-tt-hit-${T.active}`);
+        const cur = items[T.active];
+        if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: "nearest" });          // the highlighted option is always one the person can see
+      } else input.removeAttribute("aria-activedescendant");
     }
 
     async function searchPicks() {
-      const q = $("cz-tt-q").value.trim();
+      const input = $("cz-tt-q");
+      const q = input.value.trim();
       if (q.length < 2) { hideHits(); return; }
       const seq = ++T.searchSeq;
       let r;
       try { r = await api(`/api/constanza/tiktok/search?q=${encodeURIComponent(q)}`); } catch (e) { r = { ok: false, data: {} }; }
-      if (seq !== T.searchSeq || $("cz-tt-q").value.trim() !== q) return;          // a newer keystroke superseded this answer
+      // superseded by a newer keystroke, or the person has moved on to something else: the answer is not shown
+      if (seq !== T.searchSeq || input.value.trim() !== q || document.activeElement !== input) return;
       const box = $("cz-tt-results");
-      box.classList.remove("hidden");
-      $("cz-tt-q").setAttribute("aria-expanded", "true");
+      box.classList.remove("hidden", "cz-pending");
+      input.setAttribute("aria-expanded", "true");
       if (!r.ok) {
-        T.hits = []; T.active = -1;
+        T.hits = []; T.active = -1; T.hitsFor = null;
         box.innerHTML = `<div class="cz-empty">${esc(errorText(r.data, "The category search isn’t available right now."))}</div>`;
+        markHit();
         return;
       }
       const found = r.data.results || {};
       T.hits = [];
-      KIND_ORDER.forEach((kind) => (found[kind] || []).slice(0, 6).forEach((item) => T.hits.push({ kind, item })));        // six of each kind: all of them show
+      const more = [];
+      KIND_ORDER.forEach((kind) => {
+        const items = found[kind] || [];
+        items.slice(0, PER_KIND).forEach((item) => T.hits.push({ kind, item }));        // six of each kind: every kind shows
+        if (items.length > PER_KIND) { const n = items.length - PER_KIND; more.push(`${n} more ${KINDS[kind].toLowerCase()}${n === 1 ? "" : "s"}`); }
+      });
+      T.hitsFor = q;
       T.active = T.hits.length ? 0 : -1;
       box.innerHTML = T.hits.length
         ? T.hits.map((h, i) => `<div class="cz-interest-item ${i === T.active ? "cz-active" : ""}" role="option" id="cz-tt-hit-${i}" data-i="${i}"><span>${esc(h.item.name)}${h.item.path ? ` <span class="cz-grp">${esc(h.item.path)}</span>` : ""}</span><span class="cz-rate">${esc(KINDS[h.kind])}</span></div>`).join("")
+          + (more.length ? `<div class="cz-empty cz-more" role="presentation">And ${esc(more.join(", "))} — add a word to narrow the list.</div>` : "")
         : `<div class="cz-empty">Nothing in TikTok’s categories matches “${esc(q)}”. Try a simpler word, or browse the list below.</div>`;
       markHit();
     }
 
-    async function loadCatalog(kind) {
-      if (T.catalog[kind]) return T.catalog[kind];
-      let r;
-      try { r = await api(`/api/constanza/tiktok/targeting?kind=${encodeURIComponent(kind)}`); } catch (e) { r = { ok: false, data: {} }; }
-      if (!r.ok) return { error: errorText(r.data, "TikTok’s list isn’t available right now.") };
-      const items = r.data.items || [];
-      if (items.length) T.catalog[kind] = items;                    // a failure, or an empty answer, is not remembered: the next open tries again
-      return items;
+    const loading = {};                                             // a list already being fetched is not fetched again by the next keystroke
+    function loadCatalog(kind) {
+      if (T.catalog[kind]) return Promise.resolve(T.catalog[kind]);
+      if (!loading[kind]) {
+        loading[kind] = (async () => {
+          let r;
+          try { r = await api(`/api/constanza/tiktok/targeting?kind=${encodeURIComponent(kind)}`); } catch (e) { r = { ok: false, data: {} }; }
+          if (!r.ok) return { error: errorText(r.data, "TikTok’s list isn’t available right now.") };
+          const items = r.data.items || [];
+          if (items.length) T.catalog[kind] = items;                // a failure, or an empty answer, is not remembered: the next open tries again
+          return items;
+        })().finally(() => { delete loading[kind]; });
+      }
+      return loading[kind];
     }
 
     async function renderBrowse() {
@@ -376,32 +412,40 @@
     }
 
     function markLang() {
-      $("cz-tt-lang-results").querySelectorAll(".cz-interest-item").forEach((el, i) => el.classList.toggle("cz-active", i === T.langActive));
+      const items = $("cz-tt-lang-results").querySelectorAll(".cz-interest-item");
+      items.forEach((el, i) => el.classList.toggle("cz-active", i === T.langActive));
       const input = $("cz-tt-lang-q");
-      if (T.langActive >= 0 && T.langHits[T.langActive]) input.setAttribute("aria-activedescendant", `cz-tt-lang-${T.langActive}`); else input.removeAttribute("aria-activedescendant");
+      if (T.langActive >= 0 && T.langHits[T.langActive]) {
+        input.setAttribute("aria-activedescendant", `cz-tt-lang-${T.langActive}`);
+        const cur = items[T.langActive];
+        if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: "nearest" });
+      } else input.removeAttribute("aria-activedescendant");
     }
 
     async function searchLanguages() {
-      const q = $("cz-tt-lang-q").value.trim().toLowerCase();
+      const input = $("cz-tt-lang-q"), box = $("cz-tt-lang-results");
+      const q = input.value.trim().toLowerCase();
+      const say = (html) => {
+        box.classList.remove("hidden");
+        input.setAttribute("aria-expanded", "true");
+        box.innerHTML = html;
+        T.langHits = []; T.langActive = -1;
+        markLang();
+      };
       if (!T.languagesAll) {
         let r;
         try { r = await api("/api/constanza/tiktok/targeting?kind=languages"); } catch (e) { r = { ok: false, data: {} }; }
-        if (!r.ok) {
-          const box = $("cz-tt-lang-results");
-          box.classList.remove("hidden");
-          $("cz-tt-lang-q").setAttribute("aria-expanded", "true");
-          box.innerHTML = `<div class="cz-empty">${esc(errorText(r.data, "TikTok’s language list isn’t available right now."))}</div>`;
-          T.langHits = []; T.langActive = -1;
-          return;
-        }
-        T.languagesAll = r.data.items || [];
+        const items = r.ok ? (r.data.items || []) : [];
+        if (items.length) T.languagesAll = items;                  // a failure, or an empty list, is not remembered: the next try asks again
+        if (document.activeElement !== input) return;              // the person moved on while it loaded: nothing opens behind them
+        if (!r.ok) { say(`<div class="cz-empty">${esc(errorText(r.data, "TikTok’s language list isn’t available right now."))}</div>`); return; }
+        if (!items.length) { say(`<div class="cz-empty">TikTok’s language list came back empty. Try again in a moment.</div>`); return; }
       }
-      if ($("cz-tt-lang-q").value.trim().toLowerCase() !== q) return;
+      if (input.value.trim().toLowerCase() !== q || document.activeElement !== input) return;
       T.langHits = T.languagesAll.filter((l) => !T.languages.some((x) => x.code === l.code) && (!q || l.name.toLowerCase().includes(q) || l.code.toLowerCase() === q)).slice(0, 12);
       T.langActive = T.langHits.length ? 0 : -1;
-      const box = $("cz-tt-lang-results");
       box.classList.remove("hidden");
-      $("cz-tt-lang-q").setAttribute("aria-expanded", "true");
+      input.setAttribute("aria-expanded", "true");
       box.innerHTML = T.langHits.length
         ? T.langHits.map((l, i) => `<div class="cz-interest-item ${i === T.langActive ? "cz-active" : ""}" role="option" id="cz-tt-lang-${i}" data-i="${i}"><span>${esc(l.name)}</span><span class="cz-rate">${esc(l.code)}</span></div>`).join("")
         : `<div class="cz-empty">No language matches “${esc(q)}”.</div>`;
@@ -418,6 +462,12 @@
     }
 
     // ---------------------------------------------------------------- wiring
+    // A chip's × is gone once the chip is removed: the focus goes to the next chip's ×, else the one before, else the box the chips belong to.
+    function refocus(chipsId, i, fallbackId) {
+      const xs = $(chipsId).querySelectorAll(".cz-x");
+      (xs[i] || xs[xs.length - 1] || $(fallbackId)).focus({ preventScroll: true });
+    }
+
     function bind() {
       const root = $("cz-tt");
       renderAll();
@@ -425,6 +475,8 @@
         const b = e.target.closest("[data-tt]");
         if (!b || !root.contains(b)) return;
         const v = b.dataset.v;
+        const hadFocus = document.activeElement === b;
+        let after = null;                                            // what to do once the screen is redrawn, if the pressed button had the focus
         switch (b.dataset.tt) {
           case "age": T.age = toggled(T.age, v); break;
           case "gender": T.gender = v; break;
@@ -438,9 +490,18 @@
             break;
           case "objective": T.objective = v; break;
           case "period": T.videoPeriod = Number(v); break;
-          case "fix-objective": T.objective = "traffic"; break;
-          case "rm-pick": T.picks.splice(Number(b.dataset.i), 1); break;
-          case "rm-lang": T.languages.splice(Number(b.dataset.i), 1); renderLanguages(); break;
+          case "fix-objective":
+            T.objective = "traffic";
+            after = () => {
+              // the warning (and the button that was pressed) is gone: the focus goes to the objective that just changed, or - when that part of the
+              // panel is folded away - to the box the person was filling in; either way the change is announced
+              const traffic = $("cz-tt-obj").querySelector('button[data-v="traffic"]');
+              (traffic && $("cz-tt-more").open ? traffic : $("cz-tt-q")).focus({ preventScroll: true });
+              if (announce) announce("The campaign objective is now Traffic.");
+            };
+            break;
+          case "rm-pick": { const i = Number(b.dataset.i); T.picks.splice(i, 1); after = () => refocus("cz-tt-chips", i, "cz-tt-q"); break; }
+          case "rm-lang": { const i = Number(b.dataset.i); T.languages.splice(i, 1); renderLanguages(); after = () => refocus("cz-tt-lang-chips", i, "cz-tt-lang-q"); break; }
           case "tab":
             T.tab = v;
             $("cz-tt-tabs").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.v === v)));
@@ -457,34 +518,52 @@
           default: return;
         }
         changed();
+        if (hadFocus && after) after();
       });
 
+      // A popup closes when the focus leaves the box and its list (Tab, or a click elsewhere): left open, it would still be on screen
+      // for Escape to find, and Escape would then close the whole dock. Choosing an option with the mouse must not move the focus away first.
+      const leaves = (e, ...ids) => !(e.relatedTarget && ids.some((id) => $(id).contains(e.relatedTarget)));
+      $("cz-tt-results").addEventListener("mousedown", (e) => e.preventDefault());
+      $("cz-tt-lang-results").addEventListener("mousedown", (e) => e.preventDefault());
+
       // categories search
-      $("cz-tt-q").addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(searchPicks, 220); });
+      $("cz-tt-q").addEventListener("input", () => {
+        clearTimeout(searchTimer);
+        if (T.hits.length && T.hitsFor !== $("cz-tt-q").value.trim()) {              // the list on screen is for older text: nothing in it can be picked now
+          T.active = -1;
+          $("cz-tt-results").classList.add("cz-pending");
+          markHit();
+        }
+        searchTimer = setTimeout(searchPicks, 220);
+      });
+      $("cz-tt-q").addEventListener("focusout", (e) => { if (leaves(e, "cz-tt-q", "cz-tt-results")) { clearTimeout(searchTimer); hideHits(); } });
       $("cz-tt-q").addEventListener("keydown", (e) => {
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-          if (!T.hits.length) return;
+          if (!hitsAreFresh()) return;
           e.preventDefault();
           T.active = (T.active + (e.key === "ArrowDown" ? 1 : -1) + T.hits.length) % T.hits.length;
           markHit();
         } else if (e.key === "Enter") {
           e.preventDefault();
-          if (T.hits[T.active]) addPick(T.hits[T.active].kind, T.hits[T.active].item);
+          if (hitsAreFresh() && T.hits[T.active]) addPick(T.hits[T.active].kind, T.hits[T.active].item);
+          else if ($("cz-tt-q").value.trim().length >= 2) { clearTimeout(searchTimer); searchPicks(); }          // ask for THIS text now
         } else if (e.key === "Escape" && !$("cz-tt-results").classList.contains("hidden")) { e.preventDefault(); e.stopPropagation(); hideHits(); }
       });
       $("cz-tt-results").addEventListener("click", (e) => {
         const el = e.target.closest(".cz-interest-item");
-        if (el && T.hits[Number(el.dataset.i)]) { const h = T.hits[Number(el.dataset.i)]; addPick(h.kind, h.item); }
+        if (el && hitsAreFresh() && T.hits[Number(el.dataset.i)]) { const h = T.hits[Number(el.dataset.i)]; addPick(h.kind, h.item); }
       });
       $("cz-tt-browse").addEventListener("toggle", (e) => { if (e.target.open) renderBrowse(); });
       $("cz-tt-filter").addEventListener("input", renderBrowse);
 
-      // languages
-      $("cz-tt-lang-q").addEventListener("focus", searchLanguages);
+      // languages: the list opens on a click, on typing or on ArrowDown - not on every Tab into the field
+      $("cz-tt-lang-q").addEventListener("click", searchLanguages);
       $("cz-tt-lang-q").addEventListener("input", searchLanguages);
+      $("cz-tt-lang-q").addEventListener("focusout", (e) => { if (leaves(e, "cz-tt-lang-q", "cz-tt-lang-results")) hideLangHits(); });
       $("cz-tt-lang-q").addEventListener("keydown", (e) => {
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-          if (!T.langHits.length) return;
+          if (!T.langHits.length) { if (e.key === "ArrowDown") { e.preventDefault(); searchLanguages(); } return; }
           e.preventDefault();
           T.langActive = (T.langActive + (e.key === "ArrowDown" ? 1 : -1) + T.langHits.length) % T.langHits.length;
           markLang();
@@ -497,14 +576,10 @@
         const el = e.target.closest(".cz-interest-item");
         if (el && T.langHits[Number(el.dataset.i)]) addLanguage(T.langHits[Number(el.dataset.i)]);
       });
-      document.addEventListener("mousedown", (e) => {
-        if (!e.target.closest("#cz-tt-q, #cz-tt-results")) hideHits();
-        if (!e.target.closest("#cz-tt-lang-q, #cz-tt-lang-results")) hideLangHits();
-      });
     }
 
     function reset() {
-      Object.assign(T, fresh(), { hits: [], active: -1, langHits: [], langActive: -1, tab: "general_interest" });
+      Object.assign(T, fresh(), { hits: [], hitsFor: null, active: -1, langHits: [], langActive: -1, tab: "general_interest" });
       if (!$("cz-tt")) return;
       ["cz-tt-q", "cz-tt-lang-q", "cz-tt-filter"].forEach((id) => { if ($(id)) $(id).value = ""; });
       hideHits(); hideLangHits();
@@ -583,14 +658,18 @@
       if (status === 503) loadStatus(true);                       // the connection changed under us: show it
     }
 
+    function onResult() {
+      if (!T.status || !T.status.configured) loadStatus(true);    // an estimate came back, so TikTok IS connected: a banner that says otherwise is out of date
+    }
+
     return {
       goLabel: "Estimate audience →",
-      formHtml, bind, reset, canPull, onError,
+      formHtml, bind, reset, canPull, onError, onResult,
       onSelect: () => { renderAll(); loadStatus(false); },
       requestPart: () => ({ tiktok: targeting() }),
       context: () => ({ summary: summaryParts() }),
       headlineHtml, bodyHtml, aboutHtml, cardHtml, summaryLines,
-      _pure: { targeting, summaryParts, stageHtml, headlineHtml, bodyHtml, aboutHtml, cardHtml, summaryLines, canPull, T, pushPick, selectedCount, moreCount, toggled, formHtml },
+      _pure: { FALLBACK, targeting, summaryParts, stageHtml, headlineHtml, bodyHtml, aboutHtml, cardHtml, summaryLines, canPull, T, pushPick, selectedCount, moreCount, toggled, formHtml },
     };
   });
 })();
