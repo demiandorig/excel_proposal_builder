@@ -1012,7 +1012,7 @@
   },
   {
    "name": "eDigital Display",
-   "after": "YouTube Ads - Non-Skippable",
+   "after": "YouTube Ads - Demand Gen",
    "replaces": "eDigital Network Display - Standard IAB",
    "family": "Display",
    "short_label": "Awareness / Retargeting",

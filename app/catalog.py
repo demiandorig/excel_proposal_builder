@@ -53,7 +53,7 @@ Field provenance from the rate card:
                                 card has one general CPP line with no
                                 per-objective breakdown, so these 3 use an
                                 explicitly-given estimated CPM per
-                                objective (Awareness $13, Traffic/
+                                objective (Awareness $12, Traffic/
                                 Conversion $18, Lead Gen/Calls $35) purely
                                 for the impressions estimate — same
                                 mechanism as any other Fixed-model product.
@@ -281,6 +281,33 @@ CATALOG: list[Product] = [
         wide_orbit_code='YouTube Ads - Non-Skippable',
         notes=NOTE_GOOGLE_VERTICALS,
         estimated_cpm_for_imps=15.0,
+        hispanic_targeting_forced=None,
+        cannabis_policy='not_allowed',
+        political_policy='not_allowed',
+    ),
+    Product(
+        family='Online Video',
+        name='YouTube Ads - Demand Gen',
+        short_label='Demand Gen',
+        proposal_description='Demand Gen video advertising on YouTube, including eligible in-stream, in-feed and Shorts placements. Select YouTube channels in Google Ads when the proposal is for YouTube-only delivery; Demand Gen can otherwise serve on other Google surfaces. Targeting and placement eligibility are confirmed by Sales Planning.',
+        sizes='Video assets per selected YouTube placement',
+        buying_model='Fixed',
+        base_rate=None,
+        estimated_impressions=True,
+        discloses_impressions=False,
+        minimum_spend=500.0,
+        minimum_flight_days=[30, 90],
+        sla_data_days=1,
+        sla_creative_days=3,
+        sla_activate_days=7,
+        sla_total_days=9,
+        media_allocation_pct=0.0,
+        margin_upper=0.4,
+        margin_lower=0.3,
+        tech_platform='',
+        wide_orbit_code='YouTube Ads - Demand Gen',
+        notes='*Team planning estimate: $20 retail CPM. Restrict Demand Gen channels to YouTube when quoting YouTube-only delivery. Confirm campaign setup and operational eligibility with Sales Planning.',
+        estimated_cpm_for_imps=20.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='not_allowed',
@@ -1248,7 +1275,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Facebook & Instagram Ads',
         notes=NOTE_META_FULL,
-        estimated_cpm_for_imps=13.0,
+        estimated_cpm_for_imps=12.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',

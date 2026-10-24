@@ -341,6 +341,9 @@ PRODUCT_ALIASES: dict[str, str] = {
     "youtube bumper": "YouTube Ads - Non-Skippable",
     "youtube bumper ads": "YouTube Ads - Non-Skippable",
     "bumper ads": "YouTube Ads - Non-Skippable",
+    "youtube demand gen": "YouTube Ads - Demand Gen",
+    "youtube ads demand gen": "YouTube Ads - Demand Gen",
+    "youtube demand generation": "YouTube Ads - Demand Gen",
     # CTV / OTT / Entravision Plus
     "connected tv (ott) - entravision plus": "Entravision Plus CTV/OTT - English Content",
     "connected tv (ott)": "Entravision Plus CTV/OTT - English Content",
