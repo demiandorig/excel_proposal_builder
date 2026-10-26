@@ -1,3 +1,4 @@
 - [Post-merge Python installs](post-merge-python-install.md) — use non-interactive pip with Nix's externally managed environment handled explicitly.
 - [Playwright browser runtime](playwright-replit-runtime.md) — prefer Replit's managed Chromium wrapper so browser checks inherit the workspace's Nix libraries.
 - [Git push authorization](git-push-auth.md) — Git Providers, the GitHub API connector, and shell Git credentials are separate access paths.
+- [Publish foreign-key ordering](publish-foreign-key-ordering.md) — when a new referenced key and its foreign key are published together, stage the unique key first and add the FK in a later publish.
