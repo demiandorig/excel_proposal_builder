@@ -138,7 +138,7 @@ TikTok identifies a place by an ID, not a name, so the geography the planner typ
 * **If TikTok refuses `REACH` / `REACH`** for an account (its own documentation example pairs the Reach objective with `CLICK`),
   *Test the connection* tries `CLICK` and says to set `TIKTOK_OPTIMIZATION_GOAL=CLICK`.
 * The Admin → Forecast table lists the product with the method **TikTok API (live)**; an admin can switch it back to a
-  population-share estimate, or give the method to another product (migration `0003` lets the table store it).
+  population-share estimate, or give the method to another product (migration `0004` lets the table store it).
 
 ## Code map
 

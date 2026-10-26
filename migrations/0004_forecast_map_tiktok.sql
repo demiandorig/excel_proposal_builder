@@ -1,4 +1,4 @@
--- 0003_forecast_map_tiktok.sql
+-- 0004_forecast_map_tiktok.sql
 --
 -- Why: Admin -> Forecast chooses, per catalog product, what Constanza's "Auto-calculate avails" computes. Until now that was
 -- 'platform' (loaded avails data) or 'generic' (a population-share estimate). The TikTok ads product is now forecast from

@@ -332,6 +332,28 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 .constanza-result .cz-audience-box { background: var(--paper-card); }
 .constanza-result .cz-using { margin: 0 0 8px; }
 
+/* Paid Meta auction model on a Step 05 card. These full-flight planning
+   metrics deliberately sit apart from the monthly inventory/SOV fields. */
+.meta-plan-block {
+  margin-top: 14px; padding: 14px; border: 1px solid var(--rule);
+  border-radius: var(--radius); background: var(--paper-card);
+}
+.meta-plan-block > strong { display: block; color: var(--ink); margin-bottom: 6px; }
+.meta-plan-block p { margin: 6px 0 10px; line-height: 1.45; }
+.meta-plan-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 12px; margin: 10px 0; }
+.meta-plan-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; }
+.meta-plan-fields input, .meta-plan-fields select {
+  box-sizing: border-box; width: 100%; min-width: 0; padding: 8px;
+  border: 1px solid var(--rule); border-radius: 6px; background: var(--paper-card); color: var(--ink);
+}
+.meta-plan-block button { margin: 4px 8px 4px 0; }
+.meta-live-details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule); }
+.meta-live-details summary { cursor: pointer; font-weight: 600; }
+.meta-plan-result { margin-top: 12px; padding: 10px; border-left: 3px solid var(--accent); background: var(--paper-warm); }
+.meta-plan-result p { margin: 7px 0; }
+.meta-plan-result small { color: var(--ink-faint); }
+.meta-plan-feedback .constanza-error { margin-top: 10px; }
+
 /* ------------------------------------------------------------------ status for screen readers, stale banner */
 .cz-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .cz-stale {

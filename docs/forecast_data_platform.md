@@ -172,16 +172,62 @@ Flight dates are **not** checked against the window: seasons repeat each year an
 
 ## How an estimate is built
 
-For each resolved area the most direct row wins:
+### Meta (Facebook & Instagram) audience scenarios (Step 05)
 
-1. a **ZIP** area uses its series' own ZIP row; a ZIP with no row is zero (and listed in a note);
-2. a **congressional-district** area uses its district row;
-3. a whole **DMA** uses its DMA row;
-4. anything finer (county, city) is its parent DMA's row × the area's population share (as before).
+The three paid Facebook & Instagram Ads SKUs (Awareness, Traffic / Conversion, Lead Gen / Calls; the branded-content / Page SKUs are excluded)
+have a Meta panel on Step 05 in place of the platform-data button. Like TikTok, Meta answers with an **audience size, not avails**: its
+account-scoped `reachestimate` returns the range of accounts (`users_lower_bound` – `users_upper_bound`) that match a targeting, not what a flight
+can deliver. Entravision's planning rule turns the **lower end** of that range into impressions in three scenarios
+(`app/services/platform_scenarios.py`, shared with TikTok):
 
-Then × months (or weeks), with the planning range from the row (legacy series) or the series band. Every estimate carries
-its series, version, data basis, unit and period, and notes in plain language. For the seven original model series the
-database path reproduces the old bundled-workbook numbers **exactly** (a test compares them across 14 geographies).
+| Scenario | Monthly impressions | |
+|---|---|---|
+| Conservative | lower-end audience × **4.3** | the Low |
+| **Mid** | lower-end audience × **5.5** | **the default**: what *Insert into Avails* writes |
+| Upper | lower-end audience × **8.6** | the High |
+
+A flight of *N* months is *N* times the monthly figure. The lower end is the base on purpose; the upper end of Meta's range is shown as context and
+is never a base. *Insert the mid-case into Avails* writes the monthly mid impressions and the **lower-end audience as est. uniques**, so the Avails
+step's frequency reads 5.5. Change the multipliers (they must stay in order) with `CONSTANZA_AUDIENCE_X_CONSERVATIVE` / `_MID` / `_UPPER`.
+
+Beside the scenarios the panel shows a **budget cross-check**, kept apart from avails: the retail budget ÷ the retail CPM × 1,000 (Awareness **$12**,
+Traffic / Conversion **$18**, Lead Gen / Calls **$35**; retail spend is **2× platform media spend**), and the retail spend each scenario's flight
+would imply at that CPM. The snapshot (audience, scenarios, what was asked) is saved with the proposal as `avails_data[line_id].meta_forecast`; a
+changed budget, product, CPM, geography, flight length or targeting label marks it stale and withdraws the Insert button. The Awareness catalog seed
+and migration `0003` change the old $13 default to $12 while preserving any admin-edited CPM (see "Deploying" below: a data migration does not run
+in a published deployment, so set the rate in Admin if it still reads $13).
+
+**Two ways to give it the audience.** *Manual*: type the lower end (and optionally the upper end) of the "Estimated audience size" Ads Manager shows.
+*Live*: put `META_ACCESS_TOKEN` and `META_AD_ACCOUNT_ID` in the app's secrets (below), search Meta's own geographies (DMA "geo markets", cities,
+regions, ZIPs, countries; the planner picks the exact key, nothing is guessed), optionally set age (18–65) and gender, and choose **interests and
+behaviors from Meta's own lists** (below). Everything chosen goes to Meta as the targeting spec; the chosen interests / behaviors form **one
+`flexible_spec` group, so the audience is people who match ANY of them**. Nothing else about a real campaign (exclusions, placements, account
+restrictions) is represented, so check those in Ads Manager.
+
+**The interest and behavior lists come from Meta.** `GET /api/constanza/meta-targeting?kind=interests|behaviors|demographics` returns a whole list
+(Meta's `search?type=adTargetingCategory&class=…`, cached for 12 hours; demographics are life events, industries, income, family status);
+`?q=soccer` returns the interests Meta's keyword search finds (`type=adinterest`) plus the behaviors and demographics whose name or path contains
+the words. Meta does not return every option to every ad account and retires options over time, so what is listed is what this account can use today
+(and demographic options depend on the token's home country).
+
+**Setting it up (an admin, once)** — both are read-only; nothing is ever created in the ad account:
+
+| Secret | What |
+|---|---|
+| `META_ACCESS_TOKEN` | a long-lived token (a business **system user's** is best) with the **`ads_read`** permission on the ad account |
+| `META_AD_ACCOUNT_ID` | the numeric ad account ID the estimates are asked through, with or without `act_` |
+| `META_GRAPH_API_VERSION` | optional, default **v25.0** (the newest Marketing API version at the time of writing) |
+
+The app that issued the token needs **Ads Management Standard Access** (Meta's naming moved to *Limited Access* in May 2026) with business
+verification when it reads accounts beyond your own business's; a token for an app still in development works only for people with a role on the
+app. Then run `python -m app.services.meta_diagnose` (`--json` for a machine-readable answer): it checks the token and ad account, geography search,
+reach estimates (a country; a TV market with age and gender; an interest), and the three lists, and each failing line says what to fix. Errors are
+told in plain words with the right status (token → 503, permission → 503, rate limit → 429, refused settings → 422); no secret appears in any answer.
+`GET /api/constanza/meta/status` says whether it is connected (which settings are missing, never their values).
+
+**Not verified against a real account** (none existed when this was written; the request and response shapes are Meta's published reference): that
+`geo_markets` alone satisfies `reachestimate` (Meta's page lists `countries` as required in a targeting spec), that the token can read the lists, and
+which options each account sees. The diagnostics are the first thing to run after the secrets are in.
 
 ### The win rate (MadHive / The Trade Desk products)
 
@@ -192,7 +238,7 @@ at the raw avails overstated what a line could deliver by 5-10x. `app/services/c
 | | |
 |---|---|
 | **Which products** | A built-in rule, correctable per product. Every product forecast from data (method `platform`) is assumed bought through MadHive or The Trade Desk and gets the programmatic rate (10–20%, mid 15%) **except those forecast from Roku's series** (bought directly in Roku's Ads Manager). **Prime Video, bought through the Amazon DSP, has one rate of its own: 20%** (`CONSTANZA_WIN_RATE_PRIME`, no 10–20% range). Today that is 50 of the 51 platform products: Prime Video, Hulu, Peacock, Other FAST, vMVPD, the blended CTV/OTT products, the Connect and Hispanic Connect families, Pause Ads, VIX, Netflix, Live Sports and eDigital. The *series* decides, not the name: a product remapped to Roku's series is exempt, the Roku product remapped to a MadHive series is not, any product forecast from Prime's series carries Prime's 20% (`constanza_forecast_map.win_rate_applies`, `constanza_win_rate.for_series`, exposed as `forecast.win_rate` on every catalog product). |
-| **Correcting it** | **Admin → Forecast → Win rate** column, per product: *Auto* (the rule, with what it gives said in words), *Apply* or *Don't apply* (`forecast_product_map.win_rate`: NULL / TRUE / FALSE; migration `0004`, also added at startup by `schema.sql`; a database without the column yet still answers, it just ignores the choice). The tab says which rates are in force and how many products they reach. A copy of a product keeps the original's choice. |
+| **Correcting it** | **Admin → Forecast → Win rate** column, per product: *Auto* (the rule, with what it gives said in words), *Apply* or *Don't apply* (`forecast_product_map.win_rate`: NULL / TRUE / FALSE; migration `0005`, also added at startup by `schema.sql`; a database without the column yet still answers, it just ignores the choice). The tab says which rates are in force and how many products they reach. A copy of a product keeps the original's choice. |
 | **Never applied to** | A population-share estimate (it spreads the planner's *own* impression total, so there are no avails to win), TikTok's live audience estimate, an international geography, and a product whose series could not be read **and has no bundled copy** (those fall to the population-share path; the seven legacy series fall to the bundled workbook, where the win rate *is* applied). |
 | **Rate** | Low 10% / **mid 15%** / high 20%. Override with `CONSTANZA_WIN_RATE_LOW/MID/HIGH`: a `%` is always a percent (`1%`, `0.5%`), a bare number from 1 up is a percent (`15`), below 1 a fraction (`0.15`). Set only some and the rest follow (`MID=8` gives 8% with the default 20% high). A set that is still not `0 < low <= mid <= high <= 1` is ignored with a warning (the defaults are used). All three equal means one fixed rate, no sensitivity range. |
 | **Impressions** | **Low, Mid and High are all multiplied by the mid rate**: the planner asked for the median to be factorized by the win rate, and Low / High keep meaning what they always did (the platform's planning band around the avails). The 10-20% range is *not* folded into that band (doing so put Low below "10% of the avails"); it is its own figure beside the estimate: "387,615 a month — 258,410 at 10%, 516,820 at 20%" (`win_rate.delivered_at_low/high`). |
@@ -501,3 +547,16 @@ export makes a new Netflix version instead of leaving it "unchanged".
   products the programmatic **win rate** applies to (Netflix, Live Sports, eDigital, Pause Ads: see "The win rate" above; correctable per
   product in Admin → Forecast).
 * All 30 new products carry a **$40 CPM placeholder** and a "PLACEHOLDER RATE" note until the rate card is confirmed.
+
+### Deploying (Replit Publish)
+
+* **A published deployment skips the startup migrations** (`REPLIT_DEPLOYMENT=1`, `forecast_import.service._apply_startup_migrations`): its schema
+  comes from **Publish's schema diff** of the development database. So run the app once in the workspace first (that applies
+  `migrations/*.sql` and `schema.sql` to the dev database) and then Publish: the diff carries the new column `forecast_product_map.win_rate`
+  (migration `0005`) and the wider method CHECK (`0004`, which lets a product's method be `tiktok`). Neither has a foreign key. Until the schema is
+  published, the app keeps working: an admin's win-rate choice is simply not stored (`UndefinedColumn` fallback) and the TikTok default needs no row.
+* **Data is not schema.** Publish does not run data statements, so these need doing against the production database by hand: the Awareness CPM
+  correction ($13 → $12, migration `0003`: set the rate in Admin → Catalog if it still reads $13), and loading the recalibrated **Prime Video**
+  series (`python -m app.services.forecast_import import` in the deployment's shell: it also re-versions the other six bundled series with identical
+  numbers).
+* Migration numbers: `0003` Meta CPM (from the Meta branch), `0004` TikTok method, `0005` win rate.

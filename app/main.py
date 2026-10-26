@@ -92,6 +92,7 @@ from app.services import gamma_client
 from app.services import monthly_allocation
 from app.services import notion_client
 from app.services import constanza_geo
+from app.services import constanza_meta
 from app.services import constanza_forecast_map as forecast_map_svc
 from app.services import forecast_store
 from app.services.constanza_engine import estimate_avails
@@ -267,6 +268,10 @@ def _bootstrap_forecast_data() -> None:
         result = forecast_import_service.bootstrap()
         if result.get("migrations") or result.get("products") or result.get("series"):
             _logger.info("forecast data bootstrap: %s", result)
+        # The Meta Awareness CPM correction is a compare-and-set migration;
+        # drop any catalog rows read before the background migration ran.
+        from app import catalog as catalog_svc
+        catalog_svc.invalidate_product_caches()
         forecast_store.invalidate()
         forecast_map_svc.invalidate()
         audience_taxonomy.invalidate()                   # the seed may just have changed the audience rows
@@ -645,6 +650,12 @@ class AvailsEntry(BaseModel):
     # "Apply" — they are then expected delivery, not the platform's raw avails, and the share-of-voice badge says so. None when
     # none was applied, or once the planner typed over the figures.
     win_rate: Optional[float] = None
+    # The Hispanic share (a fraction) the avails were narrowed to when max_imps / est_uniques came from an "Apply" with Hispanic targeting on,
+    # so the share-of-voice helper can say so. None otherwise, or once the planner typed over the figures.
+    hispanic_share: Optional[float] = None
+    # The Meta line's last planning snapshot (audience range, the three scenarios, the budget cross-check) with what it was asked, so a reopened
+    # proposal can show it and mark it stale when the line changed. The scenario the planner inserted lives in max_imps / est_uniques as usual.
+    meta_forecast: Optional[dict] = None
 
 
 class TierModel(BaseModel):
@@ -944,6 +955,40 @@ class ConstanzaEstimateRequest(BaseModel):
     tiktok: Optional[TikTokTargetingModel] = None
 
 
+class MetaGeoSearchRequest(BaseModel):
+    query: str
+    location_type: str
+
+
+class MetaTargetingItem(BaseModel):
+    """One interest / behavior / demographic option picked from Meta's own list (id, name and type come from /meta-targeting)."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., max_length=30)
+    name: str = Field(..., max_length=120)
+    type: str = Field(..., max_length=20)
+
+
+class MetaAuctionForecastRequest(BaseModel):
+    product_name: str
+    retail_budget: float
+    # a manually entered audience: its LOWER end is what the three impression scenarios multiply (the upper end is context and optional)
+    audience_lower: Optional[int] = None
+    audience_upper: Optional[int] = None
+    # the flight's length in months: the flight total is the monthly scenario times it
+    months: int = 1
+    retail_cpm: Optional[float] = None
+    # Select a geography returned by /meta-geos for a live audience pull.
+    # Omit both fields for a manually supplied audience or budget-only model.
+    meta_geo_type: Optional[str] = None
+    meta_geo_key: Optional[str] = None
+    age_min: Optional[int] = None
+    age_max: Optional[int] = None
+    gender: Optional[str] = None
+    # interests / behaviors / demographics chosen from Meta's lists: the audience is people who match ANY of them
+    meta_targeting: list[MetaTargetingItem] = Field(default_factory=list, max_length=50)
+
+
 class ConstanzaParseAudienceRequest(BaseModel):
     text: str
 
@@ -1079,6 +1124,7 @@ async def get_catalog() -> dict:
             "minimum_spend": p.minimum_spend,
             "estimated_impressions": p.estimated_impressions,
             "estimated_cpm_for_imps": p.estimated_cpm_for_imps,
+            "meta_retail_cpm": constanza_meta.product_cpm(p.name),
             "sizes": p.sizes,
             "description": p.proposal_description,
             "notes": p.notes,
@@ -1687,6 +1733,83 @@ def constanza_tiktok_search(q: str = "") -> dict:
         return {"query": q.strip()[:100], "results": tiktok_svc.search(q)}
     except (TikTokAPIError, ValueError) as exc:
         raise _tiktok_error(exc)
+
+
+def _meta_error(exc: "constanza_meta.MetaAPIError") -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@app.get("/api/constanza/meta/status")
+def constanza_meta_status() -> dict:
+    """Whether the Meta connection is set up (which settings are missing, never their values), the planning multipliers and the Graph API version."""
+    return constanza_meta.status()
+
+
+@app.post("/api/constanza/meta-geos")
+def constanza_meta_geos(body: MetaGeoSearchRequest) -> dict:
+    """Search Meta geography IDs for an explicit planner choice."""
+    try:
+        return {"locations": constanza_meta.search_geography(body.query, body.location_type)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except constanza_meta.MetaAPIError as exc:
+        raise _meta_error(exc) from exc
+
+
+@app.get("/api/constanza/meta-targeting")
+def constanza_meta_targeting(kind: str = "", q: str = "") -> dict:
+    """What Meta lets an audience be targeted by: with `kind` (interests, behaviors or demographics) the whole list straight from Meta (cached for
+    hours, what this ad account can use today); with `q` the interests, behaviors and demographics a keyword finds."""
+    try:
+        if kind:
+            return {"kind": kind, "items": constanza_meta.targeting_catalog(kind)}
+        return {"query": q.strip()[:80], "results": constanza_meta.search_targeting(q)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except constanza_meta.MetaAPIError as exc:
+        raise _meta_error(exc) from exc
+
+
+@app.post("/api/constanza/meta-forecast")
+def constanza_meta_forecast(body: MetaAuctionForecastRequest) -> dict:
+    """The Meta line's audience scenarios: the LOWER end of Meta's audience range x 4.3 / 5.5 / 8.6 (conservative / mid / upper; platform_scenarios.py), a
+    month's avails and the flight, plus the budget cross-check.
+
+    A live Meta request requires an explicitly selected Meta geo ID, optionally with age, gender and interests / behaviors from Meta's lists;
+    nothing else about the campaign's targeting is represented, so the planner checks the rest in Ads Manager. Without the selection a planner may
+    enter the audience (its lower end) manually.
+    """
+    if bool(body.meta_geo_type) != bool(body.meta_geo_key):
+        raise HTTPException(status_code=422, detail="Select both a Meta geography type and its key.")
+    if body.meta_geo_type and (body.audience_lower is not None or body.audience_upper is not None):
+        raise HTTPException(status_code=422, detail="Use either the live Meta audience or manually entered bounds.")
+    if body.meta_targeting and not body.meta_geo_type:
+        raise HTTPException(status_code=422, detail="Interests and behaviors need a live Meta pull: select a Meta geography too.")
+    try:
+        audience_source = "manual"
+        lower, upper = body.audience_lower, body.audience_upper
+        targeting = [item.model_dump() for item in body.meta_targeting]
+        if body.meta_geo_type:
+            lower, upper = constanza_meta.fetch_reach_estimate(
+                geo_type=body.meta_geo_type, geo_key=body.meta_geo_key,
+                age_min=body.age_min, age_max=body.age_max, gender=body.gender, targeting=targeting,
+            )
+            audience_source = "meta_api"
+        result = constanza_meta.model_auction(
+            product_name=body.product_name, retail_budget=body.retail_budget,
+            audience_lower=lower, audience_upper=upper, months=body.months, audience_source=audience_source,
+            retail_cpm=body.retail_cpm,
+        )
+        if audience_source == "meta_api":
+            result["meta_targeting"] = {
+                "geo_type": body.meta_geo_type, "geo_key": body.meta_geo_key,
+                "age_min": body.age_min, "age_max": body.age_max, "gender": body.gender, "detailed": targeting,
+            }
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except constanza_meta.MetaAPIError as exc:
+        raise _meta_error(exc) from exc
 
 
 @app.post("/api/constanza/parse-audience")

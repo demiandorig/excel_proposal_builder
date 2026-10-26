@@ -160,12 +160,12 @@ def test_same_behavior_notices_a_different_win_rate():
 
 # ---------------------------------------------------------------------------------------------------------- the table and the migration
 
-def test_the_win_rate_column_is_added_by_schema_and_by_migration_0004():
+def test_the_win_rate_column_is_added_by_schema_and_by_migration_0005():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     schema = (root / "schema.sql").read_text()
     assert "ALTER TABLE forecast_product_map ADD COLUMN IF NOT EXISTS win_rate BOOLEAN;" in schema
-    migration = next((root / "migrations").glob("0004_*.sql")).read_text()
+    migration = next((root / "migrations").glob("0005_*.sql")).read_text()
     assert "ADD COLUMN IF NOT EXISTS win_rate BOOLEAN" in migration and "DROP" not in migration.upper().replace("-- ", "")
     from app.services import schema_bootstrap
     assert any("forecast_product_map" in st and "win_rate" in st for st in schema_bootstrap.split_statements(schema)), \

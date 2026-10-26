@@ -539,7 +539,7 @@ def test_a_replaced_product_still_resolves_by_name_for_a_saved_proposal(db, monk
 # --------------------------------------------------------------------------------------------- the migration runner, isolated
 
 def test_the_forecast_map_accepts_the_tiktok_method_and_still_rejects_any_other(db):
-    """Migration 0003 widens the method check to 'tiktok'; the schema.sql baseline says the same, and the migration is re-runnable."""
+    """Migration 0004 widens the method check to 'tiktok'; the schema.sql baseline says the same, and the migration is re-runnable."""
     mine = "zz-test Tiktok map"
     with get_connection() as conn:
         conn.execute("DELETE FROM forecast_product_map WHERE product_name = %s", (mine,))
@@ -552,7 +552,7 @@ def test_the_forecast_map_accepts_the_tiktok_method_and_still_rejects_any_other(
             with pytest.raises(psycopg.errors.CheckViolation):
                 with conn.transaction():
                     conn.execute("UPDATE forecast_product_map SET method = 'magic' WHERE product_name = %s", (mine,))
-            sql = next(m for m in migrations.discover() if m.version == "0003").sql
+            sql = next(m for m in migrations.discover() if m.version == "0004").sql
             conn.execute(sql)                                                  # run again over the already-widened check: nothing breaks
             conn.execute(sql)
             assert conn.execute("SELECT method FROM forecast_product_map WHERE product_name = %s", (mine,)).fetchone()["method"] == "tiktok"

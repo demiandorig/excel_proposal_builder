@@ -527,7 +527,8 @@ ADMIN_HTML = (ROOT / "app" / "templates" / "admin.html").read_text(encoding="utf
 
 def test_the_avails_card_reads_the_products_forecast_config_not_a_hard_coded_family():
     card = APP_JS.split("function renderAvailsGrid", 1)[1].split("\nfunction ", 1)[0]
-    assert "${!isFreeform && _forecastEnabled(p) ? `" in card
+    # a paid Meta line has its own panel (audience scenarios) instead of the platform-data button: the config decides, not a family name
+    assert "${!isFreeform && _forecastEnabled(p) && p.meta_retail_cpm == null ? `" in card
     assert 'p.family === "Entravision Plus"' not in card
     helper = APP_JS.split("function _forecastEnabled(p) {", 1)[1].split("\n}\n", 1)[0]
     assert "p.forecast ? !!p.forecast.enabled" in helper and 'p.family === "Entravision Plus"' in helper     # the old rule is only a fallback

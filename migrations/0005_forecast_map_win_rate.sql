@@ -1,4 +1,4 @@
--- 0004_forecast_map_win_rate.sql
+-- 0005_forecast_map_win_rate.sql
 --
 -- Why: Constanza multiplies the avails of programmatic (MadHive / The Trade Desk) products by a win rate, because those avails
 -- are bid opportunities, not delivered impressions. Which products that applies to is a built-in rule (every platform series

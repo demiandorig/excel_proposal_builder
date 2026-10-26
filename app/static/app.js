@@ -6442,6 +6442,105 @@ function _jumpToCurateField(field, lineId) {
   }, 80);
 }
 
+function _metaFullFlightRetailBudget(li) {
+  // Step 04's line budget is per selected billing period; li.months is
+  // that period's count (1 for full-flight), so this is the actual retail
+  // spend for the whole line, not a monthly-equivalent approximation.
+  return Math.max(0, Number(li.monthly_budget) || 0) * Math.max(1, Number(li.months) || 1);
+}
+
+// The interests / behaviors / demographics a planner picked from Meta's own lists for a line (kept for the session; a saved snapshot restores them).
+function _metaSelected(lid) {
+  state.metaTargeting = state.metaTargeting || {};
+  if (!state.metaTargeting[lid]) {
+    const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
+    state.metaTargeting[lid] = ((saved && saved.meta_targeting && saved.meta_targeting.detailed) || []).map(x => ({ id: x.id, name: x.name, type: x.type }));
+  }
+  return state.metaTargeting[lid];
+}
+
+function _metaChipsHtml(lid) {
+  const chosen = _metaSelected(lid);
+  if (!chosen.length) return `<span class="cz-note">None chosen: the audience is everyone Meta can reach in the geography.</span>`;
+  return chosen.map((x, i) => `<span class="cz-chip cz-ok">${escapeHtml(x.name)} <small>${escapeHtml(x.type.replace("_", " "))}</small>`
+    + `<button type="button" class="cz-x" data-meta-act="remove" data-i="${i}" aria-label="Remove ${escapeHtml(x.name)}">×</button></span>`).join("");
+}
+
+function _metaForecastSummaryHtml(data, li, p) {
+  if (!data) return "";
+  const n = value => Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 });
+  const money = value => "$" + Number(value).toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const audience = data.potential_audience;
+  const sc = data.scenarios;
+  const effectiveCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm;
+  const stale = Math.abs(Number(data.retail_budget) - _metaFullFlightRetailBudget(li)) > 0.01
+    || data.product_name !== li.product_name
+    || Number(data.months) !== _constanzaFlightMonths(li)
+    || data.proposal_geo !== _constanzaGeoFor(li.id)
+    || data.target_text !== _effectiveTargetText(li)
+    || Math.abs(Number(data.retail_cpm) - Number(effectiveCpm)) > 0.01;
+  let table = "";
+  if (sc) {
+    const m = sc.multipliers;
+    const cols = [["conservative", "Conservative"], ["mid", "Mid · default"], ["upper", "Upper"]];
+    table = `<table class="constanza-range-table meta-scenarios"><tr><th></th>${cols.map(([k, label]) => `<th>${label} <small>× ${escapeHtml(String(m[k]))}</small></th>`).join("")}</tr>
+      <tr><td>Imps / month</td>${cols.map(([k]) => `<td${k === "mid" ? " class=\"meta-mid\"" : ""}>${n(sc.monthly[k])}</td>`).join("")}</tr>
+      ${sc.months > 1 ? `<tr><td>Flight · ${n(sc.months)} mo</td>${cols.map(([k]) => `<td>${n(sc.flight[k])}</td>`).join("")}</tr>` : ""}
+      <tr><td>Retail spend at the planning CPM</td>${cols.map(([k]) => `<td>${money(sc.retail_spend_at_flight[k])}</td>`).join("")}</tr></table>`;
+  }
+  return `<div class="meta-plan-result">
+    <strong>${stale ? "⚠ Inputs changed — recalculate" : "Meta audience scenarios"}</strong>
+    ${audience ? `<p>Meta audience (lower – upper end): <strong>${n(audience.lower)}</strong> – ${n(audience.upper)} accounts ${audience.source === "meta_api" ? "(from Meta)" : "(entered manually)"}. The scenarios use the <strong>lower end</strong>: it is the est. uniques the Avails step gets, so its frequency reads ${sc ? escapeHtml(String(sc.multipliers.mid)) : "5.5"}.</p>` : `<p>Enter or pull an audience to see the scenarios.</p>`}
+    ${table}
+    <p>Budget cross-check: ${money(data.retail_budget)} retail → ${money(data.media_budget)} media at a ${money(data.retail_cpm)} retail CPM buys about ${n(data.budget_impressions)} impressions over the ${n(data.months)}-month flight. That is what the budget pays for, not avails.</p>
+    ${sc && !stale ? `<button type="button" class="btn-secondary meta-insert-btn" data-meta-act="insert" data-lid="${escapeAttr(li.id)}">Insert the mid-case (${n(sc.monthly.mid)} / month) into Avails →</button>` : ""}
+    <small>Planning scenarios, not a delivery forecast · ${escapeHtml(String(data.as_of || "").slice(0, 10))}</small>
+  </div>`;
+}
+
+function _metaForecastPanelHtml(li, p, existing) {
+  const saved = existing.meta_forecast || null;
+  const manualLower = saved && saved.potential_audience && saved.potential_audience.source === "manual" ? saved.potential_audience.lower : "";
+  const manualUpper = saved && saved.potential_audience && saved.potential_audience.source === "manual" && saved.potential_audience.upper !== saved.potential_audience.lower
+    ? saved.potential_audience.upper : "";
+  const geo = _constanzaGeoFor(li.id);
+  const effectiveCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm;
+  return `<div class="meta-plan-block" data-meta-lid="${escapeAttr(li.id)}">
+    <strong>Meta audience scenarios</strong>
+    <p>Retail budget ${_metaFullFlightRetailBudget(li).toLocaleString("en-US", { style: "currency", currency: "USD" })} over ${_constanzaFlightMonths(li)} month(s); retail CPM $${escapeHtml(effectiveCpm)}. Monthly impressions are the <strong>lower end</strong> of Meta's audience × 4.3 (conservative), 5.5 (mid, the default) or 8.6 (upper).</p>
+    <div class="meta-plan-fields">
+      <label>Audience size, lower end <input data-meta-input class="meta-audience" type="number" min="0" max="1000000000" placeholder="From Ads Manager" value="${escapeHtml(manualLower)}" /></label>
+      <label>Upper end (optional) <input data-meta-input class="meta-audience-upper" type="number" min="0" max="1000000000" placeholder="Same as lower" value="${escapeHtml(manualUpper)}" /></label>
+    </div>
+    <button type="button" class="btn-secondary meta-model-btn" data-lid="${escapeAttr(li.id)}">Calculate scenarios</button>
+    <details class="meta-live-details"><summary>Pull the audience from Meta (API)</summary>
+      <p>Choose the exact Meta geography; age, gender and interests are optional (any of the chosen interests / behaviors). Anything else about the campaign (exclusions, placements, account restrictions) must be checked in Ads Manager.</p>
+      <div class="meta-plan-fields">
+        <label>Meta geography type <select class="meta-geo-type"><option value="geo_market">DMA / geo market</option><option value="city">City</option><option value="region">State / region</option><option value="zip">ZIP</option><option value="country">Country</option></select></label>
+        <label>Search <input data-meta-input class="meta-geo-query" type="text" maxlength="100" value="${escapeHtml(geo)}" /></label>
+        <button type="button" class="btn-secondary meta-search-btn" data-lid="${escapeAttr(li.id)}">Find Meta geographies</button>
+        <label>Matched geography <select class="meta-geo-choice"><option value="">Search and choose an exact match</option></select></label>
+        <label>Minimum age <input data-meta-input class="meta-age-min" type="number" min="18" max="65" placeholder="All" /></label>
+        <label>Maximum age <input data-meta-input class="meta-age-max" type="number" min="18" max="65" placeholder="All" /></label>
+        <label>Gender <select class="meta-gender"><option value="all">All</option><option value="male">Male</option><option value="female">Female</option></select></label>
+      </div>
+      <div class="meta-targeting">
+        <strong>Interests &amp; behaviors</strong> <small>(Meta's own lists)</small>
+        <div class="meta-plan-fields">
+          <label>Search <input data-meta-input class="meta-target-query" type="search" maxlength="80" placeholder="soccer, new parents, small business…" /></label>
+          <button type="button" class="btn-secondary" data-meta-act="search" data-lid="${escapeAttr(li.id)}">Search Meta</button>
+          <label>Or browse a whole list <select class="meta-browse-kind"><option value="interests">Interests</option><option value="behaviors">Behaviors</option><option value="demographics">Demographics (life events, income, …)</option></select></label>
+          <button type="button" class="btn-secondary" data-meta-act="browse" data-lid="${escapeAttr(li.id)}">Browse</button>
+        </div>
+        <div class="meta-target-results" aria-live="polite"></div>
+        <div class="cz-chips meta-target-chips">${_metaChipsHtml(li.id)}</div>
+      </div>
+      <button type="button" class="btn-secondary meta-pull-btn" data-lid="${escapeAttr(li.id)}">Pull audience and calculate</button>
+    </details>
+    <div class="meta-plan-feedback" aria-live="polite">${_metaForecastSummaryHtml(saved, li, p)}</div>
+  </div>`;
+}
+
 function renderAvailsGrid() {
   renderAllTierTabStrips();
   const rt = (state.parsed.request_type || "").toLowerCase();
@@ -6552,7 +6651,8 @@ function renderAvailsGrid() {
         `}
       </div>
       <p class="sov-helper" id="sov-helper-${escapeAttr(li.id)}"></p>
-      ${!isFreeform && _forecastEnabled(p) ? `
+      ${!isFreeform && p.meta_retail_cpm != null ? _metaForecastPanelHtml(li, p, existing) : ""}
+      ${!isFreeform && _forecastEnabled(p) && p.meta_retail_cpm == null ? `
       <div class="constanza-block">
         ${window.Constanza ? Constanza.periodLineHtml(p.forecast && p.forecast.series) : ""}
         <div class="cz-card-actions">
@@ -6614,7 +6714,7 @@ function renderAvailsGrid() {
   // is meaningless, always "on" per the checkbox default) and the "_text"
   // free-form inputs above (running parseFormattedInput on "50 to 100"
   // would strip the letters and glue the digits together into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input])').forEach(inp => {
     inp.addEventListener("focus", e => {
       const raw = parseFormattedInput(e.target.value);
       // Frequency is legitimately fractional (5.5) — rounding it here and
@@ -6652,7 +6752,7 @@ function renderAvailsGrid() {
   // both overwrite that with a numeric parse of the same text AND mangle
   // it in the process — parseFormattedInput("50 to 100") strips the
   // letters and glues what's left into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input])').forEach(inp => {
     inp.addEventListener("blur", e => {
       const lid = e.target.dataset.lid;
       const key = e.target.dataset.key;
@@ -6779,6 +6879,26 @@ function renderAvailsGrid() {
   grid.querySelectorAll(".constanza-line-dock-btn").forEach(btn => {
     btn.addEventListener("click", () => openConstanzaForLine(btn.dataset.lid));
   });
+  grid.querySelectorAll(".meta-plan-block").forEach(panel => {
+    panel.addEventListener("click", e => onMetaPanelClick(panel, e));
+    const q = panel.querySelector(".meta-target-query");
+    if (q) q.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); onMetaTargetLookup(panel.dataset.metaLid, false); } });
+  });
+  grid.querySelectorAll(".meta-model-btn").forEach(btn => {
+    btn.addEventListener("click", () => onMetaForecast(btn.dataset.lid, false));
+  });
+  grid.querySelectorAll(".meta-pull-btn").forEach(btn => {
+    btn.addEventListener("click", () => onMetaForecast(btn.dataset.lid, true));
+  });
+  grid.querySelectorAll(".meta-search-btn").forEach(btn => {
+    btn.addEventListener("click", () => onMetaGeoSearch(btn.dataset.lid));
+  });
+  grid.querySelectorAll(".meta-geo-type, .meta-geo-query").forEach(input => {
+    input.addEventListener("input", () => {
+      const choice = input.closest(".meta-plan-block").querySelector(".meta-geo-choice");
+      choice.innerHTML = '<option value="">Search and choose an exact match</option>';
+    });
+  });
   if (window.Constanza) Constanza.hintOnce();
 }
 
@@ -6881,6 +7001,167 @@ function _constanzaFlightDays() {
   const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
   if (!start || !end || end < start) return null;
   return Math.min(Math.round((end - start) / 86400000) + 1, 3660);
+}
+
+function _metaPanel(lid) {
+  return document.querySelector(`.meta-plan-block[data-meta-lid="${escapeAttr(lid)}"]`);
+}
+
+function _metaFeedback(panel, message) {
+  const el = panel && panel.querySelector(".meta-plan-feedback");
+  if (el) el.innerHTML = `<p class="constanza-error">${escapeHtml(message)}</p>`;
+}
+
+async function onMetaGeoSearch(lid) {
+  const panel = _metaPanel(lid);
+  if (!panel) return;
+  const query = panel.querySelector(".meta-geo-query").value.trim();
+  const locationType = panel.querySelector(".meta-geo-type").value;
+  const btn = panel.querySelector(".meta-search-btn");
+  const choice = panel.querySelector(".meta-geo-choice");
+  if (!query) { _metaFeedback(panel, "Enter a Meta geography to search."); return; }
+  btn.disabled = true;
+  choice.innerHTML = '<option value="">Searching…</option>';
+  try {
+    const response = await fetch("/api/constanza/meta-geos", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, location_type: locationType }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+    choice.innerHTML = '<option value="">Choose an exact Meta match</option>' +
+      (data.locations || []).map(loc => `<option value="${escapeHtml(loc.key)}">${escapeHtml(loc.name)}${loc.region ? " · " + escapeHtml(loc.region) : ""}${loc.country_code ? " · " + escapeHtml(loc.country_code) : ""}</option>`).join("");
+    if (!data.locations || !data.locations.length) _metaFeedback(panel, "Meta found no matching geography. Try a city, ZIP, state, or DMA name.");
+  } catch (error) {
+    choice.innerHTML = '<option value="">Search and choose an exact match</option>';
+    _metaFeedback(panel, String(error.message || error));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// What a keyword (or a whole list) finds in Meta's interests / behaviors / demographics, as buttons a planner clicks to choose.
+function _metaTargetResultsHtml(groups, chosen) {
+  const have = new Set(chosen.map(x => `${x.type}:${x.id}`));
+  const sections = groups.filter(([, items]) => items.length).map(([label, items]) =>
+    `<div class="meta-target-group"><span class="cz-note">${escapeHtml(label)}</span><div class="cz-chips">${items.slice(0, 60).map(it =>
+      `<button type="button" class="cz-chip ${have.has(`${it.type}:${it.id}`) ? "cz-ok" : ""}" data-meta-act="add" data-id="${escapeHtml(it.id)}" data-type="${escapeHtml(it.type)}" data-name="${escapeHtml(it.name)}"` +
+      `${it.path && it.path.length ? ` title="${escapeHtml(it.path.join(" › "))}"` : ""}>${escapeHtml(it.name)}${it.audience_lower != null ? ` <small>${Number(it.audience_lower).toLocaleString("en-US")}+</small>` : ""}</button>`).join("")}</div>${items.length > 60 ? `<span class="cz-note">${items.length - 60} more: search to narrow.</span>` : ""}</div>`);
+  return sections.length ? sections.join("") : `<span class="cz-note">Nothing found: try other words, or browse the list.</span>`;
+}
+
+async function onMetaTargetLookup(lid, browse) {
+  const panel = _metaPanel(lid);
+  if (!panel) return;
+  const box = panel.querySelector(".meta-target-results");
+  const query = panel.querySelector(".meta-target-query").value.trim();
+  const kind = panel.querySelector(".meta-browse-kind").value;
+  if (!browse && query.length < 2) { box.innerHTML = '<span class="cz-note">Type at least two letters to search.</span>'; return; }
+  box.innerHTML = '<span class="cz-note">Asking Meta…</span>';
+  try {
+    const response = await fetch(browse ? `/api/constanza/meta-targeting?kind=${encodeURIComponent(kind)}` : `/api/constanza/meta-targeting?q=${encodeURIComponent(query)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+    const groups = browse ? [[kind, data.items || []]]
+      : [["Interests", data.results.interests || []], ["Behaviors", data.results.behaviors || []], ["Demographics", data.results.demographics || []]];
+    box.innerHTML = _metaTargetResultsHtml(groups, _metaSelected(lid));
+  } catch (error) {
+    box.innerHTML = `<p class="constanza-error">${escapeHtml(String(error.message || error))}</p>`;
+  }
+}
+
+// Clicks inside a Meta panel: choose / remove an interest, search or browse Meta's lists, insert the mid scenario into Avails.
+function onMetaPanelClick(panel, event) {
+  const target = event.target.closest("[data-meta-act]");
+  if (!target || !panel.contains(target)) return;
+  const lid = panel.dataset.metaLid;
+  const act = target.dataset.metaAct;
+  if (act === "search") onMetaTargetLookup(lid, false);
+  else if (act === "browse") onMetaTargetLookup(lid, true);
+  else if (act === "insert") onMetaInsert(lid);
+  else if (act === "add" || act === "remove") {
+    const chosen = _metaSelected(lid);
+    if (act === "add") {
+      const item = { id: target.dataset.id, name: target.dataset.name, type: target.dataset.type };
+      if (!chosen.some(x => x.id === item.id && x.type === item.type)) chosen.push(item);
+      target.classList.add("cz-ok");
+    } else {
+      chosen.splice(Number(target.dataset.i), 1);
+    }
+    panel.querySelector(".meta-target-chips").innerHTML = _metaChipsHtml(lid);
+  }
+}
+
+async function onMetaForecast(lid, liveAudience) {
+  const panel = _metaPanel(lid);
+  const li = state.lineItems.find(x => x.id === lid);
+  if (!panel || !li) return;
+  const p = state.productIndex[li.product_name] || {};
+  const retailBudget = _metaFullFlightRetailBudget(li);
+  const months = _constanzaFlightMonths(li);
+  const geoAtRequest = _constanzaGeoFor(lid);
+  const targetAtRequest = _effectiveTargetText(li);
+  if (!(retailBudget > 0)) { _metaFeedback(panel, "Set a positive retail budget for this line in Step 04 first."); return; }
+  const lowerText = panel.querySelector(".meta-audience").value.trim();
+  const upperText = panel.querySelector(".meta-audience-upper").value.trim();
+  const lower = lowerText ? Number(lowerText) : null;
+  const upper = upperText ? Number(upperText) : null;
+  if (!liveAudience && (lower === null || !Number.isSafeInteger(lower) || lower < 0 || (upper !== null && (!Number.isSafeInteger(upper) || upper < lower)))) {
+    _metaFeedback(panel, "Enter the lower end of Meta's audience size (a whole number), and, if you give one, an upper end that is not below it.");
+    return;
+  }
+  const body = {
+    product_name: li.product_name, retail_budget: retailBudget,
+    retail_cpm: _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm, months,
+  };
+  if (liveAudience) {
+    const key = panel.querySelector(".meta-geo-choice").value;
+    if (!key) { _metaFeedback(panel, "Search and choose the exact Meta geography first."); return; }
+    body.meta_geo_type = panel.querySelector(".meta-geo-type").value;
+    body.meta_geo_key = key;
+    const min = panel.querySelector(".meta-age-min").value.trim();
+    const max = panel.querySelector(".meta-age-max").value.trim();
+    body.age_min = min ? Number(min) : null;
+    body.age_max = max ? Number(max) : null;
+    body.gender = panel.querySelector(".meta-gender").value;
+    body.meta_targeting = _metaSelected(lid).map(x => ({ id: x.id, name: x.name, type: x.type }));
+  } else {
+    body.audience_lower = lower;
+    body.audience_upper = upper === null ? lower : upper;
+  }
+  const btn = panel.querySelector(liveAudience ? ".meta-pull-btn" : ".meta-model-btn");
+  btn.disabled = true;
+  try {
+    const response = await fetch("/api/constanza/meta-forecast", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+    // Save the provenance with the proposal. A changed line/geo/length is shown as stale (and the insert button withdrawn).
+    const stillThere = state.lineItems.find(x => x.id === lid);
+    if (!stillThere || stillThere.product_name !== li.product_name ||
+        _metaFullFlightRetailBudget(stillThere) !== retailBudget || _constanzaFlightMonths(stillThere) !== months ||
+        _constanzaGeoFor(lid) !== geoAtRequest || _effectiveTargetText(stillThere) !== targetAtRequest) return;
+    data.proposal_geo = geoAtRequest;
+    data.target_text = targetAtRequest;
+    state.availsData[lid] = state.availsData[lid] || {};
+    state.availsData[lid].meta_forecast = data;
+    panel.querySelector(".meta-plan-feedback").innerHTML = _metaForecastSummaryHtml(data, li, p);
+  } catch (error) {
+    _metaFeedback(panel, String(error.message || error));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Writes the MID scenario (the default) into the line's Avails: monthly impressions, and the lower-end audience as est. uniques.
+function onMetaInsert(lid) {
+  const li = state.lineItems.find(x => x.id === lid);
+  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
+  if (!li || !saved || !saved.scenarios) return false;
+  const geo = saved.meta_targeting ? `Meta geography ${saved.meta_targeting.geo_key}` : "entered audience";
+  return applyConstanzaEstimate(lid, saved.scenarios.monthly.mid, saved.scenarios.est_uniques,
+    { method: "meta_audience", dmas: [geo], unmatched_tokens: [], win_rate: null, hispanic_share: null });
 }
 
 async function onConstanzaAutoCalc(lid) {
