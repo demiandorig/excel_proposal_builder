@@ -20,6 +20,13 @@ inputs (Nielsen TV-home counts, Gauge shares, ad-load/fill assumptions,
 market-tier skews, ...) into a second, parallel implementation. Re-run this
 script whenever a refreshed workbook comes in.
 
+ONE DELIBERATE DEPARTURE FROM THE WORKBOOK — Prime Video's ad load. The workbook's Assumptions sheet says 3.2 ad minutes per
+hour for Prime Video (a blend of Ampere's measured 2.60 and Adweek's 4-6); Entravision plans on the measured 2.6 (PRIME_AD_LOAD
+below). Prime's impressions are hours x ad load x ads per minute x fill, so they are LINEAR in the ad load, and its uniques and
+households do not depend on it at all — scaling the three impression columns by 2.6 / (the workbook's own ad load) is exactly
+the edit of that one input, without hand-editing the planner's workbook. If the workbook is refreshed to carry 2.6 itself, the
+factor becomes 1 and this does nothing.
+
 Usage:
     python scripts/extract_constanza_data.py /path/to/CTV_Avails_by_DMA.xlsx
 """
@@ -41,6 +48,10 @@ OUT_DIR = REPO_ROOT / "app" / "data" / "constanza"
 # (other_fast, vmvpd — see module docstring in the loader).
 LOW_MULT = 0.7
 HIGH_MULT = 1.3
+
+# Prime Video ad minutes per hour that Constanza plans on (see the docstring): Ampere Analysis's measured figure, Aug-2026.
+PRIME_AD_LOAD = 2.6
+PRIME_AD_LOAD_ROW = 11                      # Assumptions!A11 / B11 in the workbook
 
 
 def _rows(ws, header_row: int, first_data_row: int):
@@ -176,6 +187,33 @@ def derive_other_fast_and_vmvpd(other_fast_raw: dict, vmvpd_raw: dict,
     return other_fast, vmvpd
 
 
+def prime_ad_load_factor(wb) -> float:
+    """PRIME_AD_LOAD over the ad load the workbook carries for Prime Video (read from its Assumptions sheet, label checked so a
+    reshuffled sheet fails loudly instead of scaling by the wrong cell)."""
+    ws = wb["Assumptions"]
+    label, value = ws.cell(row=PRIME_AD_LOAD_ROW, column=1).value, ws.cell(row=PRIME_AD_LOAD_ROW, column=2).value
+    if not label or "Ad load" not in str(label) or "Prime" not in str(label) or not isinstance(value, (int, float)) or value <= 0:
+        raise SystemExit(f"Assumptions row {PRIME_AD_LOAD_ROW} is no longer Prime Video's ad load ({label!r}, {value!r}); update PRIME_AD_LOAD_ROW")
+    return PRIME_AD_LOAD / float(value)
+
+
+def apply_prime_ad_load(dma_model: dict, national: dict, factor: float) -> None:
+    """Scale Prime's impressions (every DMA, and the two national rows that carry them) by `factor`, in place."""
+    if factor == 1.0:
+        return
+    for figs in dma_model["prime"].values():
+        for key in ("imps_low", "imps_mid", "imps_high"):
+            if figs.get(key) is not None:
+                figs[key] *= factor
+    prime_row = national.get("Reference: Prime Video (not on list)")
+    total_row = national.get("Cumulative incl. Prime Video (reference)")
+    if prime_row and prime_row.get("imps_mid") is not None:
+        old = prime_row["imps_mid"]
+        prime_row["imps_mid"] = old * factor
+        if total_row and total_row.get("imps_mid") is not None:
+            total_row["imps_mid"] += prime_row["imps_mid"] - old
+
+
 def extract_national_summary(wb) -> dict:
     """A handful of national anchor figures, kept alongside the per-DMA data
     so tests can reconcile DMA sums back to the workbook's own declared
@@ -209,6 +247,9 @@ def main():
     peacock = extract_platform_by_dma_sheet(wb, "Peacock by DMA")
     cumulative, other_fast_raw, vmvpd_raw = extract_cumulative(wb)
     national = extract_national_summary(wb)
+    factor = prime_ad_load_factor(wb)
+    apply_prime_ad_load(dma_model, national, factor)
+    print(f"Prime Video ad load: workbook {PRIME_AD_LOAD / factor:g} -> {PRIME_AD_LOAD:g} min/hr (impressions x {factor:.4f})")
 
     # The Cumulative sheet's vMVPD column is "vMVPD + MVPD-app imps" (the
     # two rows combined), so the national reach figure it's apportioned

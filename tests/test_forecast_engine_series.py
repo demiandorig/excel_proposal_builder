@@ -351,8 +351,9 @@ def test_a_whole_states_people_and_reach_are_scaled_to_the_state_rows_own_figure
 
 def test_a_state_row_without_people_falls_back_to_the_avails_ratio_for_them(fake):
     fake.series["s"] = ref("s", 1, levels=("dma", "state"))
-    fake.dmas[1] = {d.key: store.Row(d.key, 1000.0, reach_universe=5000.0, est_reach=2000.0) for d in geo.dma_table()}
-    fake.states[(1, "WY")] = store.Row("WY", 3800.0)                           # no universe and no reach in the state row
+    # (avails sit well above reach, as in every real export: an ID needs at least one impression, and the engine caps reach at them)
+    fake.dmas[1] = {d.key: store.Row(d.key, 10_000.0, reach_universe=5000.0, est_reach=2000.0) for d in geo.dma_table()}
+    fake.states[(1, "WY")] = store.Row("WY", 38_000.0)                         # no universe and no reach in the state row
     est = estimate("P", "WY", config=cfg("s"))
     assert est.reach_universe == pytest.approx(10_000.0 * 1.9) and est.est_uniques == pytest.approx(4000.0 * 1.9)
 
@@ -361,8 +362,8 @@ def test_a_state_row_with_only_the_people_there_are_scales_the_people_reached_th
     """If the state row carries the universe but no reach, the reach follows the universe's ratio (x1.26), never the avails ratio (x1.9): the
     people reached stay a part of the people there are."""
     fake.series["s"] = ref("s", 1, levels=("dma", "state"))
-    fake.dmas[1] = {d.key: store.Row(d.key, 1000.0, reach_universe=5000.0, est_reach=4500.0) for d in geo.dma_table()}
-    fake.states[(1, "WY")] = store.Row("WY", 3800.0, reach_universe=12_600.0)
+    fake.dmas[1] = {d.key: store.Row(d.key, 10_000.0, reach_universe=5000.0, est_reach=4500.0) for d in geo.dma_table()}
+    fake.states[(1, "WY")] = store.Row("WY", 38_000.0, reach_universe=12_600.0)
     est = estimate("P", "WY", config=cfg("s"))
     assert est.reach_universe == pytest.approx(12_600.0) and est.est_uniques == pytest.approx(9000.0 * 1.26)
     assert est.est_uniques <= est.reach_universe

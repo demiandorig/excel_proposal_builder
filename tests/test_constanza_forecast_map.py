@@ -229,9 +229,9 @@ def test_clean_config_rejects_what_cannot_work(payload, message):
 
 def test_clean_config_normalizes_a_generic_choice_and_keeps_a_platform_one():
     assert fm.clean_config({"enabled": 1, "method": "generic", "platform": "roku", "hispanic_weighted": True}) == \
-        {"enabled": True, "method": "generic", "platform": None, "hispanic_weighted": False}     # generic: no platform, no weighting
+        {"enabled": True, "method": "generic", "platform": None, "hispanic_weighted": False, "win_rate": None}     # generic: no platform, no weighting, no win rate
     assert fm.clean_config({"enabled": False, "method": "platform", "platform": " roku ", "hispanic_weighted": True}) == \
-        {"enabled": False, "method": "platform", "platform": "roku", "hispanic_weighted": True}
+        {"enabled": False, "method": "platform", "platform": "roku", "hispanic_weighted": True, "win_rate": None}
 
 
 def test_set_override_stores_under_the_current_name_and_drops_a_former_name_row(store):
@@ -279,7 +279,7 @@ def test_the_default_estimates_are_what_they_were_before_the_mapping_existed():
     assert vix.confidence == "generic_fallback" and vix.platform == "generic_population"
     assert engine.estimate_avails(VIX, national, months=1) is None            # nothing to apportion without a total
     hisp = engine.estimate_avails(HISPANIC, resolve_geo("Los Angeles; Nashville"), months=1)
-    assert any("Hispanic population %" in n for n in hisp.notes)
+    assert any("share of the geography's Hispanic population" in n for n in hisp.notes)
 
 
 def test_repointing_a_product_at_another_platform_changes_its_numbers(store):
@@ -309,13 +309,13 @@ def test_a_generic_product_can_be_given_platform_data(store):
 def test_hispanic_weighting_can_be_turned_on_and_off_per_product(store):
     geo = resolve_geo("Los Angeles; Nashville")            # two states with very different Hispanic shares
     plain = engine.estimate_avails(REACH, geo, months=1)
-    assert not any("Hispanic population %" in n for n in plain.notes)
+    assert not any("share of the geography's Hispanic population" in n for n in plain.notes)
     fm.set_override(REACH, {"enabled": True, "method": "platform", "platform": "cumulative", "hispanic_weighted": True}, "a")
     weighted = engine.estimate_avails(REACH, geo, months=1)
-    assert any("Hispanic population %" in n for n in weighted.notes)
+    assert any("share of the geography's Hispanic population" in n for n in weighted.notes)
     assert [round(a.weight, 6) for a in weighted.by_area] != [round(a.weight, 6) for a in plain.by_area]
     fm.set_override(HISPANIC, {"enabled": True, "method": "platform", "platform": "cumulative", "hispanic_weighted": False}, "a")
-    assert not any("Hispanic population %" in n for n in engine.estimate_avails(HISPANIC, geo, months=1).notes)
+    assert not any("share of the geography's Hispanic population" in n for n in engine.estimate_avails(HISPANIC, geo, months=1).notes)
 
 
 def test_turning_the_button_off_does_not_break_the_estimate_itself(store):
@@ -345,7 +345,11 @@ def _catalog_payload():
 def test_every_product_in_the_catalog_payload_carries_its_forecast_config():
     products = _catalog_payload()
     assert len(products) == len(catalog.effective_catalog())
-    assert products[ROKU]["forecast"] == {"enabled": True, "method": "platform", "platform": "roku", "hispanic_weighted": False, "source": "default", "relation": "primary"}
+    assert products[ROKU]["forecast"] == {"enabled": True, "method": "platform", "platform": "roku", "hispanic_weighted": False, "source": "default", "relation": "primary", "win_rate": False, "win_rate_override": None, "hispanic_default": False}      # bought directly on Roku Ads
+    assert products["Entravision Plus - Hulu"]["forecast"]["win_rate"] is True                              # bought through MadHive
+    assert products[PRIME]["forecast"]["win_rate"] is True                                                    # bought through the Amazon DSP, at its own rate
+    assert products["Entravision Plus - Hispanics CTV/OTT"]["forecast"]["hispanic_default"] is True            # Hispanic targeting on unless the planner turns it off
+    assert products["Entravision Plus - Hulu"]["forecast"]["hispanic_default"] is False
     assert products[VIX]["forecast"]["method"] == "generic" and products[VIX]["forecast"]["enabled"] is True
     assert products[SEARCH]["forecast"]["enabled"] is False
     assert products["Tiktok Ads"]["forecast"]["method"] == "tiktok" and products["Tiktok Ads"]["forecast"]["platform"] is None

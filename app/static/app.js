@@ -1172,6 +1172,7 @@ async function startNewProposal() {
 function _clearPerProposalState() {
   _resetEpoch++;
   state.constanzaGeoOverride = {};       // a geography picked for a line belongs to the proposal being left
+  state.constanzaHispanic = {};          // ... and so does a line's own Hispanic targeting switch
   if (window.Constanza) Constanza.onProposalReset();
   state.strategyBrief = null;
   state.roadblocks = null;
@@ -5085,13 +5086,24 @@ function applySovDisplay(lid, pct) {
   }
   const tier = sovTier(pct);
   const pctLabel = pct.toFixed(0);
+  // Figures Constanza applied with a win rate are expected delivery, not the platform's avails: say what the percent is of
+  // (>100% then means the plan buys more than Entravision expects to win, not more than exists).
+  const entryForSov = (state.availsData || {})[lid] || {};
+  const winRate = entryForSov.freeform ? null : entryForSov.win_rate;      // free-form: the SOV is the planner's own declared %, of nothing we computed
+  const hispanicShare = entryForSov.freeform ? null : entryForSov.hispanic_share;      // the avails were also narrowed to the Hispanic audience
+  const against = winRate ? "expected delivery" : (hispanicShare != null ? "Hispanic avails" : "avails");
   if (badge) {
     badge.className = `sov-badge sov-${tier}`;
-    badge.textContent = `${pctLabel}% of avails`;
+    badge.textContent = `${pctLabel}% of ${against}`;
   }
   if (helper) {
     helper.className = `sov-helper sov-${tier}`;
-    let text = `Proposed product allocation uses: ${pctLabel}% of total avails`;
+    const hispanicText = hispanicShare != null ? ` x the ${Math.round(hispanicShare * 1000) / 10}% Hispanic share` : "";
+    let text = winRate
+      ? `Proposed product allocation uses: ${pctLabel}% of expected delivery (the avails x a ${Math.round(winRate * 1000) / 10}% win rate${hispanicText})`
+      : (hispanicShare != null
+        ? `Proposed product allocation uses: ${pctLabel}% of Hispanic avails (the avails${hispanicText})`
+        : `Proposed product allocation uses: ${pctLabel}% of total avails`);
     if (_isFullFlight()) {
       // The ceilings are MONTHLY, the budget is the whole flight (one period): say what is being compared.
       const li = state.lineItems.find(x => x.id === lid);
@@ -6667,6 +6679,8 @@ function renderAvailsGrid() {
       }
       e.target._focusParsed = undefined;
       entry[key] = value;
+      delete entry.win_rate;      // the planner typed over it: no longer Constanza's win-rate-adjusted figure
+      delete entry.hispanic_share;    // ... nor its Hispanic-narrowed one
 
       const impsInputEl = () => grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="max_imps"]`);
       const spendInputEl = () => grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="max_spend"]`);
@@ -6831,6 +6845,35 @@ function _constanzaGeoFor(lid) {
   return picked || _effectiveGeo(state.activeTierLabel);
 }
 
+// Does this line's targeting name a Hispanic / Latino audience? A line's own target text REPLACES the campaign's (as everywhere else, see
+// _effectiveTargetText); only a line with none falls back to the campaign's demo / behavioral. A language word alone ("Spanish") does not count: it
+// describes the creative, and Spanish-language viewers are a narrower audience than Hispanic ones. Mentions that leave the audience OUT ("non-Hispanic",
+// "not targeting Hispanic", "excluding all Hispanic and Latino audiences") or take everyone ("Hispanic and non-Hispanic") do not count either.
+// (The Python twin is constanza_audience.mentions_hispanic_audience; a pattern cannot read intent, so the card shows the switch and says where it came from.)
+function _targetsHispanic(li) {
+  const word = "(?:hispanics?|latinos?|latinas?|latinx|latines?)";
+  const both = new RegExp(`\\b${word}\\s*(?:,|/|&|\\band\\b|\\bor\\b|\\bvs\\.?|\\bversus\\b)\\s*(?:and\\s+|or\\s+)?(?:non|not)[-\\s]*${word}`, "gi");
+  const negated = new RegExp(
+    `(?:\\b(?:non|not|no|excluding|exclude|excl|except|without|avoid|avoiding|skip|skipping)\\b\\.?|\\bw/o\\b|\\bnot\\s+targeting\\b|\\bnot\\s+for\\b)[-\\s]*`
+    + `(?:targeting\\s+)?(?:(?:the|all|any)\\s+)*(?:(?:${word})\\s*(?:(?:,|and|&|or|/)\\s*)?)+`, "gi");
+  const p = state.parsed || {};
+  const own = li && li.target_override && String(li.target_override).trim();
+  const parts = own ? [own, li.target_secondary] : [p.demo, p.behavioral, li && li.target_secondary];
+  const text = parts.filter(Boolean).join(" ").replace(both, " ").replace(negated, " ");
+  return new RegExp(`\\b${word}\\b`, "i").test(text);
+}
+
+// Hispanic targeting for a line's avails: the planner's own switch on its card when they used it; else ON when the line's own or the proposal's
+// targeting names a Hispanic audience (most of our campaigns do); else null = the product's own default (the server decides). Only platform
+// data has avails to narrow: a population-share or TikTok estimate is never sent the flag.
+function _constanzaHispanicFor(lid, li) {
+  const prod = li && state.productIndex ? state.productIndex[li.product_name] : null;
+  if (!prod || !prod.forecast || prod.forecast.method !== "platform") return null;
+  const mine = state.constanzaHispanic && state.constanzaHispanic[lid];
+  if (mine === true || mine === false) return mine;
+  return _targetsHispanic(li) ? true : null;
+}
+
 // Days from the flight's first day to its last, both counted: what a weekly (live-sports) series is scaled by. null when
 // the proposal has no readable dates.
 function _constanzaFlightDays() {
@@ -6848,6 +6891,7 @@ async function onConstanzaAutoCalc(lid) {
   const p = state.productIndex[li.product_name] || {};
 
   const geoText = _constanzaGeoFor(lid);
+  const hispanic = _constanzaHispanicFor(lid, li);
 
   // Only meaningful for the generic (no-platform-model) fallback — the
   // planner's own curated monthly budget, converted to impressions via
@@ -6876,6 +6920,7 @@ async function onConstanzaAutoCalc(lid) {
         months: flightMonths,
         flight_days: _constanzaFlightDays(),
         national_monthly_total: nationalMonthlyImpsTotal,
+        ...(hispanic === null ? {} : { hispanic }),
       }),
     });
     const data = await res.json();
@@ -6932,6 +6977,13 @@ function _constanzaCardOpts(lid) {
     },
     onApply: (monthlyMid, estUniques, geoInfo) => applyConstanzaEstimate(lid, monthlyMid, estUniques, geoInfo),
     onRefine: () => openConstanzaForLine(lid),
+    onHispanic: (next) => {
+      state.constanzaHispanic = state.constanzaHispanic || {};
+      state.constanzaHispanic[lid] = next;
+      onConstanzaAutoCalc(lid);
+    },
+    // the switch is on because the proposal's targeting names a Hispanic audience (not the planner's choice, not the product's default)
+    hispanicFromProposal: !(state.constanzaHispanic && lid in state.constanzaHispanic) && _targetsHispanic(state.lineItems.find(x => x.id === lid)),
   };
 }
 
@@ -6946,6 +6998,7 @@ function openConstanzaForLine(lid) {
     flightDays: days,
     lineId: lid,
     lineLabel: Constanza.lineLabel(li),
+    hispanic: _constanzaHispanicFor(lid, li),
   });
 }
 
@@ -6974,6 +7027,10 @@ function _constanzaGeoInfo(data) {
     method: data.geo_method,
     dmas: fromAreas.length ? fromAreas : fromTikTok,
     unmatched_tokens: data.unmatched_geo_tokens || [],
+    // the programmatic win rate that was applied to the figures this Apply writes (null when none): the Avails step says so beside them
+    win_rate: data.win_rate ? data.win_rate.mid : null,
+    // the Hispanic share the avails were narrowed to (null when not narrowed), so the share-of-voice helper can say it
+    hispanic_share: data.audience && data.audience.hispanic && data.audience.hispanic.mode === "cut" ? data.audience.hispanic.share : null,
   };
 }
 
@@ -6987,8 +7044,20 @@ function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
   entry.max_imps = Math.round(monthlyImpsMid);
   entry.max_imps_estimated = true;
   entry.basis = "imps";
-  if (estUniques != null) entry.est_uniques = Math.round(estUniques);
+  if (estUniques != null) {
+    entry.est_uniques = Math.round(estUniques);
+  } else if (entry.est_uniques != null && entry.est_uniques > entry.max_imps) {
+    // This estimate has no unique count to write, and the one already on the line (from an earlier Apply, or typed) was measured
+    // against other impressions: it can no longer be true (an ID needs at least one impression, and the card would show an
+    // "audience" larger than the impressions beside it). Drop it, and the frequency derived from it, rather than keep a nonsense pair.
+    delete entry.est_uniques;
+    delete entry.frequency;
+  }
   if (geoInfo) entry.geo_resolution = geoInfo;
+  // Remember that these figures are expected DELIVERY (platform avails x the win rate), so the share-of-voice badge can say what it is
+  // measured against; a figure the planner types over later clears it (see the avails blur handler).
+  if (geoInfo && geoInfo.win_rate) entry.win_rate = geoInfo.win_rate; else delete entry.win_rate;
+  if (geoInfo && geoInfo.hispanic_share != null) entry.hispanic_share = geoInfo.hispanic_share; else delete entry.hispanic_share;
 
   const spendResult = calcMaxSpendFromImps(_effectiveProduct(li, p), entry.max_imps);
   if (spendResult !== null) {

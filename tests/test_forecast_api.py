@@ -59,13 +59,14 @@ def test_the_estimate_says_which_series_version_and_basis_it_used(series_store):
     assert out["platform"] == "connect-default" and out["confidence"] == "platform_modeled"
     assert s["key"] == "connect-default" and s["version"] == 3 and s["data_basis"] == "platform_reported" and s["unit"] == "monthly"
     assert s["device_mix"] == {"connected_tv": 0.76, "mobile": 0.24} and s["top_publishers"] == [["Samsung TV Plus", 0.18]]
-    assert out["imps_mid"] == 2000.0 and out["weeks"] is None
+    # Connect is bought through MadHive: the avails (2,000) are bid opportunities, so the estimate is those x the 15% win rate
+    assert out["win_rate"]["raw_imps_mid"] == 2000.0 and out["imps_mid"] == pytest.approx(300.0) and out["weeks"] is None
 
 
 def test_a_live_sports_estimate_reports_its_period_and_uses_flight_days(series_store):
     out = main.constanza_estimate(estimate_body(product_name=MLB, flight_days=14))
     assert out["series"]["period_label"] == "Regular season, ends Sep 27, 2026" and out["series"]["unit"] == "weekly"
-    assert out["weeks"] == 2.0 and out["imps_mid"] == 1000.0
+    assert out["weeks"] == 2.0 and out["win_rate"]["raw_imps_mid"] == 1000.0 and out["imps_mid"] == pytest.approx(150.0)   # MLB: MadHive, x 15%
     assert any("WEEKLY" in n for n in out["notes"])
 
 

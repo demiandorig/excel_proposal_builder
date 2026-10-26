@@ -884,18 +884,18 @@ def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
             return f"  - {li.product_name}: (the amount differs by option — see AUTHORITATIVE FIGURES){desc_line}"
         if full_flight:
             return (
-                f"  - {li.product_name}: ${li.monthly_budget * li.months:,.0f} flat for the whole flight "
+                f"  - {li.product_name}: {email_totals.fmt_money(li.monthly_budget * li.months)} flat for the whole flight "
                 f"(single billing period — not a monthly rate){desc_line}"
             )
         if getattr(li, "monthly_allocations", None):
             # A customised Step 06 split: monthly_budget is only the average of unequal periods.
             return (
-                f"  - {li.product_name}: ${li.monthly_budget * li.months:,.0f} total over "
+                f"  - {li.product_name}: {email_totals.fmt_money(li.monthly_budget * li.months)} total over "
                 f"{email_totals.periods_phrase(li.months, time_unit)} (differs by {unit_noun} — see AUTHORITATIVE FIGURES){desc_line}"
             )
         return (
-            f"  - {li.product_name}: ${li.monthly_budget:,.0f}/{unit_noun} × {email_totals.periods_phrase(li.months, time_unit)} "
-            f"= ${li.monthly_budget * li.months:,.0f} total{desc_line}"
+            f"  - {li.product_name}: {email_totals.fmt_money(li.monthly_budget)}/{unit_noun} × {email_totals.periods_phrase(li.months, time_unit)} "
+            f"= {email_totals.fmt_money(li.monthly_budget * li.months)} total{desc_line}"
         )
 
     items_text = "\n".join(_product_line(li) for li in line_items)
@@ -905,7 +905,7 @@ def _build_prompt(request, line_items, strategy_brief: Optional[dict] = None,
         total_budget_text = "see each option below — they are ALTERNATIVES, never added together"
     else:
         opt0 = totals.options[0]
-        total_budget_text = f"${opt0.total_net:,.0f}" + (
+        total_budget_text = email_totals.fmt_money(opt0.total_net) + (
             f" ({email_totals.fmt_money(opt0.media_net)} media + {email_totals.fmt_money(opt0.addons_net)} one-time add-ons)"
             if opt0.addons else "")
     total_impressions = _estimate_monthly_impressions(line_items)

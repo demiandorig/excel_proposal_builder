@@ -13,9 +13,10 @@ measured independently and is multiplied together assuming no
 correlation between them — a real, disclosed simplification, not a claim
 of parity with panel-based measurement.
 
-    audience_imps(geo, age x gender, interests, months) =
+    audience_imps(geo, age x gender, hispanic, interests, months) =
         dma_baseline(geo, product, months)        # constanza_engine.py, already area-weighted
-      x age_gender_share(geo)                       # this area's own ACS age x sex data when available
+      x demographic_share(geo)                      # this area's own ACS data: age x sex, and — when Hispanic targeting is on — the
+                                                    # Hispanic share, all from ONE joint table (constanza_hispanic.py)
       x PRODUCT of interest_incidence(interest_i)    # SOURCED / DERIVED rates only — see audience_taxonomy.py and audience_taxonomy.json
       x PRODUCT of geo_interest_multiplier(interest_i, area)  # Google Ads search-volume skew — see constanza_search.py; defaults to 1.0 (no-op) until configured
 
@@ -47,12 +48,12 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 
 from app.data.constanza import read_json_maybe_gz
-from app.services import audience_taxonomy
+from app.services import audience_taxonomy, constanza_hispanic
 from app.services.constanza_engine import AreaEstimate, AvailsEstimate
 
 try:
@@ -79,6 +80,11 @@ _CV_INTEREST = 0.30        # curated, not sampled (used when a segment carries n
 # exact definition is tighter than a proxy or an old figure. Still a coarse heuristic, not a measured standard error.
 _CV_INTEREST_BY_CONFIDENCE = {"high": 0.15, "moderate": 0.25, "low": 0.40}
 _CV_SEARCH_APPLIED = 0.20  # only counted when the multiplier actually fired (not a no-op 1.0)
+# The Hispanic cut: the ACS share itself is well measured, but "Hispanic households use this platform in proportion to their population" is
+# an assumption nothing measures (platforms over- and under-index), so the cut widens the band more than age / gender does. A share that had
+# to come from the state-level proxy is cruder still.
+_CV_HISPANIC = 0.12
+_CV_HISPANIC_PROXY = 0.20
 
 RELIABILITY_FLOOR_POPULATION = 10_000  # a starting heuristic, not a derived constant — see module docstring
 
@@ -91,6 +97,7 @@ class AudienceSpec:
     interest_terms: list[str] = field(default_factory=list)
     geo_text: str = ""
     geo_type_hint: str | None = None   # "dma" | "state" | "zip" | "county" | "congressional_district" | "city" | "country"
+    hispanic: bool = False             # Hispanic targeting: cut each area to its real Hispanic share (constanza_hispanic.py)
 
 
 @dataclass
@@ -122,7 +129,7 @@ class AudienceAreaEstimate:
     imps_mid: float
     imps_high: float
     underlying_population: float       # the CENSUS population of the market that fits the cuts (see AudienceEstimate)
-    audience_people: float | None = None   # the product's reach universe here, narrowed by the same cuts
+    audience_people: float | None = None   # the addressable pool here (the product's reach universe), narrowed by the same cuts
     unique_viewers: float | None = None    # its est. monthly uniques here, narrowed by the same cuts
 
 
@@ -137,7 +144,7 @@ class AudienceEstimate:
     imps_high: float
     # The CENSUS population of the market that fits the cuts (adults when an interest rate, which is a share of adults, is
     # applied): how many people are in the area and fit, across all media. It is context and the basis of the reliability
-    # floor — NOT what the product reaches, which is `audience_people`.
+    # floor — NOT what the product reaches (that is `est_uniques`; `audience_people` is the platform's addressable pool).
     underlying_population: float
     reliability_floor_population: float
     below_reliability_threshold: bool
@@ -145,16 +152,23 @@ class AudienceEstimate:
     cuts_applied: int
     by_area: list[AudienceAreaEstimate] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    # What THIS PRODUCT reaches: the platform's reach universe for the geography (AvailsEstimate.reach_universe) narrowed by the
-    # same age / gender / interest cuts as the impressions, so impressions >= audience always holds. None when the data behind
-    # the estimate has no reach universe.
+    # The platform's reach universe for the geography (AvailsEstimate.reach_universe) narrowed by the same age / gender / interest cuts
+    # as the impressions: the ADDRESSABLE POOL of IDs the product could reach — a ceiling, not delivery, so it can exceed the
+    # impressions (the people a flight reaches are `est_uniques`, always at or below them). None when the data has no reach universe.
     audience_people: float | None = None
     est_uniques: float | None = None           # the est. monthly uniques narrowed the same way
-    impressions_per_person: float | None = None   # monthly impressions / audience people (unchanged by the cuts)
+    impressions_per_person: float | None = None   # monthly impressions / the addressable pool (unchanged by the cuts; below 1 when the pool exceeds delivery)
 
     # True when the market population counts ADULTS (an interest rate was applied and every area had age data to clip to 18+); False
     # when it is everyone in the area that fits the age / gender cuts (no interest, or an area - a country - with no age data).
     market_population_adults: bool = False
+
+    # Hispanic targeting, when it was on: {"mode": "cut" | "already_targeted" | "not_applied", "share": the Hispanic share of the people in the
+    # areas with data (None when none had), "levels": {"state_total": n, "area": n, "dma": n, "state": n, "state_proxy": n, "none": n} - which row
+    # each area used, see constanza_hispanic.py - "vintage"}. None when it was not asked for. "cut": the series is general and was narrowed to the
+    # Hispanic share; "already_targeted": the series is built from Hispanic audiences, so nothing was cut (an age / gender cut was read against the
+    # Hispanic population instead); "not_applied": it was asked for but no area had a Census row, so nothing was narrowed.
+    hispanic: dict | None = None
 
     @property
     def market_population(self) -> float:
@@ -243,11 +257,37 @@ def normalize_gender(value) -> str | None:
     raise ValueError("Gender must be male, female or all.")
 
 
+_HISPANIC_IN_TEXT = re.compile(r"\b(?:hispanics?|latinos?|latinas?|latinx|latines?)\b", re.IGNORECASE)
+# Mentions that do NOT target Hispanics must not switch the cut on: "non-Hispanic", "not (targeting) Hispanic", "excluding all Hispanic and Latino
+# audiences", "w/o Hispanic" name the audience to LEAVE OUT, and "Hispanic and non-Hispanic" / "Hispanic or general market" is everyone.
+_WORD = r"(?:hispanics?|latinos?|latinas?|latinx|latines?)"
+_BOTH_AUDIENCES = re.compile(rf"\b{_WORD}\s*(?:,|/|&|\band\b|\bor\b|\bvs\.?|\bversus\b)\s*(?:and\s+|or\s+)?(?:non|not)[-\s]*{_WORD}", re.IGNORECASE)
+_NEGATED_HISPANIC = re.compile(
+    rf"(?:\b(?:non|not|no|excluding|exclude|excl|except|without|avoid|avoiding|skip|skipping)\b\.?|\bw/o\b|\bnot\s+targeting\b|\bnot\s+for\b)[-\s]*"
+    rf"(?:targeting\s+)?(?:(?:the|all|any)\s+)*(?:(?:{_WORD})\s*(?:(?:,|and|&|or|/)\s*)?)+", re.IGNORECASE)
+
+
+def mentions_hispanic_audience(text) -> bool:
+    """Does this free text target a Hispanic / Latino audience? A plain word match, with the mentions that leave the audience OUT (or take
+    everyone) removed first - a regex cannot read intent, so the cut it switches on is shown (and can be switched off) next to the result."""
+    cleaned = _NEGATED_HISPANIC.sub(" ", _BOTH_AUDIENCES.sub(" ", str(text or "")))
+    return bool(_HISPANIC_IN_TEXT.search(cleaned))
+
+
 def parse_audience_text(text: str) -> AudienceSpec:
     """Free text -> AudienceSpec. Falls back to a spec with only geo_text
     set (age/gender/interests left unspecified) when no LLM is configured
     — the UI's manual fields let the planner fill in the rest directly
-    rather than blocking the feature."""
+    rather than blocking the feature. "Hispanic" / "Latino" in the text turns Hispanic targeting on either way (a plain word
+    match, never the model's say-so: it is a cut on real Census data, not an interest)."""
+    spec = _parse_audience_text(text)
+    terms, term_found = split_hispanic_terms(spec.interest_terms)
+    spec.interest_terms = terms
+    spec.hispanic = bool(term_found or mentions_hispanic_audience(text))
+    return spec
+
+
+def _parse_audience_text(text: str) -> AudienceSpec:
     client = _openai_client()
     if client is None:
         return AudienceSpec(geo_text=text)
@@ -346,6 +386,105 @@ def _age_gender_share(area: AreaEstimate, age_min: int | None, age_max: int | No
     return (matched / total if total else 0.0), True
 
 
+def _hispanic_summary(base: AvailsEstimate, spec: AudienceSpec, mode: str, levels: dict, not_applied: list[str],
+                      age_gender_requested: bool, notes: list[str], cut_applied: bool = True) -> dict:
+    """The `hispanic` block of an estimate, and the planner-facing notes that explain what the cut did and what it assumed."""
+    if mode == "cut" and not cut_applied:
+        # asked for, but no area had a Census row (a country, a geography ACS does not cover): the estimate is NOT narrowed and must not say it was
+        notes.append("Hispanic targeting was asked for but could not be applied: there is no Census data for this geography, so the estimate is not "
+                     "narrowed to Hispanic audiences.")
+        return {"mode": "not_applied", "share": None, "levels": dict(levels), "vintage": constanza_hispanic.vintage()}
+    if mode == "cut":
+        # the engine's note about the by-area share column says the same thing as the cut's own note below: the shares now follow the narrowed impressions
+        notes[:] = [n for n in notes if not n.startswith("The by-area share column is each area's share of the geography's Hispanic population")]
+    num = den = 0.0
+    for a in base.by_area:
+        frac, _level = constanza_hispanic.fraction(a)
+        if frac is not None and a.area_population:
+            num += a.area_population * frac
+            den += a.area_population
+    share = num / den if den else None
+    vintage = constanza_hispanic.vintage()
+    where = f"{share:.0%} of the people here are Hispanic" if share is not None else "no Census share was available for this geography"
+    source = f"Census ACS {vintage.replace('ACS ', '')}" if vintage else "Census ACS"
+    if mode == "already":
+        notes.append(
+            "This series is already built from Hispanic audiences, so no Hispanic share was applied on top of it (that would count the "
+            f"targeting twice)." + (" The age / gender cut was read against the Hispanic population, not everyone." if age_gender_requested else "")
+            + f" For context, {where} ({source}).")
+    else:
+        notes.append(
+            f"Hispanic targeting: the platform's avails describe everyone it reaches, so each area's were multiplied by its Hispanic share of "
+            f"the population ({where}; {source})" + (", jointly with the age / gender cut from the same Census table" if age_gender_requested else "")
+            + ". This assumes Hispanic households use this platform in proportion to their population; platforms over- and under-index, so read it as "
+            "a planning estimate and replace it with the platform's own Hispanic segment size when you have one.")
+        plural = lambda n: ("s", "their") if n != 1 else ("", "its")       # noqa: E731
+        if levels["dma"]:
+            n = levels["dma"]
+            sfx, own = plural(n)
+            notes.append(f"{n} area{sfx} too small for a reliable Census share used {own} parent DMA's Hispanic share and age / gender mix.")
+        if levels.get("state"):
+            n = levels["state"]
+            sfx, own = plural(n)
+            notes.append(f"{n} area{sfx} had no Census row of {own} own or in {own} market, so the state's Hispanic share and age / gender mix stood in.")
+        if levels.get("state_total"):
+            notes.append("A whole state was cut at the STATE's Hispanic share, not market by market: the platform's own state total includes households "
+                         "served from markets homed elsewhere, so the home markets' shares would misstate it.")
+        if levels["state_proxy"]:
+            n = levels["state_proxy"]
+            notes.append(f"{n} area{'s' if n != 1 else ''} had no Census row, so the state-level Hispanic % stood in "
+                         "(combined with the age / gender share as if independent).")
+    if not_applied:
+        notes.append(f"Hispanic targeting was NOT applied to {', '.join(not_applied[:6])}{' and more' if len(not_applied) > 6 else ''} (no Census data for it) — "
+                     + ("those areas are counted at full size, so the total reads high." if mode == "cut" else "the age / gender cut was not applied there."))
+    return {"mode": "cut" if mode == "cut" else "already_targeted", "share": share, "levels": dict(levels), "vintage": vintage}
+
+
+_HISPANIC_WORD = r"(?:hispanics?|latinos?|latinas?|latinx|latines?)"
+# A term that is only Hispanic / Latino words ("Hispanic", "Hispanic & Latino", "Hispanic or Latino", "Latino Hispanic", "Hispanic-Latino") or one of them
+# plus a word naming the audience ("Hispanic households"): the cut, not an interest. "hispanic music" is an interest and stays one.
+_HISPANIC_TERM = re.compile(
+    rf"^\s*(?:{_HISPANIC_WORD}(?:\s*(?:/|&|,|-|\band\b|\bor\b)\s*|\s+)){{0,2}}{_HISPANIC_WORD}\s*$"
+    rf"|^\s*{_HISPANIC_WORD}\s+(?:audience|households?|consumers?|viewers?|adults?|targeting)\s*$", re.IGNORECASE)
+
+
+def split_hispanic_terms(terms) -> tuple[list[str], bool]:
+    """(the interest terms without Hispanic ones, whether any was there). "Hispanic" typed as an interest is the Hispanic CUT, not an
+    interest with an incidence rate: it is taken out of the interest list (so it is not reported as an interest nothing sourced) and
+    turns the cut on."""
+    kept: list[str] = []
+    found = False
+    for term in terms or []:
+        if _HISPANIC_TERM.match(str(term)):
+            found = True
+        else:
+            kept.append(term)
+    return kept, found
+
+
+def _hispanic_share(area: AreaEstimate, age_min: int | None, age_max: int | None, gender: str | None,
+                    adults_only: bool = False, conditional: bool = False) -> tuple[float, bool, str | None]:
+    """(share, applied, level) for a Hispanic cut on one area: Hispanic people in the age range / gender over the area's TOTAL population (or,
+    `conditional`, over its Hispanic population — an already-Hispanic series). Which row decides is constanza_hispanic.entry_for (the area's own, its
+    parent DMA's, its state's); with none, the state-level Hispanic % stands in and combines with the general age / gender share as two independent
+    shares; with nothing at all it is (1.0, False, None) — NOT applied. A series that is already Hispanic with no age / gender cut asked is
+    unchanged (1.0): there is nothing to read the row for."""
+    cut = age_min is not None or age_max is not None or gender is not None or adults_only
+    if conditional and not cut:
+        _entry, level = constanza_hispanic.entry_for(area)
+        return 1.0, True, level
+    entry, level = constanza_hispanic.entry_for(area, conditional=conditional)
+    if entry is not None:
+        return entry.share(age_min, age_max, gender, adults_only, conditional), True, level
+    pct = constanza_hispanic.state_proxy_pct(area)
+    if pct is None:
+        return 1.0, False, None
+    age_gender, age_gender_applied = _age_gender_share(area, age_min, age_max, gender, adults_only)
+    if cut and not age_gender_applied:
+        return 1.0, False, None          # the age / gender asked for cannot be read for this area: nothing was narrowed, and the estimate says so
+    return (1.0 if conditional else pct) * age_gender, True, "state_proxy"
+
+
 def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstimate:
     """Applies the age/gender/interest multiplier stack on top of an
     already-computed, already-area-weighted AvailsEstimate (constanza_
@@ -361,7 +500,14 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     except ValueError:
         gender = None
         gender_note = f"Gender {spec.gender!r} wasn't recognised (use male, female or all), so no gender cut was applied."
-    interests = [resolve_interest(t) for t in spec.interest_terms]
+    # "Hispanic" typed as an interest is the Hispanic cut, not an interest with an incidence rate (split_hispanic_terms).
+    interest_terms, hispanic_term = split_hispanic_terms(spec.interest_terms)
+    hispanic_requested = bool(spec.hispanic) or hispanic_term
+    # A series built from Hispanic audiences already IS the cut: applying the Hispanic share on top would count it twice.
+    hispanic_mode = None
+    if hispanic_requested:
+        hispanic_mode = "already" if constanza_hispanic.series_is_hispanic(base.series) else "cut"
+    interests = [resolve_interest(t) for t in interest_terms]
     # Two phrases that map to the same category ("sports" and "football") are ONE interest — multiplying its incidence
     # rate in twice would shrink the audience by the rate squared for no reason.
     supported_interests = []
@@ -419,9 +565,22 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     adults_everywhere = True
     by_area: list[AudienceAreaEstimate] = []
     not_narrowed: list[str] = []
+    hispanic_levels = {"area": 0, "dma": 0, "state": 0, "state_total": 0, "state_proxy": 0, "none": 0}
+    hispanic_not_applied: list[str] = []
+    hispanic_cut_applied = False       # the Hispanic share multiplied at least one area's avails
+    hispanic_proxy_used = False
 
     for area_est in base.by_area:
-        share, applied = _age_gender_share(area_est, spec.age_min, spec.age_max, gender)
+        if hispanic_requested:
+            share, applied, level = _hispanic_share(area_est, spec.age_min, spec.age_max, gender, conditional=(hispanic_mode == "already"))
+            hispanic_levels[level or "none"] += 1
+            if not applied:
+                hispanic_not_applied.append(area_est.area_label)
+            elif hispanic_mode == "cut":
+                hispanic_cut_applied = True
+                hispanic_proxy_used = hispanic_proxy_used or level in ("state", "state_proxy")
+        else:
+            share, applied = _age_gender_share(area_est, spec.age_min, spec.age_max, gender)
         any_age_gender_applied = any_age_gender_applied or applied
         if age_gender_requested and not applied:
             not_narrowed.append(area_est.area_label)
@@ -443,11 +602,16 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
         # population it multiplies is the adults' (children are not auto intenders); without one the share stands as is. The
         # interest cut is part of the size: a segment that is 0.1% of adults is a tiny audience however large the
         # geography, and the reliability warning has to see that.
-        if supported_interests:
+        # With Hispanic targeting the population is the HISPANIC people who fit (an already-Hispanic series' own cut is conditional on
+        # Hispanic, so the census context is read against the whole area, not that share).
+        if hispanic_requested:
+            pop_share, adults_known, _level = _hispanic_share(area_est, spec.age_min, spec.age_max, gender, adults_only=bool(supported_interests))
+        elif supported_interests:
             pop_share, adults_known = _age_gender_share(area_est, spec.age_min, spec.age_max, gender, adults_only=True)
-            adults_everywhere = adults_everywhere and adults_known          # no age data for the area (a country): everyone is counted, not adults
         else:
-            pop_share = share
+            pop_share, adults_known = share, True
+        if supported_interests:
+            adults_everywhere = adults_everywhere and adults_known          # no age data for the area (a country): everyone is counted, not adults
         area_pop = area_est.area_population * pop_share * interest_multiplier
 
         total_underlying_pop += area_pop
@@ -476,7 +640,17 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
             "cut was NOT applied; the number below is geography-only."
         )
 
-    cuts_applied = (1 if (age_gender_requested and any_age_gender_applied) else 0) + len(supported_interests)
+    hispanic_info = None
+    if hispanic_requested:
+        hispanic_info = _hispanic_summary(base, spec, hispanic_mode, hispanic_levels, hispanic_not_applied, age_gender_requested, notes,
+                                          cut_applied=hispanic_cut_applied or hispanic_mode == "already")
+        if hispanic_mode == "cut" and hispanic_cut_applied and imps_mid_total > 0:
+            # the by-area shares follow the narrowed impressions: each area's share of the HISPANIC audience, not of everyone
+            by_area = [replace(a, weight=a.imps_mid / imps_mid_total) for a in by_area]
+
+    # Age, gender and Hispanic come from ONE joint table, so together they are a single demographic cut (not three independent ones).
+    demographic_applied = (age_gender_requested and any_age_gender_applied) or hispanic_cut_applied
+    cuts_applied = (1 if demographic_applied else 0) + len(supported_interests)
 
     # Confidence widening: root-sum-of-squares across active factors —
     # see module docstring. Geo CV comes from whichever apportionment
@@ -485,6 +659,8 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
     cvs.append(max(geo_cvs) if geo_cvs else 0.05)
     if age_gender_requested and any_age_gender_applied:
         cvs.append(_CV_AGE_GENDER)
+    if hispanic_cut_applied:
+        cvs.append(_CV_HISPANIC_PROXY if hispanic_proxy_used else _CV_HISPANIC)
     # One factor per distinct interest: each is its own curated, independence-assumed cut, so stacking them must widen
     # the band (they are the least-independent pair in practice — sports and gaming overlap).
     cvs.extend(_CV_INTEREST_BY_CONFIDENCE.get(i.confidence or "", _CV_INTEREST) for i in supported_interests)
@@ -529,8 +705,9 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
         notes.append("Interest rates describe adults (18+) and this age range has none: the market population is shown as 0, and the interest's "
                      "rate is applied to the age group only as a rough proxy.")
     elif audience_people is not None and total_underlying_pop > 0 and audience_people > total_underlying_pop:
-        notes.append(f"This product's reach universe ({audience_people:,.0f}) is larger than the census population that fits these cuts "
-                     f"({total_underlying_pop:,.0f}): the platform counts devices or IDs, not people, so read it as the product's own audience measure.")
+        notes.append(f"This product's addressable pool ({audience_people:,.0f} IDs) is larger than the census population that fits these cuts "
+                     f"({total_underlying_pop:,.0f}): the platform counts devices or IDs, not people, so read the pool as the platform's own count of "
+                     "IDs it can reach — a ceiling, not who a flight reaches (that is the unique IDs).")
     months = max(1, base.months)
     return AudienceEstimate(
         base=base, age_gender_share_applied=any_age_gender_applied, interests=interests,
@@ -544,4 +721,5 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
         est_uniques=uniques_total if uniques_known else None,
         impressions_per_person=(imps_mid_total / months / audience_people) if audience_people else None,
         market_population_adults=bool(supported_interests) and adults_everywhere,
+        hispanic=hispanic_info,
     )

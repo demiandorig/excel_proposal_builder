@@ -1,10 +1,14 @@
-"""The people-counts of an estimate: what a PRODUCT reaches (the platform's reach universe in the geography, narrowed by the same
-cuts as the impressions) versus the census population of the market that fits the cuts.
+"""The people-counts of an estimate: the platform's reach universe in the geography narrowed by the same cuts as the impressions (the
+ADDRESSABLE POOL), the est. unique IDs a flight reaches (narrowed the same way, never above the impressions), and the census
+population of the market that fits the cuts.
 
 The card used to headline the census figure as the "underlying audience": Los Angeles x Entravision+ Connect - Family x women x
 auto intenders read 403K impressions beside "an audience of 2.6M", which cannot be right - the product's own platform reaches
-488K people in that market. These tests pin the three numbers to one another, offline (the store is faked)."""
+488K people in that market. The pool fixed that; the win rate (impressions x 15%) then made even the pool larger than the impressions,
+so what a planner reads as the audience is the unique IDs. These tests pin the numbers to one another, offline (the store is faked)."""
 from __future__ import annotations
+
+import dataclasses
 
 import pytest
 
@@ -60,10 +64,13 @@ def without_universe(monkeypatch):
     fm.invalidate()
 
 
-def base_estimate(text="Los Angeles", months=1):
+def base_estimate(text="Los Angeles", months=1, win_rate=False):
+    """The engine's estimate for the Connect-Family product. `win_rate=False` (the default here) is the platform's raw avails — these
+    tests pin the people-count arithmetic itself; the same example WITH the programmatic win rate is pinned at the bottom."""
     res = resolve_geo(text)
     assert res.resolved, text
-    est = engine.estimate_avails(FAMILY, res, months=months)
+    cfg = dataclasses.replace(fm.resolve_forecast(FAMILY), win_rate=win_rate)
+    est = engine.estimate_avails(FAMILY, res, months=months, config=cfg)
     assert est is not None
     return est
 
@@ -181,12 +188,16 @@ def estimate_body(**kw):
 def test_the_estimate_payload_has_the_universe_and_the_audience_counts(with_universe):
     plain = main.constanza_estimate(estimate_body())
     assert plain["reach_universe"] == LA_UNIVERSE and plain["by_area"][0]["reach_universe"] == LA_UNIVERSE
+    # Connect - Family is bought through MadHive: the endpoint's impressions are the avails x the 15% win rate (the raw figure is kept)
+    assert plain["win_rate"]["mid"] == 0.15 and plain["win_rate"]["raw_imps_mid"] == LA_AVAILS and plain["imps_mid"] == pytest.approx(LA_AVAILS * 0.15)
     out = main.constanza_estimate(estimate_body(audience=main.ConstanzaAudienceSpecModel(gender="female", interest_terms=["Auto Intenders"])))
     a = out["audience"]
-    assert a["audience_people"] == pytest.approx(76_000, rel=0.02) and a["est_uniques"] == pytest.approx(26_000, rel=0.02)
-    assert a["impressions_per_person"] == pytest.approx(5.3, abs=0.05)
+    reached = 1 - 0.85 ** (LA_AVAILS / LA_REACH)                                   # share of the platform's reach that wins an impression
+    assert a["audience_people"] == pytest.approx(76_000, rel=0.02) and a["est_uniques"] == pytest.approx(26_000 * reached, rel=0.02)
+    assert a["impressions_per_person"] == pytest.approx(5.3 * 0.15, abs=0.05)
     assert a["market_population"] == a["underlying_population"] > a["audience_people"]
     assert a["by_area"][0]["audience_people"] == pytest.approx(a["audience_people"])
+    assert a["est_uniques"] < a["imps_mid"]                                         # unique IDs never above the impressions beside them
 
 
 def test_the_payload_says_null_when_the_data_has_no_universe(without_universe):
@@ -242,3 +253,28 @@ def test_an_age_range_with_no_adults_and_an_interest_rate_of_adults_says_so(with
     aud = estimate_audience(base_estimate(), AudienceSpec(age_min=16, age_max=17, interest_terms=["Auto Intenders"]))
     assert aud.underlying_population == 0 and any("this age range has none" in n for n in aud.notes)
     assert not any("larger than the census population" in n for n in aud.notes)
+
+
+# --------------------------------------------------------------------------------------------- the same example once the win rate applies
+
+def test_with_the_win_rate_the_reported_example_keeps_unique_ids_below_the_impressions(with_universe):
+    """The win rate cuts the impressions to 15% of the avails (403K -> 60K) while the platform's reach universe (76K people in the
+    market that fit the cuts) is a property of the market. That pool is now LARGER than the impressions, so it must not be offered as
+    'the audience': what the impressions reach is the unique IDs, re-derived for the smaller delivery, and it stays below them."""
+    base = base_estimate(win_rate=True)
+    aud = estimate_audience(base, WOMEN_AUTO)
+    assert aud.imps_mid == pytest.approx(402_887 * 0.15, rel=0.01)
+    assert aud.audience_people == pytest.approx(76_000, rel=0.02) and aud.audience_people > aud.imps_mid       # the pool exceeds delivery
+    reached = LA_REACH * (1 - 0.85 ** (LA_AVAILS / LA_REACH))
+    cut = aud.imps_mid / base.imps_mid
+    assert aud.est_uniques == pytest.approx(reached * cut)
+    assert 0 < aud.est_uniques < aud.imps_mid                                    # ... but the people REACHED are below the impressions
+    assert aud.imps_mid / aud.est_uniques == pytest.approx(0.15 * (LA_AVAILS / LA_REACH) / (1 - 0.85 ** (LA_AVAILS / LA_REACH)))   # about 2.5 each
+
+
+def test_the_win_rate_leaves_the_pool_and_its_ratio_to_the_unfiltered_avails_alone(with_universe):
+    raw, won = base_estimate(), base_estimate(win_rate=True)
+    assert won.reach_universe == raw.reach_universe == LA_UNIVERSE
+    a_raw, a_won = estimate_audience(raw, WOMEN_AUTO), estimate_audience(won, WOMEN_AUTO)
+    assert a_won.audience_people == pytest.approx(a_raw.audience_people)
+    assert a_won.imps_mid == pytest.approx(a_raw.imps_mid * 0.15)

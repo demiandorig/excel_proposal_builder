@@ -104,7 +104,13 @@
       for (const p of (cat.products_by_family || {})[fam] || []) {
         if (p.is_addon || !p.forecast || !p.forecast.enabled) continue;
         const series = p.forecast.series || null;
-        out.push({ name: p.name, family: fam, method: p.forecast.method, series, channel: p.forecast.method === "tiktok" ? "tiktok" : (series && series.channel ? series.channel : "_generic") });
+        out.push({
+          name: p.name, family: fam, method: p.forecast.method, series,
+          channel: p.forecast.method === "tiktok" ? "tiktok" : (series && series.channel ? series.channel : "_generic"),
+          // Hispanic targeting: on by default for this product, and whether its data is ALREADY built from Hispanic audiences (never cut twice)
+          hispanicDefault: !!(p.forecast.hispanic_default != null ? p.forecast.hispanic_default : p.forecast.hispanic_weighted),
+          hispanicAlready: /^(hispanic|spanish)/.test(String((series && series.targeting) || "")),
+        });
       }
     }
     return out;
@@ -124,7 +130,7 @@
     open: false, wide: !!store.get().wide,
     product: store.get().product || null, products: [],
     geo: "", geoType: "", flight: 1, unit: "months", total: "",
-    ageMin: "", ageMax: "", gender: "", interests: [],
+    ageMin: "", ageMax: "", gender: "", interests: [], hispanic: null,     // hispanic: null = the product's default, true / false = the planner's choice
     lineId: null, needTotal: false,
     resolve: null, result: null, busy: false, resSeq: 0, pullSeq: 0, taxonomy: null,
     resultCtx: null,                  // what the shown result was pulled for: the geography as typed and the areas it resolved to
@@ -322,8 +328,21 @@
     const people = aud ? aud.audience_people : data.reach_universe;
     const uniques = aud ? aud.est_uniques : data.est_uniques;
     const monthMid = per(src.imps_mid, months);
+    // A win rate was applied (a MadHive / Trade Desk product, or Prime Video through the Amazon DSP): the impressions here are
+    // the expected delivery, a share of the platform's avails. `raw` is what the platform reported, per the unit the card speaks in (week for live sports, else month).
+    // With audience cuts the table is the AUDIENCE's, so the platform's figures are scaled by the same cut (the delivery already is):
+    // the line then describes the very number in the headline instead of the whole geography's.
+    const wr = data.win_rate || null;
+    const wrPeriod = weekly ? data.weeks : months;
+    const cut = aud && data.imps_mid ? aud.imps_mid / data.imps_mid : 1;
     return {
       aud, months, weekly, weeks: weekly ? data.weeks : null,
+      winRate: wr ? {
+        low: wr.low, mid: wr.mid, high: wr.high, unit: weekly ? "week" : "month", forAudience: !!aud,
+        raw: per(wr.raw_imps_mid, wrPeriod) * cut, delivered: per(src.imps_mid, wrPeriod),
+        atLow: wr.delivered_at_low == null ? null : per(wr.delivered_at_low, wrPeriod) * cut,
+        atHigh: wr.delivered_at_high == null ? null : per(wr.delivered_at_high, wrPeriod) * cut,
+      } : null,
       total: { low: src.imps_low, mid: src.imps_mid, high: src.imps_high },
       month: { low: per(src.imps_low, months), mid: monthMid, high: per(src.imps_high, months) },
       week: weekly ? { low: per(src.imps_low, data.weeks), mid: per(src.imps_mid, data.weeks), high: per(src.imps_high, data.weeks) } : null,
@@ -351,13 +370,51 @@
       b.push(`<span class="cz-badge cz-extended">Population-share estimate</span>`);
     }
     if (isLiveSports(series) && series.period_label) b.push(`<span class="cz-badge cz-period">📅 ${esc(series.period_label)}</span>`);
+    if (data.audience && data.audience.hispanic) {
+      const h = data.audience.hispanic;
+      if (h.mode === "not_applied") b.push(`<span class="cz-badge cz-extended" title="No Census data for this geography: the estimate is not narrowed">Hispanic targeting · not applied</span>`);
+      else b.push(`<span class="cz-badge cz-reported" title="${h.mode === "already_targeted" ? "This product’s data is already built from Hispanic audiences" : "Avails narrowed to the Hispanic share of the population (Census ACS)"}">Hispanic targeting${h.mode === "cut" && h.share != null ? ` · ${pct(h.share)}` : ""}</span>`);
+    }
+    if (data.win_rate) b.push(`<span class="cz-badge" title="${data.win_rate.high > data.win_rate.low ? "Avails are bid opportunities; Entravision wins about this share of them" : "Entravision is expected to win about this share of the avails"}">Win rate ${pct(data.win_rate.mid)}</span>`);
     const geo = { high: "High geo confidence", medium: "Medium geo confidence", low_confidence_international: "International · low confidence" }[data.geo_confidence];
     if (geo) b.push(`<span class="cz-badge">${esc(geo)}</span>`);
     return b.join("");
   }
 
+  const pct = (x) => `${Math.round(x * 1000) / 10}%`;                     // 0.15 -> "15%", 0.125 -> "12.5%"
+
+  // The line that says the impressions are expected delivery, not the platform's raw avails (only when a win rate was applied), with
+  // what the delivery would be at the low and high win rate — the range is its own figure, not folded into Low / High above.
+  // "(bid opportunities) " only where there is a win-rate RANGE to explain — the programmatic (MadHive / Trade Desk) case; a single rate
+  // (Prime Video through the Amazon DSP) applies to the platform's ad volume, which is not a pool of bids.
+  const winRateWhat = (w) => (w.high > w.low ? "(bid opportunities) " : "");
+
+  function winRateHtml(m) {
+    const w = m && m.winRate;
+    if (!w) return "";
+    const sens = w.atLow != null && w.atHigh != null && w.high > w.low ? ` — ${num(w.atLow)} at ${pct(w.low)}, ${num(w.atHigh)} at ${pct(w.high)}` : "";
+    // (not "the platform reports N avails": a modeled series is Entravision's own model, and with audience cuts N is that audience's slice)
+    return `<p class="cz-winrate"><strong>Win rate ${pct(w.mid)}</strong> applied: ${num(w.raw)} avails a ${w.unit}${w.forAudience ? " for this audience" : ""} `
+      + `${winRateWhat(w)}become an expected delivery of about <strong>${num(w.delivered)}</strong> a ${w.unit}${sens}.</p>`;
+  }
+
+  // The one people-count a planner reads beside the impressions: the est. UNIQUE IDs reached, always at or below them. The platform's
+  // reach universe (the "addressable pool", a ceiling a flight only partly delivers to, which can be larger than the impressions) is
+  // kept out of the headline — it was read as "the audience" and looked larger than the impressions — and is offered as a tooltip here
+  // and in the dock's "About this data".
+  function reachLinesHtml(m, plug) {
+    if (m.uniques == null || plug) return "";
+    const tip = m.people != null ? ` title="${esc(poolText(m.people, m.proxy))}"` : "";
+    return `<p class="constanza-uniques"${tip}>Unique IDs reached / month${m.proxy ? " (baseline product)" : ""}: <strong>${num(m.uniques)}</strong>${m.perUnique ? ` · about ${m.perUnique.toFixed(1)} impressions each` : ""}</p>`;
+  }
+
+  const poolText = (people, proxy) => `Addressable pool${proxy ? " (baseline product)" : ""}: ${num(people)} IDs — the most the platform could reach here; a flight reaches part of it`;
+
+  const isWinRateNote = (n) => String(n).startsWith("Win rate applied");
+
   function notesOf(data) {
-    return (data.notes || []).filter((n) => !String(n).startsWith("NOT INCLUDED in this estimate"));
+    // (the win-rate note is for API readers: the card and the dock already show it as their own win-rate line)
+    return (data.notes || []).filter((n) => !String(n).startsWith("NOT INCLUDED in this estimate") && !isWinRateNote(n));
   }
 
   function unmatchedHtml(data) {
@@ -368,25 +425,42 @@
     return `<div class="cz-error"><strong>Not included — couldn’t be matched:</strong><ul class="cz-list">${tokens.map((t) => `<li><strong>${esc(t)}</strong>${reasons[t] ? ` — ${esc(reasons[t])}` : ""}</li>`).join("")}</ul></div>`;
   }
 
-  // `m` is summarize()'s result for the same data. The first people-count is what THIS PRODUCT reaches (its reach universe in the
-  // geography, narrowed by the cuts - the number the impressions come from); the census population of the market that fits the
-  // cuts is context beside it, said to be about everyone in the market across all media, so the two are never read as one audience.
+  // `m` is summarize()'s result for the same data. What the product reaches is the est. UNIQUE IDs (narrowed by the cuts, never above
+  // the impressions beside it); the platform's reach universe is the ADDRESSABLE POOL, a ceiling that is only partly delivered to; the
+  // census population of the market that fits the cuts is context, said to be everyone in the market across all media — three
+  // different counts, labelled apart so none is read as "the audience" of the impressions.
+  // What the Hispanic targeting did, in one line: the real Hispanic share it cut to (Census ACS), that the product's data already is one, or
+  // that it could not be applied. The server's own notes say the same things for API readers; the box shows this line instead (isHispanicNote).
+  const HISPANIC_ASSUMPTION = "This assumes Hispanic households use the platform in proportion to their population; replace it with the platform’s own Hispanic segment size when you have one.";
+  function hispanicLineHtml(h) {
+    const source = h.vintage ? `Census ${esc(String(h.vintage))}` : "Census ACS";
+    if (h.mode === "not_applied") return `<p class="cz-warn-text"><strong>Hispanic targeting not applied</strong> — there is no Census data for this geography, so the estimate is not narrowed.</p>`;
+    const share = h.share != null ? `${pct(h.share)} of the people here are Hispanic, ${source}` : "no Census share was available for this geography";
+    return h.mode === "already_targeted"
+      ? `<p><strong>Hispanic targeting</strong> — this product’s data is already built from Hispanic audiences, so no further cut was applied. For context, ${share}.</p>`
+      : `<p><strong>Hispanic targeting</strong> — avails narrowed to each area’s Hispanic share: ${share}. <small>${HISPANIC_ASSUMPTION}</small></p>`;
+  }
+
+  // The server's Hispanic notes that the line above already says (its warnings — small areas, the state proxy, areas not narrowed — stay).
+  const isHispanicNote = (n) => /^(Hispanic targeting: the platform's avails|This series is already built from Hispanic audiences|Hispanic targeting was asked for but could not be applied)/.test(String(n));
+
   function audienceBoxHtml(aud, m) {
     if (!aud) return "";
     const tier = { audience_modeled_geo_only: "Geography only — no demographic narrowing", audience_modeled_single_cut: "1 targeting cut applied", audience_modeled_stacked: "Several cuts stacked — directional, not precise" }[aud.confidence_tier] || "";
     const lines = [];
     if (tier) lines.push(`<p><strong>${esc(tier)}</strong></p>`);
+    if (aud.hispanic) lines.push(hispanicLineHtml(aud.hispanic));
     const people = m ? m.people : aud.audience_people;
+    const uniques = m ? m.uniques : aud.est_uniques;
     const floor = aud.below_reliability_threshold ? ` <span class="cz-warn-text">That is below the ~${num(aud.reliability_floor_population)} reliability floor for this cut; treat the result as order-of-magnitude only.</span>` : "";
     const who = aud.market_population_adults ? "adults" : "people";                 // adults only when an interest rate (a share of adults) clipped it to 18+
-    if (people != null) {
-      const ipp = m && m.perPerson ? ` — about ${m.perPerson.toFixed(1)} impressions per reachable person a month${m.perUnique ? ` (${m.perUnique.toFixed(1)} per est. unique)` : ""}` : "";
-      const of = m && m.peopleBase != null && m.peopleBase !== people ? ` of the ${num(m.peopleBase)} it reaches here` : "";
-      const proxy = m && m.proxy;
-      lines.push(`<p>${proxy ? "Audience on the baseline product" : "Audience on this product"} ≈ <strong>${num(people)}</strong> people${of}${ipp}.${proxy ? " <small>This product’s own targeting reaches fewer.</small>" : ""}</p>`);
-      // "more than any one product reaches" is only said when it is true: a display platform counts devices, and can hold more than the census does
-      const more = people <= aud.underlying_population ? " — more than any one product reaches" : "";
-      lines.push(`<p><small>Market population (census): ≈ ${num(aud.underlying_population)} ${who} in the market fit these cuts, across all media${more}.${floor}</small></p>`);
+    const proxy = m && m.proxy;
+    if (uniques != null) {
+      const poolTip = people != null ? ` title="${esc(poolText(people, proxy))}"` : "";
+      lines.push(`<p${poolTip}>Unique IDs reached ${proxy ? "on the baseline product" : "on this product"} ≈ <strong>${num(uniques)}</strong> a month${m && m.perUnique ? ` — about ${m.perUnique.toFixed(1)} impressions each` : ""}.${proxy ? " <small>This product’s own targeting reaches fewer.</small>" : ""}</p>`);
+    }
+    if (people != null || uniques != null) {
+      lines.push(`<p><small>Market population (census): ≈ ${num(aud.underlying_population)} ${who} in the market fit these cuts, across all media.${floor}</small></p>`);
     } else {
       lines.push(`<p>Market population (census): ≈ <strong>${num(aud.underlying_population)}</strong> ${who} in the market fit these cuts, across all media. This product’s own data has no audience count, so its reach is not shown.${floor}</p>`);
     }
@@ -401,7 +475,7 @@
         lines.push(`<p class="cz-warn-text">⚠ <strong>${esc(name)}</strong> has no public rate — not applied to the estimate, not guessed.${alts ? ` <small>Closest audiences with a rate: ${alts}.</small>` : ""}</p>`);
       }
     });
-    (aud.notes || []).forEach((n) => lines.push(`<p><small>${esc(n)}</small></p>`));
+    (aud.notes || []).filter((n) => !isWinRateNote(n) && !isHispanicNote(n)).forEach((n) => lines.push(`<p><small>${esc(n)}</small></p>`));
     return `<div class="cz-audience-box">${lines.join("")}</div>`;
   }
 
@@ -428,6 +502,8 @@
     if (dates.length) items.push(`<li>${dates.join(" · ")}</li>`);
     if (s.levels && s.levels.length) items.push(`<li>Geographic detail in the file: ${esc(s.levels.join(", "))}</li>`);
     if (s.note) items.push(`<li>${esc(s.note)}</li>`);
+    const pool = data.audience ? data.audience.audience_people : data.reach_universe;
+    if (pool != null) items.push(`<li>${esc(poolText(pool, s.relation === "baseline_proxy"))}${data.audience ? " (with these audience cuts)" : ""}. It is a ceiling, not delivery, so it can be larger than the impressions.</li>`);
     if (s.top_publishers && s.top_publishers.length) {
       items.push(`<li>Top publishers: ${s.top_publishers.slice(0, 5).map((p) => `${esc(p[0])} ${(p[1] * 100).toFixed(0)}%`).join(", ")}</li>`);
     }
@@ -451,13 +527,14 @@
     el.innerHTML = `
       <div class="cz-badges">${badgesHtml(data)}</div>
       <table class="constanza-range-table"><tr><th></th><th>Low</th><th>Mid</th><th>High</th></tr>${monthRow}${weekRow}${totalRow}</table>
+      ${winRateHtml(m)}
       ${plug ? plug.cardHtml(data, m) : ""}
-      ${m.people != null ? `<p class="constanza-uniques">Audience (${m.proxy ? "baseline product, " : ""}people): <strong>${num(m.people)}</strong>${m.perPerson ? ` · ${m.perPerson.toFixed(1)} impressions per reachable person a month` : ""}</p>` : ""}
-      ${m.uniques != null && !plug ? `<p class="constanza-uniques">Est. monthly uniques: <strong>${num(m.uniques)}</strong></p>` : ""}
+      ${m.aud ? "" : reachLinesHtml(m, plug)}
       ${audienceBoxHtml(m.aud, m)}
       ${unmatchedHtml(data)}
       <div class="cz-geohelp"></div>
       ${notes ? `<ul class="cz-list">${notes}</ul>` : ""}
+      ${hispanicToggleHtml(data, opts)}
       <div class="cz-card-actions">
         <button type="button" class="btn-secondary cz-apply">Apply monthly mid-case →</button>
         <button type="button" class="cz-link cz-refine">Refine in Constanza</button>
@@ -466,6 +543,17 @@
     mountGeoHelp(help, data, { getText: opts.getText, setText: (next) => opts.onGeoText(next) });
     el.querySelector(".cz-apply").addEventListener("click", () => opts.onApply(m.month.mid, m.uniques, typeof _constanzaGeoInfo === "function" ? _constanzaGeoInfo(data) : null));
     el.querySelector(".cz-refine").addEventListener("click", () => opts.onRefine());
+    const toggle = el.querySelector(".cz-hispanic-toggle");
+    if (toggle) toggle.addEventListener("change", () => opts.onHispanic(toggle.checked));
+  }
+
+  // The Step 05 card's own switch for Hispanic targeting (the server says what it was and what the product's default is; TikTok has none).
+  function hispanicToggleHtml(data, opts) {
+    const t = data.hispanic_targeting;
+    if (!t || t.applies === false || !opts || !opts.onHispanic) return "";
+    if (data.audience && data.audience.hispanic && data.audience.hispanic.mode === "already_targeted") return "";      // the data IS that audience: nothing to switch
+    const note = t.on && t.default ? " <small>(on by default for this product)</small>" : (t.on && opts.hispanicFromProposal ? " <small>(from the proposal’s targeting)</small>" : "");
+    return `<label class="cz-check cz-card-hispanic"><input type="checkbox" class="cz-hispanic-toggle" ${t.on ? "checked" : ""} /> <span>Hispanic targeting${note}</span></label>`;
   }
 
   function renderCardError(el, message, resolution, opts) {
@@ -600,7 +688,11 @@
       </div>
 
       <details class="cz-details" id="cz-aud">
-        <summary><span>Audience</span><span class="cz-count hidden" id="cz-aud-count">0</span><span class="cz-hint">age · gender · interests</span></summary>
+        <summary><span>Audience</span><span class="cz-count hidden" id="cz-aud-count">0</span><span class="cz-hint">Hispanic · age · gender · interests</span></summary>
+        <div class="cz-field cz-hispanic-field">
+          <label class="cz-check"><input type="checkbox" id="cz-hispanic" /> <span><strong>Hispanic targeting</strong></span></label>
+          <p class="cz-note" id="cz-hispanic-note"></p>
+        </div>
         <div class="cz-row">
           <div class="cz-grow"><label class="cz-label" for="cz-age-min"><span>Age from</span></label><input type="number" class="cz-input" id="cz-age-min" min="0" max="120" placeholder="18" inputmode="numeric" /></div>
           <div class="cz-grow"><label class="cz-label" for="cz-age-max"><span>to</span></label><input type="number" class="cz-input" id="cz-age-max" min="0" max="120" placeholder="34" inputmode="numeric" /></div>
@@ -677,6 +769,7 @@
   const productByName = (name) => S.products.find((p) => p.name === name) || null;
 
   function updateProductUI() {
+    if ($("cz-aud-count")) refreshAudienceUI(); else refreshHispanicUI();       // the Audience badge counts a default-on Hispanic cut too
     const p = productByName(S.product);
     $("cz-pname").textContent = p ? p.name : (S.products.length ? "Choose a product…" : "Loading products…");
     $("cz-pname").title = p ? p.name : "";
@@ -748,6 +841,7 @@
   }
 
   function chooseProduct(name) {
+    if (name !== S.product) S.hispanic = null;       // a Hispanic choice was about the product it was made for: the new one starts from ITS default
     S.product = name;
     store.set({ product: name });
     updateProductUI();
@@ -865,11 +959,34 @@
   }
 
   // ---- audience
+  // Hispanic targeting for the product in the dock: the planner's choice when they made one, else the product's own default.
+  function hispanicOn() {
+    const p = productByName(S.product);
+    if (p && p.hispanicAlready) return true;          // its data IS a Hispanic audience: it cannot be switched off
+    return S.hispanic === null ? !!(p && p.hispanicDefault) : S.hispanic;
+  }
+
   function audienceCount() {
-    return (S.ageMin !== "" || S.ageMax !== "" ? 1 : 0) + (S.gender ? 1 : 0) + S.interests.length;
+    const p = productByName(S.product);
+    return (S.ageMin !== "" || S.ageMax !== "" ? 1 : 0) + (S.gender ? 1 : 0) + S.interests.length + (hispanicOn() && !(p && p.hispanicAlready) ? 1 : 0);
+  }
+
+  function refreshHispanicUI() {
+    const box = $("cz-hispanic");
+    if (!box) return;
+    const p = productByName(S.product);
+    const on = hispanicOn();
+    box.checked = on;
+    box.disabled = !!(p && p.hispanicAlready);
+    let note;
+    if (p && p.hispanicAlready) note = "This product’s data is already built from Hispanic audiences, so no further cut is applied; an age or gender cut is read against the Hispanic population.";
+    else if (on) note = `Narrows the avails to each area’s real Hispanic share (Census ACS)${S.hispanic === null && p && p.hispanicDefault ? " — on by default for this product" : ""}. Assumes Hispanic households use the platform in proportion to their population.`;
+    else note = "Narrow the avails to the Hispanic audience, using each area’s Census Hispanic %.";
+    $("cz-hispanic-note").textContent = note;
   }
 
   function refreshAudienceUI() {
+    refreshHispanicUI();
     const n = audienceCount();
     const badge = $("cz-aud-count");
     badge.textContent = n;
@@ -1008,8 +1125,20 @@
       `${m.aud ? "Audience impressions" : "Impressions"} per month (low / mid / high): ${num(m.month.low)} / ${num(m.month.mid)} / ${num(m.month.high)}`,
       `Flight total (low / mid / high): ${num(m.total.low)} / ${num(m.total.mid)} / ${num(m.total.high)}`,
     ];
-    if (m.people != null) lines.push(`Audience on ${m.proxy ? "the baseline product" : "this product"}: ${num(m.people)} people${m.perPerson ? ` (about ${m.perPerson.toFixed(1)} impressions per reachable person a month)` : ""}`);
-    if (m.uniques != null && !data.tiktok) lines.push(`Est. uniques per month: ${num(m.uniques)}`);
+    if (m.winRate) {
+      const w = m.winRate;
+      lines.push(`Win rate ${pct(w.mid)} applied: ${num(w.raw)} avails a ${w.unit}${w.forAudience ? " for this audience" : ""}${w.high > w.low ? " (bid opportunities)" : ""}; expected delivery ${num(w.delivered)} a ${w.unit}`
+        + (w.high > w.low ? ` (${num(w.atLow)} at ${pct(w.low)}, ${num(w.atHigh)} at ${pct(w.high)})` : ""));
+    }
+    if (data.audience && data.audience.hispanic) {
+      const h = data.audience.hispanic;
+      lines.push(h.mode === "not_applied"
+        ? "Hispanic targeting: not applied (no Census data for this geography)"
+        : (h.mode === "already_targeted"
+          ? "Hispanic targeting: this product’s data is already built from Hispanic audiences (no further cut applied)"
+          : `Hispanic targeting: avails narrowed to each area’s Hispanic share${h.share != null ? ` (${pct(h.share)} of the people here are Hispanic, Census ${String(h.vintage || "ACS")})` : ""}`));
+    }
+    if (m.uniques != null && !data.tiktok) lines.push(`Unique IDs reached per month${m.proxy ? " (baseline product)" : ""}: ${num(m.uniques)}${m.perUnique ? ` (about ${m.perUnique.toFixed(1)} impressions each)` : ""}`);
     const plug = pluginFor(data);
     if (plug) plug.summaryLines(data, asked).forEach((l) => lines.push(l));
     if (data.series) lines.push(`Source: ${data.series.title || data.series.key}, version ${data.series.version}${data.series.period_label ? `; period: ${data.series.period_label}` : ""}`);
@@ -1035,9 +1164,8 @@
     } else if (m.months > 1) {
       side.push({ label: `Flight total · ${m.months} mo`, v: num(m.total.mid), r: `${compact(m.total.low)} – ${compact(m.total.high)}` });
     }
-    if (m.people != null) side.push({ label: m.proxy ? "Audience (baseline product)" : "Audience (people)", v: num(m.people), r: m.perPerson ? `${m.perPerson.toFixed(1)} imps per reachable person / mo` : "" });
-    if (m.uniques != null) side.push({ label: "Est. uniques / month", v: num(m.uniques), r: m.perUnique ? `${m.perUnique.toFixed(1)} imps per unique` : "" });
-    if (m.aud) side.push({ label: "Before the audience filter", v: num(m.baseMonthMid) + " imps / mo", r: m.peopleBase != null ? `${num(m.peopleBase)} people` : "" });
+    if (m.uniques != null) side.push({ label: m.proxy ? "Unique IDs / month (baseline product)" : "Unique IDs reached / month", v: num(m.uniques), r: m.perUnique ? `${m.perUnique.toFixed(1)} imps each` : "" });
+    if (m.aud) side.push({ label: "Before the audience filter", v: num(m.baseMonthMid) + " imps / mo", r: "" });
     const notes = notesOf(data).map((n) => `<li>${esc(n)}</li>`).join("");
     const inserts = insertButtons(data, m);
     const plug = pluginFor(data);                  // a result a forecast method brought (TikTok) draws its own headline and middle
@@ -1057,6 +1185,7 @@
         <div class="cz-badges">${badgesHtml(data)}</div>
       </div>
       ${headline}
+      ${plug ? "" : winRateHtml(m)}
       ${before}
       ${unmatchedHtml(data)}
       ${middle}
@@ -1106,6 +1235,7 @@
       flight_days: days ? S.flight : null,
       national_monthly_total: plug ? null : (total > 0 ? total : null),
       audience,
+      ...(!plug && S.hispanic !== null && !(productByName(S.product) || {}).hispanicAlready ? { hispanic: S.hispanic } : {}),
       ...(plug ? plug.requestPart() : {}),
     };
   }
@@ -1170,7 +1300,7 @@
     S.pullSeq++; S.resSeq++;
     clearTimeout(resolveTimer);
     setBusy(false);
-    Object.assign(S, { geoType: "", total: "", ageMin: "", ageMax: "", gender: "", interests: [], needTotal: false, result: null, resultCtx: null, resultSig: null });
+    Object.assign(S, { geoType: "", total: "", ageMin: "", ageMax: "", gender: "", interests: [], hispanic: null, needTotal: false, result: null, resultCtx: null, resultSig: null });
     setGeoType("", true);
     $("cz-total").value = ""; $("cz-age-min").value = ""; $("cz-age-max").value = ""; $("cz-interest-q").value = "";
     $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === "")));
@@ -1189,7 +1319,7 @@
     S.pullSeq++; S.resSeq++;                      // discard any pull or resolve still in flight
     clearTimeout(resolveTimer);
     setBusy(false);
-    Object.assign(S, { geo: "", geoType: "", flight: 1, unit: "months", total: "", ageMin: "", ageMax: "", gender: "", interests: [], needTotal: false, resolve: null, result: null, resultCtx: null, resultSig: null, lineId: null });
+    Object.assign(S, { geo: "", geoType: "", flight: 1, unit: "months", total: "", ageMin: "", ageMax: "", gender: "", interests: [], hispanic: null, needTotal: false, resolve: null, result: null, resultCtx: null, resultSig: null, lineId: null });
     $("cz-geo").value = ""; $("cz-total").value = ""; $("cz-age-min").value = ""; $("cz-age-max").value = ""; $("cz-interest-q").value = "";
     setGeoType("", true); setFlight(1, "months");
     $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === "")));
@@ -1220,6 +1350,7 @@
     });
     if (opts.lineId || opts.geo != null) clearRequestState();      // a line's own request, not whatever the dock held before
     S.lineId = opts.lineId || null;
+    if (opts.hispanic != null) S.hispanic = !!opts.hispanic;       // the line's own choice (or the proposal's targeting), else the product's default
     const typedAlready = S.geo.trim() !== "" && !opts.geo;
     if (opts.geo != null) { S.geo = opts.geo; $("cz-geo").value = opts.geo; }
     else if (!typedAlready && typeof _effectiveGeo === "function" && typeof state !== "undefined" && state.parsed) {
@@ -1302,6 +1433,12 @@
     // audience
     $("cz-age-min").addEventListener("input", (e) => { S.ageMin = e.target.value; refreshAudienceUI(); markStale(); });
     $("cz-age-max").addEventListener("input", (e) => { S.ageMax = e.target.value; refreshAudienceUI(); markStale(); });
+    $("cz-hispanic").addEventListener("change", (e) => {
+      const p = productByName(S.product);
+      S.hispanic = (p && e.target.checked === !!p.hispanicDefault) ? null : e.target.checked;       // back to the default = no preference, so nothing looks changed
+      refreshAudienceUI();
+      markStale();
+    });
     $("cz-gender").addEventListener("click", (e) => {
       const b = e.target.closest("button[data-g]");
       if (!b) return;
@@ -1366,7 +1503,7 @@
     _state: S, _plugin: (name) => plugins[name] || null,
     // Pure helpers, exposed so tests/test_constanza_frontend.py can run them without a browser.
     _pure: { compact, editGeoItem, tidyList, removeGeoItems, replaceItem, looksLikeList, summarize, normGeo, geoHelpHtml, badgesHtml, lineLabel, seriesMeta, notesOf,
-      markStale, requestBody, audienceBoxHtml },
+      markStale, requestBody, audienceBoxHtml, winRateHtml, reachLinesHtml, summaryText, hispanicToggleHtml, loadProducts },
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount);

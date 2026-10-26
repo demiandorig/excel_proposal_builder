@@ -10,7 +10,7 @@ Two layers, so nothing changes until an admin chooses to change it:
                     Other-FAST / vMVPD pools and the four blended Madhive CTV/OTT products), "tiktok" for the products in
                     DEFAULT_API_PRODUCTS (a live audience-size estimate from TikTok's own API, tiktok_client.py), else
                     "generic" (the planner's own budget apportioned by population share — VIX 360, Netflix, OLV Blend, ...)
-      * hispanic  : DEFAULT_HISPANIC_PRODUCTS (re-weight by state Hispanic population %)
+      * hispanic  : DEFAULT_HISPANIC_PRODUCTS (Hispanic targeting on by default: avails narrowed to each area's real Hispanic share)
   OVERRIDE (a row) — the admin's explicit choice for that one product. Rows are keyed by the product's NAME and looked up
       through catalog.name_variants, so renaming a product (or splitting it) never orphans its row — the same convention as
       the Restricted Verticals mapping.
@@ -26,10 +26,12 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
+import psycopg
+
 from app import catalog
 from app.data.constanza import load_platform_dma
 from app.db import get_connection
-from app.services import forecast_store
+from app.services import constanza_hispanic, constanza_win_rate, forecast_store
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +67,9 @@ DEFAULT_PLATFORM_PRODUCTS: dict[str, str] = {
     "Entravision Plus - CTV/OTT Reach": "cumulative",
 }
 
-# Products whose targeting is Hispanic-specific — re-weight area shares by state-level Hispanic population % (a proxy;
-# the workbook has no DMA-level demographic breakout) instead of general population share.
+# Products whose targeting is Hispanic-specific — Hispanic targeting is ON by default for them (constanza_hispanic.py): their avails are
+# narrowed to each area's real Hispanic share (Census ACS) and the by-area shares follow the Hispanic population. Admin -> Forecast can
+# set it for any other product; a product forecast from a series that is already Hispanic-targeted has it on regardless.
 DEFAULT_HISPANIC_PRODUCTS = frozenset({"Entravision Plus - Hispanics CTV/OTT"})
 
 # Products forecast by a LIVE API instead of loaded data: catalog product name -> the provider's method name. TikTok's
@@ -78,6 +81,49 @@ DEFAULT_API_PRODUCTS: dict[str, str] = {
 
 METHODS = ("platform", "generic", "tiktok")
 
+# Series bought DIRECTLY on the inventory owner's own platform — Roku Ads in Roku's Ads Manager — so their reported avails are
+# not bid opportunities Entravision wins a share of. EVERY OTHER series forecast from data gets a win rate on its avails
+# (constanza_win_rate.py): MadHive / The Trade Desk products at the programmatic 10-20% (mid 15%) — Hulu, Peacock, FAST, vMVPD,
+# the blended CTV/OTT products, the Connect family, Pause Ads, eDigital (its series are MadHive exports) and Live Sports through
+# MadHive; VIX and Netflix through custom Trade Desk lists / PMPs — and Prime Video through the Amazon DSP at its own 20%
+# (constanza_win_rate.SERIES_RATES). That is the planner's stated rule, not something the data files say (the Netflix export is
+# labelled "Direct", the Live Sports sheets are Entravision's own weekly estimates), so Admin -> Forecast can set it per product:
+# Auto (this rule), Apply, or Don't apply (`forecast_product_map.win_rate`).
+# The SERIES decides, not the product's name: a product remapped to Roku's series is exempt, one remapped to a MadHive series is not.
+DIRECT_BUY_PLATFORMS = frozenset({"roku"})
+
+
+def series_is_hispanic_for(cfg: "ForecastConfig") -> bool:
+    """Is the series this product is forecast from ALREADY built from Hispanic audiences (Hispanic Connect, VIX / Spanish-language)? Read from
+    the product's configured series, not from an estimate, so the catalog, Admin and the estimate endpoint always agree (an international
+    geography, which falls to the population-share path and has no series on the estimate, must not change what a product is)."""
+    if cfg.method != "platform" or not cfg.platform:
+        return False
+    try:
+        ref = forecast_store.series_by_key(cfg.platform)
+    except Exception:  # noqa: BLE001 - an unreadable store is the bundled workbook, which is general
+        ref = None
+    return constanza_hispanic.series_is_hispanic(ref.to_public() if ref is not None else None)
+
+
+def hispanic_default(cfg: "ForecastConfig") -> bool:
+    """Is Hispanic targeting on for this product unless the planner turns it off? Configured as Hispanic-targeted in Admin -> Forecast, or
+    forecast from a series that already is. Only platform data has avails to narrow."""
+    return bool(cfg.method == "platform" and (cfg.hispanic_weighted or series_is_hispanic_for(cfg)))
+
+
+def win_rate_applies(product_name: str, family: Optional[str], method: str, platform: Optional[str],
+                     variants: Optional[set[str]] = None, override: Optional[bool] = None) -> bool:
+    """Is this product's forecast multiplied by the programmatic win rate? Only avails taken from data (method 'platform') — a
+    population-share estimate spreads the planner's OWN impression total (nothing to win) and TikTok is its own API. Among those,
+    an admin's explicit choice (`override`: True apply, False don't) wins; with none, every series except Roku's gets it
+    (Prime Video at its own rate). `product_name`, `family` and `variants` are accepted for callers that have them but do not decide."""
+    if method != "platform":
+        return False
+    if override is not None:
+        return bool(override)
+    return platform not in DIRECT_BUY_PLATFORMS
+
 
 @dataclass(frozen=True)
 class ForecastConfig:
@@ -88,14 +134,17 @@ class ForecastConfig:
     source: str                    # "default" | "admin"
     relation: str = "primary"      # "baseline_proxy": the series is another product's avails used as this one's baseline
     link_note: Optional[str] = None  # the sentence stored with that link ("this targeted variant will deliver fewer impressions")
+    win_rate: bool = False         # the avails are bid opportunities (MadHive / Trade Desk): multiply by the win rate (constanza_win_rate.py)
+    win_rate_override: Optional[bool] = None   # the admin's explicit choice (True apply / False don't); None = the default rule
 
     def to_public(self) -> dict:
         return {"enabled": self.enabled, "method": self.method, "platform": self.platform,
-                "hispanic_weighted": self.hispanic_weighted, "source": self.source, "relation": self.relation}
+                "hispanic_weighted": self.hispanic_weighted, "source": self.source, "relation": self.relation,
+                "win_rate": self.win_rate, "win_rate_override": self.win_rate_override}
 
     def same_behavior(self, other: "ForecastConfig") -> bool:
-        return (self.enabled, self.method, self.platform, self.hispanic_weighted) == \
-               (other.enabled, other.method, other.platform, other.hispanic_weighted)
+        return (self.enabled, self.method, self.platform, self.hispanic_weighted, self.win_rate) == \
+               (other.enabled, other.method, other.platform, other.hispanic_weighted, other.win_rate)
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +198,8 @@ def default_config(product_name: str, family: Optional[str] = None, variants: Op
     enabled and forecast from that series; otherwise Phase 1's behavior, found through every name the product has
     answered to (so a renamed 'Entravision Plus - Hulu' keeps its platform)."""
     variants = variants if variants is not None else _name_variants(product_name)
+    if family is None:
+        family = _family_of(product_name)
     platform = DEFAULT_PLATFORM_PRODUCTS.get(product_name)
     if platform is None:
         platform = next((DEFAULT_PLATFORM_PRODUCTS[v] for v in sorted(variants) if v in DEFAULT_PLATFORM_PRODUCTS), None)
@@ -157,18 +208,18 @@ def default_config(product_name: str, family: Optional[str] = None, variants: Op
     if linked is not None:
         return ForecastConfig(enabled=True, method="platform", platform=linked.series_key,
                               hispanic_weighted=hispanic and linked.series_key == platform, source="default", relation=linked.relation,
-                              link_note=linked.link_note)
+                              link_note=linked.link_note,
+                              win_rate=win_rate_applies(product_name, family, "platform", linked.series_key, variants))
     api = DEFAULT_API_PRODUCTS.get(product_name) or next((DEFAULT_API_PRODUCTS[v] for v in sorted(variants) if v in DEFAULT_API_PRODUCTS), None)
     if api is not None:
         return ForecastConfig(enabled=True, method=api, platform=None, hispanic_weighted=False, source="default")
-    if family is None:
-        family = _family_of(product_name)
     return ForecastConfig(
         enabled=(family == EP_FAMILY),
         method="platform" if platform else "generic",
         platform=platform,
         hispanic_weighted=hispanic and bool(platform),
         source="default",
+        win_rate=win_rate_applies(product_name, family, "platform" if platform else "generic", platform, variants),
     )
 
 
@@ -187,15 +238,27 @@ def invalidate() -> None:
         _cache.update(rows=None, at=0.0, retry_at=0.0)
 
 
+_ROW_COLUMNS = "product_name, enabled, method, platform, hispanic_weighted, updated_at, updated_by"
+
+
 def _read_rows() -> Optional[list[dict]]:
-    """Every override row, or None when the table can't be read."""
+    """Every override row, or None when the table can't be read. The `win_rate` column is newer than the table: a database
+    that does not have it yet (psycopg's UndefinedColumn, and only that) still answers — its rows just carry no win-rate choice —
+    instead of losing every override. Any other failure (no database, a lock timeout, a missing table) is "unreadable"."""
     try:
         with get_connection() as conn:
-            return list(conn.execute(
-                "SELECT product_name, enabled, method, platform, hispanic_weighted, updated_at, updated_by "
-                "FROM forecast_product_map ORDER BY product_name"
-            ).fetchall())
+            return list(conn.execute(f"SELECT {_ROW_COLUMNS}, win_rate FROM forecast_product_map ORDER BY product_name").fetchall())
+    except psycopg.errors.UndefinedColumn as exc:
+        missing_column = exc
     except Exception as exc:  # noqa: BLE001 — a missing table / unreachable DB must never break a proposal
+        log.warning("forecast_product_map unavailable, every product keeps its default: %s", exc)
+        return None
+    try:
+        with get_connection() as conn:
+            rows = list(conn.execute(f"SELECT {_ROW_COLUMNS} FROM forecast_product_map ORDER BY product_name").fetchall())
+        log.warning("forecast_product_map has no win_rate column yet (restart the app to add it): win-rate choices are ignored (%s)", missing_column)
+        return [{**r, "win_rate": None} for r in rows]
+    except Exception as exc:  # noqa: BLE001
         log.warning("forecast_product_map unavailable, every product keeps its default: %s", exc)
         return None
 
@@ -248,6 +311,8 @@ def resolve_forecast(product_name: str, family: Optional[str] = None, *, overrid
             hispanic_weighted=bool(row.get("hispanic_weighted")) and row["method"] == "platform", source="admin",
             relation=base.relation if platform and platform == base.platform else "primary",
             link_note=base.link_note if platform and platform == base.platform else None,
+            win_rate=win_rate_applies(product_name, family, row["method"], platform, variants, override=row.get("win_rate")),
+            win_rate_override=row.get("win_rate") if row["method"] == "platform" else None,
         )
     return default_config(product_name, family, variants)
 
@@ -264,6 +329,9 @@ def forecast_for_products(products: Iterable) -> dict[str, dict]:
         if ref is not None:
             # the product's own link to the series: whether the series is its baseline proxy, and the stored caveat for that
             public["series"] = ref.with_link(cfg.relation, cfg.link_note).to_public()
+        # Hispanic targeting is on for this product unless the planner turns it off (constanza_hispanic.py): configured as Hispanic-targeted,
+        # or forecast from a series that is already built from Hispanic audiences
+        public["hispanic_default"] = hispanic_default(cfg)
         out[p.name] = public
     return out
 
@@ -299,11 +367,44 @@ def clean_config(payload: dict) -> dict:
             raise ValueError(f"'{platform}' isn't one of the bundled platform data series.")
     else:
         platform, hispanic = None, False
-    return {"enabled": bool(payload.get("enabled")), "method": method, "platform": platform, "hispanic_weighted": hispanic}
+    win_rate = parse_win_rate_choice(payload.get("win_rate")) if method == "platform" else None
+    return {"enabled": bool(payload.get("enabled")), "method": method, "platform": platform, "hispanic_weighted": hispanic,
+            "win_rate": win_rate}
+
+
+def parse_win_rate_choice(value) -> Optional[bool]:
+    """The admin's win-rate choice: None / "auto" / "" = the default rule, True / "apply" = always, False / "skip" = never.
+    ValueError for anything else (a typo must not silently mean "auto")."""
+    if value is None or value == "" or (isinstance(value, str) and value.strip().lower() in ("auto", "default")):
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("apply", "on", "true", "yes"):
+        return True
+    if text in ("skip", "off", "false", "no"):
+        return False
+    raise ValueError("Win rate must be Auto, Apply or Don't apply.")
 
 
 def _write(name: str, cfg: dict, updated_by: str) -> None:
-    with get_connection() as conn:
+    win_rate = cfg.get("win_rate")
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT INTO forecast_product_map (product_name, enabled, method, platform, hispanic_weighted, win_rate, updated_at, updated_by) "
+                "VALUES (%s, %s, %s, %s, %s, %s, now(), %s) "
+                "ON CONFLICT (product_name) DO UPDATE SET enabled = EXCLUDED.enabled, method = EXCLUDED.method, "
+                "platform = EXCLUDED.platform, hispanic_weighted = EXCLUDED.hispanic_weighted, win_rate = EXCLUDED.win_rate, "
+                "updated_at = now(), updated_by = EXCLUDED.updated_by",
+                (name, cfg["enabled"], cfg["method"], cfg["platform"], cfg["hispanic_weighted"], win_rate, updated_by),
+            )
+        return
+    except psycopg.errors.UndefinedColumn as exc:
+        # Only a MISSING column is excused (any other failure — a lock timeout, a dropped connection — is the caller's to report).
+        if win_rate is not None:
+            raise RuntimeError("the win-rate column hasn't been added to the database yet — restart the app (or run the migrations) and try again") from exc
+    with get_connection() as conn:           # a database without the win_rate column still takes every other choice
         conn.execute(
             "INSERT INTO forecast_product_map (product_name, enabled, method, platform, hispanic_weighted, updated_at, updated_by) "
             "VALUES (%s, %s, %s, %s, %s, now(), %s) "
@@ -365,7 +466,9 @@ def inherit_config(source_name: str, new_name: str, updated_by: str) -> bool:
     if source.same_behavior(resolve_forecast(new_name, copy.family)):
         return False
     _write(copy.name, {"enabled": source.enabled, "method": source.method, "platform": source.platform,
-                       "hispanic_weighted": source.hispanic_weighted}, updated_by)
+                       "hispanic_weighted": source.hispanic_weighted,
+                       # the original's CHOICE (None = Auto stays Auto: the copy follows the same series rule), not its effective value
+                       "win_rate": source.win_rate_override if source.method == "platform" else None}, updated_by)
     invalidate()
     return True
 
@@ -417,6 +520,13 @@ def admin_payload() -> dict:
         rows.append({
             "name": p.name, "family": p.family, "buying_model": p.buying_model, "base_rate": p.base_rate,
             "enabled": cfg.enabled, "method": cfg.method, "platform": cfg.platform, "hispanic_weighted": cfg.hispanic_weighted,
+            "win_rate": cfg.win_rate, "win_rate_override": cfg.win_rate_override, "win_rate_default": default.win_rate,
+            # what "Auto" gives for the series / method the product uses NOW (the default above describes its built-in mapping)
+            "win_rate_auto": win_rate_applies(p.name, p.family, cfg.method, cfg.platform, variants),
+            # the rate it would be multiplied by (its series' own, else the programmatic mid); None when it is not forecast from platform data
+            "win_rate_mid": constanza_win_rate.for_series(cfg.platform).mid if cfg.method == "platform" else None,
+            # Hispanic targeting is on by default for this product: configured (hispanic_weighted) or because its series is already Hispanic
+            "hispanic_default": hispanic_default(cfg), "hispanic_from_series": series_is_hispanic_for(cfg),
             "customized": cfg.source == "admin",
             "default": default.to_public(),
         })
@@ -446,6 +556,8 @@ def admin_payload() -> dict:
     enabled = [r for r in rows if r["enabled"]]
     return {
         "products": rows,
+        "win_rate": constanza_win_rate.configured().to_public(),       # the rates in force (the defaults, or the environment's)
+        "win_rate_series": {k: constanza_win_rate.for_series(k).mid for k in constanza_win_rate.SERIES_RATES},   # series with a rate of their own (Prime)
         "families": sorted({r["family"] for r in rows}),
         "platforms": platforms,
         "coverage": coverage,

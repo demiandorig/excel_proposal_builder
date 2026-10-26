@@ -364,3 +364,8 @@ button.cz-chip { cursor: pointer; font-family: inherit; }
 @media (forced-colors: active) {
   .cz-seg button[aria-pressed="true"], .cz-chip[aria-pressed="true"], .cz-stage.on { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
 }
+
+/* a plain labelled checkbox (Hispanic targeting) */
+.cz-check { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--ink); cursor: pointer; line-height: 1.35; }
+.cz-check input { margin-top: 2px; accent-color: var(--accent); }
+.cz-card-hispanic { margin: 10px 0 0; }

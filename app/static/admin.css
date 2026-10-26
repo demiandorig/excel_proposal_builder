@@ -555,3 +555,4 @@
 .fc-chk-ok { border-left-color: var(--green); }
 .fc-chk-warn { border-left-color: var(--accent); }
 .fc-chk-bad { border-left-color: var(--red); }
+.fc-na { opacity: 0.45; }

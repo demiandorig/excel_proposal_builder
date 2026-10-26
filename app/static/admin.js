@@ -1868,8 +1868,10 @@ async function loadForecast() {
     adminState.forecastLoaded = true;
     applyForecastPayload(data);
   } catch (e) {
-    document.getElementById("fc-body").innerHTML = `<tr><td colspan="8" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+    document.getElementById("fc-body").innerHTML = `<tr><td colspan="9" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
     document.getElementById("fc-coverage-body").innerHTML = `<tr><td colspan="4" class="admin-empty">—</td></tr>`;
+    const note = document.getElementById("fc-winrate-note");
+    if (note) note.textContent = "";
   }
 }
 
@@ -1882,7 +1884,29 @@ function applyForecastPayload(data) {
   select.value = (data.families || []).includes(chosen) ? chosen : "";
   renderForecastSummary();
   renderForecastCoverage();
+  renderForecastWinRateNote();
   renderForecastRows();
+}
+
+// The line above the Products table: which rates are in force and how many products they reach, so a planner can see it
+// without opening a card (the rates come from the app's environment; the per-product choice is the Win rate column).
+function renderForecastWinRateNote() {
+  const el = document.getElementById("fc-winrate-note");
+  if (!el) return;
+  const wr = adminState.forecast.win_rate;
+  if (!wr) { el.textContent = ""; return; }
+  const pct = (x) => `${Math.round(x * 1000) / 10}%`;
+  const rows = (adminState.forecast.products || []).filter(p => p.method === "platform" && p.enabled);     // the same products the "Platform data" card counts
+  const own = adminState.forecast.win_rate_series || {};                  // series with a rate of their own (Prime Video, through the Amazon DSP)
+  const ownKeys = Object.keys(own);
+  const withOwn = rows.filter(p => p.win_rate && ownKeys.includes(p.platform));
+  const applied = rows.filter(p => p.win_rate && !ownKeys.includes(p.platform)).length;      // the programmatic rate's products
+  const chosen = rows.filter(p => p.win_rate_override !== null && p.win_rate_override !== undefined).length;
+  const prime = own.prime;
+  const primeText = prime != null ? ` Prime Video, bought through the Amazon DSP, uses its own <strong>${pct(prime)}</strong>${withOwn.length ? ` (${withOwn.length} product${withOwn.length === 1 ? "" : "s"})` : ""}.` : "";
+  el.innerHTML = `<strong>Programmatic win rate: ${pct(wr.mid)}</strong> (${pct(wr.low)}–${pct(wr.high)}) is applied to the avails of ${applied} of the ${rows.length} products with the button on that use platform data — `
+    + `the platforms report bid opportunities, and Entravision wins about ${pct(wr.mid)} of them.${primeText} The rates come from the app’s environment `
+    + `(<code>CONSTANZA_WIN_RATE_LOW / _MID / _HIGH</code>${prime != null ? ", <code>CONSTANZA_WIN_RATE_PRIME</code>" : ""}). Auto skips Roku Ads (bought directly in Roku’s Ads Manager); the <em>Win rate</em> column corrects any product${chosen ? ` — ${chosen} set by hand` : ""}.`;
 }
 
 function renderForecastSummary() {
@@ -1922,6 +1946,20 @@ function renderForecastCoverage() {
   body.querySelectorAll("[data-fc-add]").forEach(btn => btn.addEventListener("click", () => addForecastPlatformProduct(btn)));
 }
 
+// The win-rate cell: Auto (what the built-in rule gives this product, said in words), Apply, or Don't apply. Not for a product
+// that is not forecast from platform data (a population-share estimate spreads the planner's own total; TikTok has its own API).
+function _forecastWinRateHtml(p, isPlatform) {
+  if (!isPlatform) return `<span class="fc-na" title="Only platform data has avails to win">—</span>`;
+  const choice = p.win_rate_override === true ? "apply" : (p.win_rate_override === false ? "skip" : "auto");
+  const autoApplies = p.win_rate_auto !== undefined ? p.win_rate_auto : p.win_rate_default;     // what Auto gives for the series it uses NOW
+  const autoWord = autoApplies ? (p.win_rate_mid != null ? `applied (${Math.round(p.win_rate_mid * 1000) / 10}%)` : "applied") : "not applied";
+  return `<select data-fc="win_rate" aria-label="Win rate for ${escapeAttr(p.name)}">
+      <option value="auto" ${choice === "auto" ? "selected" : ""}>Auto — ${autoWord}</option>
+      <option value="apply" ${choice === "apply" ? "selected" : ""}>Apply</option>
+      <option value="skip" ${choice === "skip" ? "selected" : ""}>Don’t apply</option>
+    </select>`;
+}
+
 function _forecastRowHtml(p) {
   const platforms = adminState.forecast.platforms || [];
   const platformOptions = platforms.map(pl =>
@@ -1948,7 +1986,8 @@ function _forecastRowHtml(p) {
           ${isPlatform ? "" : `<option value="" selected>—</option>`}${platformOptions}
         </select>
       </td>
-      <td><input type="checkbox" data-fc="hispanic_weighted" aria-label="Hispanic weighting" ${p.hispanic_weighted ? "checked" : ""} ${isPlatform ? "" : "disabled"} /></td>
+      <td><input type="checkbox" data-fc="hispanic_weighted" aria-label="Hispanic targeting by default" ${p.hispanic_weighted ? "checked" : ""} ${isPlatform ? "" : "disabled"} />${p.hispanic_from_series ? ` <span class="fc-na" title="Its data is already built from Hispanic audiences, so Hispanic targeting is always on for it and it is never cut twice">already Hispanic</span>` : ""}</td>
+      <td>${_forecastWinRateHtml(p, isPlatform)}</td>
       <td><span class="fc-badge ${p.customized ? "fc-custom" : "fc-default"}" title="Built-in default: ${escapeAttr(defaultText)}">${p.customized ? "Customized" : "Default"}</span></td>
       <td class="fc-actions">
         <span class="fc-saved" data-fc-status></span>
@@ -1968,7 +2007,7 @@ function renderForecastRows() {
     (!q || p.name.toLowerCase().includes(q) || p.family.toLowerCase().includes(q)));
   document.getElementById("fc-count").textContent = `${list.length} of ${all.length} products`;
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="8" class="admin-empty">No products match.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="admin-empty">No products match.</td></tr>`;
     return;
   }
   body.innerHTML = list.map(_forecastRowHtml).join("");
@@ -2001,11 +2040,13 @@ async function saveForecastRow(tr, changed) {
   const method = tr.querySelector('[data-fc="method"]').value;
   let platform = tr.querySelector('[data-fc="platform"]').value || null;
   let hispanic = tr.querySelector('[data-fc="hispanic_weighted"]').checked;
+  const winSelect = tr.querySelector('[data-fc="win_rate"]');
+  let winRate = winSelect ? winSelect.value : "auto";
   if (method === "platform") {
     // Switching a product to platform data with nothing chosen yet: use the platform it would have by default, else the first one.
     if (!platform) platform = (before && before.default && before.default.platform) || (platforms[0] && platforms[0].key) || null;
   } else {
-    platform = null; hispanic = false;
+    platform = null; hispanic = false; winRate = "auto";
   }
   tr.querySelectorAll("[data-fc]").forEach(el => { el.disabled = true; });
   _forecastStatus(tr, "Saving…", false);
@@ -2013,7 +2054,7 @@ async function saveForecastRow(tr, changed) {
     const res = await fetch("/api/admin/forecast-map", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ product_name: name, enabled, method, platform, hispanic_weighted: hispanic }),
+      body: JSON.stringify({ product_name: name, enabled, method, platform, hispanic_weighted: hispanic, win_rate: winRate }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(detailText(data.detail, res.statusText));

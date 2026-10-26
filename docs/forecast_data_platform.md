@@ -183,6 +183,65 @@ Then × months (or weeks), with the planning range from the row (legacy series) 
 its series, version, data basis, unit and period, and notes in plain language. For the seven original model series the
 database path reproduces the old bundled-workbook numbers **exactly** (a test compares them across 14 geographies).
 
+### The win rate (MadHive / The Trade Desk products)
+
+The avails a programmatic platform reports are **bid opportunities**: impressions that exist and could be bought, not impressions
+Entravision will deliver. Entravision wins only a share of the auctions it bids on (typically 10-20%), so an estimate that stopped
+at the raw avails overstated what a line could deliver by 5-10x. `app/services/constanza_win_rate.py` applies the win rate:
+
+| | |
+|---|---|
+| **Which products** | A built-in rule, correctable per product. Every product forecast from data (method `platform`) is assumed bought through MadHive or The Trade Desk and gets the programmatic rate (10–20%, mid 15%) **except those forecast from Roku's series** (bought directly in Roku's Ads Manager). **Prime Video, bought through the Amazon DSP, has one rate of its own: 20%** (`CONSTANZA_WIN_RATE_PRIME`, no 10–20% range). Today that is 50 of the 51 platform products: Prime Video, Hulu, Peacock, Other FAST, vMVPD, the blended CTV/OTT products, the Connect and Hispanic Connect families, Pause Ads, VIX, Netflix, Live Sports and eDigital. The *series* decides, not the name: a product remapped to Roku's series is exempt, the Roku product remapped to a MadHive series is not, any product forecast from Prime's series carries Prime's 20% (`constanza_forecast_map.win_rate_applies`, `constanza_win_rate.for_series`, exposed as `forecast.win_rate` on every catalog product). |
+| **Correcting it** | **Admin → Forecast → Win rate** column, per product: *Auto* (the rule, with what it gives said in words), *Apply* or *Don't apply* (`forecast_product_map.win_rate`: NULL / TRUE / FALSE; migration `0004`, also added at startup by `schema.sql`; a database without the column yet still answers, it just ignores the choice). The tab says which rates are in force and how many products they reach. A copy of a product keeps the original's choice. |
+| **Never applied to** | A population-share estimate (it spreads the planner's *own* impression total, so there are no avails to win), TikTok's live audience estimate, an international geography, and a product whose series could not be read **and has no bundled copy** (those fall to the population-share path; the seven legacy series fall to the bundled workbook, where the win rate *is* applied). |
+| **Rate** | Low 10% / **mid 15%** / high 20%. Override with `CONSTANZA_WIN_RATE_LOW/MID/HIGH`: a `%` is always a percent (`1%`, `0.5%`), a bare number from 1 up is a percent (`15`), below 1 a fraction (`0.15`). Set only some and the rest follow (`MID=8` gives 8% with the default 20% high). A set that is still not `0 < low <= mid <= high <= 1` is ignored with a warning (the defaults are used). All three equal means one fixed rate, no sensitivity range. |
+| **Impressions** | **Low, Mid and High are all multiplied by the mid rate**: the planner asked for the median to be factorized by the win rate, and Low / High keep meaning what they always did (the platform's planning band around the avails). The 10-20% range is *not* folded into that band (doing so put Low below "10% of the avails"); it is its own figure beside the estimate: "387,615 a month — 258,410 at 10%, 516,820 at 20%" (`win_rate.delivered_at_low/high`). |
+| **Unique IDs** | Not multiplied by the win rate: fewer impressions reach fewer distinct IDs, but nowhere near 6.7x fewer. A reached ID has *n* = avails ÷ est. reach bid opportunities a month; each is won with probability *w*, so the IDs with at least one win are est. reach × (1 − (1 − *w*)^*n*), capped at the impressions delivered. On the shipped exports (*n* of 4 to 190) unique IDs come out at about 0.92x-1.00x of the platform's est. reach for most markets, lower (down to about 0.5x) in the smallest markets and for the Spanish-only and Family products, never above the impressions and never below a frequency of 1. A model: it assumes opportunities are spread evenly over the IDs, which slightly overstates reach. |
+| **Reach universe** | Unchanged: it is the pool of IDs in the market, not a property of delivery. |
+| **Prime Video (Amazon DSP)** | One fixed **20%**, no range (`constanza_win_rate.for_series("prime")`; the cards show no "at 10% / at 20%" and the note says "Entravision is assumed to win 20% of these modeled avails"). It is the planner's assumption for buying through the DSP, the top of the 10–20% because the DSP and the inventory belong to the same company. **What it multiplies is different**: the model workbook's Prime figure is Prime Video's *total delivered ad impressions* in the market (hours × ad load × ads per minute × 90% fill, split by household weights), not a pool of bids, so for Prime the rate reads "the share of Prime Video's ad volume Entravision is assumed to win" — a planning ceiling to calibrate against an Amazon DSP forecast when there is one, not an auction statistic. The bundled Prime impressions also use the **measured 2.6 ad minutes an hour** (Ampere, Aug-2026) instead of the workbook's 3.2 (`PRIME_AD_LOAD` in `scripts/extract_constanza_data.py`; impressions are linear in the ad load and uniques / households do not depend on it, so the extractor scales only Prime's three impression columns by 2.6 ÷ the workbook's own value, and does nothing if the workbook is refreshed to carry 2.6): national Prime avails are 4.58B a month (5.64B at 3.2), and after the 20% about 0.92B. The database's `prime` series is read from the same bundled file, so **re-run `python -m app.services.forecast_import import` after deploying** to publish the new version (a -19% move is under the 40% large-change guard). The bundled series are fingerprinted by the whole `platform_dma.json`, so the run also publishes a new version of the other six bundled series (Roku, Hulu, Peacock, Other FAST, vMVPD, the blended list) with **identical numbers**: harmless, and the previous versions are retired as usual. |
+| **What the API says** | `win_rate` on the estimate: `{low, mid, high, raw_imps_low, raw_imps_mid, raw_imps_high, raw_est_uniques, delivered_at_low, delivered_at_high}` (null when none applied), and one of the estimate's notes says it in words (it is the first of the engine's own notes; the API puts any geography warning before it), naming whether the avails are platform-reported, modeled or extended. The cards show a badge and a line ("Win rate 15% applied: X avails a month (bid opportunities) become an expected delivery of about Y a month — Z at 10%, W at 20%"); with an audience cut the line is scaled by the same cut and says "for this audience". It never says the platform *reports* the avails: a modeled series is Entravision's own model and an audience slice is the model's, not the platform's. |
+
+Applied once, in `constanza_engine.estimate_avails`, after the platform estimate is built (so the offline bundled-workbook path gets
+it too, and the whole-state / unplaced-share notes still quote the platform's raw avails, labelled as such).
+
+**Effect on Step 05.** *Apply* writes the expected delivery as the line's max impressions, so its spend ceiling and share-of-voice
+move with it: a ceiling that read $103K from raw avails reads about $15.5K at 15%, and a line that fit under the raw avails can now
+show a share of voice above 100% (a $30K line that buys 41% of the avails reads 276%). That is the point of the factor, not a side
+effect to hide, so the share-of-voice badge of a line whose figures came from a win rate says "**% of expected delivery**" (and its
+helper "the platform's avails × a 15% win rate") instead of "% of avails"; the entry remembers it (`avails_data[...].win_rate`) until
+the planner types over the figures. The workbook's own column header ("% of Avails Reached with Minimum Monthly Budget") and the
+65 / 80 / 90 traffic-light thresholds are unchanged: that column also holds lines whose figures were typed from a platform's own UI.
+
+**Unique IDs never exceed impressions, with or without a win rate.** `_cap_uniques_at_impressions` caps them per area as a guard
+(an ID needs an impression). On the shipped exports it never binds: est. reach is never above avails in any row (what *is* above
+avails in 304 of the 276,463 ZIP rows is the reach **universe**, the pool, which is why the pool is not shown as an audience).
+
+**Still to confirm with the data owners.** The rule above is the planner's stated buying stack, not something the files say:
+Netflix's export is labelled "Direct" (the stated stack is a custom Trade Desk PMP), the Live Sports sheets are Entravision's own
+weekly estimates (they may already be expected delivery), and eDigital and Pause Ads are MadHive-format exports. Netflix (10 products)
+and Live Sports (17) are 27 of the 50 products the rule applies to: if either is not auction inventory, set it to *Don't apply* in
+Admin → Forecast. Prime Video's 20% is likewise an assumption, and (above) applies to a total-impressions base rather than a pool of bids.
+
+### Hispanic targeting
+
+Most campaigns are Hispanic-targeted, but a platform series describes everyone the platform reaches in a market. A **Hispanic cut**
+multiplies each area's avails by that area's **real Hispanic share** of the population (`app/services/constanza_hispanic.py`, applied
+in `constanza_audience.estimate_audience` like the age / gender cut): about 95% in Laredo, 47% in Los Angeles, 25% in New York.
+
+| | |
+|---|---|
+| **Data** | ACS 2023 5-year, table **B01001I** (Sex by Age, Hispanic or Latino) with B01001_001E, for ZIP (ZCTA), county, congressional district, city (Census Place), and DMA / state aggregated from counties — `acs_hispanic_{zcta,county,cd,place,dma,state}.json.gz`, 1.7 MB in all, built by `scripts/extract_constanza_hispanic.py` (needs `CENSUS_API_KEY`; same vintage and the same geography keys as the age × sex bundles, which a test checks). Each geography is `[total population, Hispanic total, male × 14 age bands, female × 14]`. Nothing here came from the CTV workbook (its State Inputs sheet has only household size and broadband). |
+| **Joint with age and gender** | One table carries all of it, so "Hispanic adults 18–34" is those people over everyone — **not** the Hispanic share × the 18–34 share (the Hispanic population is younger: in Los Angeles the joint share is about 13%, the product of the two shares about 11%). Together they are one demographic cut, one entry in the confidence tier (for Hispanic *men* 18–34 in Los Angeles the same comparison is 6.5% against 5.8%). |
+| **Which row an area gets** | The first that exists: for a market of a **whole-state** request whose avails were scaled up to the platform's own state total (below), its **state's** row (`state_total`: that total holds households served from markets homed elsewhere, so cutting it at the home markets' shares would misstate the state — Northern Virginia, served from Washington, is why a Virginia request reads 6.9% at the home markets' shares and 10.7% at the state's); else the area's **own** row (a ZIP's, a county's, a city's, a district's, a whole DMA's); else its **parent DMA's** when its own is under 200 people (an ACS share from a few dozen people is mostly noise; the estimate says how many areas did this; an already-Hispanic series' age mix also needs 200 *Hispanic* people); else its **state's** row (`state`: the three Alaska markets, which neither the Nielsen polygons nor the DMA bundles cover; the same joint age × sex table, so an age cut still works); only if the state bundle lacks the state, the old **state-level proxy** (`hispanic_pct_by_state.json`, no age detail; an age or gender cut it cannot read leaves the area uncut and says so); nothing at all means the area is **not cut** and the note says the total reads high (`mode: "not_applied"` when no area at all had data). |
+| **Series that are already Hispanic** | A series whose targeting is `hispanic*` (the Hispanic Connect exports) or `spanish_language` (VIX Select, Spanish Only) already describes those audiences, so the Hispanic share is **not** applied again (that would count the restriction twice); an age / gender cut on one is read against the Hispanic population (conditional on Hispanic). The response says `mode: "already_targeted"`. |
+| **Default** | On for a product configured as Hispanic-targeted in **Admin → Forecast → Hispanic targeting** (the old "Hispanic weighting" checkbox; "Entravision Plus - Hispanics CTV/OTT" by default) and for every product whose series is already Hispanic (the column shows an "already Hispanic" badge for those); off otherwise. The planner can switch it on or off for any product **except one whose series is already Hispanic, which is always on** (the data *is* that audience): the **Hispanic targeting** checkbox in the dock's Audience section (a choice belongs to the product it was made for: choosing another product starts from its default), or the switch on a Step 05 card. A proposal whose line target or, when the line has none, campaign targeting names a Hispanic / Latino audience (`demo`, `behavioral`; "Spanish" alone does not count; "non-Hispanic", "not targeting Hispanic", "Hispanic and non-Hispanic" do not count either) switches the cards on for **platform-data** products only. **A population-share estimate is never cut** (it spreads the impression total the planner entered, so there are no platform avails to narrow; likewise an international geography and TikTok): the response says so when it was asked for. `hispanic: true|false|null` on `/api/constanza/estimate` (also `audience.hispanic`, which wins; null = the product's default; a "Hispanic" interest term turns it on only when nothing was chosen). The response says `hispanic_targeting: {default, on, applies}` (`applies: false` for the estimates above) and `audience.hispanic: {mode, share, levels, vintage}` with `mode` **`cut`** (a general series narrowed), **`already_targeted`** (nothing cut) or **`not_applied`** (asked for, no Census row anywhere); `/api/constanza/parse-audience` sets `hispanic: true` when free text names the audience ("Hispanic men 25–44 in Houston") and `null` otherwise, and "Hispanic", "Hispanic & Latino", "Hispanic or Latino", "Latino Hispanic" typed as an *interest* are read as the cut, not as an interest with no sourced rate. |
+| **What it also changes** | The by-area share column of a Hispanic-targeted product is each area's share of the geography's *Hispanic population* (it was a state-level % proxy); with the cut on, the by-area shares follow the narrowed impressions. Unique IDs, the addressable pool and the market population are cut the same way (the market population becomes the Hispanic people who fit, which also feeds the reliability floor). |
+| **What it assumes** | That Hispanic households use the platform **in proportion to their population**. Platforms over- and under-index (free ad-supported services tend to over-index among Hispanic viewers) and no public source says by how much per platform and market, so the band is widened for it (12%, 20% when the share came from the proxy) and the note tells the planner to replace the cut with the platform's own Hispanic segment size when they have one (Roku / MadHive / Amazon DSP can give it). |
+
+Refresh with `CENSUS_API_KEY=… python scripts/extract_constanza_hispanic.py` after the age × sex bundles (the freshness check lists the six bundles).
+
+### Whole states, baseline proxies, gender and the people-counts
+
 **A state asked for as a whole** ("Texas", "WA") resolves to the markets homed in it, but a state is more than that: Wyoming's
 own row in the Madhive exports is nearly twice what its two home markets hold (the rest is served from Denver, Billings and
 Salt Lake City). When the series carries state rows, the markets are scaled so they add up to the platform's own state total
@@ -199,26 +258,26 @@ caveat ("this targeted variant will deliver fewer impressions") travels with the
 as "everyone" while counted as an applied cut). An interest with no sourced male/female split applies its all-adults rate to a
 gender cut and the estimate says so.
 
-**The people-counts on a result card** are three different things, kept apart:
+**The people-counts of an estimate** are three different things, kept apart. Only the first is shown beside the impressions:
 
-* **Audience on this product** (`audience.audience_people`): the platform's own *Reach Universe* for the geography
-  (`forecast_avail_*.reach_universe`, carried through the engine as `AvailsEstimate.reach_universe`) narrowed by the **same**
-  age / gender / interest cuts as the impressions. It is the number to read beside the impressions: the ratio of the two does
-  not change with the cuts (`impressions_per_person`, monthly, per person *in the reach universe*) and impressions are normally
-  larger than the audience. "Normally": a platform reports a ZIP at its floor (about 180 avails a month), so 123 of the 16,028
-  Connect-Family ZIP rows hold more people than avails, and a display platform counts **devices or IDs**, not people (eDigital
-  Display's universe in Dallas, 8.4M, is larger than Dallas's 6.4M census adults); when the audience exceeds the census figure the
-  estimate carries a note saying so and the card does not claim the census is the larger. A series or workbook with no reach
-  universe (the seven legacy model series) returns `null` and the card simply does not show an audience count. A product that
-  forecasts from **another product's series** (a baseline proxy: VIX 360, a targeted Netflix variant) shows it as "Audience on the
-  baseline product", since its own targeting reaches fewer.
-* **Est. uniques / month**: the platform's *Est. Reach*; now narrowed by the cuts too, so "Apply to Avails" writes uniques and a
-  frequency (impressions ÷ uniques, shown on the card as "per est. unique") that agree with the narrowed impressions. This is a
-  different "per person" figure from `impressions_per_person` (impressions ÷ the reach universe): the card labels each.
+* **Unique IDs reached / month** (`audience.est_uniques`, `est_uniques` without cuts): the platform's *Est. Reach* — for a MadHive /
+  Trade Desk product re-derived for the win-rate delivery (above) — narrowed by the same age / gender / interest cuts as the
+  impressions. It is the number to read beside the impressions: **never above them** (each ID needs an impression), with
+  "about N impressions each" next to it. "Apply to Avails" writes it with the monthly impressions, so the Avails step's frequency
+  (impressions ÷ uniques) agrees with them (and an Apply with no unique count drops a stale one that would now exceed the impressions).
+  A series with no reach figure (Netflix, Live Sports, Other FAST) shows none.
+* **Addressable pool** (`audience.audience_people`, `reach_universe`): the platform's own *Reach Universe* for the geography
+  (`forecast_avail_*.reach_universe`, carried through the engine as `AvailsEstimate.reach_universe`) narrowed by the same cuts. It is
+  the most the platform could reach here, **not** delivery, so it can be larger than the impressions (after the win rate: about 1 in 10 Family-series
+  markets, 4 in 10 of their ZIPs, Los Angeles among them), and a tile showing it beside smaller impressions read as "an audience bigger than the impressions" again.
+  It is therefore **not in the headline**: the Step 05 card carries it as a tooltip on the unique-IDs line and the dock under
+  "About this data" ("a ceiling, not delivery"); the API still returns it. A series or workbook with no reach universe (the seven legacy
+  model series) returns `null`. A product that forecasts from **another product's series** (a baseline proxy: VIX 360, a targeted
+  Netflix variant) labels the unique IDs "on the baseline product", since its own targeting reaches fewer.
 * **Market population** (`audience.market_population`, also still `underlying_population`): the census population of the
   market that fits the cuts, across all media. It is context and the basis of the reliability floor (about 10,000), **not** what
   a product reaches: Los Angeles holds about 2.0M adult women who are auto intenders while Entravision+ Connect - Family reaches
-  about 76K of them. An interest rate is a share of *adults*, so with one applied the population it multiplies is the adults'
+  about 24K unique IDs of them (from a pool of 76K). An interest rate is a share of *adults*, so with one applied the population it multiplies is the adults'
   (ACS ages 18+), not everyone including children (this lowered the figure by about a fifth); `market_population_adults` says
   whether that happened (a country has no age data, so its figure counts everyone and the card says "people", not "adults"). An
   age range with no adults (16–17) and an interest rate shows 0 and says why.
@@ -438,5 +497,7 @@ export makes a new Netflix version instead of leaving it "unchanged".
   (they are gone from `catalog.CATALOG`), the Notion parser maps "display" / "olv" / "pre-roll" to the new names, and so does
   the recommender. **The new products carry the $40 placeholder below, where the older ones were $9-$11 (display) and
   $23-$25 (OLV): confirm the rate card before proposals go out.**
-* **Still to confirm with the data owners:** the unit of the Live Sports playoff tabs (headed "Estimates"; treated as weekly).
+* **Still to confirm with the data owners:** the unit of the Live Sports playoff tabs (headed "Estimates"; treated as weekly); and which
+  products the programmatic **win rate** applies to (Netflix, Live Sports, eDigital, Pause Ads: see "The win rate" above; correctable per
+  product in Admin → Forecast).
 * All 30 new products carry a **$40 CPM placeholder** and a "PLACEHOLDER RATE" note until the rate card is confirmed.

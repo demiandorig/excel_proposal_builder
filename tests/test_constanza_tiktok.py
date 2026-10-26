@@ -206,6 +206,16 @@ def test_a_narrow_audience_gets_tiktoks_own_warning(tiktok):
 
 # --------------------------------------------------------------------------------------------- the estimate endpoint
 
+def test_a_hispanic_ask_is_not_applied_to_a_tiktok_estimate_and_says_so(tiktok):
+    plain = main.constanza_estimate(request())
+    assert plain["hispanic_targeting"] == {"default": False, "on": False, "applies": False}
+    assert not any("Hispanic targeting isn't applied" in n for n in plain["notes"])
+    for kw in ({"hispanic": True}, {"audience": main.ConstanzaAudienceSpecModel(hispanic=True)}):
+        out = main.constanza_estimate(request(**kw))
+        assert out["hispanic_targeting"]["on"] is False and out["imps_mid"] == plain["imps_mid"] and "audience" not in out
+        assert any("Hispanic targeting isn't applied to a TikTok audience estimate" in n for n in out["notes"])
+
+
 def test_the_estimate_is_shaped_like_every_other_estimate_plus_a_tiktok_block(tiktok):
     out = main.constanza_estimate(request(months=2))
     t = out["tiktok"]
@@ -311,7 +321,7 @@ def test_the_tiktok_product_is_on_by_default_with_the_tiktok_method_and_no_platf
 
 def test_an_admin_can_choose_the_tiktok_method_for_a_product_and_it_carries_no_platform():
     assert fm.clean_config({"enabled": True, "method": "tiktok", "platform": "roku", "hispanic_weighted": True}) == \
-        {"enabled": True, "method": "tiktok", "platform": None, "hispanic_weighted": False}
+        {"enabled": True, "method": "tiktok", "platform": None, "hispanic_weighted": False, "win_rate": None}     # (TikTok has no avails to win)
     with pytest.raises(ValueError):
         fm.clean_config({"enabled": True, "method": "magic"})
     assert fm._valid_row({"method": "tiktok", "platform": None, "enabled": True})

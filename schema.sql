@@ -528,3 +528,7 @@ CREATE TABLE IF NOT EXISTS forecast_product_map (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by         TEXT
 );
+-- win_rate: whether the product's avails are multiplied by the programmatic win rate (Constanza; MadHive / Trade Desk bid
+-- opportunities). NULL = the built-in rule (every platform series except Roku's; Prime Video at its own rate), TRUE = always, FALSE = never.
+-- Added after the table: an existing database gets the column at startup (and from migrations/0004). Idempotent.
+ALTER TABLE forecast_product_map ADD COLUMN IF NOT EXISTS win_rate BOOLEAN;

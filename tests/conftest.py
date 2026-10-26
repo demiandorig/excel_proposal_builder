@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -108,3 +109,17 @@ def _forecast_map_without_a_database(request, monkeypatch):
     _forecast_map.invalidate()
     _forecast_store.invalidate()
     _REAL_DMA_TABLE.cache_clear()
+
+
+# The programmatic win rate is configurable from the environment (CONSTANZA_WIN_RATE_LOW / _MID / _HIGH / _PRIME, also via a .env that app.main
+# loads); the tests pin the DEFAULT 10 / 15 / 20% unless one sets its own, so a developer's local override must never leak in. Scrubbed at
+# import (the script-style test modules assert while being collected) and before every test (app.main's load_dotenv() may add them later).
+_WIN_RATE_ENV = ("CONSTANZA_WIN_RATE_LOW", "CONSTANZA_WIN_RATE_MID", "CONSTANZA_WIN_RATE_HIGH", "CONSTANZA_WIN_RATE_PRIME")
+for _var in _WIN_RATE_ENV:
+    os.environ.pop(_var, None)
+
+
+@pytest.fixture(autouse=True)
+def _default_win_rate(monkeypatch):
+    for var in _WIN_RATE_ENV:
+        monkeypatch.delenv(var, raising=False)

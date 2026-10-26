@@ -66,6 +66,27 @@ def _find(ws, text, col="C"):
 
 
 # ---------------------------------------------------------------------------
+# Totals are plain, exact sums
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("unit", ["week", "month", "quarter", "full_flight"])
+def test_no_cell_of_any_sheet_rounds_a_total_down(tmp_path, unit):
+    """The Net and Gross totals (per-period, campaign grand total, impressions) used to be wrapped in ROUNDDOWN(..., 0), which
+    silently dropped the cents; they are plain sums now, on every sheet of every option, in every billing period."""
+    months = 1 if unit == "full_flight" else 3
+    a = [LineItem(product_name=EMAIL, monthly_budget=1666.67, months=months, id="a1"),
+         LineItem(product_name=IAB, monthly_budget=2500.33, months=months, id="a2")]
+    b = [LineItem(product_name=EMAIL, monthly_budget=999.99, months=months, id="b1")]
+    tiers = [{"label": "A", "name": "One", "line_items": a}, {"label": "B", "name": "Two", "line_items": b}]
+    _, wb = _export(tmp_path, lines=a, tiers=tiers, time_unit=unit, force_tabs={"net": True, "gross": True},
+                    addons=[AddonItem("Call Tracking", 100.0), AddonItem("Web Services - Landing Page", 250.5)])
+    assert len(wb.sheetnames) >= 4                                                # both options, net and gross
+    offenders = [(ws.title, c.coordinate) for ws in wb for row in ws.iter_rows() for c in row
+                 if "ROUNDDOWN" in str(getattr(c.value, "text", c.value) or "").upper()]
+    assert offenders == []
+
+
+# ---------------------------------------------------------------------------
 # The reference scenario
 # ---------------------------------------------------------------------------
 
@@ -75,7 +96,7 @@ def test_net_sheet_matches_the_reference_layout(tmp_path):
     assert ws["H10"].value is None and ws["I10"].value is None      # Full Flight shows no "Months:" label or cell at all
 
     total_row = _find(ws, "SUBTOTAL DIGITAL")                  # not "TOTAL DIGITAL MONTHLY": the add-ons + the campaign total follow
-    assert ws[f"L{total_row}"].value == "=ROUNDDOWN(SUM(L19:L22),0)"
+    assert ws[f"L{total_row}"].value == "=SUM(L19:L22)"
     assert [ws[f"L{r}"].value for r in range(19, 23)] == list(FLIGHT_NET.values())
 
     grand_row = _find(ws, "TOTAL DIGITAL — CAMPAIGN")           # static label, no "N-MONTH" suffix
@@ -85,8 +106,8 @@ def test_net_sheet_matches_the_reference_layout(tmp_path):
         if formula is None:
             continue
         assert "*" not in formula and "I10" not in formula, (col, formula)   # NOTHING is multiplied
-    assert ws[f"L{grand_row}"].value == f'=ROUNDDOWN(L{total_row} + SUMIF(L27:L28,">0"),0)'
-    assert ws[f"I{grand_row}"].value == f"=ROUNDDOWN(I{total_row},0)"
+    assert ws[f"L{grand_row}"].value == f'=L{total_row} + SUMIF(L27:L28,">0")'
+    assert ws[f"I{grand_row}"].value == f"=I{total_row}"
 
     # exactly one breakdown column, headed with the flight's date span
     assert ws["S16"].value == "MONTHLY BREAKDOWN (NET)"            # the planner's own title for the block, with its basis
@@ -115,7 +136,7 @@ def test_gross_sheet_shows_gross_dollars_in_the_single_column(tmp_path):
     total_row = _find(ws, "SUBTOTAL DIGITAL")
     assert ws[f"U{total_row}"].value == f"=N{total_row}"
     grand_row = _find(ws, "TOTAL DIGITAL — CAMPAIGN")
-    assert ws[f"N{grand_row}"].value == f'=ROUNDDOWN(N{total_row} + SUMIF(N27:N28,">0"),0)'
+    assert ws[f"N{grand_row}"].value == f'=N{total_row} + SUMIF(N27:N28,">0")'
     assert "*" not in ws[f"L{grand_row}"].value and "*" not in ws[f"N{grand_row}"].value
 
 
@@ -239,7 +260,7 @@ def test_added_value_and_addons_are_never_multiplied_or_given_a_period(tmp_path)
     assert all(ws[f"S{r}"].value for r in range(19, 23))
     assert str(ws["C23"].value).startswith(GEOFENCE) and ws["S23"].value is None
     total_row = _find(ws, "SUBTOTAL DIGITAL")
-    assert ws[f"L{total_row}"].value == "=ROUNDDOWN(SUM(L19:L23),0)"
+    assert ws[f"L{total_row}"].value == "=SUM(L19:L23)"
     grand_row = _find(ws, "TOTAL DIGITAL — CAMPAIGN")
     assert "SUMIF(" in ws[f"L{grand_row}"].value and "*" not in ws[f"L{grand_row}"].value   # add-ons added once, not x months
 
@@ -343,7 +364,7 @@ def test_an_added_value_line_with_a_percent_does_not_poison_the_gross_totals(tmp
         assert ws[f"N{av_row}"].value == ws[f"L{av_row}"].value, (unit, ws[f"N{av_row}"].value)      # text, not a formula over text
         assert not str(ws[f"N{av_row}"].value).startswith("=")
         total_row = _find(ws, "SUBTOTAL DIGITAL" if unit == "full_flight" else "TOTAL DIGITAL MONTHLY")
-        assert ws[f"N{total_row}"].value == f"=ROUNDDOWN(SUM(N19:N{av_row}),0)"
+        assert ws[f"N{total_row}"].value == f"=SUM(N19:N{av_row})"
 
 
 def test_a_full_flight_tier_with_unreadable_dates_warns_instead_of_silently_dropping_the_column(tmp_path):

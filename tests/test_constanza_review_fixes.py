@@ -198,10 +198,10 @@ def test_hispanic_weights_use_the_parent_dmas_state_for_a_zip_instead_of_zero():
     assert sum(_area_weights(zips.areas, None)) == pytest.approx(1.0)
 
 
-def test_the_hispanic_note_is_honest_that_impressions_are_the_blended_pool():
+def test_the_hispanic_note_is_honest_that_the_impressions_here_are_the_platforms_general_ones():
     est = estimate_avails("Entravision Plus - Hispanics CTV/OTT", resolve_geo("Los Angeles; Nashville"), months=1)
-    note = next(n for n in est.notes if "Hispanic population %" in n)
-    assert "share column" in note and "same blended Madhive pool" in note
+    note = next(n for n in est.notes if "Hispanic population" in n)
+    assert "share column" in note and "platform's general ones" in note and "narrows" in note and "Census ACS" in note
 
 
 def test_the_state_note_does_not_promise_a_few_percent():
