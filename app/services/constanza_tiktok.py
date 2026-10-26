@@ -5,9 +5,10 @@ video / creator / hashtag interactions), spending power, household income, devic
 estimator (POST /ad/audience_size/estimate/, see tiktok_client.py).
 
 TikTok answers with a head count: the range of people ("accounts, 18 and over") who match. It does not forecast delivery, so
-Entravision's planning rule turns the audience into impressions: **monthly impressions = audience x 5.5** (TIKTOK_IMPRESSIONS_PER_PERSON
-changes it). A flight of N months is N times that; est. uniques is the audience itself (so the Avails step's frequency lands on
-exactly the factor).
+Entravision's planning rule turns the audience into impressions in three scenarios, all taken from the LOWER end of TikTok's range
+(platform_scenarios.py): **monthly impressions = lower-end audience x 4.3 (conservative) / x 5.5 (mid, the default) / x 8.6 (upper)**.
+A flight of N months is N times that; est. uniques is the lower-end audience (so the Avails step's frequency lands on exactly the mid
+multiplier).
 
 This module owns three things: the validated form of a targeting request (`Targeting`), the request TikTok's estimator takes
 (`build_estimate_body`), and the answer as the estimate card shows it (`estimate`). The HTTP calls live in tiktok_client.py and the
@@ -19,7 +20,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from app.services import tiktok_client
+from app.services import platform_scenarios, tiktok_client
 from app.services.constanza_audience import normalize_gender
 from app.services.constanza_geo import GeoResolution
 from app.services.tiktok_client import STAGE_LABELS, STAGE_NOTES, AudienceSize, TikTokAPIError, TikTokClient
@@ -249,10 +250,12 @@ def build_estimate_body(t: Targeting, mapping: Mapping, goal_override: Optional[
 
 # ------------------------------------------------------------------------------------------------------------- the estimate
 
+SLOT_NAME = platform_scenarios.SLOT        # conservative / mid / upper -> the estimate's low / mid / high
+
 @dataclass
 class TikTokEstimate:
     size: AudienceSize
-    factor: float
+    multipliers: dict                      # platform_scenarios.multipliers(): conservative / mid / upper, applied to the LOWER end of TikTok's range
     months: int
     mapping: Mapping
     targeting: Targeting
@@ -260,18 +263,33 @@ class TikTokEstimate:
     adult_ages_sent: bool = False          # the adult age groups were spelled out because TikTok asked for it (40065)
 
     @property
+    def factor(self) -> float:
+        """The mid (default) multiplier: the frequency the Avails step shows, since the est. uniques are the lower-end audience."""
+        return self.multipliers["mid"]
+
+    @property
     def monthly(self) -> dict:
-        return {"low": self.size.lower * self.factor, "mid": self.size.mid * self.factor, "high": self.size.upper * self.factor}
+        """Monthly impressions in the three scenarios: the LOWER end of TikTok's audience x conservative / mid / upper multiplier."""
+        return {SLOT_NAME[name]: self.size.lower * self.multipliers[name] for name in platform_scenarios.SCENARIOS}
+
+    @property
+    def scenarios(self) -> dict:
+        return {name: {"multiplier": self.multipliers[name], "monthly": self.size.lower * self.multipliers[name],
+                       "total": self.size.lower * self.multipliers[name] * self.months} for name in platform_scenarios.SCENARIOS}
 
     @property
     def total(self) -> dict:
         return {k: v * self.months for k, v in self.monthly.items()}
 
+    def _rule(self) -> str:
+        m = self.multipliers
+        return f"TikTok's lower-end audience ({self.size.lower:,.0f}) x {m['conservative']:g} / {m['mid']:g} / {m['upper']:g} (conservative / mid / upper; mid is the default)"
+
     def notes(self) -> list[str]:
         t, size = self.targeting, self.size
         out = [
             f"Audience size is TikTok's own estimate of the TikTok accounts (18 and over) that match these settings. Monthly impressions are "
-            f"that audience x {self.factor:g} - Entravision's planning factor, not a delivery forecast from TikTok; real delivery depends on "
+            f"{self._rule()} - Entravision's planning scenarios, not a delivery forecast from TikTok; real delivery depends on "
             "budget, bid and creative."
         ]
         if size.stage in (1, 2):
@@ -307,7 +325,7 @@ def estimate(res: GeoResolution, targeting: Targeting, months: int, client: Opti
         size = client.estimate_audience(body)
         client.adult_ages_needed = True
         adult = True
-    return TikTokEstimate(size=size, factor=tiktok_client.impressions_per_person(), months=max(1, int(months)),
+    return TikTokEstimate(size=size, multipliers=platform_scenarios.multipliers(), months=max(1, int(months)),
                           mapping=mapping, targeting=targeting, request=body, adult_ages_sent=adult and not targeting.age_groups)
 
 
@@ -332,7 +350,8 @@ def status() -> dict:
     missing = tiktok_client.missing_config()
     return {
         "configured": not missing, "missing": missing, "advertiser": tiktok_client.advertiser_hint(),
-        "impressions_per_person": tiktok_client.impressions_per_person(), "setup_hint": tiktok_client.SETUP_HINT,
+        "impressions_per_person": platform_scenarios.multipliers()["mid"], "scenarios": platform_scenarios.to_public(),
+        "setup_hint": tiktok_client.SETUP_HINT,
         "options": static_options(),
     }
 

@@ -56,6 +56,7 @@ DATA = {
     "geo_interpretations": [], "geo_suggestions": [], "by_area": [],
     "tiktok": {"audience": {"low": 216_000, "mid": 240_000, "high": 264_000}, "stage": 3, "stage_label": "Balanced",
                "stage_note": "20% to 80% of the possible audience in these locations", "impressions_per_person": 5.5,
+               "scenarios": {"basis": "lower_end", "default": "mid", "multipliers": {"conservative": 4.3, "mid": 5.5, "upper": 8.6}},
                "monthly": {"low": 1_188_000, "mid": 1_320_000, "high": 1_452_000},
                "locations": [{"source": "Los Angeles", "name": "Los Angeles CA", "id": "800002", "geo_type": "DMA", "kind": "location_id"}],
                "unmapped": [], "objective": "Reach", "placements": ["PLACEMENT_TIKTOK"], "request_id": "REQ-1", "cached": False},
@@ -207,7 +208,7 @@ def test_the_numbers_of_a_tiktok_result_are_monthly_impressions_and_the_audience
 def test_the_headline_leads_with_the_audience_and_shows_impressions_the_flight_and_tiktoks_verdict():
     html = run(f"return JSON.stringify(TT.headlineHtml({json.dumps(DATA)}, P.summarize({json.dumps(DATA)})));")
     assert "Audience size · TikTok accounts, 18+" in html and "240,000" in html and "216K – 264K range" in html
-    assert "1,320,000" in html and "audience × 5.5" in html and "Flight total · 2 mo" in html and "2,640,000" in html
+    assert "1,320,000" in html and "lower-end audience × 5.5 (4.3 – 8.6)" in html and "Flight total · 2 mo" in html and "2,640,000" in html
     assert 'class="cz-stage on s3"' in html and "Balanced" in html and "20% to 80% of the possible audience" in html
 
 
@@ -246,20 +247,22 @@ def test_text_from_tiktok_is_escaped_everywhere_it_is_shown():
     assert "<img" not in html and "<script" not in html and "<b>Balanced" not in html and "&lt;img" in html
 
 
-def test_the_about_section_names_the_factor_and_what_the_audience_is():
+def test_the_about_section_names_the_three_scenarios_and_what_the_audience_is():
     html = run(f"return JSON.stringify(TT.aboutHtml({json.dumps(DATA)}));")
-    assert "audience-size estimator" in html and "× 5.5 a month" in html and "request REQ-1" in html and "under-18s" in html
+    assert "audience-size estimator" in html and "request REQ-1" in html and "under-18s" in html
+    assert "the lower end of that audience × 4.3 (conservative), × 5.5 (mid, the default) or × 8.6 (upper)" in html and "planning scenarios" in html
+    assert "so its frequency reads 5.5" in html
     cached = json.loads(json.dumps(DATA))
     cached["tiktok"]["cached"] = True
     assert "answered from the last ten minutes" in run(f"return JSON.stringify(TT.aboutHtml({json.dumps(cached)}));")
 
 
-def test_the_copied_summary_has_the_audience_the_factor_and_the_places():
+def test_the_copied_summary_has_the_audience_the_scenarios_and_the_places():
     out = run(f"""
         TT._pure.T.gender = 'male'; var lines = TT.summaryLines({json.dumps(DATA)}, {{ method: TT.context() }});
         return JSON.stringify(lines);""")
     assert out[0].startswith("Audience size (TikTok accounts, 18+): 240,000 (216,000 – 264,000); TikTok says: Balanced")
-    assert "Impressions = audience × 5.5 per month" in out and "Asked of TikTok: Men" in out and "Places sent to TikTok: Los Angeles CA" in out
+    assert "Impressions = lower-end audience × 5.5 (4.3 – 8.6) per month (mid is the default)" in out and "Asked of TikTok: Men" in out and "Places sent to TikTok: Los Angeles CA" in out
 
 
 def test_the_badge_says_the_numbers_are_live_from_tiktok_and_not_a_population_share():

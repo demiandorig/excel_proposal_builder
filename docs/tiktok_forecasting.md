@@ -8,8 +8,9 @@ reads avails data that was loaded into the app; this one is asked of TikTok each
 planner sets up the audience in the dock ─► /api/constanza/estimate ─► TikTok  POST /ad/audience_size/estimate/
    places · age · gender · languages ·          │                         ◄─ { user_count: { lower_end, upper_end }, user_count_stage }
    interests & behaviors · spending ·           ▼
-   income · device · placement · objective    audience (people)  ×  5.5  =  impressions a month   (× months = the flight)
-                                              est. uniques = the audience   →  Avails step: frequency = 5.5
+   income · device · placement · objective    LOWER-end audience (people)  ×  4.3 / 5.5 / 8.6  =  impressions a month
+                                              (conservative / mid = the default / upper)     (× months = the flight)
+                                              est. uniques = the lower-end audience   →  Avails step: frequency = 5.5
 ```
 
 ## What it answers, and what it does not
@@ -18,11 +19,14 @@ planner sets up the audience in the dock ─► /api/constanza/estimate ─► T
   (`lower_end` – `upper_end`) plus TikTok's verdict on how narrow it is (*Too narrow / Narrow / Balanced / Fairly broad*, which is
   how big the audience is against everyone TikTok could reach in those places: under 10,000 and under 20% = too narrow; under 20% =
   narrow; 20%–80% = balanced; 80% or more = fairly broad). TikTok leaves out under-18s.
-* **Impressions** are **audience × 5.5 a month** — Entravision's planning factor, *not* a delivery forecast from TikTok (real
-  delivery depends on budget, bid and creative). A flight of N months is N times the monthly figure. Change the factor with
-  `TIKTOK_IMPRESSIONS_PER_PERSON`; the card always says which factor it used.
-* **Est. uniques** is the audience itself, so **Insert into Avails** writes monthly impressions, est. uniques and a frequency of
-  exactly the factor.
+* **Impressions** are three scenarios, all taken from the **lower end** of TikTok's range — Entravision's planning rule, *not* a
+  delivery forecast from TikTok (real delivery depends on budget, bid and creative): **conservative = lower end × 4.3**, **mid =
+  lower end × 5.5 (the default)**, **upper = lower end × 8.6**. A flight of N months is N times the monthly figure. The mid scenario
+  is what the card headlines and what *Insert into Avails* writes; Low / High are the other two. The upper end of TikTok's range is
+  shown as context and is not a base. Change the multipliers (they must stay in order) with `CONSTANZA_AUDIENCE_X_CONSERVATIVE`,
+  `_MID`, `_UPPER` (shared with Meta, `app/services/platform_scenarios.py`); the card always says which it used.
+* **Est. uniques** is the lower-end audience, so **Insert into Avails** writes the mid monthly impressions, est. uniques and a
+  frequency of exactly the mid multiplier (5.5).
 
 ## Setting it up (an admin, once)
 
@@ -142,7 +146,8 @@ TikTok identifies a place by an ID, not a name, so the geography the planner typ
 |---|---|
 | `app/services/tiktok_client.py` | the HTTP client: auth header, retries, caches, return-code classification, `AudienceSize` |
 | `app/services/tiktok_geo.py` | Constanza geography → TikTok location IDs, and what could not be placed |
-| `app/services/constanza_tiktok.py` | the validated `Targeting`, the estimate request, the audience × 5.5 numbers, the panel's menus |
+| `app/services/constanza_tiktok.py` | the validated `Targeting`, the estimate request, the lower-end audience × 4.3 / 5.5 / 8.6 numbers, the panel's menus |
+| `app/services/platform_scenarios.py` | the three multipliers and their settings, shared with Meta |
 | `app/services/tiktok_diagnose.py` | the end-to-end connection check (CLI and Admin button) |
 | `app/main.py` | `POST /api/constanza/estimate` (routes the product), `GET /api/constanza/tiktok/{status,targeting,search}`, `POST /api/admin/tiktok/test` |
 | `app/static/constanza-tiktok.js` | the dock's TikTok panel and result card (registers with `constanza.js` through `registerMethod`) |

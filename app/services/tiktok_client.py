@@ -11,7 +11,8 @@ Setup (the app runs fine without it, exactly like Notion / Drive / OpenAI - ever
                           authorized (https://business-api.tiktok.com/portal/docs?id=1738373164380162)
     TIKTOK_ADVERTISER_ID  the numeric ID of the ad account the estimates are asked through
   optional:
-    TIKTOK_IMPRESSIONS_PER_PERSON   the planning factor that turns an audience into monthly impressions (default 5.5)
+    CONSTANZA_AUDIENCE_X_CONSERVATIVE / _MID / _UPPER   the planning multipliers that turn the lower end of an audience into monthly
+                                    impressions (defaults 4.3 / 5.5 / 8.6; shared with Meta, see platform_scenarios.py)
     TIKTOK_OPTIMIZATION_GOAL        replaces the optimization goal of a Reach estimate (default REACH; the diagnostics say when CLICK, the
                                     pair in TikTok's own documentation example, is the one an account accepts)
     TIKTOK_OBJECTIVE_TYPE           the objective used for the location look-ups (default REACH)
@@ -47,7 +48,6 @@ import requests
 log = logging.getLogger(__name__)
 
 DEFAULT_API_BASE = "https://business-api.tiktok.com/open_api/v1.3"
-DEFAULT_IMPRESSIONS_PER_PERSON = 5.5
 DEFAULT_OBJECTIVE = "REACH"
 DEFAULT_OPTIMIZATION_GOAL = "REACH"
 
@@ -112,20 +112,6 @@ def optimization_goal_override() -> str:
     pairs the Reach objective with CLICK; if an ad account rejects REACH / REACH, this is the way to change it without a release)."""
     return _env("TIKTOK_OPTIMIZATION_GOAL").upper()
 
-
-def impressions_per_person() -> float:
-    """The planning factor: monthly impressions = audience x this. 5.5 unless TIKTOK_IMPRESSIONS_PER_PERSON says otherwise
-    (a value that is not a sensible number is ignored, never half-applied)."""
-    raw = _env("TIKTOK_IMPRESSIONS_PER_PERSON")
-    if raw:
-        try:
-            value = float(raw)
-            if 0.1 <= value <= 100 and value == value:
-                return value
-        except ValueError:
-            pass
-        log.warning("TIKTOK_IMPRESSIONS_PER_PERSON=%r is not a number between 0.1 and 100; using %s", raw, DEFAULT_IMPRESSIONS_PER_PERSON)
-    return DEFAULT_IMPRESSIONS_PER_PERSON
 
 
 _ADVERTISER_RE = re.compile(r"^\d{5,25}$", re.ASCII)

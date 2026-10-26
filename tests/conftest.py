@@ -119,7 +119,13 @@ for _var in _WIN_RATE_ENV:
     os.environ.pop(_var, None)
 
 
+# The audience-size platforms' planning multipliers (CONSTANZA_AUDIENCE_X_*) are configurable the same way; tests pin the defaults 4.3 / 5.5 / 8.6.
+_AUDIENCE_X_ENV = ("CONSTANZA_AUDIENCE_X_CONSERVATIVE", "CONSTANZA_AUDIENCE_X_MID", "CONSTANZA_AUDIENCE_X_UPPER")
+for _var in _AUDIENCE_X_ENV:
+    os.environ.pop(_var, None)
+
+
 @pytest.fixture(autouse=True)
 def _default_win_rate(monkeypatch):
-    for var in _WIN_RATE_ENV:
+    for var in (*_WIN_RATE_ENV, *_AUDIENCE_X_ENV):
         monkeypatch.delenv(var, raising=False)

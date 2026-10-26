@@ -4,8 +4,8 @@
  * Choosing the TikTok ads product swaps the dock's Entravision audience block for the targeting TikTok Ads Manager offers when
  * you set up an ad group - age, gender, languages, interests & behaviors, spending power, household income, device, placement and
  * campaign objective - and the result card shows what TikTok's own audience-size estimator answers: how many people match, as a
- * range and TikTok's own verdict on how narrow that is. Impressions are the audience x 5.5 a month (the planning factor the server
- * applies); est. uniques is the audience itself.
+ * range and TikTok's own verdict on how narrow that is. Impressions are the LOWER end of that range x 4.3 / 5.5 / 8.6 a month
+ * (conservative / mid / upper, mid is the default; the multipliers come from the server); est. uniques is the lower-end audience.
  *
  * Loaded after constanza.js, which owns the dock: this file only registers a forecast method with it (registerMethod). The server
  * side is app/services/constanza_tiktok.py (/api/constanza/tiktok/*, and /api/constanza/estimate for the numbers).
@@ -182,7 +182,7 @@
         return;
       }
       el.className = "cz-tt-status cz-tt-on";
-      el.innerHTML = `<span class="cz-dot"></span> Connected to TikTok · ad account ${esc(s.advertiser || "")} · impressions = audience × ${esc(String(s.impressions_per_person))} a month`;
+      el.innerHTML = `<span class="cz-dot"></span> Connected to TikTok · ad account ${esc(s.advertiser || "")} · impressions = ${esc(ruleOf(s).short)} a month`;
     }
 
     // The buttons of a group are built once (and again only when TikTok's menus arrive); after that a change only flips their state in
@@ -591,13 +591,21 @@
     // ---------------------------------------------------------------- the result
     const money = (n) => num(n);
 
+    // The planning rule the server applied: the lower end of TikTok's audience x conservative / mid / upper (platform_scenarios.py).
+    function ruleOf(source) {
+      const sc = source && source.scenarios;
+      const m = (sc && sc.multipliers) || { conservative: source && source.impressions_per_person, mid: source && source.impressions_per_person, upper: source && source.impressions_per_person };
+      return { m, short: `lower-end audience × ${m.mid} (${m.conservative} – ${m.upper})`,
+        long: `the lower end of that audience × ${m.conservative} (conservative), × ${m.mid} (mid, the default) or × ${m.upper} (upper)` };
+    }
+
     function headlineHtml(data, m) {
       const tt = data.tiktok, a = tt.audience;
-      const per = tt.impressions_per_person;
+      const rule = ruleOf(tt);
       const flight = m.months > 1 ? `<div class="cz-metric"><span class="cz-mlabel">Flight total · ${m.months} mo</span><span class="cz-mvalue">${money(m.total.mid)}</span><span class="cz-mrange">${compact(m.total.low)} – ${compact(m.total.high)}</span></div>` : "";
       return `<div class="cz-headline">
         <div class="cz-metric main"><span class="cz-mlabel">Audience size · TikTok accounts, 18+</span><span class="cz-mvalue">${money(a.mid)}</span><span class="cz-mrange">${compact(a.low)} – ${compact(a.high)} range</span></div>
-        <div class="cz-metric"><span class="cz-mlabel">Impressions · per month</span><span class="cz-mvalue">${money(m.month.mid)}</span><span class="cz-mrange">${compact(m.month.low)} – ${compact(m.month.high)} · audience × ${esc(String(per))}</span></div>
+        <div class="cz-metric"><span class="cz-mlabel">Impressions · per month</span><span class="cz-mvalue">${money(m.month.mid)}</span><span class="cz-mrange">${compact(m.month.low)} – ${compact(m.month.high)} · ${esc(rule.short)}</span></div>
         ${flight}
       </div>
       ${stageHtml(tt)}`;
@@ -625,8 +633,8 @@
       const tt = data.tiktok;
       const items = [
         `Asked of TikTok’s audience-size estimator (the one behind Ads Manager’s audience panel)${tt.request_id ? `; request ${esc(tt.request_id)}` : ""}${tt.cached ? "; answered from the last ten minutes, not asked again" : ""}.`,
-        `The audience is TikTok’s own count of the accounts that match; it leaves out under-18s. Impressions are that audience × ${esc(String(tt.impressions_per_person))} a month — Entravision’s planning factor, not a delivery forecast.`,
-        `The Avails step takes the monthly impressions, and the audience as est. uniques, so its frequency reads ${esc(String(tt.impressions_per_person))}.`,
+        `The audience is TikTok’s own count of the accounts that match; it leaves out under-18s. Monthly impressions are ${esc(ruleOf(tt).long)} — Entravision’s planning scenarios, not a delivery forecast.`,
+        `The Avails step takes the mid scenario as the monthly impressions, and the lower-end audience as est. uniques, so its frequency reads ${esc(String(ruleOf(tt).m.mid))}.`,
       ];
       return `<details class="cz-details"><summary>About this estimate</summary><ul class="cz-list">${items.map((i) => `<li>${i}</li>`).join("")}</ul></details>`;
     }
@@ -635,13 +643,13 @@
     function cardHtml(data) {
       const tt = data.tiktok, a = tt.audience;
       return `<p class="constanza-uniques">Audience size (TikTok accounts, 18+): <strong>${num(a.mid)}</strong> <small>(${num(a.low)} – ${num(a.high)})</small>${tt.stage_label ? ` · TikTok: ${esc(tt.stage_label)}` : ""}</p>
-        <p class="cz-note">Impressions are the audience × ${esc(String(tt.impressions_per_person))} a month. This is the geography alone — <strong>Refine in Constanza</strong> to set age, gender and interests.</p>`;
+        <p class="cz-note">Impressions are the ${esc(ruleOf(tt).short)} a month. This is the geography alone — <strong>Refine in Constanza</strong> to set age, gender and interests.</p>`;
     }
 
     function summaryLines(data, asked) {
       const tt = data.tiktok, a = tt.audience;
       const lines = [`Audience size (TikTok accounts, 18+): ${num(a.mid)} (${num(a.low)} – ${num(a.high)})${tt.stage_label ? `; TikTok says: ${tt.stage_label}` : ""}`,
-        `Impressions = audience × ${tt.impressions_per_person} per month`];
+        `Impressions = ${ruleOf(tt).short} per month (mid is the default)`];
       const parts = (asked && asked.method && asked.method.summary) || [];
       if (parts.length) lines.push(`Asked of TikTok: ${parts.join(" · ")}`);
       if ((tt.locations || []).length) lines.push(`Places sent to TikTok: ${tt.locations.map((l) => l.name).join("; ")}`);

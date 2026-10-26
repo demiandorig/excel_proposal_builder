@@ -29,7 +29,7 @@ class Clock:
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for name in ("TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID", "TIKTOK_API_BASE", "TIKTOK_IMPRESSIONS_PER_PERSON",
+    for name in ("TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID", "TIKTOK_API_BASE", "CONSTANZA_AUDIENCE_X_MID",
                  "TIKTOK_OBJECTIVE_TYPE", "TIKTOK_OPTIMIZATION_GOAL"):
         monkeypatch.delenv(name, raising=False)
     tc.reset_client()
@@ -63,13 +63,6 @@ def test_blank_secrets_are_the_same_as_missing(monkeypatch):
 def test_the_ad_account_is_only_ever_shown_by_its_last_four_digits(monkeypatch):
     monkeypatch.setenv("TIKTOK_ADVERTISER_ID", "7000000000000001234")
     assert tc.advertiser_hint() == "…1234" and "7000" not in tc.advertiser_hint()
-
-
-@pytest.mark.parametrize("raw,expected", [("", 5.5), ("6", 6.0), ("4.25", 4.25), ("abc", 5.5), ("0", 5.5), ("-3", 5.5), ("1000", 5.5), ("nan", 5.5)])
-def test_the_impressions_per_person_factor_is_5_5_unless_a_sensible_number_is_set(monkeypatch, raw, expected):
-    if raw:
-        monkeypatch.setenv("TIKTOK_IMPRESSIONS_PER_PERSON", raw)
-    assert tc.impressions_per_person() == expected
 
 
 def test_the_shared_client_needs_the_secrets_and_is_rebuilt_when_they_change(monkeypatch):

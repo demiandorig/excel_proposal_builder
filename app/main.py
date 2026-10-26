@@ -97,6 +97,7 @@ from app.services import forecast_store
 from app.services.constanza_engine import estimate_avails
 from app.services import audience_taxonomy
 from app.services import constanza_hispanic
+from app.services import platform_scenarios
 from app.services import constanza_tiktok as tiktok_svc
 from app.services import tiktok_client
 from app.services import tiktok_diagnose
@@ -1627,8 +1628,9 @@ def _constanza_tiktok_estimate(body: "ConstanzaEstimateRequest", resolution) -> 
         "geo_confidence": resolution.geo_confidence,
         "months": result.months,
         "imps_low": total["low"], "imps_mid": total["mid"], "imps_high": total["high"],
-        # est. uniques is the audience itself (a head count, not cumulative), so the Avails step's frequency is the planning factor
-        "est_uniques": size.mid,
+        # est. uniques is TikTok's LOWER-end audience (a head count, not cumulative; the base of the three scenarios), so the Avails step's
+        # frequency is the mid multiplier
+        "est_uniques": size.lower,
         "reach_universe": None,
         "series": None,
         "weeks": None,
@@ -1646,6 +1648,8 @@ def _constanza_tiktok_estimate(body: "ConstanzaEstimateRequest", resolution) -> 
             "stage_label": tiktok_client.STAGE_LABELS.get(size.stage),
             "stage_note": tiktok_client.STAGE_NOTES.get(size.stage),
             "impressions_per_person": result.factor,
+            # the three scenarios (conservative / mid / upper = lower-end audience x 4.3 / 5.5 / 8.6): monthly and flight totals, and the rule
+            "scenarios": {**platform_scenarios.to_public(size.lower), "by_scenario": result.scenarios},
             "monthly": monthly,
             "locations": [loc.to_public() for loc in result.mapping.locations],
             "unmapped": unmapped,
@@ -1659,7 +1663,7 @@ def _constanza_tiktok_estimate(body: "ConstanzaEstimateRequest", resolution) -> 
 
 @app.get("/api/constanza/tiktok/status")
 def constanza_tiktok_status() -> dict:
-    """Whether the TikTok connection is set up (which settings are missing, never their values), the planning factor, and the
+    """Whether the TikTok connection is set up (which settings are missing, never their values), the planning multipliers, and the
     fixed menus of the TikTok panel (age groups, objectives, placements, household income, ...)."""
     return tiktok_svc.status()
 

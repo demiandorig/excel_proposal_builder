@@ -1,4 +1,4 @@
-"""Constanza x TikTok: the validated targeting, the request TikTok's estimator takes, the estimate card's numbers (audience x 5.5),
+"""Constanza x TikTok: the validated targeting, the request TikTok's estimator takes, the estimate card's numbers (the lower-end audience x 4.3 / 5.5 / 8.6),
 and the API routes - against the fake TikTok API (tests/tiktok_support.py)."""
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ ESTIMATE = "/ad/audience_size/estimate/"
 @pytest.fixture
 def tiktok(monkeypatch):
     """A fake TikTok behind the shared client, and a catalog / forecast map that need no database."""
-    for name in ("TIKTOK_IMPRESSIONS_PER_PERSON", "TIKTOK_OBJECTIVE_TYPE", "TIKTOK_OPTIMIZATION_GOAL"):
+    for name in ("CONSTANZA_AUDIENCE_X_CONSERVATIVE", "CONSTANZA_AUDIENCE_X_MID", "CONSTANZA_AUDIENCE_X_UPPER", "TIKTOK_OBJECTIVE_TYPE", "TIKTOK_OPTIMIZATION_GOAL"):
         monkeypatch.delenv(name, raising=False)
     client = make_client(FakeTikTok())
     monkeypatch.setattr(tc, "get_client", lambda: client)
@@ -151,18 +151,23 @@ def test_nothing_that_was_not_asked_for_is_sent():
 
 # --------------------------------------------------------------------------------------------- the numbers
 
-def test_monthly_impressions_are_the_audience_times_5_5_and_the_flight_is_that_times_the_months(tiktok):
+def test_monthly_impressions_are_three_scenarios_of_the_lower_end_audience_and_the_flight_is_that_times_the_months(tiktok):
     est = ct.estimate(resolve_geo("Los Angeles"), ct.Targeting(), 3, client=tiktok)
     size = est.size
-    assert est.factor == 5.5 and est.months == 3
-    assert est.monthly == pytest.approx({"low": size.lower * 5.5, "mid": size.mid * 5.5, "high": size.upper * 5.5})
-    assert est.total["mid"] == pytest.approx(size.mid * 5.5 * 3) and est.total["low"] < est.total["mid"] < est.total["high"]
+    assert est.factor == 5.5 and est.months == 3 and est.multipliers == {"conservative": 4.3, "mid": 5.5, "upper": 8.6}
+    # every scenario is the LOWER end of TikTok's range x its multiplier: conservative 4.3 (low), mid 5.5 (the default), upper 8.6 (high)
+    assert est.monthly == pytest.approx({"low": size.lower * 4.3, "mid": size.lower * 5.5, "high": size.lower * 8.6})
+    assert est.total["mid"] == pytest.approx(size.lower * 5.5 * 3) and est.total["low"] < est.total["mid"] < est.total["high"]
+    assert est.scenarios["mid"] == {"multiplier": 5.5, "monthly": pytest.approx(size.lower * 5.5), "total": pytest.approx(size.lower * 5.5 * 3)}
+    assert size.lower < size.mid < size.upper                                    # the upper end of TikTok's range is context, not a base
 
 
-def test_the_planning_factor_can_be_changed_by_a_setting(tiktok, monkeypatch):
-    monkeypatch.setenv("TIKTOK_IMPRESSIONS_PER_PERSON", "6")
+def test_the_planning_multipliers_can_be_changed_by_settings_and_a_bad_set_is_ignored(tiktok, monkeypatch):
+    monkeypatch.setenv("CONSTANZA_AUDIENCE_X_MID", "6")
     est = ct.estimate(resolve_geo("Los Angeles"), ct.Targeting(), 1, client=tiktok)
-    assert est.factor == 6.0 and est.monthly["mid"] == pytest.approx(est.size.mid * 6)
+    assert est.factor == 6.0 and est.monthly["mid"] == pytest.approx(est.size.lower * 6) and est.monthly["low"] == pytest.approx(est.size.lower * 4.3)
+    monkeypatch.setenv("CONSTANZA_AUDIENCE_X_MID", "3")                          # below the conservative multiplier: out of order, the defaults are used
+    assert ct.estimate(resolve_geo("Los Angeles"), ct.Targeting(), 1, client=tiktok).factor == 5.5
 
 
 def test_the_estimate_sends_the_markets_zip_codes_and_targeting_tiktok_needs(tiktok):
@@ -195,7 +200,8 @@ def test_when_nothing_can_be_placed_no_estimate_is_asked_for(tiktok):
 def test_the_notes_say_what_the_audience_is_and_that_the_impressions_are_a_planning_factor(tiktok):
     est = ct.estimate(resolve_geo("Los Angeles"), ct.Targeting(), 1, client=tiktok)
     text = " ".join(est.notes())
-    assert "TikTok accounts (18 and over)" in text and "x 5.5" in text and "not a delivery forecast" in text
+    assert "TikTok accounts (18 and over)" in text and "lower-end audience" in text and "x 4.3 / 5.5 / 8.6" in text.replace("× ", "x ").replace("x 4.3", "x 4.3")
+    assert "conservative / mid / upper; mid is the default" in text and "not a delivery forecast" in text
 
 
 def test_a_narrow_audience_gets_tiktoks_own_warning(tiktok):
@@ -220,9 +226,13 @@ def test_the_estimate_is_shaped_like_every_other_estimate_plus_a_tiktok_block(ti
     out = main.constanza_estimate(request(months=2))
     t = out["tiktok"]
     assert out["platform"] == "tiktok" and out["confidence"] == "live_api" and out["months"] == 2 and out["series"] is None and out["by_area"] == []
-    assert out["imps_mid"] == pytest.approx(t["audience"]["mid"] * 5.5 * 2) and out["imps_low"] < out["imps_mid"] < out["imps_high"]
-    assert out["est_uniques"] == t["audience"]["mid"] and out["imps_mid"] / 2 / out["est_uniques"] == pytest.approx(5.5)   # the Avails step's frequency is the factor
-    assert t["monthly"]["mid"] == pytest.approx(t["audience"]["mid"] * 5.5) and t["impressions_per_person"] == 5.5
+    lower = t["audience"]["low"]
+    assert out["imps_low"] == pytest.approx(lower * 4.3 * 2) and out["imps_mid"] == pytest.approx(lower * 5.5 * 2) and out["imps_high"] == pytest.approx(lower * 8.6 * 2)
+    assert out["est_uniques"] == lower and out["imps_mid"] / 2 / out["est_uniques"] == pytest.approx(5.5)    # the Avails step's frequency is the MID multiplier
+    assert t["monthly"] == pytest.approx({"low": lower * 4.3, "mid": lower * 5.5, "high": lower * 8.6}) and t["impressions_per_person"] == 5.5
+    sc = t["scenarios"]
+    assert sc["basis"] == "lower_end" and sc["default"] == "mid" and sc["multipliers"] == {"conservative": 4.3, "mid": 5.5, "upper": 8.6}
+    assert sc["by_scenario"]["upper"]["total"] == pytest.approx(lower * 8.6 * 2) and sc["monthly"]["conservative"] == pytest.approx(lower * 4.3)
     assert t["locations"][0]["source"].startswith("Los Angeles") and t["locations"][0]["geo_type"] == "DMA" and t["unmapped"] == []
     assert t["objective"] == "Reach" and t["placements"] == ["PLACEMENT_TIKTOK"] and t["request_id"] and t["cached"] is False
     assert t["stage"] in (1, 2, 3, 4) and t["stage_label"]
@@ -343,6 +353,7 @@ def test_the_status_never_carries_a_secret(monkeypatch):
     out = main.constanza_tiktok_status()
     blob = json.dumps(out)
     assert out["configured"] is True and out["missing"] == [] and out["advertiser"] == "…1234" and out["impressions_per_person"] == 5.5
+    assert out["scenarios"]["multipliers"] == {"conservative": 4.3, "mid": 5.5, "upper": 8.6}
     assert "SECRET-TOKEN-VALUE" not in blob and "7000000000000001234" not in blob
 
 

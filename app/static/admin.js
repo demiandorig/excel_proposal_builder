@@ -1816,7 +1816,7 @@ async function loadTikTokStatus() {
     const s = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(detailText(s.detail, res.statusText));
     if (s.configured) {
-      state.innerHTML = `<span class="fc-badge fc-custom">Connected</span> ad account ${escapeHtml(s.advertiser || "")} · impressions = audience × ${escapeHtml(String(s.impressions_per_person))}`;
+      state.innerHTML = `<span class="fc-badge fc-custom">Connected</span> ad account ${escapeHtml(s.advertiser || "")} · impressions = lower-end audience × ${escapeHtml(((s.scenarios && s.scenarios.multipliers) ? [s.scenarios.multipliers.conservative, s.scenarios.multipliers.mid, s.scenarios.multipliers.upper] : [s.impressions_per_person]).join(" / "))}`;
     } else {
       state.innerHTML = `<span class="fc-badge fc-default">Not connected</span> add <code>${s.missing.map(escapeHtml).join("</code> and <code>")}</code> to the app's secrets`;
     }
