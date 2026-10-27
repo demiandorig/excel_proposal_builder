@@ -1172,6 +1172,7 @@ async function startNewProposal() {
 function _clearPerProposalState() {
   _resetEpoch++;
   state.constanzaGeoOverride = {};       // a geography picked for a line belongs to the proposal being left
+  state.constanzaHispanic = {};          // ... and so does a line's own Hispanic targeting switch
   if (window.Constanza) Constanza.onProposalReset();
   state.strategyBrief = null;
   state.roadblocks = null;
@@ -5085,13 +5086,24 @@ function applySovDisplay(lid, pct) {
   }
   const tier = sovTier(pct);
   const pctLabel = pct.toFixed(0);
+  // Figures Constanza applied with a win rate are expected delivery, not the platform's avails: say what the percent is of
+  // (>100% then means the plan buys more than Entravision expects to win, not more than exists).
+  const entryForSov = (state.availsData || {})[lid] || {};
+  const winRate = entryForSov.freeform ? null : entryForSov.win_rate;      // free-form: the SOV is the planner's own declared %, of nothing we computed
+  const hispanicShare = entryForSov.freeform ? null : entryForSov.hispanic_share;      // the avails were also narrowed to the Hispanic audience
+  const against = winRate ? "expected delivery" : (hispanicShare != null ? "Hispanic avails" : "avails");
   if (badge) {
     badge.className = `sov-badge sov-${tier}`;
-    badge.textContent = `${pctLabel}% of avails`;
+    badge.textContent = `${pctLabel}% of ${against}`;
   }
   if (helper) {
     helper.className = `sov-helper sov-${tier}`;
-    let text = `Proposed product allocation uses: ${pctLabel}% of total avails`;
+    const hispanicText = hispanicShare != null ? ` x the ${Math.round(hispanicShare * 1000) / 10}% Hispanic share` : "";
+    let text = winRate
+      ? `Proposed product allocation uses: ${pctLabel}% of expected delivery (the avails x a ${Math.round(winRate * 1000) / 10}% win rate${hispanicText})`
+      : (hispanicShare != null
+        ? `Proposed product allocation uses: ${pctLabel}% of Hispanic avails (the avails${hispanicText})`
+        : `Proposed product allocation uses: ${pctLabel}% of total avails`);
     if (_isFullFlight()) {
       // The ceilings are MONTHLY, the budget is the whole flight (one period): say what is being compared.
       const li = state.lineItems.find(x => x.id === lid);
@@ -6430,6 +6442,126 @@ function _jumpToCurateField(field, lineId) {
   }, 80);
 }
 
+function _metaFullFlightRetailBudget(li) {
+  // Step 04's line budget is per selected billing period; li.months is
+  // that period's count (1 for full-flight), so this is the actual retail
+  // spend for the whole line, not a monthly-equivalent approximation.
+  return Math.max(0, Number(li.monthly_budget) || 0) * Math.max(1, Number(li.months) || 1);
+}
+
+// The interests / behaviors / demographics a planner picked from Meta's own lists for a line (kept for the session; a saved snapshot restores them).
+function _metaSelected(lid) {
+  state.metaTargeting = state.metaTargeting || {};
+  if (!state.metaTargeting[lid]) {
+    const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
+    state.metaTargeting[lid] = ((saved && saved.meta_targeting && saved.meta_targeting.detailed) || []).map(x => ({ id: x.id, name: x.name, type: x.type }));
+  }
+  return state.metaTargeting[lid];
+}
+
+function _metaChipsHtml(lid) {
+  const chosen = _metaSelected(lid);
+  if (!chosen.length) return `<span class="cz-note">None chosen: the audience is everyone Meta counts on its default placements (Facebook, Instagram, Messenger, Audience Network) in the geography.</span>`;
+  return chosen.map((x, i) => `<span class="cz-chip cz-ok">${escapeHtml(x.name)} <small>${escapeHtml(x.type.replace("_", " "))}</small>`
+    + `<button type="button" class="cz-x" data-meta-act="remove" data-i="${i}" aria-label="Remove ${escapeHtml(x.name)}">×</button></span>`).join("");
+}
+
+// What a live pull was for, in words: "Los Angeles (TV market), women 25–44, any of: Soccer".
+function _metaPulledFor(data) {
+  const t = data && data.meta_targeting;
+  if (!t) return "";
+  const kind = { geo_market: "TV market", city: "city", region: "state / region", zip: "ZIP", country: "country" }[t.geo_type] || t.geo_type;
+  const age = t.age_min != null || t.age_max != null ? `ages ${t.age_min != null ? t.age_min : "18"}–${t.age_max != null ? t.age_max : "65+"}` : "";
+  const gender = t.gender === "male" ? "men" : (t.gender === "female" ? "women" : "");
+  const detailed = (t.detailed || []).length ? `any of: ${t.detailed.map(x => x.name).join(", ")}` : "";
+  return [`${t.geo_name || "Meta geography " + t.geo_key} (${kind})`, [gender, age].filter(Boolean).join(" "), detailed].filter(Boolean).join(", ");
+}
+
+function _metaForecastSummaryHtml(data, li, p, forceStale) {
+  if (!data) return "";
+  const n = value => Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 });
+  const money = value => "$" + Number(value).toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const audience = data.potential_audience;
+  const sc = data.scenarios;
+  const effectiveCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm;
+  const stale = !!forceStale
+    || Math.abs(Number(data.retail_budget) - _metaFullFlightRetailBudget(li)) > 0.01
+    || data.product_name !== li.product_name
+    || Number(data.months) !== _constanzaFlightMonths(li)
+    || data.proposal_geo !== _constanzaGeoFor(li.id)
+    || data.target_text !== _effectiveTargetText(li)
+    || Math.abs(Number(data.retail_cpm) - Number(effectiveCpm)) > 0.01;
+  let table = "";
+  if (sc) {
+    const m = sc.multipliers;
+    const cols = [["conservative", "Conservative"], ["mid", "Mid · default"], ["upper", "Upper"]];
+    table = `<table class="constanza-range-table meta-scenarios"><tr><th></th>${cols.map(([k, label]) => `<th>${label} <small>× ${escapeHtml(String(m[k]))}</small></th>`).join("")}</tr>
+      <tr><td>Imps / month</td>${cols.map(([k]) => `<td${k === "mid" ? " class=\"meta-mid\"" : ""}>${n(sc.monthly[k])}</td>`).join("")}</tr>
+      ${sc.months > 1 ? `<tr><td>Flight · ${n(sc.months)} mo</td>${cols.map(([k]) => `<td>${n(sc.flight[k])}</td>`).join("")}</tr>` : ""}
+      <tr><td>Retail spend at the planning CPM</td>${cols.map(([k]) => `<td>${money(sc.retail_spend_at_flight[k])}</td>`).join("")}</tr></table>`;
+  }
+  return `<div class="meta-plan-result">
+    <strong>${stale ? "⚠ Inputs changed — recalculate" : "Meta audience scenarios"}</strong>
+    ${audience ? `<p>Meta audience (lower – upper end): <strong>${n(audience.lower)}</strong> – ${n(audience.upper)} accounts ${audience.source === "meta_api" ? "(from Meta)" : "(entered manually)"}.${data.meta_targeting ? ` Pulled for ${escapeHtml(_metaPulledFor(data))}.` : ""} The scenarios use the <strong>lower end</strong>: it is the est. uniques the Avails step gets, so its frequency reads ${sc ? escapeHtml(String(sc.multipliers.mid)) : "5.5"}.</p>` : `<p>Enter or pull an audience to see the scenarios.</p>`}
+    ${table}
+    <p>Budget cross-check: ${money(data.retail_budget)} retail → ${money(data.media_budget)} media at a ${money(data.retail_cpm)} retail CPM buys about ${n(data.budget_impressions)} impressions over the ${n(data.months)}-month flight. That is what the budget pays for, not avails.</p>
+    ${sc && !stale ? `<button type="button" class="btn-secondary meta-insert-btn" data-meta-act="insert" data-lid="${escapeAttr(li.id)}">Insert the mid-case (${n(sc.monthly.mid)} / month) into Avails →</button>` : ""}
+    <small>Planning scenarios, not a delivery forecast · ${escapeHtml(String(data.as_of || "").slice(0, 10))}</small>
+  </div>`;
+}
+
+// "(no flight dates: 1 month assumed)" when the line has no readable dates: the flight length is then a stand-in, not the flight's.
+function _metaFlightHint(li) {
+  const start = _mbParseDate(_effectiveStartDate(state.activeTierLabel));
+  const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
+  return start && end ? "" : " (no flight dates: the flight length is not known, so 1 month is assumed)";
+}
+
+function _metaForecastPanelHtml(li, p, existing) {
+  const saved = existing.meta_forecast || null;
+  const mult = (state.catalog && state.catalog.audience_multipliers) || { conservative: 4.3, mid: 5.5, upper: 8.6 };
+  const was = (saved && saved.meta_targeting) || {};
+  const manualLower = saved && saved.potential_audience && saved.potential_audience.source === "manual" ? saved.potential_audience.lower : "";
+  const manualUpper = saved && saved.potential_audience && saved.potential_audience.source === "manual" && saved.potential_audience.upper !== saved.potential_audience.lower
+    ? saved.potential_audience.upper : "";
+  const geo = _constanzaGeoFor(li.id);
+  const effectiveCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm;
+  return `<div class="meta-plan-block" data-meta-lid="${escapeAttr(li.id)}">
+    <strong>Meta audience scenarios</strong>
+    <p>Retail budget ${_metaFullFlightRetailBudget(li).toLocaleString("en-US", { style: "currency", currency: "USD" })} over ${_constanzaFlightMonths(li)} month(s)${_metaFlightHint(li)}; retail CPM $${escapeHtml(effectiveCpm)}. Monthly impressions are the <strong>lower end</strong> of Meta's audience × ${escapeHtml(String(mult.conservative))} (conservative), ${escapeHtml(String(mult.mid))} (mid, the default) or ${escapeHtml(String(mult.upper))} (upper). Meta counts people on its default placements (Facebook, Instagram, Messenger, Audience Network), as Ads Manager's estimated audience size does.</p>
+    <div class="meta-plan-fields">
+      <label>Audience size, lower end <input data-meta-input class="meta-audience" type="number" min="0" max="1000000000" placeholder="From Ads Manager" value="${escapeHtml(manualLower)}" /></label>
+      <label>Upper end (optional) <input data-meta-input class="meta-audience-upper" type="number" min="0" max="1000000000" placeholder="Same as lower" value="${escapeHtml(manualUpper)}" /></label>
+    </div>
+    <button type="button" class="btn-secondary meta-model-btn" data-lid="${escapeAttr(li.id)}">Calculate scenarios</button>
+    <details class="meta-live-details"><summary>Pull the audience from Meta (API)</summary>
+      <p>Choose the exact Meta geography; age, gender and interests are optional (any of the chosen interests / behaviors). Anything else about the campaign (exclusions, placements, account restrictions) must be checked in Ads Manager.</p>
+      <div class="meta-plan-fields">
+        <label>Meta geography type <select class="meta-geo-type"><option value="geo_market">TV market (Meta's Comscore markets)</option><option value="city">City</option><option value="region">State / region</option><option value="zip">ZIP</option><option value="country">Country</option></select></label>
+        <label>Search <input data-meta-input class="meta-geo-query" type="text" maxlength="100" value="${escapeHtml(geo)}" /></label>
+        <button type="button" class="btn-secondary meta-search-btn" data-lid="${escapeAttr(li.id)}">Find Meta geographies</button>
+        <label>Matched geography <select class="meta-geo-choice"><option value="">Search and choose an exact match</option></select></label>
+        <label>Minimum age <input data-meta-input class="meta-age-min" type="number" min="18" max="65" placeholder="All" value="${escapeHtml(was.age_min != null ? was.age_min : "")}" /></label>
+        <label>Maximum age <input data-meta-input class="meta-age-max" type="number" min="18" max="65" placeholder="All" value="${escapeHtml(was.age_max != null ? was.age_max : "")}" /></label>
+        <label>Gender <select class="meta-gender"><option value="all">All</option><option value="male"${was.gender === "male" ? " selected" : ""}>Male</option><option value="female"${was.gender === "female" ? " selected" : ""}>Female</option></select></label>
+      </div>
+      <div class="meta-targeting">
+        <strong>Interests &amp; behaviors</strong> <small>(Meta's own lists)</small>
+        <div class="meta-plan-fields">
+          <label>Search <input data-meta-input class="meta-target-query" type="search" maxlength="80" placeholder="soccer, new parents, small business…" /></label>
+          <button type="button" class="btn-secondary" data-meta-act="search" data-lid="${escapeAttr(li.id)}">Search Meta</button>
+          <label>Or browse a whole list (A–Z; type above to narrow it) <select class="meta-browse-kind"><option value="interests">Interests</option><option value="behaviors">Behaviors</option><option value="demographics">Demographics (life events, income, …)</option></select></label>
+          <button type="button" class="btn-secondary" data-meta-act="browse" data-lid="${escapeAttr(li.id)}">Browse</button>
+        </div>
+        <div class="meta-target-results" aria-live="polite"></div>
+        <div class="cz-chips meta-target-chips">${_metaChipsHtml(li.id)}</div>
+      </div>
+      <button type="button" class="btn-secondary meta-pull-btn" data-lid="${escapeAttr(li.id)}">Pull audience and calculate</button>
+    </details>
+    <div class="meta-plan-feedback" aria-live="polite">${_metaForecastSummaryHtml(saved, li, p)}</div>
+  </div>`;
+}
+
 function renderAvailsGrid() {
   renderAllTierTabStrips();
   const rt = (state.parsed.request_type || "").toLowerCase();
@@ -6540,7 +6672,8 @@ function renderAvailsGrid() {
         `}
       </div>
       <p class="sov-helper" id="sov-helper-${escapeAttr(li.id)}"></p>
-      ${!isFreeform && _forecastEnabled(p) ? `
+      ${!isFreeform && p.meta_retail_cpm != null ? _metaForecastPanelHtml(li, p, existing) : ""}
+      ${!isFreeform && _forecastEnabled(p) && p.meta_retail_cpm == null ? `
       <div class="constanza-block">
         ${window.Constanza ? Constanza.periodLineHtml(p.forecast && p.forecast.series) : ""}
         <div class="cz-card-actions">
@@ -6602,7 +6735,7 @@ function renderAvailsGrid() {
   // is meaningless, always "on" per the checkbox default) and the "_text"
   // free-form inputs above (running parseFormattedInput on "50 to 100"
   // would strip the letters and glue the digits together into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input])').forEach(inp => {
     inp.addEventListener("focus", e => {
       const raw = parseFormattedInput(e.target.value);
       // Frequency is legitimately fractional (5.5) — rounding it here and
@@ -6640,7 +6773,7 @@ function renderAvailsGrid() {
   // both overwrite that with a numeric parse of the same text AND mangle
   // it in the process — parseFormattedInput("50 to 100") strips the
   // letters and glues what's left into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input])').forEach(inp => {
     inp.addEventListener("blur", e => {
       const lid = e.target.dataset.lid;
       const key = e.target.dataset.key;
@@ -6667,6 +6800,8 @@ function renderAvailsGrid() {
       }
       e.target._focusParsed = undefined;
       entry[key] = value;
+      delete entry.win_rate;      // the planner typed over it: no longer Constanza's win-rate-adjusted figure
+      delete entry.hispanic_share;    // ... nor its Hispanic-narrowed one
 
       const impsInputEl = () => grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="max_imps"]`);
       const spendInputEl = () => grid.querySelector(`[data-lid="${escapeAttr(lid)}"][data-key="max_spend"]`);
@@ -6765,6 +6900,30 @@ function renderAvailsGrid() {
   grid.querySelectorAll(".constanza-line-dock-btn").forEach(btn => {
     btn.addEventListener("click", () => openConstanzaForLine(btn.dataset.lid));
   });
+  grid.querySelectorAll(".meta-plan-block").forEach(panel => {
+    panel.addEventListener("click", e => onMetaPanelClick(panel, e));
+    const q = panel.querySelector(".meta-target-query");
+    if (q) q.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); onMetaTargetLookup(panel.dataset.metaLid, false); } });
+    panel.querySelectorAll(".meta-audience, .meta-audience-upper, .meta-geo-choice, .meta-age-min, .meta-age-max, .meta-gender").forEach(el => {
+      el.addEventListener("input", () => _metaMarkStale(panel));
+      el.addEventListener("change", () => _metaMarkStale(panel));
+    });
+  });
+  grid.querySelectorAll(".meta-model-btn").forEach(btn => {
+    btn.addEventListener("click", () => onMetaForecast(btn.dataset.lid, false));
+  });
+  grid.querySelectorAll(".meta-pull-btn").forEach(btn => {
+    btn.addEventListener("click", () => onMetaForecast(btn.dataset.lid, true));
+  });
+  grid.querySelectorAll(".meta-search-btn").forEach(btn => {
+    btn.addEventListener("click", () => onMetaGeoSearch(btn.dataset.lid));
+  });
+  grid.querySelectorAll(".meta-geo-type, .meta-geo-query").forEach(input => {
+    input.addEventListener("input", () => {
+      const choice = input.closest(".meta-plan-block").querySelector(".meta-geo-choice");
+      choice.innerHTML = '<option value="">Search and choose an exact match</option>';
+    });
+  });
   if (window.Constanza) Constanza.hintOnce();
 }
 
@@ -6831,6 +6990,35 @@ function _constanzaGeoFor(lid) {
   return picked || _effectiveGeo(state.activeTierLabel);
 }
 
+// Does this line's targeting name a Hispanic / Latino audience? A line's own target text REPLACES the campaign's (as everywhere else, see
+// _effectiveTargetText); only a line with none falls back to the campaign's demo / behavioral. A language word alone ("Spanish") does not count: it
+// describes the creative, and Spanish-language viewers are a narrower audience than Hispanic ones. Mentions that leave the audience OUT ("non-Hispanic",
+// "not targeting Hispanic", "excluding all Hispanic and Latino audiences") or take everyone ("Hispanic and non-Hispanic") do not count either.
+// (The Python twin is constanza_audience.mentions_hispanic_audience; a pattern cannot read intent, so the card shows the switch and says where it came from.)
+function _targetsHispanic(li) {
+  const word = "(?:hispanics?|latinos?|latinas?|latinx|latines?)";
+  const both = new RegExp(`\\b${word}\\s*(?:,|/|&|\\band\\b|\\bor\\b|\\bvs\\.?|\\bversus\\b)\\s*(?:and\\s+|or\\s+)?(?:non|not)[-\\s]*${word}`, "gi");
+  const negated = new RegExp(
+    `(?:\\b(?:non|not|no|excluding|exclude|excl|except|without|avoid|avoiding|skip|skipping)\\b\\.?|\\bw/o\\b|\\bnot\\s+targeting\\b|\\bnot\\s+for\\b)[-\\s]*`
+    + `(?:targeting\\s+)?(?:(?:the|all|any)\\s+)*(?:(?:${word})\\s*(?:(?:,|and|&|or|/)\\s*)?)+`, "gi");
+  const p = state.parsed || {};
+  const own = li && li.target_override && String(li.target_override).trim();
+  const parts = own ? [own, li.target_secondary] : [p.demo, p.behavioral, li && li.target_secondary];
+  const text = parts.filter(Boolean).join(" ").replace(both, " ").replace(negated, " ");
+  return new RegExp(`\\b${word}\\b`, "i").test(text);
+}
+
+// Hispanic targeting for a line's avails: the planner's own switch on its card when they used it; else ON when the line's own or the proposal's
+// targeting names a Hispanic audience (most of our campaigns do); else null = the product's own default (the server decides). Only platform
+// data has avails to narrow: a population-share or TikTok estimate is never sent the flag.
+function _constanzaHispanicFor(lid, li) {
+  const prod = li && state.productIndex ? state.productIndex[li.product_name] : null;
+  if (!prod || !prod.forecast || prod.forecast.method !== "platform") return null;
+  const mine = state.constanzaHispanic && state.constanzaHispanic[lid];
+  if (mine === true || mine === false) return mine;
+  return _targetsHispanic(li) ? true : null;
+}
+
 // Days from the flight's first day to its last, both counted: what a weekly (live-sports) series is scaled by. null when
 // the proposal has no readable dates.
 function _constanzaFlightDays() {
@@ -6838,6 +7026,181 @@ function _constanzaFlightDays() {
   const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
   if (!start || !end || end < start) return null;
   return Math.min(Math.round((end - start) / 86400000) + 1, 3660);
+}
+
+function _metaPanel(lid) {
+  return document.querySelector(`.meta-plan-block[data-meta-lid="${escapeAttr(lid)}"]`);
+}
+
+function _metaFeedback(panel, message) {
+  const el = panel && panel.querySelector(".meta-plan-feedback");
+  if (el) el.innerHTML = `<p class="constanza-error">${escapeHtml(message)}</p>`;
+}
+
+async function onMetaGeoSearch(lid) {
+  const panel = _metaPanel(lid);
+  if (!panel) return;
+  const query = panel.querySelector(".meta-geo-query").value.trim();
+  const locationType = panel.querySelector(".meta-geo-type").value;
+  const btn = panel.querySelector(".meta-search-btn");
+  const choice = panel.querySelector(".meta-geo-choice");
+  if (!query) { _metaFeedback(panel, "Enter a Meta geography to search."); return; }
+  btn.disabled = true;
+  choice.innerHTML = '<option value="">Searching…</option>';
+  try {
+    const response = await fetch("/api/constanza/meta-geos", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, location_type: locationType }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+    choice.innerHTML = '<option value="">Choose an exact Meta match</option>' +
+      (data.locations || []).map(loc => `<option value="${escapeHtml(loc.key)}">${escapeHtml(loc.name)}${loc.region ? " · " + escapeHtml(loc.region) : ""}${loc.country_code ? " · " + escapeHtml(loc.country_code) : ""}</option>`).join("");
+    if (!data.locations || !data.locations.length) _metaFeedback(panel, "Meta found no matching geography. Try a city, ZIP, state, or the market name as Meta lists it (Meta's markets are Comscore markets, which can differ from Nielsen DMAs).");
+  } catch (error) {
+    choice.innerHTML = '<option value="">Search and choose an exact match</option>';
+    _metaFeedback(panel, String(error.message || error));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// What a keyword (or a whole list) finds in Meta's interests / behaviors / demographics, as buttons a planner clicks to choose.
+function _metaTargetResultsHtml(groups, chosen) {
+  const have = new Set(chosen.map(x => `${x.type}:${x.id}`));
+  const sections = groups.filter(([, items]) => items.length).map(([label, items]) =>
+    `<div class="meta-target-group"><span class="cz-note">${escapeHtml(label)}</span><div class="cz-chips">${items.slice(0, 60).map(it =>
+      `<button type="button" class="cz-chip ${have.has(`${it.type}:${it.id}`) ? "cz-ok" : ""}" data-meta-act="add" data-id="${escapeHtml(it.id)}" data-type="${escapeHtml(it.type)}" data-name="${escapeHtml(it.name)}"` +
+      `${it.path && it.path.length ? ` title="${escapeHtml(it.path.join(" › "))}"` : ""}>${escapeHtml(it.name)}${it.audience_lower != null ? ` <small>${Number(it.audience_lower).toLocaleString("en-US")}+</small>` : ""}</button>`).join("")}</div>${items.length > 60 ? `<span class="cz-note">${items.length - 60} more: search to narrow.</span>` : ""}</div>`);
+  return sections.length ? sections.join("") : `<span class="cz-note">Nothing found: try other words, or browse the list.</span>`;
+}
+
+async function onMetaTargetLookup(lid, browse) {
+  const panel = _metaPanel(lid);
+  if (!panel) return;
+  const box = panel.querySelector(".meta-target-results");
+  const query = panel.querySelector(".meta-target-query").value.trim();
+  const kind = panel.querySelector(".meta-browse-kind").value;
+  if (!browse && query.length < 2) { box.innerHTML = '<span class="cz-note">Type at least two letters to search.</span>'; return; }
+  box.innerHTML = '<span class="cz-note">Asking Meta…</span>';
+  try {
+    const response = await fetch(browse ? `/api/constanza/meta-targeting?kind=${encodeURIComponent(kind)}` : `/api/constanza/meta-targeting?q=${encodeURIComponent(query)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const narrowed = (data.items || []).filter(it => words.every(w => (it.name + " " + (it.path || []).join(" ")).toLowerCase().includes(w)));
+    const groups = browse ? [[kind, narrowed]]
+      : [["Interests", data.results.interests || []], ["Behaviors", data.results.behaviors || []], ["Demographics", data.results.demographics || []]];
+    box.innerHTML = _metaTargetResultsHtml(groups, _metaSelected(lid));
+  } catch (error) {
+    box.innerHTML = `<p class="constanza-error">${escapeHtml(String(error.message || error))}</p>`;
+  }
+}
+
+// Clicks inside a Meta panel: choose / remove an interest, search or browse Meta's lists, insert the mid scenario into Avails.
+function onMetaPanelClick(panel, event) {
+  const target = event.target.closest("[data-meta-act]");
+  if (!target || !panel.contains(target)) return;
+  const lid = panel.dataset.metaLid;
+  const act = target.dataset.metaAct;
+  if (act === "search") onMetaTargetLookup(lid, false);
+  else if (act === "browse") onMetaTargetLookup(lid, true);
+  else if (act === "insert") onMetaInsert(lid);
+  else if (act === "add" || act === "remove") {
+    const chosen = _metaSelected(lid);
+    if (act === "add") {
+      const item = { id: target.dataset.id, name: target.dataset.name, type: target.dataset.type };
+      if (!chosen.some(x => x.id === item.id && x.type === item.type)) chosen.push(item);
+      target.classList.add("cz-ok");
+    } else {
+      chosen.splice(Number(target.dataset.i), 1);
+    }
+    panel.querySelector(".meta-target-chips").innerHTML = _metaChipsHtml(lid);
+    _metaMarkStale(panel);
+  }
+}
+
+// A control that changes the number was changed after a calculation: say the saved snapshot no longer matches what is on screen.
+function _metaMarkStale(panel) {
+  const lid = panel.dataset.metaLid;
+  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
+  const li = state.lineItems.find(x => x.id === lid);
+  if (!saved || !li) return;
+  panel.querySelector(".meta-plan-feedback").innerHTML = _metaForecastSummaryHtml(saved, li, state.productIndex[li.product_name] || {}, true);
+}
+
+async function onMetaForecast(lid, liveAudience) {
+  const panel = _metaPanel(lid);
+  const li = state.lineItems.find(x => x.id === lid);
+  if (!panel || !li) return;
+  const p = state.productIndex[li.product_name] || {};
+  const retailBudget = _metaFullFlightRetailBudget(li);
+  const months = _constanzaFlightMonths(li);
+  const geoAtRequest = _constanzaGeoFor(lid);
+  const targetAtRequest = _effectiveTargetText(li);
+  if (!(retailBudget > 0)) { _metaFeedback(panel, "Set a positive retail budget for this line in Step 04 first."); return; }
+  const lowerText = panel.querySelector(".meta-audience").value.trim();
+  const upperText = panel.querySelector(".meta-audience-upper").value.trim();
+  const lower = lowerText ? Number(lowerText) : null;
+  const upper = upperText ? Number(upperText) : null;
+  if (!liveAudience && (lower === null || !Number.isSafeInteger(lower) || lower < 0 || (upper !== null && (!Number.isSafeInteger(upper) || upper < lower)))) {
+    _metaFeedback(panel, "Enter the lower end of Meta's audience size (a whole number), and, if you give one, an upper end that is not below it.");
+    return;
+  }
+  const body = {
+    product_name: li.product_name, retail_budget: retailBudget,
+    retail_cpm: _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm, months,
+  };
+  if (liveAudience) {
+    const key = panel.querySelector(".meta-geo-choice").value;
+    if (!key) { _metaFeedback(panel, "Search and choose the exact Meta geography first."); return; }
+    body.meta_geo_type = panel.querySelector(".meta-geo-type").value;
+    body.meta_geo_key = key;
+    const picked = panel.querySelector(".meta-geo-choice");
+    body.meta_geo_label = picked.options[picked.selectedIndex] ? picked.options[picked.selectedIndex].text.slice(0, 160) : null;
+    const min = panel.querySelector(".meta-age-min").value.trim();
+    const max = panel.querySelector(".meta-age-max").value.trim();
+    body.age_min = min ? Number(min) : null;
+    body.age_max = max ? Number(max) : null;
+    body.gender = panel.querySelector(".meta-gender").value;
+    body.meta_targeting = _metaSelected(lid).map(x => ({ id: x.id, name: x.name, type: x.type }));
+  } else {
+    body.audience_lower = lower;
+    body.audience_upper = upper === null ? lower : upper;
+  }
+  const btn = panel.querySelector(liveAudience ? ".meta-pull-btn" : ".meta-model-btn");
+  btn.disabled = true;
+  try {
+    const response = await fetch("/api/constanza/meta-forecast", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+    // Save the provenance with the proposal. A changed line/geo/length is shown as stale (and the insert button withdrawn).
+    const stillThere = state.lineItems.find(x => x.id === lid);
+    if (!stillThere || stillThere.product_name !== li.product_name ||
+        _metaFullFlightRetailBudget(stillThere) !== retailBudget || _constanzaFlightMonths(stillThere) !== months ||
+        _constanzaGeoFor(lid) !== geoAtRequest || _effectiveTargetText(stillThere) !== targetAtRequest) return;
+    data.proposal_geo = geoAtRequest;
+    data.target_text = targetAtRequest;
+    state.availsData[lid] = state.availsData[lid] || {};
+    state.availsData[lid].meta_forecast = data;
+    panel.querySelector(".meta-plan-feedback").innerHTML = _metaForecastSummaryHtml(data, li, p);
+  } catch (error) {
+    _metaFeedback(panel, String(error.message || error));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Writes the MID scenario (the default) into the line's Avails: monthly impressions, and the lower-end audience as est. uniques.
+function onMetaInsert(lid) {
+  const li = state.lineItems.find(x => x.id === lid);
+  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
+  if (!li || !saved || !saved.scenarios) return false;
+  const geo = saved.meta_targeting ? (saved.meta_targeting.geo_name || `Meta geography ${saved.meta_targeting.geo_key}`) : "entered audience";
+  return applyConstanzaEstimate(lid, saved.scenarios.monthly.mid, saved.scenarios.est_uniques,
+    { method: "meta_audience", dmas: [geo], unmatched_tokens: [], win_rate: null, hispanic_share: null });
 }
 
 async function onConstanzaAutoCalc(lid) {
@@ -6848,6 +7211,7 @@ async function onConstanzaAutoCalc(lid) {
   const p = state.productIndex[li.product_name] || {};
 
   const geoText = _constanzaGeoFor(lid);
+  const hispanic = _constanzaHispanicFor(lid, li);
 
   // Only meaningful for the generic (no-platform-model) fallback — the
   // planner's own curated monthly budget, converted to impressions via
@@ -6876,6 +7240,7 @@ async function onConstanzaAutoCalc(lid) {
         months: flightMonths,
         flight_days: _constanzaFlightDays(),
         national_monthly_total: nationalMonthlyImpsTotal,
+        ...(hispanic === null ? {} : { hispanic }),
       }),
     });
     const data = await res.json();
@@ -6932,6 +7297,13 @@ function _constanzaCardOpts(lid) {
     },
     onApply: (monthlyMid, estUniques, geoInfo) => applyConstanzaEstimate(lid, monthlyMid, estUniques, geoInfo),
     onRefine: () => openConstanzaForLine(lid),
+    onHispanic: (next) => {
+      state.constanzaHispanic = state.constanzaHispanic || {};
+      state.constanzaHispanic[lid] = next;
+      onConstanzaAutoCalc(lid);
+    },
+    // the switch is on because the proposal's targeting names a Hispanic audience (not the planner's choice, not the product's default)
+    hispanicFromProposal: !(state.constanzaHispanic && lid in state.constanzaHispanic) && _targetsHispanic(state.lineItems.find(x => x.id === lid)),
   };
 }
 
@@ -6946,6 +7318,7 @@ function openConstanzaForLine(lid) {
     flightDays: days,
     lineId: lid,
     lineLabel: Constanza.lineLabel(li),
+    hispanic: _constanzaHispanicFor(lid, li),
   });
 }
 
@@ -6967,10 +7340,17 @@ function renderConstanzaResult(lid, data) {
 }
 
 function _constanzaGeoInfo(data) {
+  // A TikTok estimate has no per-market rows (one audience for the whole place list): the places it sent to TikTok stand in for them.
+  const fromAreas = [...new Set((data.by_area || []).map(d => d.dma).filter(Boolean))];
+  const fromTikTok = data.tiktok ? [...new Set((data.tiktok.locations || []).map(l => l.source).filter(Boolean))] : [];
   return {
     method: data.geo_method,
-    dmas: [...new Set(data.by_area.map(d => d.dma).filter(Boolean))],
+    dmas: fromAreas.length ? fromAreas : fromTikTok,
     unmatched_tokens: data.unmatched_geo_tokens || [],
+    // the programmatic win rate that was applied to the figures this Apply writes (null when none): the Avails step says so beside them
+    win_rate: data.win_rate ? data.win_rate.mid : null,
+    // the Hispanic share the avails were narrowed to (null when not narrowed), so the share-of-voice helper can say it
+    hispanic_share: data.audience && data.audience.hispanic && data.audience.hispanic.mode === "cut" ? data.audience.hispanic.share : null,
   };
 }
 
@@ -6984,8 +7364,20 @@ function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
   entry.max_imps = Math.round(monthlyImpsMid);
   entry.max_imps_estimated = true;
   entry.basis = "imps";
-  if (estUniques != null) entry.est_uniques = Math.round(estUniques);
+  if (estUniques != null) {
+    entry.est_uniques = Math.round(estUniques);
+  } else if (entry.est_uniques != null && entry.est_uniques > entry.max_imps) {
+    // This estimate has no unique count to write, and the one already on the line (from an earlier Apply, or typed) was measured
+    // against other impressions: it can no longer be true (an ID needs at least one impression, and the card would show an
+    // "audience" larger than the impressions beside it). Drop it, and the frequency derived from it, rather than keep a nonsense pair.
+    delete entry.est_uniques;
+    delete entry.frequency;
+  }
   if (geoInfo) entry.geo_resolution = geoInfo;
+  // Remember that these figures are expected DELIVERY (platform avails x the win rate), so the share-of-voice badge can say what it is
+  // measured against; a figure the planner types over later clears it (see the avails blur handler).
+  if (geoInfo && geoInfo.win_rate) entry.win_rate = geoInfo.win_rate; else delete entry.win_rate;
+  if (geoInfo && geoInfo.hispanic_share != null) entry.hispanic_share = geoInfo.hispanic_share; else delete entry.hispanic_share;
 
   const spendResult = calcMaxSpendFromImps(_effectiveProduct(li, p), entry.max_imps);
   if (spendResult !== null) {

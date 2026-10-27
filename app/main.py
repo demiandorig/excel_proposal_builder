@@ -26,10 +26,11 @@ import tempfile
 import threading
 import time
 from collections import Counter
+import dataclasses
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Optional, Union
 from urllib.parse import quote
 
 # Load .env (OPENAI_API_KEY, DRIVE_CLIENT_ID/SECRET/ROOT_FOLDER_ID, etc.) into
@@ -45,7 +46,7 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, Body, Request, UploadFile, File
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -91,11 +92,18 @@ from app.services import gamma_client
 from app.services import monthly_allocation
 from app.services import notion_client
 from app.services import constanza_geo
+from app.services import constanza_meta
 from app.services import constanza_forecast_map as forecast_map_svc
 from app.services import forecast_store
 from app.services.constanza_engine import estimate_avails
 from app.services import audience_taxonomy
-from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, normalize_gender, parse_audience_text
+from app.services import constanza_hispanic
+from app.services import platform_scenarios
+from app.services import constanza_tiktok as tiktok_svc
+from app.services import tiktok_client
+from app.services import tiktok_diagnose
+from app.services.tiktok_client import TikTokAPIError
+from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, normalize_gender, parse_audience_text, split_hispanic_terms
 from app.services.line_modifier import clean_line_modifier_or_none
 
 
@@ -260,6 +268,10 @@ def _bootstrap_forecast_data() -> None:
         result = forecast_import_service.bootstrap()
         if result.get("migrations") or result.get("products") or result.get("series"):
             _logger.info("forecast data bootstrap: %s", result)
+        # The Meta Awareness CPM correction is a compare-and-set migration;
+        # drop any catalog rows read before the background migration ran.
+        from app import catalog as catalog_svc
+        catalog_svc.invalidate_product_caches()
         forecast_store.invalidate()
         forecast_map_svc.invalidate()
         audience_taxonomy.invalidate()                   # the seed may just have changed the audience rows
@@ -634,6 +646,16 @@ class AvailsEntry(BaseModel):
     # what it was actually calculated from instead of just a bare number
     # indistinguishable from any other "Est." value. None otherwise.
     geo_resolution: Optional[dict] = None
+    # The programmatic win rate (a fraction, e.g. 0.15) that was applied to max_imps / est_uniques when they came from Constanza's
+    # "Apply" — they are then expected delivery, not the platform's raw avails, and the share-of-voice badge says so. None when
+    # none was applied, or once the planner typed over the figures.
+    win_rate: Optional[float] = None
+    # The Hispanic share (a fraction) the avails were narrowed to when max_imps / est_uniques came from an "Apply" with Hispanic targeting on,
+    # so the share-of-voice helper can say so. None otherwise, or once the planner typed over the figures.
+    hispanic_share: Optional[float] = None
+    # The Meta line's last planning snapshot (audience range, the three scenarios, the budget cross-check) with what it was asked, so a reopened
+    # proposal can show it and mark it stale when the line changed. The scenario the planner inserted lives in max_imps / est_uniques as usual.
+    meta_forecast: Optional[dict] = None
 
 
 class TierModel(BaseModel):
@@ -880,6 +902,33 @@ class ConstanzaAudienceSpecModel(BaseModel):
     age_max: Optional[int] = None
     gender: Optional[str] = None
     interest_terms: list[str] = []
+    # Hispanic targeting (constanza_hispanic.py): True narrows each area to its real Hispanic share, False turns the product's own default
+    # off, None = the product's default (the request-level `hispanic` below, then the product's configuration).
+    hispanic: Optional[bool] = None
+
+
+class TikTokTargetingModel(BaseModel):
+    """The audience set up the way TikTok Ads Manager sets up an ad group (see constanza_tiktok.Targeting, which validates it).
+    Every list empty / every field None means "not narrowed". A field this model does not know is refused (a typo must not quietly
+    become a broader audience), and every list is capped before anything looks inside it."""
+    model_config = ConfigDict(extra="forbid")
+
+    gender: Optional[str] = Field(None, max_length=20)
+    age_groups: list[str] = Field(default_factory=list, max_length=10)
+    languages: list[str] = Field(default_factory=list, max_length=60)
+    interest_category_ids: list[str] = Field(default_factory=list, max_length=120)
+    interest_keyword_ids: list[str] = Field(default_factory=list, max_length=120)
+    purchase_intention_ids: list[str] = Field(default_factory=list, max_length=120)
+    video_interaction_ids: list[str] = Field(default_factory=list, max_length=120)
+    creator_interaction_ids: list[str] = Field(default_factory=list, max_length=120)
+    hashtag_ids: list[str] = Field(default_factory=list, max_length=120)
+    video_period: int = 15
+    spending_power: Optional[str] = Field(None, max_length=10)
+    household_income: list[str] = Field(default_factory=list, max_length=10)
+    operating_system: Optional[str] = Field(None, max_length=10)
+    network_types: list[str] = Field(default_factory=list, max_length=10)
+    placements: list[str] = Field(default_factory=list, max_length=6)
+    objective: str = Field("reach", max_length=20)
 
 
 class ConstanzaEstimateRequest(BaseModel):
@@ -898,6 +947,48 @@ class ConstanzaEstimateRequest(BaseModel):
     # When present, routes through constanza_audience.py's age/gender/
     # interest layer instead of the plain geo/platform estimate.
     audience: Optional[ConstanzaAudienceSpecModel] = None
+    # Hispanic targeting for the whole estimate: True / False is the planner's choice, None = the product's default (a product configured as
+    # Hispanic-targeted in Admin -> Forecast, or forecast from a series that is already built from Hispanic audiences, has it on).
+    hispanic: Optional[bool] = None
+    # Only used for a product whose forecast method is "tiktok" (Admin -> Forecast): the targeting to ask TikTok's
+    # audience-size estimator about. None asks about the geography alone.
+    tiktok: Optional[TikTokTargetingModel] = None
+
+
+class MetaGeoSearchRequest(BaseModel):
+    query: str
+    location_type: str
+
+
+class MetaTargetingItem(BaseModel):
+    """One interest / behavior / demographic option picked from Meta's own list (id, name and type come from /meta-targeting)."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., max_length=30)
+    name: str = Field(..., max_length=120)
+    type: str = Field(..., max_length=20)
+
+
+class MetaAuctionForecastRequest(BaseModel):
+    product_name: str
+    retail_budget: float
+    # a manually entered audience: its LOWER end is what the three impression scenarios multiply (the upper end is context and optional)
+    audience_lower: Optional[int] = None
+    audience_upper: Optional[int] = None
+    # the flight's length in months: the flight total is the monthly scenario times it
+    months: int = 1
+    retail_cpm: Optional[float] = None
+    # Select a geography returned by /meta-geos for a live audience pull.
+    # Omit both fields for a manually supplied audience or budget-only model.
+    meta_geo_type: Optional[str] = None
+    meta_geo_key: Optional[str] = None
+    # the chosen geography's name as Meta listed it, kept with the snapshot so the result can say what it was pulled for
+    meta_geo_label: Optional[str] = Field(None, max_length=160)
+    age_min: Optional[int] = None
+    age_max: Optional[int] = None
+    gender: Optional[str] = None
+    # interests / behaviors / demographics chosen from Meta's lists: the audience is people who match ANY of them
+    meta_targeting: list[MetaTargetingItem] = Field(default_factory=list, max_length=50)
 
 
 class ConstanzaParseAudienceRequest(BaseModel):
@@ -911,6 +1002,9 @@ class ForecastMapUpdateRequest(BaseModel):
     method: str
     platform: Optional[str] = None
     hispanic_weighted: bool = False
+    # The programmatic win rate (constanza_win_rate.py): null / "auto" = the built-in rule, true / "apply" = always, false / "skip" = never.
+    # Only meaningful for a product forecast from platform data.
+    win_rate: Optional[Union[bool, str]] = None
 
 
 class ForecastMapProductRequest(BaseModel):
@@ -1032,6 +1126,7 @@ async def get_catalog() -> dict:
             "minimum_spend": p.minimum_spend,
             "estimated_impressions": p.estimated_impressions,
             "estimated_cpm_for_imps": p.estimated_cpm_for_imps,
+            "meta_retail_cpm": constanza_meta.product_cpm(p.name),
             "sizes": p.sizes,
             "description": p.proposal_description,
             "notes": p.notes,
@@ -1042,6 +1137,8 @@ async def get_catalog() -> dict:
     return {
         "families": families(),
         "products_by_family": grouped,
+        # the audience-size platforms' planning multipliers (conservative / mid / upper): the Meta panel quotes them instead of hard-coding them
+        "audience_multipliers": platform_scenarios.multipliers(),
     }
 
 
@@ -1400,8 +1497,12 @@ def _serialize_avails_estimate(estimate, resolution) -> dict:
         "imps_mid": estimate.imps_mid,
         "imps_high": estimate.imps_high,
         "est_uniques": estimate.est_uniques,
+        # People the product can reach in this geography (the platform's reach universe), before any audience cut
+        "reach_universe": estimate.reach_universe,
         "series": estimate.series,
         "weeks": estimate.weeks,
+        # Set when the win rate was applied to this product's avails (MadHive / Trade Desk): the rates and the platform's raw figures
+        "win_rate": estimate.win_rate,
         "notes": _geo_warning_notes(resolution) + list(estimate.notes),
         "unmatched_geo_tokens": resolution.unmatched_tokens,
         "unmatched_geo_details": resolution.unmatched_details,
@@ -1412,11 +1513,18 @@ def _serialize_avails_estimate(estimate, resolution) -> dict:
             {
                 "area_label": a.area_label, "dma": a.dma, "weight": a.weight,
                 "imps_low": a.imps_low, "imps_mid": a.imps_mid, "imps_high": a.imps_high,
-                "unique_viewers": a.unique_viewers, "unique_hh": a.unique_hh,
+                "unique_viewers": a.unique_viewers, "unique_hh": a.unique_hh, "reach_universe": a.reach_universe,
             }
             for a in estimate.by_area
         ],
     }
+
+
+def _hispanic_asked(body: "ConstanzaEstimateRequest") -> Optional[bool]:
+    """The planner's explicit Hispanic-targeting choice, most specific first (the audience block's own flag, then the request's); None = none made."""
+    if body.audience is not None and body.audience.hispanic is not None:
+        return body.audience.hispanic
+    return body.hispanic
 
 
 @app.post("/api/constanza/estimate")
@@ -1432,9 +1540,26 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
     resolution = constanza_geo.resolve_geo(body.geo_text, geo_type_hint=body.geo_type_hint)
     if resolution.ambiguous or not resolution.resolved:
         raise HTTPException(status_code=422, detail=_geo_failure_detail(body.geo_text, resolution))
+    cfg = forecast_map_svc.resolve_forecast(body.product_name)
+    if cfg.method == tiktok_svc.PRODUCT_KEY:
+        return _constanza_tiktok_estimate(body, resolution)
+
+    # Hispanic targeting is decided BEFORE the estimate (the by-area shares of a Hispanic-weighted product follow it): a series that is already
+    # built from Hispanic audiences always has it on (it cannot be turned off: the data IS that audience); otherwise the planner's choice, else the
+    # product's default, else a "Hispanic" typed as an interest.
+    asked = _hispanic_asked(body)
+    audience_in = body.audience or ConstanzaAudienceSpecModel()
+    interest_terms, term_found = split_hispanic_terms(audience_in.interest_terms)         # "Hispanic" as an interest is the cut, not an interest
+    already = forecast_map_svc.series_is_hispanic_for(cfg)
+    default_on = forecast_map_svc.hispanic_default(cfg)
+    hispanic_on = True if already else (asked if asked is not None else (default_on or term_found))
+    engine_cfg = cfg
+    if cfg.method == "platform" and not already and cfg.hispanic_weighted != hispanic_on:
+        engine_cfg = dataclasses.replace(cfg, hispanic_weighted=hispanic_on)
+
     estimate = estimate_avails(
         body.product_name, resolution, months=body.months,
-        national_monthly_total=body.national_monthly_total, flight_days=body.flight_days,
+        national_monthly_total=body.national_monthly_total, flight_days=body.flight_days, config=engine_cfg,
     )
     if estimate is None:
         if resolution.geo_confidence == "low_confidence_international":
@@ -1450,30 +1575,54 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
             )
         raise HTTPException(status_code=422, detail=detail)
 
-    if body.audience is None:
-        return _serialize_avails_estimate(estimate, resolution)
+    # A population-share estimate spreads the planner's OWN impression total by population: there are no platform avails to narrow, and
+    # cutting the planner's plan to the Hispanic share would shrink the very total they entered. Hispanic targeting does not apply to it.
+    applies = estimate.confidence != "generic_fallback"
+    if not applies:
+        hispanic_on = False
+    targeting = {"hispanic_targeting": {"default": default_on if applies else False, "on": hispanic_on, "applies": applies}}
+    extra_notes = []
+    if not applies and (asked or term_found):
+        extra_notes.append("Hispanic targeting isn't applied to a population-share estimate: it spreads the impression total you entered across the "
+                           "geography, so there are no platform avails to narrow.")
+    if body.audience is None and not hispanic_on:
+        out = {**_serialize_avails_estimate(estimate, resolution), **targeting}
+        out["notes"] = [*out["notes"], *extra_notes]
+        return out
 
     audience_estimate = estimate_audience(estimate, AudienceSpec(
-        age_min=body.audience.age_min, age_max=body.audience.age_max,
-        gender=body.audience.gender, interest_terms=body.audience.interest_terms,
+        age_min=audience_in.age_min, age_max=audience_in.age_max,
+        gender=audience_in.gender, interest_terms=interest_terms, hispanic=hispanic_on,
     ))
-    return {
+    out = {
         **_serialize_avails_estimate(estimate, resolution),
+        **targeting,
         "audience": {
             "imps_low": audience_estimate.imps_low, "imps_mid": audience_estimate.imps_mid,
             "imps_high": audience_estimate.imps_high,
+            # The addressable POOL with the cuts applied (the platform's reach universe: a ceiling, not delivery; null when its data
+            # has none), the unique IDs a flight reaches (`est_uniques`, never above the impressions), and the census population of
+            # the market that fits the cuts (all media; the basis of the reliability floor). `impressions_per_person` is delivered
+            # impressions per member of the pool, so it is often below 1 once a win rate applies; the cards no longer show it.
+            "audience_people": audience_estimate.audience_people,
+            "est_uniques": audience_estimate.est_uniques,
+            "impressions_per_person": audience_estimate.impressions_per_person,
             "underlying_population": audience_estimate.underlying_population,
+            "market_population": audience_estimate.market_population,
+            "market_population_adults": audience_estimate.market_population_adults,
             "reliability_floor_population": audience_estimate.reliability_floor_population,
             "below_reliability_threshold": audience_estimate.below_reliability_threshold,
             "confidence_tier": audience_estimate.confidence_tier,
             "cuts_applied": audience_estimate.cuts_applied,
             "search_multiplier_applied": audience_estimate.search_multiplier_applied,
+            # Hispanic targeting, when it was on: {mode: "cut" | "already_targeted" | "not_applied", share, levels, vintage} — see AudienceEstimate.hispanic
+            "hispanic": audience_estimate.hispanic,
             "interests": [
                 {
                     "input_text": i.input_text, "category": i.category, "label": i.label, "group": i.group,
                     "supported": i.supported, "status": i.status, "confidence": i.confidence,
                     # the rate that was applied (the gender-specific one when the source gives it)
-                    "rate": (i.rate_by_gender or {}).get(body.audience.gender or "all"),
+                    "rate": (i.rate_by_gender or {}).get(audience_in.gender or "all"),
                     "definition": i.definition, "source": i.source, "source_date": i.source_date, "source_url": i.source_url,
                     "caveats": i.caveats, "how": i.how, "suggestions": i.suggestions, "gender_split": i.gender_split,
                 }
@@ -1485,11 +1634,186 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
                     "area_label": a.area_label, "dma": a.dma, "weight": a.weight,
                     "imps_low": a.imps_low, "imps_mid": a.imps_mid, "imps_high": a.imps_high,
                     "underlying_population": a.underlying_population,
+                    "audience_people": a.audience_people, "unique_viewers": a.unique_viewers,
                 }
                 for a in audience_estimate.by_area
             ],
         },
     }
+    out["notes"] = [*out["notes"], *extra_notes]
+    return out
+
+
+def _tiktok_error(exc: Exception) -> HTTPException:
+    """A failed TikTok call or an unusable TikTok request as the clean 4xx / 5xx the dock shows (never a stack trace)."""
+    if isinstance(exc, TikTokAPIError):
+        return HTTPException(status_code=exc.status_code, detail=exc.public_message())
+    return HTTPException(status_code=422, detail=str(exc))
+
+
+def _constanza_tiktok_estimate(body: "ConstanzaEstimateRequest", resolution) -> dict:
+    """The estimate of a product forecast by TikTok's audience-size API. Shaped like every other estimate (impressions low / mid /
+    high over the flight, est. uniques, notes, what could not be matched) so the dock and the Step 05 card read it the same way,
+    plus a `tiktok` block with the audience range, TikTok's own verdict, the locations that were sent and the three impression scenarios."""
+    try:
+        targeting = tiktok_svc.Targeting.from_dict(body.tiktok.model_dump() if body.tiktok else None)
+        result = tiktok_svc.estimate(resolution, targeting, body.months)
+    except (TikTokAPIError, ValueError) as exc:
+        raise _tiktok_error(exc)
+    size, monthly, total = result.size, result.monthly, result.total
+    unmapped = result.mapping.unmapped
+    notes = _geo_warning_notes(resolution) + result.mapping.notes + result.notes()
+    if _hispanic_asked(body) or (body.audience is not None and split_hispanic_terms(body.audience.interest_terms)[1]):
+        notes.append("Hispanic targeting isn't applied to a TikTok audience estimate: it describes the whole geography's audience. Use TikTok's own "
+                     "language / interest targeting for Spanish speakers.")
+    if unmapped:
+        dropped = "; ".join(f"{u['input']!r} ({u['reason']})" for u in unmapped)
+        notes.insert(0, f"NOT INCLUDED in this estimate — couldn't be placed in TikTok: {dropped}")
+    details = [{"input": d["input"], "reason": d["reason"]} for d in resolution.unmatched_details]
+    return {
+        "product_name": body.product_name,
+        "platform": tiktok_svc.PRODUCT_KEY,
+        "confidence": "live_api",
+        "geo_method": resolution.method,
+        "geo_confidence": resolution.geo_confidence,
+        "months": result.months,
+        "imps_low": total["low"], "imps_mid": total["mid"], "imps_high": total["high"],
+        # est. uniques is TikTok's LOWER-end audience (a head count, not cumulative; the base of the three scenarios), so the Avails step's
+        # frequency is the mid multiplier
+        "est_uniques": size.lower,
+        "reach_universe": None,
+        "series": None,
+        "weeks": None,
+        "notes": notes,
+        "unmatched_geo_tokens": list(resolution.unmatched_tokens) + [u["input"] for u in unmapped],
+        "unmatched_geo_details": details + [{"input": u["input"], "reason": u["reason"]} for u in unmapped],
+        "ambiguous": resolution.ambiguous,
+        "geo_interpretations": resolution.interpretations,
+        "geo_suggestions": resolution.suggestions,
+        "by_area": [],
+        "hispanic_targeting": {"default": False, "on": False, "applies": False},
+        "tiktok": {
+            "audience": {"low": size.lower, "mid": size.mid, "high": size.upper},
+            "stage": size.stage,
+            "stage_label": tiktok_client.STAGE_LABELS.get(size.stage),
+            "stage_note": tiktok_client.STAGE_NOTES.get(size.stage),
+            "impressions_per_person": result.factor,
+            # the three scenarios (conservative / mid / upper = lower-end audience x 4.3 / 5.5 / 8.6): monthly and flight totals, and the rule
+            "scenarios": {**platform_scenarios.to_public(size.lower), "by_scenario": result.scenarios},
+            "monthly": monthly,
+            "locations": [loc.to_public() for loc in result.mapping.locations],
+            "unmapped": unmapped,
+            "objective": tiktok_svc.OBJECTIVES[result.targeting.objective]["label"],
+            "placements": list(result.targeting.placements),
+            "request_id": size.request_id,
+            "cached": size.cached,
+        },
+    }
+
+
+@app.get("/api/constanza/tiktok/status")
+def constanza_tiktok_status() -> dict:
+    """Whether the TikTok connection is set up (which settings are missing, never their values), the planning multipliers, and the
+    fixed menus of the TikTok panel (age groups, objectives, placements, household income, ...)."""
+    return tiktok_svc.status()
+
+
+@app.get("/api/constanza/tiktok/targeting")
+def constanza_tiktok_targeting(kind: str) -> dict:
+    """One list of what TikTok can target - `languages`, or the interest / behavior categories `general_interest`,
+    `purchase_intention`, `video_interaction`, `creator_interaction`, `hashtag_interaction` - straight from TikTok (cached for
+    hours), so the panel offers exactly what Ads Manager would."""
+    try:
+        return {"kind": kind, "items": tiktok_svc.catalog(kind)}
+    except (TikTokAPIError, ValueError) as exc:
+        raise _tiktok_error(exc)
+
+
+@app.get("/api/constanza/tiktok/search")
+def constanza_tiktok_search(q: str = "") -> dict:
+    """What a keyword finds across TikTok's targeting: interest categories, additional interests, purchase intent, and video /
+    creator / hashtag interactions, as {kind: [{id, name, path}]}."""
+    try:
+        return {"query": q.strip()[:100], "results": tiktok_svc.search(q)}
+    except (TikTokAPIError, ValueError) as exc:
+        raise _tiktok_error(exc)
+
+
+def _meta_error(exc: "constanza_meta.MetaAPIError") -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@app.get("/api/constanza/meta/status")
+def constanza_meta_status() -> dict:
+    """Whether the Meta connection is set up (which settings are missing, never their values), the planning multipliers and the Graph API version."""
+    return constanza_meta.status()
+
+
+@app.post("/api/constanza/meta-geos")
+def constanza_meta_geos(body: MetaGeoSearchRequest) -> dict:
+    """Search Meta geography IDs for an explicit planner choice."""
+    try:
+        return {"locations": constanza_meta.search_geography(body.query, body.location_type)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except constanza_meta.MetaAPIError as exc:
+        raise _meta_error(exc) from exc
+
+
+@app.get("/api/constanza/meta-targeting")
+def constanza_meta_targeting(kind: str = "", q: str = "") -> dict:
+    """What Meta lets an audience be targeted by: with `kind` (interests, behaviors or demographics) the whole list straight from Meta (cached for
+    hours, what this ad account can use today); with `q` the interests, behaviors and demographics a keyword finds."""
+    try:
+        if kind:
+            return {"kind": kind, "items": constanza_meta.targeting_catalog(kind)}
+        return {"query": q.strip()[:80], "results": constanza_meta.search_targeting(q)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except constanza_meta.MetaAPIError as exc:
+        raise _meta_error(exc) from exc
+
+
+@app.post("/api/constanza/meta-forecast")
+def constanza_meta_forecast(body: MetaAuctionForecastRequest) -> dict:
+    """The Meta line's audience scenarios: the LOWER end of Meta's audience range x 4.3 / 5.5 / 8.6 (conservative / mid / upper; platform_scenarios.py), a
+    month's avails and the flight, plus the budget cross-check.
+
+    A live Meta request requires an explicitly selected Meta geo ID, optionally with age, gender and interests / behaviors from Meta's lists;
+    nothing else about the campaign's targeting is represented, so the planner checks the rest in Ads Manager. Without the selection a planner may
+    enter the audience (its lower end) manually.
+    """
+    if bool(body.meta_geo_type) != bool(body.meta_geo_key):
+        raise HTTPException(status_code=422, detail="Select both a Meta geography type and its key.")
+    if body.meta_geo_type and (body.audience_lower is not None or body.audience_upper is not None):
+        raise HTTPException(status_code=422, detail="Use either the live Meta audience or manually entered bounds.")
+    if body.meta_targeting and not body.meta_geo_type:
+        raise HTTPException(status_code=422, detail="Interests and behaviors need a live Meta pull: select a Meta geography too.")
+    try:
+        audience_source = "manual"
+        lower, upper = body.audience_lower, body.audience_upper
+        targeting = [item.model_dump() for item in body.meta_targeting]
+        if body.meta_geo_type:
+            lower, upper = constanza_meta.fetch_reach_estimate(
+                geo_type=body.meta_geo_type, geo_key=body.meta_geo_key,
+                age_min=body.age_min, age_max=body.age_max, gender=body.gender, targeting=targeting,
+            )
+            audience_source = "meta_api"
+        result = constanza_meta.model_auction(
+            product_name=body.product_name, retail_budget=body.retail_budget,
+            audience_lower=lower, audience_upper=upper, months=body.months, audience_source=audience_source,
+            retail_cpm=body.retail_cpm,
+        )
+        if audience_source == "meta_api":
+            result["meta_targeting"] = {
+                "geo_type": body.meta_geo_type, "geo_key": body.meta_geo_key, "geo_name": (body.meta_geo_label or "").strip() or None,
+                "age_min": body.age_min, "age_max": body.age_max, "gender": body.gender, "detailed": targeting,
+            }
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except constanza_meta.MetaAPIError as exc:
+        raise _meta_error(exc) from exc
 
 
 @app.post("/api/constanza/parse-audience")
@@ -1504,7 +1828,8 @@ def constanza_parse_audience(body: ConstanzaParseAudienceRequest) -> dict:
     return {
         "age_min": spec.age_min, "age_max": spec.age_max, "gender": spec.gender,
         "interest_terms": spec.interest_terms, "geo_text": spec.geo_text,
-        "geo_type_hint": spec.geo_type_hint,
+        # true only when the text names the audience; null otherwise (an unspecified field, NOT an explicit "off" that would override a product's default)
+        "geo_type_hint": spec.geo_type_hint, "hispanic": True if spec.hispanic else None,
     }
 
 
@@ -3585,6 +3910,15 @@ async def admin_delete_product(product_id: int) -> dict:
 # Admin -> Forecast: which products get Constanza's "Auto-calculate avails" button (Step 05) and what it computes.
 # See app/services/constanza_forecast_map.py. Admin-only through the blanket /api/admin/* rule.
 # ---------------------------------------------------------------------------
+
+@app.post("/api/admin/tiktok/test")
+def admin_tiktok_test() -> dict:
+    """Admin -> Forecast, "Test the connection": the same end-to-end checks as `python -m app.services.tiktok_diagnose` (token and
+    ad account, the targeting catalogs, TV markets by name, ZIP codes, an audience-size estimate). Plain `def`: it makes about a
+    dozen blocking calls to TikTok. Admin-only through the blanket /api/admin/* rule; no secret is ever in the answer."""
+    checks = tiktok_diagnose.run_checks()
+    return {"ok": all(c.ok for c in checks), "checks": [c.to_public() for c in checks], "status": tiktok_svc.status()}
+
 
 @app.get("/api/admin/forecast-map")
 async def admin_get_forecast_map() -> dict:

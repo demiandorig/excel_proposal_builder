@@ -53,7 +53,7 @@ Field provenance from the rate card:
                                 card has one general CPP line with no
                                 per-objective breakdown, so these 3 use an
                                 explicitly-given estimated CPM per
-                                objective (Awareness $13, Traffic/
+                                objective (Awareness $12, Traffic/
                                 Conversion $18, Lead Gen/Calls $35) purely
                                 for the impressions estimate — same
                                 mechanism as any other Fixed-model product.
@@ -1248,7 +1248,7 @@ CATALOG: list[Product] = [
         tech_platform='',
         wide_orbit_code='Facebook & Instagram Ads',
         notes=NOTE_META_FULL,
-        estimated_cpm_for_imps=13.0,
+        estimated_cpm_for_imps=12.0,
         hispanic_targeting_forced=None,
         cannabis_policy='not_allowed',
         political_policy='allowed',

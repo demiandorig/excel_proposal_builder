@@ -1802,9 +1802,65 @@ function wireForecast() {
   document.getElementById("fc-search").addEventListener("input", renderForecastRows);
   document.getElementById("fc-family-filter").addEventListener("change", renderForecastRows);
   document.getElementById("fc-only-on").addEventListener("change", renderForecastRows);
+  document.getElementById("fc-tt-test").addEventListener("click", testTikTokConnection);
+}
+
+// ---- TikTok connection (Admin -> Forecast): is it set up, and a one-click end-to-end check. No secret is ever shown. ----------
+let _ttTesting = false;                    // a test is running: the button stays off until it ends, whatever else refreshes the status
+
+async function loadTikTokStatus() {
+  const state = document.getElementById("fc-tt-state");
+  const btn = document.getElementById("fc-tt-test");
+  try {
+    const res = await fetch("/api/constanza/tiktok/status");
+    const s = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(s.detail, res.statusText));
+    if (s.configured) {
+      state.innerHTML = `<span class="fc-badge fc-custom">Connected</span> ad account ${escapeHtml(s.advertiser || "")} · impressions = lower-end audience × ${escapeHtml(((s.scenarios && s.scenarios.multipliers) ? [s.scenarios.multipliers.conservative, s.scenarios.multipliers.mid, s.scenarios.multipliers.upper] : [s.impressions_per_person]).join(" / "))}`;
+    } else {
+      state.innerHTML = `<span class="fc-badge fc-default">Not connected</span> add <code>${s.missing.map(escapeHtml).join("</code> and <code>")}</code> to the app's secrets`;
+    }
+    btn.disabled = !s.configured;                  // (a running test holds the button off with aria-disabled instead: see testTikTokConnection)
+    btn.title = s.configured ? "" : "Add the TikTok secrets first";
+  } catch (e) {
+    state.textContent = `Couldn't read the TikTok status: ${e.message}`;
+  }
+}
+
+async function testTikTokConnection() {
+  const btn = document.getElementById("fc-tt-test");
+  const list = document.getElementById("fc-tt-checks");
+  const note = document.getElementById("fc-tt-note");
+  if (_ttTesting) return;
+  _ttTesting = true;
+  btn.setAttribute("aria-disabled", "true");     // not `disabled`: that would drop the keyboard focus of the person who just pressed it
+  note.classList.remove("fc-err");
+  note.textContent = "Checking with TikTok… (about 10–20 seconds)";
+  list.innerHTML = "";
+  try {
+    const res = await fetch("/api/admin/tiktok/test", { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    list.innerHTML = (data.checks || []).map(c => {
+      const mark = !c.ok ? "✗" : (c.warn ? "!" : "✓");
+      const cls = !c.ok ? "fc-chk-bad" : (c.warn ? "fc-chk-warn" : "fc-chk-ok");
+      return `<li class="${cls}"><strong>${mark} ${escapeHtml(c.name)}</strong> <span class="mono">${escapeHtml(String(c.seconds))}s</span><div>${escapeHtml(c.detail)}</div></li>`;
+    }).join("");
+    const bad = (data.checks || []).some(c => !c.ok), warn = (data.checks || []).some(c => c.warn);
+    note.textContent = bad ? "Something failed — see below." : (warn ? "Works, with something to look at." : "Everything works ✓");
+    note.classList.toggle("fc-err", bad);
+  } catch (e) {
+    note.textContent = e.message;
+    note.classList.add("fc-err");
+  } finally {
+    _ttTesting = false;
+    btn.removeAttribute("aria-disabled");
+    loadTikTokStatus();
+  }
 }
 
 async function loadForecast() {
+  loadTikTokStatus();                      // the connection card does not wait for the product table (or depend on it): it says what it can at once
   try {
     const res = await fetch("/api/admin/forecast-map");
     const data = await res.json().catch(() => ({}));
@@ -1812,8 +1868,10 @@ async function loadForecast() {
     adminState.forecastLoaded = true;
     applyForecastPayload(data);
   } catch (e) {
-    document.getElementById("fc-body").innerHTML = `<tr><td colspan="8" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+    document.getElementById("fc-body").innerHTML = `<tr><td colspan="9" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
     document.getElementById("fc-coverage-body").innerHTML = `<tr><td colspan="4" class="admin-empty">—</td></tr>`;
+    const note = document.getElementById("fc-winrate-note");
+    if (note) note.textContent = "";
   }
 }
 
@@ -1826,7 +1884,29 @@ function applyForecastPayload(data) {
   select.value = (data.families || []).includes(chosen) ? chosen : "";
   renderForecastSummary();
   renderForecastCoverage();
+  renderForecastWinRateNote();
   renderForecastRows();
+}
+
+// The line above the Products table: which rates are in force and how many products they reach, so a planner can see it
+// without opening a card (the rates come from the app's environment; the per-product choice is the Win rate column).
+function renderForecastWinRateNote() {
+  const el = document.getElementById("fc-winrate-note");
+  if (!el) return;
+  const wr = adminState.forecast.win_rate;
+  if (!wr) { el.textContent = ""; return; }
+  const pct = (x) => `${Math.round(x * 1000) / 10}%`;
+  const rows = (adminState.forecast.products || []).filter(p => p.method === "platform" && p.enabled);     // the same products the "Platform data" card counts
+  const own = adminState.forecast.win_rate_series || {};                  // series with a rate of their own (Prime Video, through the Amazon DSP)
+  const ownKeys = Object.keys(own);
+  const withOwn = rows.filter(p => p.win_rate && ownKeys.includes(p.platform));
+  const applied = rows.filter(p => p.win_rate && !ownKeys.includes(p.platform)).length;      // the programmatic rate's products
+  const chosen = rows.filter(p => p.win_rate_override !== null && p.win_rate_override !== undefined).length;
+  const prime = own.prime;
+  const primeText = prime != null ? ` Prime Video, bought through the Amazon DSP, uses its own <strong>${pct(prime)}</strong>${withOwn.length ? ` (${withOwn.length} product${withOwn.length === 1 ? "" : "s"})` : ""}.` : "";
+  el.innerHTML = `<strong>Programmatic win rate: ${pct(wr.mid)}</strong> (${pct(wr.low)}–${pct(wr.high)}) is applied to the avails of ${applied} of the ${rows.length} products with the button on that use platform data — `
+    + `the platforms report bid opportunities, and Entravision wins about ${pct(wr.mid)} of them.${primeText} The rates come from the app’s environment `
+    + `(<code>CONSTANZA_WIN_RATE_LOW / _MID / _HIGH</code>${prime != null ? ", <code>CONSTANZA_WIN_RATE_PRIME</code>" : ""}). Auto skips Roku Ads (bought directly in Roku’s Ads Manager); the <em>Win rate</em> column corrects any product${chosen ? ` — ${chosen} set by hand` : ""}.`;
 }
 
 function renderForecastSummary() {
@@ -1835,6 +1915,7 @@ function renderForecastSummary() {
     _analyticsStatCard("Products with the button", sm.enabled, `of ${sm.total} in the catalog`) +
     _analyticsStatCard("Platform data", sm.platform_modeled, "modeled from the DMA avails data") +
     _analyticsStatCard("Population share", sm.generic, "the line's budget, spread by population") +
+    (sm.tiktok ? _analyticsStatCard("TikTok API", sm.tiktok, "a live audience-size estimate from TikTok") : "") +
     _analyticsStatCard("Customized", sm.customized, "differ from the built-in default");
 }
 
@@ -1865,6 +1946,20 @@ function renderForecastCoverage() {
   body.querySelectorAll("[data-fc-add]").forEach(btn => btn.addEventListener("click", () => addForecastPlatformProduct(btn)));
 }
 
+// The win-rate cell: Auto (what the built-in rule gives this product, said in words), Apply, or Don't apply. Not for a product
+// that is not forecast from platform data (a population-share estimate spreads the planner's own total; TikTok has its own API).
+function _forecastWinRateHtml(p, isPlatform) {
+  if (!isPlatform) return `<span class="fc-na" title="Only platform data has avails to win">—</span>`;
+  const choice = p.win_rate_override === true ? "apply" : (p.win_rate_override === false ? "skip" : "auto");
+  const autoApplies = p.win_rate_auto !== undefined ? p.win_rate_auto : p.win_rate_default;     // what Auto gives for the series it uses NOW
+  const autoWord = autoApplies ? (p.win_rate_mid != null ? `applied (${Math.round(p.win_rate_mid * 1000) / 10}%)` : "applied") : "not applied";
+  return `<select data-fc="win_rate" aria-label="Win rate for ${escapeAttr(p.name)}">
+      <option value="auto" ${choice === "auto" ? "selected" : ""}>Auto — ${autoWord}</option>
+      <option value="apply" ${choice === "apply" ? "selected" : ""}>Apply</option>
+      <option value="skip" ${choice === "skip" ? "selected" : ""}>Don’t apply</option>
+    </select>`;
+}
+
 function _forecastRowHtml(p) {
   const platforms = adminState.forecast.platforms || [];
   const platformOptions = platforms.map(pl =>
@@ -1872,7 +1967,7 @@ function _forecastRowHtml(p) {
   const isPlatform = p.method === "platform";
   const def = p.default || {};
   const defaultText = def.enabled
-    ? `On · ${def.method === "platform" ? "platform data" : "population share"}`
+    ? `On · ${def.method === "platform" ? "platform data" : (def.method === "tiktok" ? "TikTok API (live)" : "population share")}`
     : "Off";
   return `
     <tr class="fc-row ${p.enabled ? "fc-on" : "fc-off"}" data-fc-product="${escapeAttr(p.name)}">
@@ -1882,7 +1977,8 @@ function _forecastRowHtml(p) {
       <td>
         <select data-fc="method" aria-label="What it computes">
           <option value="platform" ${isPlatform ? "selected" : ""}>Platform data</option>
-          <option value="generic" ${isPlatform ? "" : "selected"}>Population share</option>
+          <option value="generic" ${p.method === "generic" ? "selected" : ""}>Population share</option>
+          <option value="tiktok" ${p.method === "tiktok" ? "selected" : ""}>TikTok API (live)</option>
         </select>
       </td>
       <td>
@@ -1890,7 +1986,8 @@ function _forecastRowHtml(p) {
           ${isPlatform ? "" : `<option value="" selected>—</option>`}${platformOptions}
         </select>
       </td>
-      <td><input type="checkbox" data-fc="hispanic_weighted" aria-label="Hispanic weighting" ${p.hispanic_weighted ? "checked" : ""} ${isPlatform ? "" : "disabled"} /></td>
+      <td><input type="checkbox" data-fc="hispanic_weighted" aria-label="Hispanic targeting by default" ${p.hispanic_weighted ? "checked" : ""} ${isPlatform ? "" : "disabled"} />${p.hispanic_from_series ? ` <span class="fc-na" title="Its data is already built from Hispanic audiences, so Hispanic targeting is always on for it and it is never cut twice">already Hispanic</span>` : ""}</td>
+      <td>${_forecastWinRateHtml(p, isPlatform)}</td>
       <td><span class="fc-badge ${p.customized ? "fc-custom" : "fc-default"}" title="Built-in default: ${escapeAttr(defaultText)}">${p.customized ? "Customized" : "Default"}</span></td>
       <td class="fc-actions">
         <span class="fc-saved" data-fc-status></span>
@@ -1910,7 +2007,7 @@ function renderForecastRows() {
     (!q || p.name.toLowerCase().includes(q) || p.family.toLowerCase().includes(q)));
   document.getElementById("fc-count").textContent = `${list.length} of ${all.length} products`;
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="8" class="admin-empty">No products match.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="admin-empty">No products match.</td></tr>`;
     return;
   }
   body.innerHTML = list.map(_forecastRowHtml).join("");
@@ -1943,11 +2040,13 @@ async function saveForecastRow(tr, changed) {
   const method = tr.querySelector('[data-fc="method"]').value;
   let platform = tr.querySelector('[data-fc="platform"]').value || null;
   let hispanic = tr.querySelector('[data-fc="hispanic_weighted"]').checked;
+  const winSelect = tr.querySelector('[data-fc="win_rate"]');
+  let winRate = winSelect ? winSelect.value : "auto";
   if (method === "platform") {
     // Switching a product to platform data with nothing chosen yet: use the platform it would have by default, else the first one.
     if (!platform) platform = (before && before.default && before.default.platform) || (platforms[0] && platforms[0].key) || null;
   } else {
-    platform = null; hispanic = false;
+    platform = null; hispanic = false; winRate = "auto";
   }
   tr.querySelectorAll("[data-fc]").forEach(el => { el.disabled = true; });
   _forecastStatus(tr, "Saving…", false);
@@ -1955,7 +2054,7 @@ async function saveForecastRow(tr, changed) {
     const res = await fetch("/api/admin/forecast-map", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ product_name: name, enabled, method, platform, hispanic_weighted: hispanic }),
+      body: JSON.stringify({ product_name: name, enabled, method, platform, hispanic_weighted: hispanic, win_rate: winRate }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(detailText(data.detail, res.statusText));

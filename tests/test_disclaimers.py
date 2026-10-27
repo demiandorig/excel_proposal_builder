@@ -289,7 +289,7 @@ def test_excel_banner_sits_below_the_total_and_above_the_legal_lines(tmp_path):
     rows = _text_rows(ws)
     banner_row = next(r for r, t in rows.items() if t.startswith("Live Sports Inventory"))
     grand_row = next(r for r, t in rows.items() if "TOTAL DIGITAL" in str(t) and r > 17 and ws.cell(row=r, column=12).value
-                     and str(ws.cell(row=r, column=12).value).startswith("=ROUNDDOWN"))
+                     and str(ws.cell(row=r, column=12).value).startswith("=L"))     # the campaign row (=L{total} * months + add-ons), not the per-period =SUM(...) row
     gtm_row = next(r for r, t in rows.items() if t.startswith("To maximize the efficiency"))
     validity_row = next(r for r, t in rows.items() if t.startswith("This proposal will be valid"))
     assert grand_row < banner_row < gtm_row < validity_row

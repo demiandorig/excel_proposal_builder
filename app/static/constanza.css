@@ -179,7 +179,7 @@
 .cz-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .cz-chip {
   display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
-  padding: 4px 10px; border-radius: 999px; font-size: 12px; line-height: 1.3;
+  padding: 4px 10px; border-radius: 999px; font-size: 12px; line-height: 1.3; overflow-wrap: anywhere;
   border: 1px solid var(--rule); background: var(--paper-warm); color: var(--ink); font-family: inherit;
 }
 button.cz-chip { cursor: pointer; }
@@ -187,7 +187,10 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 .cz-chip.cz-ok { background: var(--green-soft); border-color: #cfe5d3; color: #25562f; }
 .cz-chip.cz-sugg { background: var(--paper-card); border-color: var(--accent); color: var(--accent); }
 .cz-chip.cz-warn { background: var(--amber-soft); border-color: #f5cba7; color: #8a3b00; }
-.cz-chip .cz-x { border: 0; background: transparent; padding: 0; cursor: pointer; color: inherit; font-size: 14px; line-height: 1; opacity: 0.7; }
+.cz-chip .cz-x {
+  border: 0; background: transparent; padding: 0; cursor: pointer; color: inherit; font-size: 14px; line-height: 1; opacity: 0.7;
+  flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 24px; min-height: 24px; margin: -5px -9px -5px -6px; border-radius: 999px;
+}
 .cz-chip .cz-x:hover { opacity: 1; }
 .cz-chip small { opacity: 0.7; }
 .cz-note { margin: 8px 0 0; font-size: 12px; color: var(--ink-soft); line-height: 1.4; }
@@ -204,6 +207,8 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 .cz-count { background: var(--accent); color: #fff; border-radius: 999px; font-size: 11px; padding: 1px 8px; font-weight: 700; }
 .cz-interest-results { border: 1px solid var(--rule); border-radius: 10px; margin-top: 6px; max-height: 240px; overflow-y: auto; background: var(--paper-card); }
 .cz-interest-results.hidden { display: none; }
+.cz-interest-results.cz-pending { opacity: 0.55; }                      /* an answer for older text: being replaced */
+.cz-interest-results .cz-more { padding: 8px 10px; font-size: 12px; border-top: 1px solid var(--rule-soft); }
 .cz-interest-item { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 8px 10px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--rule-soft); }
 .cz-interest-item:last-child { border-bottom: 0; }
 .cz-interest-item:hover, .cz-interest-item.cz-active { background: var(--accent-soft); }
@@ -288,7 +293,7 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 @media print { .constanza-bubble, .constanza-dock { display: none !important; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .cz-char *, .cz-bubble-tip, .constanza-bubble, .constanza-dock, .cz-details > summary::after { animation: none !important; transition: none !important; }
+  .cz-char *, .cz-bubble-tip, .constanza-bubble, .constanza-dock, .cz-details > summary::after, .cz-spinner { animation: none !important; transition: none !important; }
   .cz-signal path { opacity: 0.7; }
 }
 
@@ -327,6 +332,28 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 .constanza-result .cz-audience-box { background: var(--paper-card); }
 .constanza-result .cz-using { margin: 0 0 8px; }
 
+/* Paid Meta auction model on a Step 05 card. These full-flight planning
+   metrics deliberately sit apart from the monthly inventory/SOV fields. */
+.meta-plan-block {
+  margin-top: 14px; padding: 14px; border: 1px solid var(--rule);
+  border-radius: var(--radius); background: var(--paper-card);
+}
+.meta-plan-block > strong { display: block; color: var(--ink); margin-bottom: 6px; }
+.meta-plan-block p { margin: 6px 0 10px; line-height: 1.45; }
+.meta-plan-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 12px; margin: 10px 0; }
+.meta-plan-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; }
+.meta-plan-fields input, .meta-plan-fields select {
+  box-sizing: border-box; width: 100%; min-width: 0; padding: 8px;
+  border: 1px solid var(--rule); border-radius: 6px; background: var(--paper-card); color: var(--ink);
+}
+.meta-plan-block button { margin: 4px 8px 4px 0; }
+.meta-live-details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule); }
+.meta-live-details summary { cursor: pointer; font-weight: 600; }
+.meta-plan-result { margin-top: 12px; padding: 10px; border-left: 3px solid var(--accent); background: var(--paper-warm); }
+.meta-plan-result p { margin: 7px 0; }
+.meta-plan-result small { color: var(--ink-faint); }
+.meta-plan-feedback .constanza-error { margin-top: 10px; }
+
 /* ------------------------------------------------------------------ status for screen readers, stale banner */
 .cz-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .cz-stale {
@@ -334,3 +361,33 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
   background: var(--amber-soft); color: #8a3b00; border: 1px solid #f5cba7;
 }
 .cz-card-geo { font-size: 12px; color: var(--ink-soft); margin-top: 2px; overflow-wrap: anywhere; }
+
+/* ------------------------------------------------------------------ the TikTok panel (constanza-tiktok.js) */
+.cz-method-panel.hidden { display: none; }
+.cz-tt-status { border-radius: 10px; padding: 9px 12px; margin: 0 0 12px; font-size: 12.5px; line-height: 1.45; background: var(--paper-warm); color: var(--ink-soft); }
+.cz-tt-status code { font-family: var(--font-mono); font-size: 11.5px; background: var(--paper-card); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.cz-tt-status.cz-tt-on { background: var(--green-soft); color: #25562f; }
+.cz-tt-status.cz-tt-off { background: var(--amber-soft); color: #8a3b00; }
+.cz-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 4px; vertical-align: 1px; }
+.cz-seg + .cz-seg { margin-top: 6px; }
+.cz-seg button:disabled { opacity: 0.4; cursor: not-allowed; }
+.cz-chip[aria-pressed="true"] { background: var(--green-soft); border-color: #cfe5d3; color: #25562f; }
+button.cz-chip { cursor: pointer; font-family: inherit; }
+.cz-stagebar { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 4px 0 2px; }
+.cz-stage { text-align: center; font-size: 11px; padding: 5px 4px; border-radius: 6px; background: var(--paper-warm); color: var(--ink-soft); border: 1px solid var(--rule); }
+.cz-stage.on { color: #fff; font-weight: 600; border-color: transparent; }
+/* the verdict colors are darker than the brand ones so the white text reads (4.5:1 and up) */
+.cz-stage.on.s1 { background: #c4002f; }
+.cz-stage.on.s2 { background: #b34700; }
+.cz-stage.on.s3 { background: var(--green); }
+.cz-stage.on.s4 { background: #0069a8; }
+
+/* a pressed button must look pressed when the system colors replace ours (Windows high contrast) */
+@media (forced-colors: active) {
+  .cz-seg button[aria-pressed="true"], .cz-chip[aria-pressed="true"], .cz-stage.on { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
+}
+
+/* a plain labelled checkbox (Hispanic targeting) */
+.cz-check { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--ink); cursor: pointer; line-height: 1.35; }
+.cz-check input { margin-top: 2px; accent-color: var(--accent); }
+.cz-card-hispanic { margin: 10px 0 0; }

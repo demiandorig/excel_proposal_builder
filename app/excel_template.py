@@ -1164,7 +1164,7 @@ def build_proposal_a(wb: Workbook, products: list, with_sections: bool = False,
     ws[f"C{total_row}"] = labels.get("total_row_label") or f"TOTAL DIGITAL {labels['adjective'].upper()}"
     ws[f"C{total_row}"].font = TOTAL_FONT
     ws[f"C{total_row}"].fill = TOTAL_FILL
-    ws[f"L{total_row}"] = f"=ROUNDDOWN(SUM(L19:L{last_data_row}),0)"
+    ws[f"L{total_row}"] = f"=SUM(L19:L{last_data_row})"
     _format_money_cell(ws[f"L{total_row}"])
     ws[f"L{total_row}"].font = TOTAL_FONT
     ws[f"L{total_row}"].fill = TOTAL_FILL
@@ -1356,16 +1356,16 @@ def _write_addons_grand_total_footer(ws: Worksheet, total_row: int, *, gross: bo
     # logic as the dollar totals below (no addons term: add-ons don't carry
     # impressions). Previously missing entirely, so the campaign-total row
     # showed a dollar figure with no impressions to back it up.
-    ws[f"I{grand_row}"] = f"=ROUNDDOWN(I{total_row}{months_factor},0)"
+    ws[f"I{grand_row}"] = f"=I{total_row}{months_factor}"
     _format_imps_cell(ws[f"I{grand_row}"])
     ws[f"I{grand_row}"].font = TOTAL_FONT
     ws[f"I{grand_row}"].fill = TOTAL_FILL
-    ws[f"L{grand_row}"] = f"=ROUNDDOWN(L{total_row}{months_factor}{addons_sum_term},0)"
+    ws[f"L{grand_row}"] = f"=L{total_row}{months_factor}{addons_sum_term}"
     _format_money_cell(ws[f"L{grand_row}"])
     ws[f"L{grand_row}"].font = TOTAL_FONT
     ws[f"L{grand_row}"].fill = TOTAL_FILL
     if gross:
-        ws[f"N{grand_row}"] = f"=ROUNDDOWN(N{total_row}{months_factor}{addons_sum_term_gross},0)"
+        ws[f"N{grand_row}"] = f"=N{total_row}{months_factor}{addons_sum_term_gross}"
         _format_money_cell(ws[f"N{grand_row}"])
         ws[f"N{grand_row}"].font = TOTAL_FONT
         ws[f"N{grand_row}"].fill = TOTAL_FILL
@@ -1614,11 +1614,11 @@ def build_proposal_a_gross(wb: Workbook, products: list,
     ws[f"C{total_row}"] = labels.get("total_row_label") or f"TOTAL DIGITAL {labels['adjective'].upper()}"
     ws[f"C{total_row}"].font = TOTAL_FONT
     ws[f"C{total_row}"].fill = TOTAL_FILL
-    ws[f"L{total_row}"] = f"=ROUNDDOWN(SUM(L19:L{last_data_row}),0)"
+    ws[f"L{total_row}"] = f"=SUM(L19:L{last_data_row})"
     _format_money_cell(ws[f"L{total_row}"])
     ws[f"L{total_row}"].font = TOTAL_FONT
     ws[f"L{total_row}"].fill = TOTAL_FILL
-    ws[f"N{total_row}"] = f"=ROUNDDOWN(SUM(N19:N{last_data_row}),0)"
+    ws[f"N{total_row}"] = f"=SUM(N19:N{last_data_row})"
     _format_money_cell(ws[f"N{total_row}"])
     ws[f"N{total_row}"].font = TOTAL_FONT
     ws[f"N{total_row}"].fill = TOTAL_FILL

@@ -4,7 +4,8 @@ turns a free-text campaign geo into stable, DMA-weighted avails numbers.
 
 Everything here is static data extracted from a CTV avails-by-DMA workbook
 (see scripts/extract_constanza_data.py) plus a state-level Hispanic
-population % proxy — no live API calls, no DB rows, refreshed only by
+population % proxy (the fallback of the real ACS Hispanic bundles, acs_hispanic_*.json.gz,
+read by app/services/constanza_hispanic.py) — no live API calls, no DB rows, refreshed only by
 re-running the extraction script against an updated workbook. Mirrors how
 app/catalog.py is the single source of truth for products: this is the
 single source of truth for "how big is DMA X, and what's platform Y's

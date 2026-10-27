@@ -36,16 +36,27 @@ def close(a, b, tol=1e-6):
 
 # --- 1. National sum reconciles to the workbook's own per-DMA totals -------
 platform_dma = load_platform_dma()
-for label, product, platform in [("Roku", ROKU, "roku"), ("Prime", PRIME, "prime")]:
-    est = estimate_avails(product, national, months=1)
-    expected_mid = sum(f.imps_mid for f in platform_dma[platform].values())
-    assert close(est.imps_mid, expected_mid), (label, est.imps_mid, expected_mid)
-    print(f"{label} national imps_mid reconciles to bundled per-DMA sum: OK ({est.imps_mid:,.0f})")
+est = estimate_avails(ROKU, national, months=1)
+expected_mid = sum(f.imps_mid for f in platform_dma["roku"].values())
+assert close(est.imps_mid, expected_mid), ("Roku", est.imps_mid, expected_mid)
+print(f"Roku national imps_mid reconciles to bundled per-DMA sum: OK ({est.imps_mid:,.0f})")
+# Prime Video is bought through the Amazon DSP at its own single 20% win rate: its raw avails reconcile to the bundled per-DMA sum
+# and the estimate is those x 20%.
+est = estimate_avails(PRIME, national, months=1)
+expected_mid = sum(f.imps_mid for f in platform_dma["prime"].values())
+assert est.win_rate is not None and close(est.win_rate["raw_imps_mid"], expected_mid), ("Prime", est.win_rate, expected_mid)
+assert est.win_rate["mid"] == est.win_rate["low"] == est.win_rate["high"] == 0.20 and close(est.imps_mid, expected_mid * 0.20)
+print(f"Prime national raw avails reconcile to the bundled per-DMA sum; the estimate is x its 20% win rate: OK ({est.imps_mid:,.0f} of {expected_mid:,.0f})")
 
 est = estimate_avails(REACH, national, months=1)
 expected = sum(f.imps_mid for f in platform_dma["cumulative"].values())
-assert close(est.imps_mid, expected)
-print(f"Blended 'CTV/OTT Reach' (Madhive cumulative) national reconciles: OK ({est.imps_mid:,.0f})")
+# The blended products are bought through MadHive, so the workbook's avails (bid opportunities) are multiplied by the win rate:
+# the raw figures still reconcile exactly to the workbook, and the estimate is those x the 15% mid win rate.
+assert est.win_rate is not None and close(est.win_rate["raw_imps_mid"], expected)
+assert close(est.imps_mid, expected * est.win_rate["mid"]) and est.win_rate["mid"] == 0.15
+print(f"Blended 'CTV/OTT Reach' (Madhive cumulative): raw avails reconcile, estimate = avails x 15% win rate: OK ({est.imps_mid:,.0f} of {expected:,.0f})")
+assert estimate_avails(ROKU, national, months=1).win_rate is None
+print("Roku Ads (bought directly) carries no win rate: OK")
 
 # --- 2. Every catalog-mapped product actually has bundled data for its geo -
 for name, platform in PLATFORM_MODELED_PRODUCTS.items():

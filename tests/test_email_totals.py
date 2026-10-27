@@ -8,7 +8,7 @@ against them. What is pinned here:
 
   * the helper per billing period (week / month / quarter / full flight), several options, add-ons, customised per-period
     allocations (and merged periods), the agency fee, mixed period counts, added-value lines;
-  * parity with the REAL workbook (generate_proposal -> openpyxl cells): the period multiplier, the ROUNDDOWNs, the add-on
+  * parity with the REAL workbook (generate_proposal -> openpyxl cells): the period multiplier, the plain-sum total cells, the add-on
     SUMIF, the gross mark-up and the per-period breakdown row all come out of the helper identically;
   * the prompts (first generation and the revision) carry those figures and the unit's own wording;
   * the checker: a wrong total is caught, correct text (per-period, per-option, add-on figures) is accepted, statistics /
@@ -88,14 +88,23 @@ def _block(request, tiers, addons=None, unit="month"):
 # The helper
 # ===========================================================================================================
 
-def test_month_totals_floor_the_per_period_total_then_multiply_like_the_workbook():
-    # $2,000.40 + $1,500.80 = $3,501.20 a month: the sheet's TOTAL DIGITAL cell is ROUNDDOWN(.., 0) = 3,501, and the
-    # campaign row multiplies THAT by the months cell: 10,503 (not 3 x 3,501.20 = 10,503.60, which prints as 10,504).
+def test_month_totals_are_exact_sums_like_the_workbook():
+    # $2,000.40 + $1,500.80 = $3,501.20 a month: the sheet's TOTAL DIGITAL cell is the plain SUM (it used to be
+    # ROUNDDOWN(.., 0) = 3,501, which dropped the cents), and the campaign row multiplies that exact cell by the months
+    # cell: 3 x 3,501.20 = 10,503.60.
     opt = _opt(_req(), [_li("Display Alpha", 2000.40), _li("Search Beta", 1500.80)])
     assert (opt.unit, opt.n_periods) == ("month", 3)
-    assert opt.per_period_net == 3501 and opt.media_net == 10503 and opt.total_net == 10503
+    assert opt.per_period_net == 3501.20 and opt.media_net == 10503.60 and opt.total_net == 10503.60
     assert [round(l.total, 2) for l in opt.lines] == [6001.20, 4502.40]
     assert not opt.addons and opt.addons_net == 0 and opt.periods is None and not opt.custom_allocation
+
+
+def test_a_per_period_figure_with_fractions_of_a_cent_multiplies_before_rounding():
+    # 3 lines of $1,111.11 / 1.15 (gross) have sub-cent fractions per period; the sheet multiplies the EXACT per-period
+    # cell by the periods, so the reported media total is round(exact x 3), never round(exact) x 3 (a cent apart).
+    opt = _opt(_req(agency_fee=0.15), [_li("Display Alpha", 1111.11)])
+    exact = 1111.11 / 0.85
+    assert opt.per_period_gross == round(exact, 2) and opt.media_gross == round(exact * 3, 2)
 
 
 def test_week_totals_are_per_week_over_the_weeks_of_the_flight():
@@ -162,7 +171,7 @@ def test_add_ons_enter_the_campaign_total_but_free_ones_do_not():
     opt = _opt(_req(), [_li("Display Alpha", 2000.0)], addons=addons)
     assert [a.name for a in opt.addons] == ["Landing Page", "Call Tracking"] and opt.free_addons == ["Brand Lift"]
     assert opt.addons_net == pytest.approx(350.5)
-    assert opt.media_net == 6000 and opt.total_net == 6350          # ROUNDDOWN(6,000 + 350.5)
+    assert opt.media_net == 6000 and opt.total_net == 6350.5        # 6,000 + 350.5, exact
     block = _block(_req(), [{"label": "A", "line_items": [_li("Display Alpha", 2000.0)]}], addons)
     assert "One-time add-ons (net, the same on every option): Landing Page $100; Call Tracking $250.50" in block
     assert "Add-ons at no charge: Brand Lift" in block
@@ -171,7 +180,7 @@ def test_add_ons_enter_the_campaign_total_but_free_ones_do_not():
     two = et.compute_email_totals(_req(), [{"label": "A", "line_items": [_li("X", 1000.0)]},
                                            {"label": "B", "line_items": [_li("X", 2000.0)]}], addons, "month")
     assert [o.addons_net for o in two.options] == [pytest.approx(350.5)] * 2
-    assert [o.total_net for o in two.options] == [3350, 6350]
+    assert [o.total_net for o in two.options] == [3350.5, 6350.5]
 
 
 def test_added_value_lines_cost_nothing_and_are_in_no_total():
@@ -246,12 +255,12 @@ def test_agency_fee_gross_figures_follow_the_gross_sheet_and_are_labelled_gross(
     totals = et.compute_email_totals(_req(agency_fee=0.15), [{"label": "A", "line_items": [_li("Display Alpha", 2000.0)]}], addons, "month")
     o = totals.options[0]
     assert totals.agency_fee == 0.15
-    assert o.per_period_gross == 2352 and o.media_gross == 7056                       # floor(2,000/.85) = 2,352 x 3
+    assert o.per_period_gross == 2352.94 and o.media_gross == 7058.82                 # 2,000/.85 = 2,352.94 (exact x 3, to the cent)
     assert o.addons_gross == pytest.approx(117.647, abs=1e-3)
-    assert o.total_gross == 7173                                                      # floor(7,056 + 117.647)
+    assert o.total_gross == 7176.47                                                   # 7,058.82 + 117.647, not floored to whole dollars
     block = et.render_prompt_block(totals)
     assert "Gross, with the 15% agency fee (reference — quote only if the context calls for it, and always label it gross)" in block
-    assert "TOTAL INVESTMENT, gross $7,173" in block
+    assert "TOTAL INVESTMENT, gross $7,176.47" in block
     for fee in (None, 0, 0.0, 1.0, 1.5, -0.1, "x"):
         # (a plain object: ProposalRequest itself already normalizes a typed 15 / 1.0 into a fraction)
         plain = SimpleNamespace(start_date="2026-10-01", end_date="2026-12-31", total_months=3, agency_fee=fee)
@@ -296,6 +305,72 @@ def test_legacy_call_shape_gives_the_same_figures():
     assert json.loads(json.dumps(multi.to_dict()))["options"][1]["total_net"] == 10500            # JSON-able for the API
 
 
+def _excel_display(x: float) -> str:
+    """What a spreadsheet shows for a money cell holding x: 15 significant digits, then half away from zero to the cent (independent of
+    the code under test: pure decimal strings, no binary rounding)."""
+    from decimal import ROUND_HALF_UP, Decimal
+    return f"{Decimal(format(x, '.15g')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}"
+
+
+def test_a_gross_figure_on_a_half_cent_reads_what_the_sheet_displays_at_a_20_percent_fee():
+    """At 20% the mark-up is 1.25, so any net whose cents are 2 mod 4 grosses up to a half cent: the sheet shows it rounded UP
+    ($1,674.68), Python's round() sent it down ($1,674.67) about half the time."""
+    opt = _opt(_req(agency_fee=0.20, start_date="", end_date="", total_months=1), [_li("Display Alpha", 1339.74, months=1)], unit="full_flight")
+    assert opt.total_gross == 1674.68 and et.fmt_money(opt.total_gross) == "$1,674.68"
+    addon_opt = _opt(_req(agency_fee=0.20), [_li("Display Alpha", 1000.0)], addons=[SimpleNamespace(product_name="Landing Page", amount=250.5)])
+    assert et.fmt_money(addon_opt.addons[0].gross) == "$313.13"                          # 250.50 / 0.8 = 313.125
+
+
+def test_money_reads_like_the_sheet_over_many_budgets_and_fees():
+    import random
+    rng = random.Random(20261020)
+    mismatches = []
+    for _ in range(4000):
+        fee = rng.choice([0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.50])
+        cents = rng.randint(10_00, 900_000_00)
+        net = cents / 100
+        gross_cell = net / (1 - fee)                                                        # what the Gross sheet's cell holds
+        shown = _excel_display(gross_cell)
+        got = et.fmt_money(gross_cell)
+        wanted = "$" + (shown[:-3] if shown.endswith(".00") else shown)
+        if got != wanted:
+            mismatches.append((fee, net, got, wanted))
+    assert mismatches == []
+
+
+def test_per_period_amounts_round_like_the_sheet_too():
+    """The month-by-month figures quoted in the email are the Monthly Breakdown sheet's cells: at a 20% fee a custom October of $1,339.74
+    grosses up to 1674.675, which the sheet shows as $1,674.68 (round() said .67)."""
+    custom = _li("Display Alpha", 1000.0, monthly_allocations={"2026-10": 1339.74, "2026-11": 800.0, "2026-12": 860.26})   # (1,000 x 3 = the 3,000 split)
+    opt = _opt(_req(agency_fee=0.20), [custom])
+    october = next(p for p in opt.periods if p.label == "October 2026")
+    assert october.net == 1339.74 and october.gross == 1674.68 and et.fmt_money(october.gross) == "$1,674.68"
+    assert [p.gross for p in opt.periods] == [1674.68, 1000.0, 1075.33]                  # 860.26 / 0.8 = 1075.325 -> .33
+
+
+def test_an_absurd_amount_never_raises_and_never_drops_the_figures():
+    """The decimal helper once raised InvalidOperation from 1e26 up (the default 28-digit context): a typo in a budget box silently
+    dropped every authoritative figure for the proposal. HEAD accepted any finite float."""
+    for value in (1e15, 1e25, 1e26, 1e30, 1.7e308, -1e30, 0.0, float("nan"), float("inf")):
+        assert isinstance(et._xl_round2(value), float)
+        assert isinstance(et.fmt_money(value), str)
+    opt = _opt(_req(), [_li("Display Alpha", 1e26)])
+    assert opt.total_net == pytest.approx(3e26) and et.fmt_money(opt.total_net).startswith("$")
+    assert et._xl_round2(float("nan")) == 0.0 and et._xl_round2(float("inf")) == 0.0       # a non-number is the same zero as everywhere else in this module
+
+
+def test_the_prompts_single_option_total_keeps_the_cents():
+    """ai_enricher used to print the single-option total with :,.0f ($12,602) beside the same prompt's own exact figure
+    ($12,601.50): once the workbook's totals stopped rounding down, that line misled the model it tells to use the figures verbatim."""
+    lines = [_li("Display Alpha", 1666.67), _li("Search Beta", 2500.33)]
+    addons = [SimpleNamespace(product_name="Landing Page", amount=100.5)]
+    request = _req(agency_fee=None)
+    totals = et.compute_email_totals(request, [{"label": "A", "line_items": lines}], addons, "month")
+    prompt = ai_enricher._build_prompt(request, lines, tiers=None, time_unit="month", totals=totals)
+    assert "- Total Net Investment: $12,601.50 ($12,501 media + $100.50 one-time add-ons)" in prompt
+    assert "TOTAL INVESTMENT, net — the Excel's campaign grand-total row (media + one-time add-ons): $12,601.50" in prompt
+
+
 # ===========================================================================================================
 # Parity with the real workbook
 # ===========================================================================================================
@@ -305,19 +380,19 @@ def _excel_figures(ws, *, gross: bool) -> dict:
     formula really has the shape this evaluation assumes)."""
     col = "N" if gross else "L"
     total_row = next(r for r in range(19, ws.max_row + 1)
-                     if "TOTAL DIGITAL" in str(ws[f"C{r}"].value or "") and str(ws[f"L{r}"].value or "").startswith("=ROUNDDOWN(SUM(L19:L"))
-    grand_row = next(r for r in range(total_row + 1, ws.max_row + 1) if str(ws[f"L{r}"].value or "").startswith(f"=ROUNDDOWN(L{total_row}"))
+                     if "TOTAL DIGITAL" in str(ws[f"C{r}"].value or "") and str(ws[f"L{r}"].value or "").startswith("=SUM(L19:L"))
+    grand_row = next(r for r in range(total_row + 1, ws.max_row + 1) if str(ws[f"L{r}"].value or "").startswith(f"=L{total_row}"))
     fee = ws["I14"].value if gross else None
     factor = 1.0 / (1.0 - fee) if gross else 1.0
     lines = [float(ws[f"L{r}"].value) for r in range(19, total_row) if isinstance(ws[f"L{r}"].value, (int, float))]
-    per_period = math.floor(math.fsum(v * factor for v in lines) + 1e-9)
-    assert str(ws[f"{col}{total_row}"].value).startswith(f"=ROUNDDOWN(SUM({col}19:{col}")          # TOTAL DIGITAL = ROUNDDOWN(SUM(budgets))
+    per_period = math.fsum(v * factor for v in lines)
+    assert str(ws[f"{col}{total_row}"].value).startswith(f"=SUM({col}19:{col}")                    # TOTAL DIGITAL = SUM(budgets), no ROUNDDOWN
     formula = ws[f"{col}{grand_row}"].value
     if "ISNUMBER(I10)" in formula:
-        assert formula.startswith(f"=ROUNDDOWN({col}{total_row}*IF(ISNUMBER(I10),I10,3)")
+        assert formula.startswith(f"={col}{total_row}*IF(ISNUMBER(I10),I10,3)")
         multiplier = ws["I10"].value
     else:
-        assert formula.startswith(f"=ROUNDDOWN({col}{total_row} + SUMIF(")                     # Full Flight: nothing multiplied
+        assert formula.startswith(f"={col}{total_row} + SUMIF(")                              # Full Flight: nothing multiplied
         multiplier = 1
     addons = 0.0
     m = re.search(rf'SUMIF\({col}(\d+):{col}(\d+),">0"\)', formula)
@@ -327,7 +402,7 @@ def _excel_figures(ws, *, gross: bool) -> dict:
             amount = net * factor if isinstance(net, (int, float)) else 0.0
             if amount > 0:
                 addons += amount
-    return {"per_period": per_period, "multiplier": multiplier, "grand": math.floor(per_period * multiplier + addons + 1e-9),
+    return {"per_period": per_period, "multiplier": multiplier, "grand": round(per_period * multiplier + addons, 2),
             "total_row": total_row}
 
 
@@ -344,11 +419,11 @@ def _compare(wb, totals: et.EmailTotals, label="A", *, gross=True):
     sheet = "Proposal A" if len(totals.options) == 1 else None
     ws = wb[sheet] if sheet else wb[f"{opt.display_name}"]
     net = _excel_figures(ws, gross=False)
-    assert (opt.per_period_net, opt.n_periods, opt.total_net) == (net["per_period"], net["multiplier"], net["grand"])
+    assert (opt.per_period_net, opt.n_periods, opt.total_net) == (pytest.approx(net["per_period"], abs=0.005), net["multiplier"], pytest.approx(net["grand"], abs=0.005))
     if gross and totals.agency_fee:
         ws_g = wb["Proposal A (Gross)"] if sheet else wb[f"{opt.display_name} (Gross)"]
         g = _excel_figures(ws_g, gross=True)
-        assert (opt.per_period_gross, opt.total_gross) == (g["per_period"], g["grand"])
+        assert (opt.per_period_gross, opt.total_gross) == (pytest.approx(g["per_period"], abs=0.005), pytest.approx(g["grand"], abs=0.005))
     return ws, net
 
 
@@ -374,7 +449,7 @@ def test_full_flight_totals_equal_the_workbooks(tmp_path):
     _compare(wb, totals)
     o = totals.options[0]
     assert (o.per_period_net, o.n_periods, o.media_net, o.total_net) == (12750, 1, 12750, 12850)
-    assert (o.media_gross, o.total_gross) == (15000, 15117)                           # the reference export's $15,000 gross
+    assert (o.media_gross, o.total_gross) == (15000, 15117.65)                        # the reference export's $15,000 gross, + $100 / 0.85 of add-ons, to the cent
 
 
 def test_week_totals_equal_the_workbooks(tmp_path):

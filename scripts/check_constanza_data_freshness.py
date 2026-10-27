@@ -31,6 +31,8 @@ BUNDLES = [
     "country_reference.json", "audience_taxonomy.json",
     "acs_age_sex_county.json", "acs_age_sex_zcta.json", "acs_age_sex_cd.json",
     "acs_age_sex_place.json", "acs_age_sex_dma.json", "acs_age_sex_state.json",
+    "acs_hispanic_county.json", "acs_hispanic_zcta.json", "acs_hispanic_cd.json",
+    "acs_hispanic_place.json", "acs_hispanic_dma.json", "acs_hispanic_state.json",
     "geo/county_dma.json", "geo/cd_dma.json",  # county_dma has no _meta today (extract_constanza_geo_crosswalks.py doesn't stamp one yet) — reported as unknown
 ]
 

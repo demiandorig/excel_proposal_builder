@@ -101,14 +101,17 @@ def _body(name, **kw):
 # 1. Defaults == Phase 1
 # ---------------------------------------------------------------------------------------------------------------------
 
-def test_with_no_admin_rows_every_product_behaves_exactly_as_phase_1_hard_coded_it():
+def test_with_no_admin_rows_every_product_behaves_exactly_as_phase_1_hard_coded_it_plus_the_live_api_products():
     seen = 0
     for p in catalog.CATALOG:
         cfg = fm.resolve_forecast(p.name, p.family)
         expected_platform = fm.DEFAULT_PLATFORM_PRODUCTS.get(p.name)
-        assert cfg.enabled == (p.family == "Entravision Plus"), p.name           # the button: the whole family, nothing else
-        assert cfg.platform == expected_platform and cfg.method == ("platform" if expected_platform else "generic"), p.name
-        assert cfg.hispanic_weighted == (p.name in fm.DEFAULT_HISPANIC_PRODUCTS), p.name
+        if p.name in fm.DEFAULT_API_PRODUCTS:                       # the one addition since: a product forecast by a live API (TikTok)
+            assert (cfg.enabled, cfg.method, cfg.platform, cfg.hispanic_weighted) == (True, fm.DEFAULT_API_PRODUCTS[p.name], None, False), p.name
+        else:
+            assert cfg.enabled == (p.family == "Entravision Plus"), p.name           # the button: the whole family, nothing else
+            assert cfg.platform == expected_platform and cfg.method == ("platform" if expected_platform else "generic"), p.name
+            assert cfg.hispanic_weighted == (p.name in fm.DEFAULT_HISPANIC_PRODUCTS), p.name
         assert cfg.source == "default"
         seen += 1
     assert seen == len(catalog.CATALOG)
@@ -226,9 +229,9 @@ def test_clean_config_rejects_what_cannot_work(payload, message):
 
 def test_clean_config_normalizes_a_generic_choice_and_keeps_a_platform_one():
     assert fm.clean_config({"enabled": 1, "method": "generic", "platform": "roku", "hispanic_weighted": True}) == \
-        {"enabled": True, "method": "generic", "platform": None, "hispanic_weighted": False}     # generic: no platform, no weighting
+        {"enabled": True, "method": "generic", "platform": None, "hispanic_weighted": False, "win_rate": None}     # generic: no platform, no weighting, no win rate
     assert fm.clean_config({"enabled": False, "method": "platform", "platform": " roku ", "hispanic_weighted": True}) == \
-        {"enabled": False, "method": "platform", "platform": "roku", "hispanic_weighted": True}
+        {"enabled": False, "method": "platform", "platform": "roku", "hispanic_weighted": True, "win_rate": None}
 
 
 def test_set_override_stores_under_the_current_name_and_drops_a_former_name_row(store):
@@ -276,7 +279,7 @@ def test_the_default_estimates_are_what_they_were_before_the_mapping_existed():
     assert vix.confidence == "generic_fallback" and vix.platform == "generic_population"
     assert engine.estimate_avails(VIX, national, months=1) is None            # nothing to apportion without a total
     hisp = engine.estimate_avails(HISPANIC, resolve_geo("Los Angeles; Nashville"), months=1)
-    assert any("Hispanic population %" in n for n in hisp.notes)
+    assert any("share of the geography's Hispanic population" in n for n in hisp.notes)
 
 
 def test_repointing_a_product_at_another_platform_changes_its_numbers(store):
@@ -306,13 +309,13 @@ def test_a_generic_product_can_be_given_platform_data(store):
 def test_hispanic_weighting_can_be_turned_on_and_off_per_product(store):
     geo = resolve_geo("Los Angeles; Nashville")            # two states with very different Hispanic shares
     plain = engine.estimate_avails(REACH, geo, months=1)
-    assert not any("Hispanic population %" in n for n in plain.notes)
+    assert not any("share of the geography's Hispanic population" in n for n in plain.notes)
     fm.set_override(REACH, {"enabled": True, "method": "platform", "platform": "cumulative", "hispanic_weighted": True}, "a")
     weighted = engine.estimate_avails(REACH, geo, months=1)
-    assert any("Hispanic population %" in n for n in weighted.notes)
+    assert any("share of the geography's Hispanic population" in n for n in weighted.notes)
     assert [round(a.weight, 6) for a in weighted.by_area] != [round(a.weight, 6) for a in plain.by_area]
     fm.set_override(HISPANIC, {"enabled": True, "method": "platform", "platform": "cumulative", "hispanic_weighted": False}, "a")
-    assert not any("Hispanic population %" in n for n in engine.estimate_avails(HISPANIC, geo, months=1).notes)
+    assert not any("share of the geography's Hispanic population" in n for n in engine.estimate_avails(HISPANIC, geo, months=1).notes)
 
 
 def test_turning_the_button_off_does_not_break_the_estimate_itself(store):
@@ -342,10 +345,15 @@ def _catalog_payload():
 def test_every_product_in_the_catalog_payload_carries_its_forecast_config():
     products = _catalog_payload()
     assert len(products) == len(catalog.effective_catalog())
-    assert products[ROKU]["forecast"] == {"enabled": True, "method": "platform", "platform": "roku", "hispanic_weighted": False, "source": "default", "relation": "primary"}
+    assert products[ROKU]["forecast"] == {"enabled": True, "method": "platform", "platform": "roku", "hispanic_weighted": False, "source": "default", "relation": "primary", "win_rate": False, "win_rate_override": None, "hispanic_default": False}      # bought directly on Roku Ads
+    assert products["Entravision Plus - Hulu"]["forecast"]["win_rate"] is True                              # bought through MadHive
+    assert products[PRIME]["forecast"]["win_rate"] is True                                                    # bought through the Amazon DSP, at its own rate
+    assert products["Entravision Plus - Hispanics CTV/OTT"]["forecast"]["hispanic_default"] is True            # Hispanic targeting on unless the planner turns it off
+    assert products["Entravision Plus - Hulu"]["forecast"]["hispanic_default"] is False
     assert products[VIX]["forecast"]["method"] == "generic" and products[VIX]["forecast"]["enabled"] is True
     assert products[SEARCH]["forecast"]["enabled"] is False
-    assert sum(1 for p in products.values() if p["forecast"]["enabled"]) == 22 + len(NEW_EP)
+    assert products["Tiktok Ads"]["forecast"]["method"] == "tiktok" and products["Tiktok Ads"]["forecast"]["platform"] is None
+    assert sum(1 for p in products.values() if p["forecast"]["enabled"]) == 22 + len(NEW_EP) + len(fm.DEFAULT_API_PRODUCTS)
 
 
 def test_an_admin_change_reaches_the_catalog_payload(store):
@@ -371,7 +379,7 @@ def test_the_platform_products_endpoint_is_the_live_mapping(store):
 
 def test_the_admin_payload_lists_every_product_with_coverage_and_totals(store):
     data = asyncio.run(main.admin_get_forecast_map())
-    assert data["summary"] == {"total": len(catalog.effective_catalog()), "enabled": 22 + len(NEW_EP), "platform_modeled": 10, "generic": 12 + len(NEW_EP), "customized": 0}
+    assert data["summary"] == {"total": len(catalog.effective_catalog()), "enabled": 22 + len(NEW_EP) + 1, "platform_modeled": 10, "generic": 12 + len(NEW_EP), "tiktok": 1, "customized": 0}
     rows = {r["name"]: r for r in data["products"]}
     assert rows[ROKU]["enabled"] and rows[ROKU]["method"] == "platform" and rows[ROKU]["platform"] == "roku" and not rows[ROKU]["customized"]
     assert rows[SEARCH]["enabled"] is False and rows[SEARCH]["default"]["enabled"] is False
@@ -386,7 +394,7 @@ def test_the_admin_payload_lists_every_product_with_coverage_and_totals(store):
 
 def test_saving_a_choice_answers_with_the_refreshed_list(store):
     data = asyncio.run(main.admin_set_forecast_map(_body(SEARCH, method="generic", platform=None), _request("planner@x.com")))
-    assert data["saved"] is True and data["summary"]["customized"] == 1 and data["summary"]["enabled"] == 23 + len(NEW_EP)
+    assert data["saved"] is True and data["summary"]["customized"] == 1 and data["summary"]["enabled"] == 24 + len(NEW_EP)
     row = next(r for r in data["products"] if r["name"] == SEARCH)
     assert row["enabled"] and row["method"] == "generic" and row["customized"]
     assert store.rows[SEARCH]["updated_by"] == "planner@x.com"
@@ -507,7 +515,7 @@ def test_the_table_is_created_by_the_startup_bootstrap():
     mine = [s for s in statements if s["target"] == "forecast_product_map"]
     assert len(mine) == 1 and mine[0]["kind"] == "table"
     sql = re.sub(r"\s+", " ", mine[0]["sql"])
-    for column in ("product_name TEXT PRIMARY KEY", "enabled BOOLEAN NOT NULL", "method TEXT NOT NULL CHECK (method IN ('platform', 'generic'))",
+    for column in ("product_name TEXT PRIMARY KEY", "enabled BOOLEAN NOT NULL", "method TEXT NOT NULL CHECK (method IN ('platform', 'generic', 'tiktok'))",
                    "platform TEXT", "hispanic_weighted BOOLEAN NOT NULL DEFAULT FALSE"):
         assert column in sql, column
 
@@ -519,7 +527,8 @@ ADMIN_HTML = (ROOT / "app" / "templates" / "admin.html").read_text(encoding="utf
 
 def test_the_avails_card_reads_the_products_forecast_config_not_a_hard_coded_family():
     card = APP_JS.split("function renderAvailsGrid", 1)[1].split("\nfunction ", 1)[0]
-    assert "${!isFreeform && _forecastEnabled(p) ? `" in card
+    # a paid Meta line has its own panel (audience scenarios) instead of the platform-data button: the config decides, not a family name
+    assert "${!isFreeform && _forecastEnabled(p) && p.meta_retail_cpm == null ? `" in card
     assert 'p.family === "Entravision Plus"' not in card
     helper = APP_JS.split("function _forecastEnabled(p) {", 1)[1].split("\n}\n", 1)[0]
     assert "p.forecast ? !!p.forecast.enabled" in helper and 'p.family === "Entravision Plus"' in helper     # the old rule is only a fallback

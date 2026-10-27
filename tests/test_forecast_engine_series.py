@@ -332,3 +332,63 @@ def test_international_geography_never_uses_dma_series(fake):
     res = resolve_geo("Mexico", "country")
     assert engine.estimate_avails("P", res, config=cfg("s")) is None
     assert engine.estimate_avails("P", res, config=cfg("s"), national_monthly_total=1e6).confidence == "generic_fallback"
+
+
+# --------------------------------------------------------------------------------------------- a whole state's people and reach
+
+def test_a_whole_states_people_and_reach_are_scaled_to_the_state_rows_own_figures_not_the_avails_ratio(fake):
+    """Avails add up across markets, people do not: Wyoming's own row has 12,600 people where its two home markets hold 10,000, so the home
+    markets' universes are scaled by 1.26 (the state's own), not by the avails ratio (1.90)."""
+    fake.series["s"] = ref("s", 1, levels=("dma", "state"))
+    fake.dmas[1] = {d.key: store.Row(d.key, 1000.0, reach_universe=5000.0, est_reach=2000.0) for d in geo.dma_table()}
+    fake.states[(1, "WY")] = store.Row("WY", 3800.0, reach_universe=12_600.0, est_reach=3000.0)
+    est = estimate("P", "WY", config=cfg("s"))
+    assert est.imps_mid == pytest.approx(3800.0)                                # the avails still follow the state row
+    assert est.reach_universe == pytest.approx(12_600.0) and est.est_uniques == pytest.approx(3000.0)
+    assert sum(a.reach_universe for a in est.by_area) == pytest.approx(12_600.0)
+    assert sum(a.unique_viewers for a in est.by_area) == pytest.approx(3000.0)
+
+
+def test_a_state_row_without_people_falls_back_to_the_avails_ratio_for_them(fake):
+    fake.series["s"] = ref("s", 1, levels=("dma", "state"))
+    # (avails sit well above reach, as in every real export: an ID needs at least one impression, and the engine caps reach at them)
+    fake.dmas[1] = {d.key: store.Row(d.key, 10_000.0, reach_universe=5000.0, est_reach=2000.0) for d in geo.dma_table()}
+    fake.states[(1, "WY")] = store.Row("WY", 38_000.0)                         # no universe and no reach in the state row
+    est = estimate("P", "WY", config=cfg("s"))
+    assert est.reach_universe == pytest.approx(10_000.0 * 1.9) and est.est_uniques == pytest.approx(4000.0 * 1.9)
+
+
+def test_a_state_row_with_only_the_people_there_are_scales_the_people_reached_the_same_way(fake):
+    """If the state row carries the universe but no reach, the reach follows the universe's ratio (x1.26), never the avails ratio (x1.9): the
+    people reached stay a part of the people there are."""
+    fake.series["s"] = ref("s", 1, levels=("dma", "state"))
+    fake.dmas[1] = {d.key: store.Row(d.key, 10_000.0, reach_universe=5000.0, est_reach=4500.0) for d in geo.dma_table()}
+    fake.states[(1, "WY")] = store.Row("WY", 38_000.0, reach_universe=12_600.0)
+    est = estimate("P", "WY", config=cfg("s"))
+    assert est.reach_universe == pytest.approx(12_600.0) and est.est_uniques == pytest.approx(9000.0 * 1.26)
+    assert est.est_uniques <= est.reach_universe
+
+
+def test_a_state_row_with_only_the_reach_scales_the_universe_the_same_way(fake):
+    fake.series["s"] = ref("s", 1, levels=("dma", "state"))
+    fake.dmas[1] = {d.key: store.Row(d.key, 1000.0, reach_universe=5000.0, est_reach=2000.0) for d in geo.dma_table()}
+    fake.states[(1, "WY")] = store.Row("WY", 3800.0, est_reach=3000.0)                         # reach, but no universe
+    est = estimate("P", "WY", config=cfg("s"))
+    assert est.est_uniques == pytest.approx(3000.0) and est.reach_universe == pytest.approx(10_000.0 * 0.75)
+
+
+def test_unique_households_follow_the_state_rows_own_figure_not_the_avails_ratio(fake):
+    fake.series["s"] = ref("s", 1, levels=("dma", "state"))
+    fake.dmas[1] = {d.key: store.Row(d.key, 1000.0, reach_universe=5000.0, est_reach=2000.0, unique_hh=800.0) for d in geo.dma_table()}
+    fake.states[(1, "WY")] = store.Row("WY", 3800.0, reach_universe=12_600.0, est_reach=3000.0, unique_hh=1500.0)
+    est = estimate("P", "WY", config=cfg("s"))
+    assert sum(a.unique_hh for a in est.by_area) == pytest.approx(1500.0)
+
+
+def test_people_are_not_scaled_when_the_request_mixes_the_state_with_areas_outside_it(fake):
+    fake.series["s"] = ref("s", 1, levels=("dma", "state"))
+    fake.dmas[1] = {d.key: store.Row(d.key, 1000.0, reach_universe=5000.0, est_reach=2000.0) for d in geo.dma_table()}
+    fake.states[(1, "WY")] = store.Row("WY", 3800.0, reach_universe=12_600.0, est_reach=3000.0)
+    est = estimate("P", "WY; Denver", config=cfg("s"))
+    home = [a for a in est.by_area if a.dma in ("Cheyenne-Scottsbluff", "Casper-Riverton")]
+    assert [a.reach_universe for a in home] == [pytest.approx(5000.0)] * 2

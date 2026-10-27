@@ -14,8 +14,10 @@ tells the model to use them verbatim and to do no arithmetic of its own.
 THE FIGURES EQUAL THE EXCEL EXPORT
 ----------------------------------
 They mirror what proposal_generator / excel_template write, cell for cell:
-  * per period   TOTAL DIGITAL row      = ROUNDDOWN(SUM(NET BUDGET column), 0)
-  * flight       TOTAL DIGITAL — N-...  = ROUNDDOWN(that x the sheet's period count + SUMIF(add-ons > 0), 0)
+  * per period   TOTAL DIGITAL row      = SUM(NET BUDGET column)
+  * flight       TOTAL DIGITAL — N-...  = that x the sheet's period count + SUMIF(add-ons > 0)
+    (both exact: the sheet's total cells are plain sums, shown to the cent — they used to be wrapped in ROUNDDOWN(..., 0),
+    which silently dropped the cents; the figures here are rounded only to the cent, to shed float noise)
   * gross        the same with every NET budget / add-on divided by (1 - agency fee), on the Gross sheet
   * the period count is the sheet's own "Months:" cell (proposal_generator's tier_total_months): the lines' shared
     `months` when they agree, else the flight's calendar periods, else the request's total_months; exactly 1 for
@@ -35,6 +37,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from decimal import ROUND_HALF_UP, Decimal
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
@@ -79,9 +82,21 @@ def _num(value: Any) -> float:
     return out if math.isfinite(out) else 0.0
 
 
-def _floor(x: float) -> int:
-    """Excel's ROUNDDOWN(x, 0) — with a hair of tolerance so 14999.999999999998 (float noise) reads 15000 like Excel."""
-    return int(math.floor(x + 1e-9))
+def _xl_round2(x: float) -> float:
+    """What the workbook DISPLAYS for a money cell holding `x`: Excel (and LibreOffice) take the value to 15 significant digits and
+    round that decimal half away from zero. Python's round() works on the binary float and ties to even, so at a 20% agency fee
+    (a 1.25 mark-up) a gross figure like 1674.675 (the sheet shows $1,674.68) came out $1,674.67 here. Decimal does it the
+    spreadsheet's way."""
+    v = _num(x)
+    if abs(v) >= 1e15:             # past 15 significant digits there are no cents left to round (and an absurd budget must not raise)
+        return float(format(v, ".15g"))
+    return float(Decimal(format(v, ".15g")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _cents(x: float) -> float:
+    """A figure as the workbook shows it: the exact sum, taken to the cent the way the spreadsheet rounds (see _xl_round2). The
+    sheet's total cells used to ROUNDDOWN to whole dollars; they are plain sums now."""
+    return _xl_round2(x)
 
 
 def _clean(value: Any) -> str:
@@ -91,7 +106,7 @@ def _clean(value: Any) -> str:
 def fmt_money(x: float) -> str:
     """"$2,000" for a whole-dollar figure, "$21,666.67" when it carries cents (the workbook's money cells show two
     decimals; a whole-dollar amount reads naturally without them)."""
-    x = round(_num(x), 2)
+    x = _xl_round2(x)
     if abs(x - round(x)) < 0.005:
         return f"${int(round(x)):,}"
     return f"${x:,.2f}"
@@ -313,17 +328,22 @@ def _option(request: Any, tier: Any, index: int, *, unit: str, mode: str, addon_
         if not is_av:
             paid.append((li, per_period, months_i))
 
-    per_period_net = _floor(math.fsum(p for _, p, _ in paid))
-    per_period_gross = _floor(math.fsum(p * factor for _, p, _ in paid)) if fee else per_period_net
-    media_net = per_period_net * n_periods
-    media_gross = per_period_gross * n_periods
+    # Exact, like the sheet: the per-period total row is SUM(...), and the campaign grand-total row multiplies THAT exact
+    # cell by the period count — so multiply first and round only the figure that is reported (never round-then-multiply,
+    # which would drift a cent from the sheet whenever a per-period figure has fractions of a cent).
+    per_period_net_exact = math.fsum(p for _, p, _ in paid)
+    per_period_gross_exact = math.fsum(p * factor for _, p, _ in paid) if fee else per_period_net_exact
+    media_net_exact = per_period_net_exact * n_periods
+    media_gross_exact = per_period_gross_exact * n_periods
+    per_period_net, per_period_gross = _cents(per_period_net_exact), _cents(per_period_gross_exact)
+    media_net, media_gross = _cents(media_net_exact), _cents(media_gross_exact)
 
     addons = [AddonFigure(n, a, a * factor) for n, a in addon_rows if a > 0]
     free_addons = [n for n, a in addon_rows if a <= 0]
     addons_net = math.fsum(a.net for a in addons)
     addons_gross = math.fsum(a.gross for a in addons)
-    total_net = _floor(media_net + addons_net)
-    total_gross = _floor(media_gross + addons_gross) if fee else total_net
+    total_net = _cents(media_net_exact + addons_net)
+    total_gross = _cents(media_gross_exact + addons_gross) if fee else total_net
 
     # Per-period amounts — only when the planner customised at least one line (otherwise the workbook has no breakdown
     # block at all, and "per period x N" is the whole story).
@@ -338,8 +358,8 @@ def _option(request: Any, tier: Any, index: int, *, unit: str, mode: str, addon_
                 sums[p["key"]] += _num(allocations.get(p["key"]))
         tolerance = max(2.0, n_periods + 1.0)
         if abs(sum(sums.values()) - media_net) <= tolerance:
-            periods_out = [PeriodFigure(p["label"], p.get("date_range_label", ""), round(sums[p["key"]], 2),
-                                        round(sums[p["key"]] * factor, 2)) for p in merged]
+            periods_out = [PeriodFigure(p["label"], p.get("date_range_label", ""), _cents(sums[p["key"]]),
+                                        _cents(sums[p["key"]] * factor)) for p in merged]
         else:
             notes.append("the per-period amounts don't add up to the option's total, so none are quoted")
     elif has_custom:
