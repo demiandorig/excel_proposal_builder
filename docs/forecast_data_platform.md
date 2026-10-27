@@ -172,6 +172,17 @@ Flight dates are **not** checked against the window: seasons repeat each year an
 
 ## How an estimate is built
 
+For each resolved area the most direct row wins:
+
+1. a **ZIP** area uses its series' own ZIP row; a ZIP with no row is zero (and listed in a note);
+2. a **congressional-district** area uses its district row;
+3. a whole **DMA** uses its DMA row;
+4. anything finer (county, city) is its parent DMA's row × the area's population share (as before).
+
+Then × months (or weeks), with the planning range from the row (legacy series) or the series band. Every estimate carries
+its series, version, data basis, unit and period, and notes in plain language. For the seven original model series the
+database path reproduces the old bundled-workbook numbers **exactly** (a test compares them across 14 geographies).
+
 ### Meta (Facebook & Instagram) audience scenarios (Step 05)
 
 The three paid Facebook & Instagram Ads SKUs (Awareness, Traffic / Conversion, Lead Gen / Calls; the branded-content / Page SKUs are excluded)
@@ -201,8 +212,10 @@ in a published deployment, so set the rate in Admin if it still reads $13).
 *Live*: put `META_ACCESS_TOKEN` and `META_AD_ACCOUNT_ID` in the app's secrets (below), search Meta's own geographies (DMA "geo markets", cities,
 regions, ZIPs, countries; the planner picks the exact key, nothing is guessed), optionally set age (18–65) and gender, and choose **interests and
 behaviors from Meta's own lists** (below). Everything chosen goes to Meta as the targeting spec; the chosen interests / behaviors form **one
-`flexible_spec` group, so the audience is people who match ANY of them**. Nothing else about a real campaign (exclusions, placements, account
-restrictions) is represented, so check those in Ads Manager.
+`flexible_spec` group, so the audience is people who match ANY of them**. Nothing else about a real campaign (exclusions, account restrictions) is
+represented, so check those in Ads Manager. Two things the figure is not: it counts people active on Meta's **default placements** (Facebook, Instagram,
+Messenger, Audience Network…), the same as Ads Manager's "Estimated audience size", not only Facebook and Instagram; and Meta's **TV markets are Comscore
+Markets** (Meta moved off Nielsen DMAs on 2026-06-22), so a market's footprint can differ from the Nielsen DMA the rest of Constanza uses.
 
 **The interest and behavior lists come from Meta.** `GET /api/constanza/meta-targeting?kind=interests|behaviors|demographics` returns a whole list
 (Meta's `search?type=adTargetingCategory&class=…`, cached for 12 hours; demographics are life events, industries, income, family status);
@@ -216,14 +229,17 @@ the words. Meta does not return every option to every ad account and retires opt
 |---|---|
 | `META_ACCESS_TOKEN` | a long-lived token (a business **system user's** is best) with the **`ads_read`** permission on the ad account |
 | `META_AD_ACCOUNT_ID` | the numeric ad account ID the estimates are asked through, with or without `act_` |
-| `META_GRAPH_API_VERSION` | optional, default **v25.0** (the newest Marketing API version at the time of writing) |
+| `META_APP_SECRET` | optional: only if the Meta app has **Require App Secret** switched on (every call then carries an `appsecret_proof`); otherwise leave it out |
+| `META_GRAPH_API_VERSION` | optional, default **v26.0** (the current Marketing API version; a pinned older one stops working when Meta retires it) |
 
-The app that issued the token needs **Ads Management Standard Access** (Meta's naming moved to *Limited Access* in May 2026) with business
+The steps on Meta's side: in **Business Settings → Users → System users** create a system user, give it the ad account (*View performance* is enough),
+**Generate new token** for a Meta app that has the **`ads_read`** permission, and copy the ad account's numeric ID from Ads Manager. The app that issued the token needs **Ads Management Standard Access** (Meta's naming moved to *Limited Access* in May 2026) with business
 verification when it reads accounts beyond your own business's; a token for an app still in development works only for people with a role on the
 app. Then run `python -m app.services.meta_diagnose` (`--json` for a machine-readable answer): it checks the token and ad account, geography search,
 reach estimates (a country; a TV market with age and gender; an interest), and the three lists, and each failing line says what to fix. Errors are
 told in plain words with the right status (token → 503, permission → 503, rate limit → 429, refused settings → 422); no secret appears in any answer.
-`GET /api/constanza/meta/status` says whether it is connected (which settings are missing, never their values).
+`GET /api/constanza/meta/status` says whether it is connected (which settings are missing, never their values). The Meta response of `reachestimate` is
+read whether Meta sends one object (its documented shape) or a list.
 
 **Not verified against a real account** (none existed when this was written; the request and response shapes are Meta's published reference): that
 `geo_markets` alone satisfies `reachestimate` (Meta's page lists `countries` as required in a targeting spec), that the token can read the lists, and
@@ -551,12 +567,16 @@ export makes a new Netflix version instead of leaving it "unchanged".
 ### Deploying (Replit Publish)
 
 * **A published deployment skips the startup migrations** (`REPLIT_DEPLOYMENT=1`, `forecast_import.service._apply_startup_migrations`): its schema
-  comes from **Publish's schema diff** of the development database. So run the app once in the workspace first (that applies
-  `migrations/*.sql` and `schema.sql` to the dev database) and then Publish: the diff carries the new column `forecast_product_map.win_rate`
-  (migration `0005`) and the wider method CHECK (`0004`, which lets a product's method be `tiktok`). Neither has a foreign key. Until the schema is
-  published, the app keeps working: an admin's win-rate choice is simply not stored (`UndefinedColumn` fallback) and the TikTok default needs no row.
+  comes from **Publish's schema diff** of the development database, plus the idempotent statements `schema.sql` runs at every start. So run the app
+  once in the workspace first (that applies `migrations/*.sql` and `schema.sql` to the dev database) and then Publish: the diff carries the new column
+  `forecast_product_map.win_rate` (migration `0005`) and the wider method CHECK (`0004`, which lets a product's method be `tiktok`). Neither has a foreign
+  key. Until the schema is published, the app keeps working: an admin's win-rate choice is simply not stored (`UndefinedColumn` fallback) and the TikTok
+  default needs no row.
 * **Data is not schema.** Publish does not run data statements, so these need doing against the production database by hand: the Awareness CPM
   correction ($13 → $12, migration `0003`: set the rate in Admin → Catalog if it still reads $13), and loading the recalibrated **Prime Video**
   series (`python -m app.services.forecast_import import` in the deployment's shell: it also re-versions the other six bundled series with identical
   numbers).
-* Migration numbers: `0003` Meta CPM (from the Meta branch), `0004` TikTok method, `0005` win rate.
+* Migration numbers: `0003` Meta CPM (from the Meta branch), `0004` TikTok method, `0005` win rate. `python -m app.services.migrations status` lists
+  which of them a database has recorded (a changed checksum on an already-applied file only warns).
+* **Secrets** are set in the deployment's own Secrets, not only the workspace's: `TIKTOK_ACCESS_TOKEN` / `TIKTOK_ADVERTISER_ID`,
+  `META_ACCESS_TOKEN` / `META_AD_ACCOUNT_ID` (and `META_APP_SECRET` if needed), `CENSUS_API_KEY` only to rebuild the Hispanic data offline.

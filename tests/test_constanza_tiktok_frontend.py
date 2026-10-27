@@ -51,13 +51,13 @@ def run(snippet: str):
 
 DATA = {
     "product_name": "Tiktok Ads", "platform": "tiktok", "confidence": "live_api", "geo_method": "exact_dma", "geo_confidence": "high",
-    "months": 2, "imps_low": 2_400_000, "imps_mid": 2_640_000, "imps_high": 2_880_000, "est_uniques": 240_000, "reach_universe": None,
+    "months": 2, "imps_low": 1_857_600, "imps_mid": 2_376_000, "imps_high": 3_715_200, "est_uniques": 216_000, "reach_universe": None,
     "series": None, "weeks": None, "notes": ["TikTok note."], "unmatched_geo_tokens": [], "unmatched_geo_details": [], "ambiguous": [],
     "geo_interpretations": [], "geo_suggestions": [], "by_area": [],
     "tiktok": {"audience": {"low": 216_000, "mid": 240_000, "high": 264_000}, "stage": 3, "stage_label": "Balanced",
                "stage_note": "20% to 80% of the possible audience in these locations", "impressions_per_person": 5.5,
                "scenarios": {"basis": "lower_end", "default": "mid", "multipliers": {"conservative": 4.3, "mid": 5.5, "upper": 8.6}},
-               "monthly": {"low": 1_188_000, "mid": 1_320_000, "high": 1_452_000},
+               "monthly": {"low": 928_800, "mid": 1_188_000, "high": 1_857_600},
                "locations": [{"source": "Los Angeles", "name": "Los Angeles CA", "id": "800002", "geo_type": "DMA", "kind": "location_id"}],
                "unmapped": [], "objective": "Reach", "placements": ["PLACEMENT_TIKTOK"], "request_id": "REQ-1", "cached": False},
 }
@@ -202,13 +202,13 @@ def test_changing_the_tiktok_setup_makes_the_shown_result_stale():
 
 def test_the_numbers_of_a_tiktok_result_are_monthly_impressions_and_the_audience_as_uniques():
     out = run(f"return JSON.stringify(P.summarize({json.dumps(DATA)}));")
-    assert out["month"]["mid"] == 1_320_000 and out["total"]["mid"] == 2_640_000 and out["uniques"] == 240_000 and out["people"] is None
+    assert out["month"]["mid"] == 1_188_000 and out["total"]["mid"] == 2_376_000 and out["uniques"] == 216_000 and out["people"] is None
 
 
 def test_the_headline_leads_with_the_audience_and_shows_impressions_the_flight_and_tiktoks_verdict():
     html = run(f"return JSON.stringify(TT.headlineHtml({json.dumps(DATA)}, P.summarize({json.dumps(DATA)})));")
-    assert "Audience size · TikTok accounts, 18+" in html and "240,000" in html and "216K – 264K range" in html
-    assert "1,320,000" in html and "lower-end audience × 5.5 (4.3 – 8.6)" in html and "Flight total · 2 mo" in html and "2,640,000" in html
+    assert "Audience size · lower end, TikTok accounts 18+" in html and "216,000" in html and "range 216K – 264K" in html
+    assert "1,188,000" in html and "lower-end audience × 5.5 (4.3 – 8.6)" in html and "Flight total · 2 mo" in html and "2,376,000" in html
     assert 'class="cz-stage on s3"' in html and "Balanced" in html and "20% to 80% of the possible audience" in html
 
 
@@ -261,7 +261,7 @@ def test_the_copied_summary_has_the_audience_the_scenarios_and_the_places():
     out = run(f"""
         TT._pure.T.gender = 'male'; var lines = TT.summaryLines({json.dumps(DATA)}, {{ method: TT.context() }});
         return JSON.stringify(lines);""")
-    assert out[0].startswith("Audience size (TikTok accounts, 18+): 240,000 (216,000 – 264,000); TikTok says: Balanced")
+    assert out[0].startswith("Audience size, lower end (TikTok accounts, 18+): 216,000 (range 216,000 – 264,000); TikTok says: Balanced")
     assert "Impressions = lower-end audience × 5.5 (4.3 – 8.6) per month (mid is the default)" in out and "Asked of TikTok: Men" in out and "Places sent to TikTok: Los Angeles CA" in out
 
 
@@ -275,8 +275,8 @@ def test_the_step_05_card_shows_the_audience_and_says_it_is_the_geography_alone(
         var el = {{ style: {{}}, innerHTML: '', querySelector: function () {{ return {{ addEventListener: function () {{}}, innerHTML: '' }}; }} }};
         window.Constanza.renderCard(el, {json.dumps(DATA)}, {{ getText: function () {{ return 'x'; }}, onGeoText: function () {{}}, onApply: function () {{}}, onRefine: function () {{}} }});
         return JSON.stringify(el.innerHTML);""")
-    assert "TikTok API · live" in out and "Audience size (TikTok accounts, 18+)" in out and "240,000" in out and "Balanced" in out
-    assert "geography alone" in out and "Refine in Constanza" in out and "1,320,000" in out
+    assert "TikTok API · live" in out and "Audience size, lower end (TikTok accounts, 18+)" in out and "216,000" in out and "Balanced" in out
+    assert "geography alone" in out and "Refine in Constanza" in out and "1,188,000" in out
     assert "Est. monthly uniques" not in out and "Audience (people):" not in out
 
 

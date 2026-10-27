@@ -604,7 +604,7 @@
       const rule = ruleOf(tt);
       const flight = m.months > 1 ? `<div class="cz-metric"><span class="cz-mlabel">Flight total · ${m.months} mo</span><span class="cz-mvalue">${money(m.total.mid)}</span><span class="cz-mrange">${compact(m.total.low)} – ${compact(m.total.high)}</span></div>` : "";
       return `<div class="cz-headline">
-        <div class="cz-metric main"><span class="cz-mlabel">Audience size · TikTok accounts, 18+</span><span class="cz-mvalue">${money(a.mid)}</span><span class="cz-mrange">${compact(a.low)} – ${compact(a.high)} range</span></div>
+        <div class="cz-metric main"><span class="cz-mlabel">Audience size · lower end, TikTok accounts 18+</span><span class="cz-mvalue">${money(a.low)}</span><span class="cz-mrange">the base of the scenarios · range ${compact(a.low)} – ${compact(a.high)}</span></div>
         <div class="cz-metric"><span class="cz-mlabel">Impressions · per month</span><span class="cz-mvalue">${money(m.month.mid)}</span><span class="cz-mrange">${compact(m.month.low)} – ${compact(m.month.high)} · ${esc(rule.short)}</span></div>
         ${flight}
       </div>
@@ -642,13 +642,13 @@
     // The Step 05 per-line card: the same facts, in the table the other products use.
     function cardHtml(data) {
       const tt = data.tiktok, a = tt.audience;
-      return `<p class="constanza-uniques">Audience size (TikTok accounts, 18+): <strong>${num(a.mid)}</strong> <small>(${num(a.low)} – ${num(a.high)})</small>${tt.stage_label ? ` · TikTok: ${esc(tt.stage_label)}` : ""}</p>
+      return `<p class="constanza-uniques">Audience size, lower end (TikTok accounts, 18+): <strong>${num(a.low)}</strong> <small>(range ${num(a.low)} – ${num(a.high)})</small>${tt.stage_label ? ` · TikTok: ${esc(tt.stage_label)}` : ""}</p>
         <p class="cz-note">Impressions are the ${esc(ruleOf(tt).short)} a month. This is the geography alone — <strong>Refine in Constanza</strong> to set age, gender and interests.</p>`;
     }
 
     function summaryLines(data, asked) {
       const tt = data.tiktok, a = tt.audience;
-      const lines = [`Audience size (TikTok accounts, 18+): ${num(a.mid)} (${num(a.low)} – ${num(a.high)})${tt.stage_label ? `; TikTok says: ${tt.stage_label}` : ""}`,
+      const lines = [`Audience size, lower end (TikTok accounts, 18+): ${num(a.low)} (range ${num(a.low)} – ${num(a.high)})${tt.stage_label ? `; TikTok says: ${tt.stage_label}` : ""}`,
         `Impressions = ${ruleOf(tt).short} per month (mid is the default)`];
       const parts = (asked && asked.method && asked.method.summary) || [];
       if (parts.length) lines.push(`Asked of TikTok: ${parts.join(" · ")}`);

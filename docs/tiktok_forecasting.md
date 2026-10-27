@@ -30,10 +30,14 @@ planner sets up the audience in the dock ─► /api/constanza/estimate ─► T
 
 ## Setting it up (an admin, once)
 
-1. In [TikTok for Business → API → My Apps](https://business-api.tiktok.com/portal) create (or use) a developer app and have the
-   **ad account's owner authorize it**; exchange the `auth_code` for a **long-term access token**
-   ([Authentication](https://business-api.tiktok.com/portal/docs?id=1738373164380162)). The token needs read access to the ad
-   account's targeting tools and audience estimates.
+1. **The access chain.** In [TikTok for Business → API → My Apps](https://business-api.tiktok.com/portal) create (or use) a developer app
+   (it must be approved) and have the **ad account's owner authorize it** with the permission scopes below; exchange the `auth_code` for a
+   **long-term access token** ([Authentication](https://business-api.tiktok.com/portal/docs?id=1738373164380162)). The scope that matters is
+   the one for `/ad/audience_size/estimate/`: TikTok lists it as scope **211, "Create and Update Ad Groups"**. That is a permission TikTok
+   attaches to the endpoint, **not something this app uses**: nothing is ever created or changed (the call only asks "how big is this
+   audience?"). Tick it when authorizing, or the estimate answers with a permission error; the targeting look-ups (regions, interests,
+   behaviors, languages) are under the same ad-account read access. **TikTok's sandbox cannot be used to try this:** the audience-size and
+   targeting endpoints are not among the ones it supports, so the first real test is against the real ad account.
 2. Add two secrets (Replit → Secrets, or `.env` locally — **never in chat, code or a commit**):
 
    | Secret | What |
@@ -125,11 +129,11 @@ TikTok identifies a place by an ID, not a name, so the geography the planner typ
 * **Errors** are classified from TikTok's return codes (`40105` & co. = the token; `40001`/`40118`/`40125` = not allowed for this
   app or ad account; `40300` = the ad account; `40000`/`40002` = TikTok refused these settings, and its message is shown) and each
   has a plain-language message (HTTP 503 not connected / 502 TikTok trouble / 429 rate limit / 422 settings).
-* **U.S. interest targeting needs the age groups spelled out** (return code `40065`: "specify an `age_groups` value that does not
-  contain `AGE_13_17`"). A request without ages that TikTok refuses for that reason is repeated once with the five adult groups
-  (the estimate leaves out under-18s, so it is the same audience), remembered, and the card says so. What is remembered applies
-  only to requests that use interests, behaviors, income or spending power (the options TikTok restricts): a plain location /
-  age / gender request is always asked as the planner set it up.
+* **U.S. targeting that TikTok restricts needs the age groups spelled out** (return code `40065`: "specify an `age_groups` value that does not
+  contain `AGE_13_17`"). The options it restricts are gender, interests, behaviors, income, spending power and ZIP codes. A request without ages
+  that TikTok refuses for that reason is repeated once with the five adult groups (the estimate leaves out under-18s, so it is the same audience),
+  remembered, and the card says so; once TikTok has asked, the adult groups are sent up front for a request that uses any of those options. A plain
+  location / age request is always asked as the planner set it up.
 * **Calls are bounded**: at most 6 in flight, a call that cannot get a turn within 5 seconds is refused, and one call (retries
   included, and the wait for a turn) is given up after 45 seconds (a retry is begun only if its whole connect and read time still
   fits), so a slow TikTok cannot hold every worker of the app. Answers TikTok sent empty (a

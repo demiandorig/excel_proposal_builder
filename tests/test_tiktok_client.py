@@ -208,7 +208,7 @@ def test_a_rate_limit_that_does_not_clear_is_reported_as_one():
     c.fake.queue(ESTIMATE, *[FakeResponse(200, fail(40100, "x")) for _ in range(3)])
     with pytest.raises(TikTokAPIError) as err:
         c.estimate_audience(US_BODY)
-    assert err.value.kind == "rate_limit" and err.value.status_code == 429 and "wait a few seconds" in err.value.public_message()
+    assert err.value.kind == "rate_limit" and err.value.status_code == 429 and "wait a minute or two" in err.value.public_message()
 
 
 def test_http_429_is_a_rate_limit_too():
@@ -568,3 +568,47 @@ def test_a_catalog_that_came_back_empty_is_not_remembered_so_the_next_call_asks_
     c4.fake.queue("/tool/targeting/search/", FakeResponse(200, ok({"targeting_tag_list": []})))
     assert c4.search_locations(["Phoenix"], geo_types=["DMA"]) == []
     assert c4.search_locations(["Phoenix"], geo_types=["DMA"]) and c4.fake.count("/tool/targeting/search/") == 2
+
+
+def test_the_objective_for_location_lookups_is_one_tiktok_takes_without_a_promotion_type(monkeypatch, caplog):
+    import logging
+    assert tc.objective_type() == "REACH"
+    for good in ("video_views", "ENGAGEMENT"):
+        monkeypatch.setenv("TIKTOK_OBJECTIVE_TYPE", good)
+        assert tc.objective_type() == good.upper()
+    monkeypatch.setenv("TIKTOK_OBJECTIVE_TYPE", "TRAFFIC")
+    with caplog.at_level(logging.WARNING):
+        assert tc.objective_type() == "REACH"
+    assert any("TIKTOK_OBJECTIVE_TYPE" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unreadable_estimate_is_not_remembered_for_ten_minutes():
+    """An answer with code 0 but no audience size is an error AND must not be cached: the next pull asks TikTok again."""
+    c = make_client()
+    c.fake.queue(ESTIMATE, FakeResponse(200, ok({})))
+    with pytest.raises(TikTokAPIError, match="no audience size"):
+        c.estimate_audience(US_BODY)
+    assert c.estimate_audience(US_BODY).mid > 0                              # asked again, answered
+    assert c.fake.count(ESTIMATE) == 2
+    again = c.estimate_audience(US_BODY)
+    assert again.cached and c.fake.count(ESTIMATE) == 2                       # a readable one is remembered
+
+
+def test_an_ad_account_id_shorter_than_fifteen_digits_is_masked_in_a_message_tiktok_echoes():
+    c = make_client(FakeTikTok(advertiser="7000123456"), advertiser="7000123456")
+    c.fake.queue(ESTIMATE, FakeResponse(200, fail(40002, "bad request for advertiser 7000123456 and again 7000123456")))
+    with pytest.raises(TikTokAPIError) as err:
+        c.estimate_audience(US_BODY)
+    assert "7000123456" not in str(err.value) and "…3456" in str(err.value) and "7000123456" not in err.value.public_message()
+
+
+@pytest.mark.parametrize("answer", [{"user_count": {"lower_end": float("nan"), "upper_end": 5}}, {"user_count": {"lower_end": float("inf"), "upper_end": float("inf")}},
+                                    {"user_count": {"lower_end": 5, "upper_end": 9}, "user_count_stage": "x"}])
+def test_non_finite_or_odd_figures_never_become_an_audience_or_a_crash(answer):
+    try:
+        size = tc.parse_audience_size(answer)
+    except TikTokAPIError as exc:
+        assert exc.kind == "unexpected"
+        return
+    import math
+    assert math.isfinite(size.lower) and math.isfinite(size.upper) and (size.stage is None or size.stage in (1, 2, 3, 4))

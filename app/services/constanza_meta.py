@@ -18,12 +18,19 @@ Setup (the app runs fine without it - every caller checks `is_configured()`):
     META_ACCESS_TOKEN     a long-lived token (a system user's is best) that can READ the ad account: the `ads_read` permission
     META_AD_ACCOUNT_ID    the ad account the estimates are asked through, with or without `act_`
   optional:
-    META_GRAPH_API_VERSION   default v25.0 (the newest Marketing API version when this was written)
+    META_GRAPH_API_VERSION   default v26.0 (Marketing API v26.0 was released 2026-07-29; a pinned older version stops working when Meta retires it)
+    META_APP_SECRET          only if the Meta app has "Require App Secret" switched on: every call then carries an `appsecret_proof`
 Read-only: a reach estimate and the targeting lists; nothing is ever created in the ad account. The token is only sent in the Authorization
 header and is removed from every message this module raises.
+
+Two things the figure is NOT: it counts people active on Meta's DEFAULT placements (Facebook, Instagram, Messenger, Audience Network, ...), the
+same as Ads Manager's "Estimated audience size", not only Facebook and Instagram; and `geo_market` is Meta's Comscore Markets (Meta moved off
+Nielsen DMAs on 2026-06-22), so its footprint can differ from the Nielsen markets the rest of Constanza uses.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -48,10 +55,13 @@ RETAIL_CPMS = {
     "Facebook & Instagram Ads | Lead Gen / Calls": 35.0,
 }
 RETAIL_TO_MEDIA = 2.0
-DEFAULT_GRAPH_VERSION = "v25.0"
+DEFAULT_GRAPH_VERSION = "v26.0"
 _GEO_FIELDS = {"country": "countries", "region": "regions", "city": "cities", "zip": "zips", "geo_market": "geo_markets"}
-# The `type` of a detailed-targeting item = the key it has in a targeting spec's flexible_spec group.
-TARGETING_KEYS = ("interests", "behaviors", "life_events", "industries", "income", "family_statuses")
+# The `type` of a detailed-targeting item = the key it has in a targeting spec's flexible_spec group. Only the fields that take a list of
+# {id, name} objects are here: a demographics row of another type (user_device, user_os, markets, education_statuses, ...) needs a different spec
+# shape and is left out of the lists instead of being sent under the wrong key.
+TARGETING_KEYS = ("interests", "behaviors", "life_events", "industries", "income", "family_statuses", "politics", "generation",
+                  "home_ownership", "home_type", "home_value", "household_composition", "net_worth", "office_type", "moms")
 MAX_TARGETING_ITEMS = 50
 # kind -> the `class` Meta's adTargetingCategory browse takes (interests are also searchable by keyword: type=adinterest)
 CATALOG_CLASSES = {"interests": "interests", "behaviors": "behaviors", "demographics": "demographics"}
@@ -106,7 +116,7 @@ def model_auction(
         if audience_upper is None:
             audience_upper = audience_lower
         if not (0 <= audience_lower <= audience_upper <= 1_000_000_000):
-            raise ValueError("Audience bounds must be non-negative and ordered low to high.")
+            raise ValueError("Audience bounds must be non-negative, ordered low to high, and no larger than 1,000,000,000.")
     if audience_source not in ("manual", "meta_api"):
         raise ValueError("Audience source must be manual or meta_api.")
 
@@ -117,7 +127,7 @@ def model_auction(
     if audience_lower is not None:
         public = platform_scenarios.to_public(audience_lower)
         monthly = {k: round(v) for k, v in public["monthly"].items()}
-        flight = {k: round(v * months) for k, v in public["monthly"].items()}
+        flight = {k: v * months for k, v in monthly.items()}          # exactly the monthly figure shown, times the months
         scenarios = {
             **public, "monthly": monthly, "months": months, "flight": flight,
             # what each scenario's flight total would cost at the planning CPM: a reality check against the line's budget, not a quote
@@ -144,8 +154,24 @@ def model_auction(
 
 # ----------------------------------------------------------------------------------------------------------------- configuration
 
+_TOKEN_RE = re.compile(r"[\x21-\x7e]+")                 # a token is printable ASCII with no space: anything else was mangled in the paste
+_ACCOUNT_RE = re.compile(r"[0-9]{1,30}")
+
+
 def missing_config() -> list[str]:
-    return [name for name in ("META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID") if not (os.environ.get(name) or "").strip()]
+    """What is not set up, by name (never a value): a missing secret, or one that cannot be right ("copy it again")."""
+    out = []
+    token = (os.environ.get("META_ACCESS_TOKEN") or "").strip()
+    if not token:
+        out.append("META_ACCESS_TOKEN")
+    elif not _TOKEN_RE.fullmatch(token):
+        out.append("META_ACCESS_TOKEN (it has a space or a character a token cannot hold: copy it again)")
+    account = (os.environ.get("META_AD_ACCOUNT_ID") or "").strip()
+    if not account:
+        out.append("META_AD_ACCOUNT_ID")
+    elif not _ACCOUNT_RE.fullmatch(account.removeprefix("act_")):
+        out.append("META_AD_ACCOUNT_ID (it must be the numeric ad account ID, with or without act_)")
+    return out
 
 
 def is_configured() -> bool:
@@ -154,7 +180,7 @@ def is_configured() -> bool:
 
 def _account() -> str:
     account = (os.environ.get("META_AD_ACCOUNT_ID") or "").strip().removeprefix("act_")
-    if not re.fullmatch(r"\d{1,30}", account):
+    if not _ACCOUNT_RE.fullmatch(account):
         raise MetaAPIError("META_AD_ACCOUNT_ID must be a numeric Meta ad account ID (digits, with or without act_).", "not_configured")
     return account
 
@@ -167,20 +193,21 @@ def account_hint() -> Optional[str]:
 
 def graph_version() -> str:
     version = (os.environ.get("META_GRAPH_API_VERSION") or DEFAULT_GRAPH_VERSION).strip()
-    if not re.fullmatch(r"v\d{1,2}\.0", version):
-        raise MetaAPIError("META_GRAPH_API_VERSION must look like v25.0.", "not_configured")
+    if not re.fullmatch(r"v[0-9]{1,2}\.0", version):
+        raise MetaAPIError("META_GRAPH_API_VERSION must look like v26.0.", "not_configured")
     return version
 
 
 def status() -> dict:
     """Whether the Meta connection is set up - which settings are missing, never their values - and the planning multipliers."""
     missing = missing_config()
-    return {"configured": not missing, "missing": missing, "account": account_hint(), "version": os.environ.get("META_GRAPH_API_VERSION") or DEFAULT_GRAPH_VERSION,
+    return {"configured": not missing, "missing": missing, "account": account_hint(), "version": (os.environ.get("META_GRAPH_API_VERSION") or DEFAULT_GRAPH_VERSION).strip(),
             "scenarios": platform_scenarios.to_public(), "setup_hint": SETUP_HINT}
 
 
 SETUP_HINT = ("Add META_ACCESS_TOKEN (a token with the ads_read permission for the ad account) and META_AD_ACCOUNT_ID in the app's secrets "
-              "(Replit -> Secrets), then run python -m app.services.meta_diagnose.")
+              "(Replit -> Secrets), then run python -m app.services.meta_diagnose. If the Meta app has Require App Secret switched on, also add "
+              "META_APP_SECRET.")
 
 
 # ----------------------------------------------------------------------------------------------------------------- the Graph API
@@ -191,6 +218,9 @@ def _scrub(text: str) -> str:
     token = (os.environ.get("META_ACCESS_TOKEN") or "").strip()
     if token:
         out = out.replace(token, "[token]")
+    secret = (os.environ.get("META_APP_SECRET") or "").strip()
+    if secret:
+        out = out.replace(secret, "[secret]")
     account = (os.environ.get("META_AD_ACCOUNT_ID") or "").strip().removeprefix("act_")
     if account:
         out = out.replace(account, "…" + account[-4:])
@@ -207,10 +237,20 @@ def _classify(error: dict, http_status: int) -> MetaAPIError:
     if code in (10, 200, 294) or (isinstance(code, int) and 200 <= code <= 299):
         return MetaAPIError("This token cannot read the ad account: it needs the ads_read permission on META_AD_ACCOUNT_ID (and the account must be "
                             "shared with the app's business).", "permission", 503)
-    if code in (4, 17, 32, 341, 613, 80000, 80003, 80004) or http_status == 429:
-        return MetaAPIError("Meta is rate-limiting this ad account. Wait a minute and pull again.", "rate_limit", 429)
+    if code in (4, 17, 32, 341, 613, 80000, 80003, 80004, 80014) or http_status == 429:
+        return MetaAPIError("Meta is rate-limiting this ad account. Wait a few minutes and pull again (a newly created app is blocked for up to "
+                            "five minutes after a burst).", "rate_limit", 429)
     if code == 2641:
         return MetaAPIError("Meta cannot estimate this audience: it includes or excludes locations that are currently restricted.", "settings", 422)
+    if "appsecret_proof" in message.lower() or "app secret" in message.lower():
+        return MetaAPIError("Meta requires an appsecret_proof for this app (App Settings > Advanced > Require App Secret is on). Switch that off, or set "
+                            "META_APP_SECRET in the app's secrets.", "not_configured", 503)
+    if code == 2635 or "deprecated version" in message.lower():
+        return MetaAPIError("Meta has retired the Marketing API version this app asks for. Set META_GRAPH_API_VERSION to a current version (v26.0).",
+                            "not_configured", 503)
+    if sub == 33 or "missing permissions" in message.lower() or "does not exist" in message.lower():
+        return MetaAPIError("Meta says this ad account does not exist or the token cannot see it: check META_AD_ACCOUNT_ID, and in Business Settings assign "
+                            "the ad account to the token's (system) user with ads_read.", "permission", 503)
     if code == 100 or http_status == 400:
         return MetaAPIError(f"Meta refused these settings{': ' + message if message else ''}. Check the geography and targeting in Ads Manager.", "settings", 422)
     return MetaAPIError(f"Meta could not answer (error {code if code is not None else http_status}"
@@ -223,8 +263,13 @@ def _graph_get(path: str, params: dict) -> dict:
         raise MetaAPIError(f"Meta is not configured: add {' and '.join(missing)} in the app's secrets (Replit -> Secrets).", "not_configured", 503)
     version = graph_version()
     url = f"https://graph.facebook.com/{version}/{path}"
+    token = os.environ["META_ACCESS_TOKEN"].strip()
+    params = dict(params)
+    secret = (os.environ.get("META_APP_SECRET") or "").strip()
+    if secret:                                                  # an app with "Require App Secret" on refuses calls without the proof
+        params["appsecret_proof"] = hmac.new(secret.encode(), token.encode(), hashlib.sha256).hexdigest()
     try:
-        response = requests.get(url, params=params, headers={"Authorization": f"Bearer {os.environ['META_ACCESS_TOKEN'].strip()}"}, timeout=12)
+        response = requests.get(url, params=params, headers={"Authorization": f"Bearer {token}"}, timeout=12)
     except requests.RequestException as exc:
         raise MetaAPIError("Meta did not answer in time. Try again in a moment.", "unreachable", 502) from None
     try:
@@ -277,7 +322,7 @@ def search_geography(query: str, location_type: str) -> list[dict]:
     return [
         {"key": str(r["key"]), "name": str(r.get("name") or ""), "type": location_type,
          "region": str(r.get("region") or ""), "country_code": str(r.get("country_code") or "")}
-        for r in result.get("data", []) if isinstance(r, dict) and r.get("key") is not None
+        for r in (result.get("data") or []) if isinstance(r, dict) and r.get("key") is not None
     ]
 
 
@@ -287,18 +332,19 @@ def _size(row: dict, side: str) -> Optional[int]:
         raw = row.get("audience_size")
     try:
         value = int(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return value if value >= 0 else None
 
 
-def _item(row: dict, kind: str) -> Optional[dict]:
-    """One detailed-targeting option as the panel shows it; None for a row without an id or a name."""
+def _item(row: dict, kind: Optional[str]) -> Optional[dict]:
+    """One detailed-targeting option as the panel shows it; None for a row without an id or a name, or whose type this app cannot put in a
+    targeting spec (a row keeps its OWN type: it is never relabelled to the list it was browsed from)."""
     if not isinstance(row, dict) or row.get("id") is None or not str(row.get("name") or "").strip():
         return None
-    item_type = str(row.get("type") or kind)
+    item_type = str(row.get("type") or kind or "")
     if item_type not in TARGETING_KEYS:
-        item_type = kind if kind in TARGETING_KEYS else item_type
+        return None
     path = row.get("path")
     return {"id": str(row["id"]), "name": str(row["name"]).strip(), "type": item_type,
             "path": [str(p) for p in path] if isinstance(path, list) else [],
@@ -315,11 +361,20 @@ def targeting_catalog(kind: str) -> list[dict]:
 
     def fetch():
         result = _graph_get("search", {"type": "adTargetingCategory", "class": CATALOG_CLASSES[kind], "limit": 1000})
-        items = [i for i in (_item(r, kind if kind != "demographics" else "life_events") for r in result.get("data", [])) if i]
+        items = [i for i in (_item(r, None if kind == "demographics" else kind) for r in (result.get("data") or [])) if i]
         return sorted(items, key=lambda i: i["name"].lower())
     if not is_configured():
         return fetch()                                        # raises the "not configured" message
-    return list(_cached(f"catalog:{graph_version()}:{_account()}:{kind}", _CATALOG_TTL, fetch))
+    key = f"catalog:{graph_version()}:{_account()}:{kind}"
+    with _lock:
+        hit = _cache.get(key)
+        if hit and time.monotonic() - hit[0] < _CATALOG_TTL:
+            return list(hit[1])
+    items = fetch()
+    if items:                                                  # only a non-empty list is remembered for hours: an empty answer is asked again
+        with _lock:
+            _cache[key] = (time.monotonic(), items)
+    return list(items)
 
 
 def search_targeting(q: str) -> dict[str, list[dict]]:
@@ -329,7 +384,7 @@ def search_targeting(q: str) -> dict[str, list[dict]]:
     if not 2 <= len(q) <= 80:
         raise ValueError("Search text must be 2–80 characters.")
     result = _graph_get("search", {"type": "adinterest", "q": q, "limit": 25})
-    interests = [i for i in (_item(r, "interests") for r in result.get("data", [])) if i]
+    interests = [i for i in (_item(r, "interests") for r in (result.get("data") or [])) if i]
     words = [w for w in re.split(r"\s+", q.lower()) if w]
 
     def match(item):
@@ -357,7 +412,7 @@ def _clean_targeting(items) -> list[dict]:
         if not isinstance(raw, dict):
             raise ValueError("Each interest or behavior needs an id, a name and a type.")
         item_id, name, kind = str(raw.get("id") or ""), str(raw.get("name") or "").strip(), str(raw.get("type") or "")
-        if not re.fullmatch(r"\d{1,30}", item_id) or not 1 <= len(name) <= 120 or kind not in TARGETING_KEYS:
+        if not re.fullmatch(r"[0-9]{1,30}", item_id) or not 1 <= len(name) <= 120 or kind not in TARGETING_KEYS:
             raise ValueError("Each interest or behavior needs a numeric Meta id, a name and a known type; pick it from Meta's list.")
         if (kind, item_id) not in seen:
             seen.add((kind, item_id))
@@ -408,14 +463,20 @@ def fetch_reach_estimate(*, geo_type: str, geo_key: str, age_min: Optional[int] 
 
     def fetch():
         result = _graph_get(f"act_{account}/reachestimate", {"targeting_spec": body, "fields": "users_lower_bound,users_upper_bound,estimate_ready"})
-        # the reachestimate edge answers with a one-item `data` list (Meta's reference: "an array containing a single AdAccountReachEstimate node");
-        # a bare object is read the same way
-        row = result["data"][0] if isinstance(result.get("data"), list) and result["data"] and isinstance(result["data"][0], dict) else result
+        # Meta's reference describes the answer as "a single AdAccountReachEstimate node": `data` is that one object. A one-item list and a bare
+        # top-level object are read the same way, so a change in shape does not break every pull.
+        data = result.get("data")
+        if isinstance(data, dict):
+            row = data
+        elif isinstance(data, list) and data and isinstance(data[0], dict):
+            row = data[0]
+        else:
+            row = result
         if row.get("estimate_ready") is False or result.get("estimate_ready") is False:
             raise MetaAPIError("Meta is still preparing this audience estimate. Try again shortly.", "not_ready", 503)
         try:
             lower, upper = int(row["users_lower_bound"]), int(row["users_upper_bound"])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             raise MetaAPIError("Meta did not return audience bounds for that targeting.", "meta", 502) from None
         if lower < 0 or upper < 0:
             raise MetaAPIError("Meta cannot estimate this audience (it returned no figure, which does not mean the audience is empty). "

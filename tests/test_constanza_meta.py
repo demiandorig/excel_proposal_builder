@@ -38,6 +38,8 @@ class FakeGraph:
         self.error: dict | None = None
         self.http_status = 200
         self.estimate_ready = True
+        self.empty = False             # the lists answer with no rows (a transient empty answer must not stick)
+        self.shape = "object"          # how reachestimate wraps its node: Meta's reference says "a single node" = one object ("list", "bare" also read)
 
     def get(self, url, params=None, headers=None, timeout=None):
         self.calls.append({"url": url, "params": dict(params or {}), "headers": dict(headers or {}), "timeout": timeout})
@@ -55,17 +57,23 @@ class FakeGraph:
                 return Resp({"data": [{"id": "6003107902433", "name": "Soccer", "audience_size_lower_bound": 100_000_000, "audience_size_upper_bound": 120_000_000,
                                        "path": ["Interests", "Sports and outdoors", "Soccer"]},
                                       {"id": "6003012345678", "name": "Soccer balls", "audience_size": 4_000_000}]})
+            if kind == "adTargetingCategory" and self.empty:
+                return Resp({"data": []})
             if kind == "adTargetingCategory":
                 cls = params.get("class")
                 rows = {"behaviors": [{"id": "6002714895372", "name": "Frequent travelers", "type": "behaviors", "audience_size_lower_bound": 2_000_000, "audience_size_upper_bound": 2_400_000,
                                        "path": ["Behaviors", "Travel", "Frequent travelers"]},
                                       {"id": "6004386044572", "name": "Small business owners", "type": "behaviors", "path": ["Behaviors", "Business", "Small business owners"]}],
                         "interests": [{"id": "6003107902433", "name": "Soccer", "type": "interests"}, {"id": "6003020834693", "name": "Cooking", "type": "interests"}],
-                        "demographics": [{"id": "6002714398172", "name": "Newlyweds (1 year)", "type": "life_events", "path": ["Demographics", "Life events", "Newlywed"]}]}[cls]
+                        "demographics": [{"id": "6002714398172", "name": "Newlyweds (1 year)", "type": "life_events", "path": ["Demographics", "Life events", "Newlywed"]},
+                                         {"id": "6015559470583", "name": "Likely to engage with political content (US)", "type": "politics", "path": ["Demographics", "Politics"]},
+                                         {"id": "6004854404172", "name": "iPhone 15", "type": "user_device", "path": ["Demographics", "Mobile Device User", "iPhone"]},
+                                         {"id": "6006", "name": "No type at all"}]}[cls]
                 return Resp({"data": rows})
         if rest.endswith("/reachestimate"):
             lo, hi = self.reach
-            return Resp({"data": [{"users_lower_bound": lo, "users_upper_bound": hi, "estimate_ready": self.estimate_ready}]})
+            node = {"users_lower_bound": lo, "users_upper_bound": hi, "estimate_ready": self.estimate_ready}
+            return Resp({"data": node if self.shape == "object" else ([node] if self.shape == "list" else None)} if self.shape != "bare" else node)
         if rest.startswith("act_") and "/" not in rest:
             return Resp({"name": "Entravision Test Account", "account_status": 1, "currency": "USD"})
         return Resp({"error": {"message": f"Unknown path {rest}", "code": 100}}, 400)
@@ -204,7 +212,7 @@ def test_the_live_reach_request_uses_the_secret_only_in_the_header_and_the_chose
                                     targeting=[{"id": "6003107902433", "name": "Soccer", "type": "interests"}])
     assert out == (900, 1100)
     call = graph.calls[-1]
-    assert call["url"] == "https://graph.facebook.com/v25.0/act_7000000000012345/reachestimate"        # the newest Marketing API version, the account without act_ doubling
+    assert call["url"] == "https://graph.facebook.com/v26.0/act_7000000000012345/reachestimate"        # the current Marketing API version, the account without act_ doubling
     assert TOKEN not in call["url"] and TOKEN not in json.dumps(call["params"]) and call["headers"] == {"Authorization": f"Bearer {TOKEN}"}
     spec = json.loads(call["params"]["targeting_spec"])
     assert spec == {"geo_locations": {"geo_markets": [{"key": "803"}]}, "age_min": 25, "genders": [2],
@@ -232,11 +240,13 @@ def test_a_graph_version_can_be_set_and_a_bad_one_is_refused(monkeypatch, graph)
     meta.fetch_reach_estimate(geo_type="country", geo_key="US")
     assert "/v24.0/" in graph.calls[-1]["url"]
     monkeypatch.setenv("META_GRAPH_API_VERSION", "latest")
-    with pytest.raises(meta.MetaAPIError, match="v25.0"):
+    with pytest.raises(meta.MetaAPIError, match="v26.0"):
         meta.fetch_reach_estimate(geo_type="country", geo_key="US", age_min=40)
 
 
-@pytest.mark.parametrize("env", [{}, {"META_ACCESS_TOKEN": TOKEN}, {"META_AD_ACCOUNT_ID": ACCOUNT}])
+@pytest.mark.parametrize("env", [{}, {"META_ACCESS_TOKEN": TOKEN}, {"META_AD_ACCOUNT_ID": ACCOUNT},
+                                 {"META_ACCESS_TOKEN": "zzz spaced zzz", "META_AD_ACCOUNT_ID": ACCOUNT}, {"META_ACCESS_TOKEN": "tøken", "META_AD_ACCOUNT_ID": ACCOUNT},
+                                 {"META_ACCESS_TOKEN": TOKEN, "META_AD_ACCOUNT_ID": "٧٠٠٠٠"}, {"META_ACCESS_TOKEN": TOKEN, "META_AD_ACCOUNT_ID": "my-account"}])
 def test_unconfigured_calls_say_which_secret_is_missing(monkeypatch, env):
     for k, v in env.items():
         monkeypatch.setenv(k, v)
@@ -246,7 +256,9 @@ def test_unconfigured_calls_say_which_secret_is_missing(monkeypatch, env):
                  lambda: meta.targeting_catalog("interests"), lambda: meta.search_targeting("soccer")):
         with pytest.raises(meta.MetaAPIError) as err:
             call()
-        assert err.value.kind == "not_configured" and err.value.status_code == 503 and missing[0] in str(err.value) and "Replit" in str(err.value)
+        assert err.value.kind == "not_configured" and err.value.status_code == 503 and missing[0].split(" ")[0] in str(err.value) and "Replit" in str(err.value)
+    blob = json.dumps(meta.status())
+    assert TOKEN not in blob and "tøken" not in blob and "zzz spaced zzz" not in blob
 
 
 def test_a_non_numeric_ad_account_is_a_setting_to_fix(monkeypatch, graph):
@@ -257,7 +269,7 @@ def test_a_non_numeric_ad_account_is_a_setting_to_fix(monkeypatch, graph):
 
 def test_the_status_never_carries_a_secret(monkeypatch, graph):
     out = main.constanza_meta_status()
-    assert out["configured"] is True and out["missing"] == [] and out["account"] == "…2345" and out["version"] == "v25.0"
+    assert out["configured"] is True and out["missing"] == [] and out["account"] == "…2345" and out["version"] == "v26.0"
     assert out["scenarios"]["multipliers"] == {"conservative": 4.3, "mid": 5.5, "upper": 8.6}
     blob = json.dumps(out)
     assert TOKEN not in blob and "7000000000012345" not in blob
@@ -282,7 +294,7 @@ def test_geography_search_returns_choices_and_never_guesses(graph):
     ({"message": "(#200) Requires ads_read", "code": 200}, 403, "permission", 503, "ads_read"),
     ({"message": "(#10) Application does not have permission", "code": 10}, 403, "permission", 503, "ads_read"),
     ({"message": "Too many calls to this ad account", "code": 80004}, 400, "rate_limit", 429, "rate-limiting"),
-    ({"message": "Rate limit", "code": 613}, 400, "rate_limit", 429, "Wait a minute"),
+    ({"message": "Rate limit", "code": 613}, 400, "rate_limit", 429, "Wait a few minutes"),
     ({"message": "Invalid parameter", "code": 100}, 400, "settings", 422, "Meta refused these settings"),
     ({"message": "restricted locations", "code": 2641}, 400, "settings", 422, "restricted"),
     ({"message": "Something broke", "code": 2, "error_subcode": 1}, 500, "meta", 502, "error 2"),
@@ -343,7 +355,9 @@ def test_the_interest_list_and_the_other_lists_come_from_metas_own_browse(graph)
     assert behaviors[0] == {"id": "6002714895372", "name": "Frequent travelers", "type": "behaviors", "path": ["Behaviors", "Travel", "Frequent travelers"],
                             "audience_lower": 2_000_000, "audience_upper": 2_400_000, "description": ""}
     demo = meta.targeting_catalog("demographics")
-    assert demo[0]["type"] == "life_events" and graph.calls[-1]["params"]["class"] == "demographics"
+    assert graph.calls[-1]["params"]["class"] == "demographics"
+    # a row keeps its OWN type; one whose type cannot go in a targeting spec (user_device) or has none is left out, never relabelled life_events
+    assert {d["name"]: d["type"] for d in demo} == {"Likely to engage with political content (US)": "politics", "Newlyweds (1 year)": "life_events"}
     with pytest.raises(ValueError):
         meta.targeting_catalog("ethnic_affinity")
 
@@ -362,6 +376,7 @@ def test_a_keyword_finds_interests_from_meta_and_matching_behaviors_and_demograp
     again = meta.search_targeting("travel")
     assert [b["name"] for b in again["behaviors"]] == ["Frequent travelers"]                         # a name OR path word
     assert [d["name"] for d in meta.search_targeting("life events")["demographics"]] == ["Newlyweds (1 year)"]
+    assert [d["name"] for d in meta.search_targeting("iphone")["demographics"]] == []                    # not selectable: left out of the search too
     with pytest.raises(ValueError):
         meta.search_targeting("a")
 
@@ -468,3 +483,99 @@ def test_a_bare_reach_object_is_read_like_the_data_list(monkeypatch, graph):
             return {"users_lower_bound": 70, "users_upper_bound": 90, "estimate_ready": True}
     monkeypatch.setattr(meta.requests, "get", lambda *a, **k: Bare())
     assert meta.fetch_reach_estimate(geo_type="country", geo_key="CA") == (70, 90)
+
+
+# ---------------------------------------------------------------------------------------------------------------- the round-3 audit fixes
+
+@pytest.mark.parametrize("shape", ["object", "list", "bare"])
+def test_the_reach_node_is_read_whether_data_is_one_object_a_one_item_list_or_the_bare_object(graph, shape):
+    graph.shape = shape
+    meta.reset_cache()
+    assert meta.fetch_reach_estimate(geo_type="country", geo_key="US") == (900, 1100)
+
+
+def test_a_reach_answer_whose_data_is_empty_is_a_clean_failure_not_a_crash(graph):
+    graph.shape = "none"
+    with pytest.raises(meta.MetaAPIError, match="did not return audience bounds"):
+        meta.fetch_reach_estimate(geo_type="country", geo_key="US")
+
+
+@pytest.mark.parametrize("error,kind,http,words", [
+    ({"message": "Unsupported get request. Object with ID 'act_7000000000012345' does not exist, cannot be loaded due to missing permissions, or does not support this operation",
+      "code": 100, "error_subcode": 33}, "permission", 503, "assign"),
+    ({"message": "Calls to this api have exceeded the rate limit", "code": 80014}, "rate_limit", 429, "few minutes"),
+    ({"message": "(#2635) You are calling a deprecated version of the Ads API. Please update to the latest version", "code": 2635}, "not_configured", 503, "META_GRAPH_API_VERSION"),
+    ({"message": "Invalid appsecret_proof provided in the API argument", "code": 100}, "not_configured", 503, "META_APP_SECRET"),
+])
+def test_meta_config_problems_are_told_as_config_problems_not_as_a_targeting_mistake(graph, error, kind, http, words):
+    graph.error, graph.http_status = error, 400
+    with pytest.raises(meta.MetaAPIError) as err:
+        meta.fetch_reach_estimate(geo_type="country", geo_key="US")
+    assert err.value.kind == kind and err.value.status_code == http and words in str(err.value) and "geography" not in str(err.value)
+
+
+def test_an_app_with_require_app_secret_gets_the_proof_and_the_secret_is_never_shown(monkeypatch, graph):
+    import hashlib, hmac
+    monkeypatch.setenv("META_APP_SECRET", "s3cr3t-app-secret")
+    meta.fetch_reach_estimate(geo_type="country", geo_key="US")
+    proof = graph.calls[-1]["params"]["appsecret_proof"]
+    assert proof == hmac.new(b"s3cr3t-app-secret", TOKEN.encode(), hashlib.sha256).hexdigest()
+    assert "s3cr3t-app-secret" not in json.dumps(graph.calls[-1])
+    graph.error, graph.http_status = {"message": "echo s3cr3t-app-secret", "code": 100}, 400
+    with pytest.raises(meta.MetaAPIError) as err:
+        meta.fetch_reach_estimate(geo_type="country", geo_key="US", age_min=33)
+    assert "s3cr3t-app-secret" not in str(err.value)
+    monkeypatch.delenv("META_APP_SECRET")
+    graph.error = None
+    meta.reset_cache()
+    meta.fetch_reach_estimate(geo_type="country", geo_key="US")
+    assert "appsecret_proof" not in graph.calls[-1]["params"]
+
+
+def test_an_empty_list_is_asked_again_but_a_real_one_is_remembered(graph):
+    graph.empty = True
+    assert meta.targeting_catalog("behaviors") == []
+    graph.empty = False
+    assert [i["name"] for i in meta.targeting_catalog("behaviors")] == ["Frequent travelers", "Small business owners"]
+    n = len(graph.calls)
+    meta.targeting_catalog("behaviors")
+    assert len(graph.calls) == n
+
+
+def test_a_null_data_list_is_an_empty_list_not_a_500(graph, monkeypatch):
+    monkeypatch.setattr(graph, "get", lambda url, params=None, headers=None, timeout=None: Resp({"data": None}))
+    monkeypatch.setattr(meta.requests, "get", graph.get)
+    assert meta.search_geography("Los Angeles", "geo_market") == [] and meta.targeting_catalog("interests") == []
+    assert meta.search_targeting("soccer")["interests"] == []
+
+
+def test_the_flight_is_exactly_the_monthly_figure_shown_times_the_months():
+    sc = meta.model_auction(product_name=AWARENESS, retail_budget=100, audience_lower=1233, months=7)["scenarios"]
+    for k in ("conservative", "mid", "upper"):
+        assert sc["flight"][k] == sc["monthly"][k] * 7
+
+
+def test_a_bound_that_is_too_large_says_so_and_does_not_blame_the_order():
+    with pytest.raises(ValueError, match="no larger than 1,000,000,000"):
+        meta.model_auction(product_name=AWARENESS, retail_budget=100, audience_lower=1, audience_upper=2_000_000_000)
+
+
+def test_the_geography_label_is_kept_with_the_snapshot(graph):
+    live = main.constanza_meta_forecast(main.MetaAuctionForecastRequest(
+        product_name=AWARENESS, retail_budget=700, meta_geo_type="geo_market", meta_geo_key="803", meta_geo_label="Los Angeles · California · US"))
+    assert live["meta_targeting"]["geo_name"] == "Los Angeles · California · US"
+    unlabeled = main.constanza_meta_forecast(main.MetaAuctionForecastRequest(product_name=AWARENESS, retail_budget=700, meta_geo_type="geo_market", meta_geo_key="803"))
+    assert unlabeled["meta_targeting"]["geo_name"] is None
+
+
+def test_the_diagnostics_name_every_documented_account_status(graph, monkeypatch):
+    from app.services import meta_diagnose
+    for raw, words, warns in ((1, "active", False), (8, "pending settlement", True), (100, "pending closure", True), (202, "any closed", True), (55, "status 55", True), (None, "status not given", False)):
+        real = graph.get
+        def get(url, params=None, headers=None, timeout=None, raw=raw):
+            if url.endswith("/act_7000000000012345"):
+                return Resp({"name": "A", "account_status": raw, "currency": "USD"})
+            return real(url, params=params, headers=headers, timeout=timeout)
+        monkeypatch.setattr(meta.requests, "get", get)
+        check = meta_diagnose.run_checks()[1]
+        assert check.ok and words in check.detail and check.warn is warns, (raw, check)

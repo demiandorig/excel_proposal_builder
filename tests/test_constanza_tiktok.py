@@ -306,7 +306,7 @@ def test_a_rate_limit_and_an_outage_are_told_apart(tiktok):
     tiktok.fake.queue(ESTIMATE, *[FakeResponse(200, fail(40100, "slow")) for _ in range(3)])
     with pytest.raises(HTTPException) as limited:
         main.constanza_estimate(request())
-    assert limited.value.status_code == 429 and "wait a few seconds" in limited.value.detail
+    assert limited.value.status_code == 429 and "wait a minute or two" in limited.value.detail and "5 minutes" in limited.value.detail
     tiktok.fake.queue(ESTIMATE, *[timeout_error() for _ in range(3)])
     with pytest.raises(HTTPException) as down:
         main.constanza_estimate(request(geo_text="Chicago"))
@@ -506,9 +506,11 @@ def test_what_was_learned_from_one_age_refusal_only_reaches_requests_that_use_th
     as the planner set it up (no age groups, no note about interests), whatever was asked before."""
     ct.estimate(resolve_geo("Los Angeles"), ct.Targeting.from_dict({"interest_category_ids": ["12100"]}), 1, client=tiktok)
     assert tiktok.adult_ages_needed
-    plain = ct.estimate(resolve_geo("National"), ct.Targeting.from_dict({"gender": "female"}), 1, client=tiktok)
-    assert "age_groups" not in tiktok.fake.calls[-1]["body"] and not plain.adult_ages_sent
+    plain = ct.estimate(resolve_geo("National"), ct.Targeting.from_dict({"languages": ["es"]}), 1, client=tiktok)
+    assert "age_groups" not in tiktok.fake.calls[-1]["body"] and not plain.adult_ages_sent          # locations + language: never restricted
     assert not any("age groups spelled out" in n for n in plain.notes())
+    gender = ct.estimate(resolve_geo("National"), ct.Targeting.from_dict({"gender": "female"}), 1, client=tiktok)
+    assert tiktok.fake.calls[-1]["body"]["age_groups"] and gender.adult_ages_sent                  # TikTok restricts gender targeting for teens too: said up front
     income = ct.estimate(resolve_geo("Chicago"), ct.Targeting.from_dict({"household_income": ["TOP25_50"]}), 1, client=tiktok)
     assert tiktok.fake.calls[-1]["body"]["age_groups"] and income.adult_ages_sent          # income is restricted too: said up front
 

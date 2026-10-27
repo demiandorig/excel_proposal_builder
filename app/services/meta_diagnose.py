@@ -64,8 +64,11 @@ def run_checks() -> list[Check]:
 
     def account():
         row = meta._graph_get(f"act_{meta._account()}", {"fields": "name,account_status,currency"})
-        status = {1: "active", 2: "disabled", 3: "unsettled", 7: "pending review", 9: "in grace period", 101: "closed"}.get(row.get("account_status"), "status not given")
-        return f"“{row.get('name', '?')}” ({status}, {row.get('currency', '?')})", row.get("account_status") not in (None, 1)
+        raw = row.get("account_status")
+        names = {1: "active", 2: "disabled", 3: "unsettled", 7: "pending risk review", 8: "pending settlement", 9: "in grace period",
+                 100: "pending closure", 101: "closed", 201: "any active", 202: "any closed"}
+        status = "status not given" if raw is None else names.get(raw, f"status {raw}")
+        return f"“{row.get('name', '?')}” ({status}, {row.get('currency', '?')})", raw not in (None, 1)
 
     if not add(_timed("Token and ad account (ads_read)", account)).ok:
         return checks

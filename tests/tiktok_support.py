@@ -33,6 +33,7 @@ _STATE_NAME = {}
 for _n, _a in _STATE_NAMES_TO_ABBR.items():
     if len(_n) > len(_STATE_NAME.get(_a, "")):
         _STATE_NAME[_a] = _n.title().replace(" Of ", " of ")
+_STATE_NAME["DC"] = "Washington, D.C."          # TikTok's documented name for the district (Location IDs appendix, ID 4138106), not the Census one
 
 
 def dma_id(rank: int) -> str:

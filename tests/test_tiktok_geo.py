@@ -584,3 +584,47 @@ def test_a_long_list_of_zip_codes_is_looked_up_in_batches_of_a_thousand_and_none
     assert len(out.locations) == 2500 and out.unmapped == []
     batches = [len(c["body"]["keywords"]) for c in client.fake.calls]
     assert batches == [1000, 1000, 500]
+
+
+# ------------------------------------------------------------------------------------------------ TikTok's own documented market list
+
+def test_every_one_of_the_210_markets_in_tiktoks_documented_list_is_placed_on_its_own_market():
+    """TikTok's Location IDs appendix (v1.3) lists all 210 U.S. DMAs with their IDs (tests/tiktok_doc_dmas.json). Every market Constanza knows must
+    land on exactly one of them and no two on the same one: this is the names-as-TikTok-writes-them check the fake's own styles could not give
+    (it caught Duluth-Superior, which TikTok names with Wisconsin, and Wheeling-Steubenville, with Ohio)."""
+    import json
+    from pathlib import Path
+    listed = json.loads((Path(__file__).parent / "tiktok_doc_dmas.json").read_text())
+    assert len(listed) == 210 and len({i for _, i in listed}) == 210
+    cands = [{"name": n, "geo_id": i, "geo_type": "DMA", "enabled": True, "parent_id": "6252001"} for n, i in listed]
+    rivals = tg._reference_markets()
+    placed, missing = {}, []
+    for name, state in rivals:
+        best, why = tg.pick_market(name, state, cands, rivals=rivals)
+        if best is None:
+            missing.append((name, why))
+        else:
+            placed[name] = best["geo_id"]
+    assert not missing, missing
+    assert len(set(placed.values())) == 210                                                   # no two markets on one TikTok market
+    assert placed["Duluth-Superior"] == "676" and placed["Wheeling-Steubenville"] == "554"
+    assert placed["Columbus, OH"] == "535" and placed["Columbus, GA (Opelika, AL)"] == "522" and placed["Albany, GA"] == "525"
+
+
+def test_washington_state_and_the_district_are_told_apart_when_tiktok_lists_both(client_factory=None):
+    from tests import tiktok_support as S
+    fake = S.FakeTikTok("state")
+    cl = S.make_client(fake)
+    tg.forget_everything()
+    wa = tg.map_resolution(_state_resolution("WA"), cl)
+    dc = tg.map_resolution(_state_resolution("DC"), cl)
+    both = tg.map_resolution(_state_resolution("WA", "DC"), cl)
+    assert [l.name for l in wa.locations] == ["Washington"] and not wa.unmapped
+    assert [l.name for l in dc.locations] == ["Washington, D.C."] and not dc.unmapped
+    assert sorted(l.name for l in both.locations) == ["Washington", "Washington, D.C."] and len({l.tiktok_id for l in both.locations}) == 2
+
+
+def _state_resolution(*abbrs):
+    from app.services.constanza_geo import GeoResolution, ResolvedArea
+    areas = [ResolvedArea(dma=None, area_population=1.0, dma_share=1.0, source_type="state", apportionment="exact", state=a, label=a, geo_id=a) for a in abbrs]
+    return GeoResolution(input_text=",".join(abbrs), method="state_list", areas=areas, geo_confidence="high", whole_states=list(abbrs))

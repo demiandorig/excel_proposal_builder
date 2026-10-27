@@ -982,6 +982,8 @@ class MetaAuctionForecastRequest(BaseModel):
     # Omit both fields for a manually supplied audience or budget-only model.
     meta_geo_type: Optional[str] = None
     meta_geo_key: Optional[str] = None
+    # the chosen geography's name as Meta listed it, kept with the snapshot so the result can say what it was pulled for
+    meta_geo_label: Optional[str] = Field(None, max_length=160)
     age_min: Optional[int] = None
     age_max: Optional[int] = None
     gender: Optional[str] = None
@@ -1135,6 +1137,8 @@ async def get_catalog() -> dict:
     return {
         "families": families(),
         "products_by_family": grouped,
+        # the audience-size platforms' planning multipliers (conservative / mid / upper): the Meta panel quotes them instead of hard-coding them
+        "audience_multipliers": platform_scenarios.multipliers(),
     }
 
 
@@ -1650,7 +1654,7 @@ def _tiktok_error(exc: Exception) -> HTTPException:
 def _constanza_tiktok_estimate(body: "ConstanzaEstimateRequest", resolution) -> dict:
     """The estimate of a product forecast by TikTok's audience-size API. Shaped like every other estimate (impressions low / mid /
     high over the flight, est. uniques, notes, what could not be matched) so the dock and the Step 05 card read it the same way,
-    plus a `tiktok` block with the audience range, TikTok's own verdict, the locations that were sent and the planning factor."""
+    plus a `tiktok` block with the audience range, TikTok's own verdict, the locations that were sent and the three impression scenarios."""
     try:
         targeting = tiktok_svc.Targeting.from_dict(body.tiktok.model_dump() if body.tiktok else None)
         result = tiktok_svc.estimate(resolution, targeting, body.months)
@@ -1802,7 +1806,7 @@ def constanza_meta_forecast(body: MetaAuctionForecastRequest) -> dict:
         )
         if audience_source == "meta_api":
             result["meta_targeting"] = {
-                "geo_type": body.meta_geo_type, "geo_key": body.meta_geo_key,
+                "geo_type": body.meta_geo_type, "geo_key": body.meta_geo_key, "geo_name": (body.meta_geo_label or "").strip() or None,
                 "age_min": body.age_min, "age_max": body.age_max, "gender": body.gender, "detailed": targeting,
             }
         return result

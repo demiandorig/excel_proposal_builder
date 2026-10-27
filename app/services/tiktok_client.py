@@ -15,8 +15,10 @@ Setup (the app runs fine without it, exactly like Notion / Drive / OpenAI - ever
                                     impressions (defaults 4.3 / 5.5 / 8.6; shared with Meta, see platform_scenarios.py)
     TIKTOK_OPTIMIZATION_GOAL        replaces the optimization goal of a Reach estimate (default REACH; the diagnostics say when CLICK, the
                                     pair in TikTok's own documentation example, is the one an account accepts)
-    TIKTOK_OBJECTIVE_TYPE           the objective used for the location look-ups (default REACH)
-    TIKTOK_API_BASE                 point the client somewhere else (the offline mock used by the tests, a sandbox)
+    TIKTOK_OBJECTIVE_TYPE           the objective used for the location look-ups: REACH (default), VIDEO_VIEWS or ENGAGEMENT (the ones TikTok
+                                    takes without a promotion_type; anything else is ignored with a warning)
+    TIKTOK_API_BASE                 point the client somewhere else (the offline mock used by the tests; TikTok's own sandbox cannot run this:
+                                    the estimate and the targeting tools are not among the endpoints it supports)
 
 Design rules (the ones that bit the previous integrations):
   * the token is only ever sent in the `Access-Token` header, never logged, never put in an exception message, never returned
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import logging
 import os
 import re
@@ -99,8 +102,18 @@ def api_base() -> str:
     return (_env("TIKTOK_API_BASE") or DEFAULT_API_BASE).rstrip("/")
 
 
+# The objectives /tool/targeting/search/ takes without a promotion_type (TikTok: "specify promotion_type when objective_type is NOT REACH, VIDEO_VIEWS
+# or ENGAGEMENT"); this client never sends a promotion_type, so no other objective can be used for the location look-ups.
+LOOKUP_OBJECTIVES = ("REACH", "VIDEO_VIEWS", "ENGAGEMENT")
+
+
 def objective_type() -> str:
-    return (_env("TIKTOK_OBJECTIVE_TYPE") or DEFAULT_OBJECTIVE).upper()
+    raw = (_env("TIKTOK_OBJECTIVE_TYPE") or DEFAULT_OBJECTIVE).upper()
+    if raw not in LOOKUP_OBJECTIVES:
+        log.warning("TIKTOK_OBJECTIVE_TYPE=%r is not one of %s (location look-ups need no promotion_type only for those); using %s",
+                    raw, ", ".join(LOOKUP_OBJECTIVES), DEFAULT_OBJECTIVE)
+        return DEFAULT_OBJECTIVE
+    return raw
 
 
 def optimization_goal() -> str:
@@ -180,7 +193,8 @@ class TikTokAPIError(Exception):
         if self.kind == "permission":
             return f"TikTok says this app or ad account isn't allowed to do that{said}."
         if self.kind == "rate_limit":
-            return "TikTok is limiting how fast this app can ask — wait a few seconds and pull again."
+            return ("TikTok is limiting how many calls this app can make — wait a minute or two and pull again (if it keeps happening, TikTok's "
+                    "per-minute limit can take up to 5 minutes to lift).")
         if self.kind == "invalid":
             return f"TikTok couldn't use these settings{said}."
         if self.kind == "unavailable":
@@ -266,10 +280,13 @@ class _Throttle:
 _LONG_DIGITS = re.compile(r"(?<!\d)\d{15,}(?!\d)")   # an ad account / business center ID (letters or an underscore may touch it); a place ID (7-13 digits) is not one
 
 
-def _scrub(message: str, token: str) -> str:
-    """TikTok's own message with the token and any ad account ID taken out: it is shown to every planner."""
+def _scrub(message: str, token: str, advertiser: str = "") -> str:
+    """TikTok's own message with the token and any ad account ID taken out: it is shown to every planner. The configured ad account is masked
+    whatever its length (the digit-run rule alone misses one shorter than 15 digits)."""
     if token and len(token) >= 6:
         message = message.replace(token, "…")
+    if advertiser and len(advertiser) >= 5:
+        message = message.replace(advertiser, "…" + advertiser[-4:])
     return _LONG_DIGITS.sub(lambda m: "…" + m.group(0)[-4:], message)
 
 
@@ -278,16 +295,19 @@ def _canonical(value: Any) -> str:
 
 
 def _number(value: Any) -> Optional[float]:
+    """A number from TikTok's answer, or None when it is not a usable one (a boolean, text, NaN or infinity)."""
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value) if value == value else None
-    if isinstance(value, str):
+        number = float(value)
+    elif isinstance(value, str):
         try:
-            return float(value.replace(",", "").strip())
+            number = float(value.replace(",", "").strip())
         except ValueError:
             return None
-    return None
+    else:
+        return None
+    return number if math.isfinite(number) else None
 
 
 @dataclass(frozen=True)
@@ -306,8 +326,8 @@ class AudienceSize:
 
 STAGE_LABELS = {1: "Too narrow", 2: "Narrow", 3: "Balanced", 4: "Fairly broad"}
 STAGE_NOTES = {
-    1: "under 10,000 people and under 20% of the possible audience in these locations",
-    2: "10,000 people or more, but under 20% of the possible audience in these locations",
+    1: "under 10,000 accounts and under 20% of the possible audience in these locations",
+    2: "10,000 accounts or more, but under 20% of the possible audience in these locations",
     3: "20% to 80% of the possible audience in these locations",
     4: "80% or more of the possible audience in these locations",
 }
@@ -442,7 +462,7 @@ class TikTokClient:
             if code == 0:
                 data = payload.get("data")
                 return (data if isinstance(data, dict) else {}), (str(request_id) if request_id else None)
-            message = _scrub(str(payload.get("message") or "").strip(), self._token)
+            message = _scrub(str(payload.get("message") or "").strip(), self._token, self.advertiser)
             log.warning("tiktok %s %s failed: code %s: %s (request_id=%s)", method, path, code, message[:300], request_id)
             raise TikTokAPIError(message[:400], kind=_classify(code), code=code, http_status=resp.status_code,
                                  request_id=str(request_id) if request_id else None)
@@ -577,7 +597,9 @@ class TikTokClient:
         is filled in here."""
         payload = dict(body)
         payload["advertiser_id"] = self.advertiser
-        data, request_id, cached = self.call("POST", "/ad/audience_size/estimate/", body=payload, cache_ttl=TTL_ESTIMATE)
+        # only an answer that holds an audience size is remembered for ten minutes: an unreadable one is asked again
+        data, request_id, cached = self.call("POST", "/ad/audience_size/estimate/", body=payload, cache_ttl=TTL_ESTIMATE,
+                                             cache_if=lambda d: isinstance(d, dict) and d.get("user_count") not in (None, {}, "", []))
         return parse_audience_size(data, request_id, cached)
 
 
@@ -600,7 +622,8 @@ def parse_audience_size(data: dict, request_id: Optional[str] = None, cached: bo
         raise TikTokAPIError("the audience size was negative", kind="unexpected", request_id=request_id)
     lo, hi = min(lower, upper), max(lower, upper)
     stage = data.get("user_count_stage")
-    stage = int(stage) if isinstance(stage, (int, float)) and not isinstance(stage, bool) and int(stage) in STAGE_LABELS else None
+    stage = (int(stage) if isinstance(stage, (int, float)) and not isinstance(stage, bool) and math.isfinite(stage) and int(stage) in STAGE_LABELS
+             else None)
     return AudienceSize(lower=lo, upper=hi, stage=stage, request_id=request_id, cached=cached)
 
 

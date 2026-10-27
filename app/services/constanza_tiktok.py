@@ -122,9 +122,11 @@ class Targeting:
 
     @property
     def age_restricted(self) -> bool:
-        """Does this targeting use options TikTok restricts for U.S. teens (interests, behaviors, income, spending power)? Those are the
-        ones its return code 40065 is about - a plain location / age / gender / language request never meets it."""
-        return bool(self.interest_category_ids or self.interest_keyword_ids or self.purchase_intention_ids or self.interactions
+        """Does this targeting use options TikTok restricts for U.S. teens? TikTok's age-restriction rule (return code 40065): advertisers cannot
+        reach 13-17 year olds with gender, interest & behavior, income, spending power or ZIP-code targeting, so the age groups must be spelled out
+        without AGE_13_17. (A ZIP code lives in the mapped places, not here: estimate() adds it.) A plain location / age / language request never
+        meets the rule."""
+        return bool(self.gender or self.interest_category_ids or self.interest_keyword_ids or self.purchase_intention_ids or self.interactions
                     or self.household_income or self.spending_power)
 
     @classmethod
@@ -313,7 +315,8 @@ def estimate(res: GeoResolution, targeting: Targeting, months: int, client: Opti
         raise ValueError("None of those places could be found in TikTok" + (f": {why}." if why else "."))
     # once TikTok has asked for the ages (40065) the next request that carries such options says so up front - one that does not is asked
     # exactly as the planner set it up, so what is sent never depends on what was asked before
-    adult = bool(getattr(client, "adult_ages_needed", False)) and not targeting.age_groups and targeting.age_restricted
+    adult = (bool(getattr(client, "adult_ages_needed", False)) and not targeting.age_groups
+             and (targeting.age_restricted or bool(mapping.zipcode_ids)))
     body = build_estimate_body(targeting, mapping, goal_override, adult_ages=adult)
     try:
         size = client.estimate_audience(body)

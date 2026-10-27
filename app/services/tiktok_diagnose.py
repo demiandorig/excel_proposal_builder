@@ -217,7 +217,7 @@ def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = True) 
             hint = (f" — but only as REACH / CLICK: TikTok refused REACH / REACH ({refused.message}). Set TIKTOK_OPTIMIZATION_GOAL=CLICK "
                     "in the app's secrets to use it everywhere.")
         s = out.size
-        return (f"{s.lower:,.0f} – {s.upper:,.0f} people (TikTok's verdict: {tiktok_client.STAGE_LABELS.get(s.stage, 'not given')}); "
+        return (f"{s.lower:,.0f} – {s.upper:,.0f} accounts (TikTok's verdict: {tiktok_client.STAGE_LABELS.get(s.stage, 'not given')}); "
                 f"lower end ×{out.factor:g} = {out.monthly['mid']:,.0f} impressions a month (mid){hint}"), bool(hint)
 
     add(_timed("Audience size · United States", national))
@@ -237,7 +237,7 @@ def run_checks(client: Optional[TikTokClient] = None, *, all_dmas: bool = True) 
             out, where, fallback = ct.estimate(national, t, 1, client=client), "the whole U.S.", True
         s = out.size
         what = f"women 25–34{', ' + pick['name'] if pick else ''} in {where}"
-        return (f"{what}: {s.lower:,.0f} – {s.upper:,.0f} people; lower end ×{out.factor:g} = {out.monthly['mid']:,.0f} impressions a month (mid)"
+        return (f"{what}: {s.lower:,.0f} – {s.upper:,.0f} accounts; lower end ×{out.factor:g} = {out.monthly['mid']:,.0f} impressions a month (mid)"
                 + (" (Los Angeles could not be placed, see the markets line)" if fallback else "")), fallback
 
     add(_timed("Audience size · a narrow audience", narrow))

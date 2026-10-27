@@ -36,7 +36,7 @@ HARNESS = """<!doctype html><html><head><meta charset="utf-8"><title>harness</ti
 
 ESTIMATE = {
     "product_name": "Tiktok Ads", "platform": "tiktok", "confidence": "live_api", "geo_method": "exact_dma", "geo_confidence": "high", "months": 1,
-    "imps_low": 1_188_000, "imps_mid": 1_320_000, "imps_high": 1_452_000, "est_uniques": 240_000, "reach_universe": None, "series": None, "weeks": None,
+    "imps_low": 928_800, "imps_mid": 1_188_000, "imps_high": 1_857_600, "est_uniques": 216_000, "reach_universe": None, "series": None, "weeks": None,
     "notes": [], "unmatched_geo_tokens": [], "unmatched_geo_details": [], "ambiguous": [], "geo_interpretations": [], "geo_suggestions": [], "by_area": [],
     "tiktok": {"audience": {"low": 216_000, "mid": 240_000, "high": 264_000}, "stage": 3, "stage_label": "Balanced", "stage_note": "20% to 80%",
                "impressions_per_person": 5.5, "monthly": {"low": 1, "mid": 2, "high": 3}, "locations": [], "unmapped": [], "objective": "Reach",
@@ -203,7 +203,7 @@ def test_the_request_the_panel_sends_is_what_was_picked(dock):
     dock.wait_for_selector("#cz-result .cz-headline")
     sent = dock.world.requests[-1]["tiktok"]                       # type: ignore[attr-defined]
     assert sent["gender"] == "female" and sent["age_groups"] == ["AGE_25_34", "AGE_35_44"] and sent["interest_category_ids"] == ["12100"]
-    assert "240,000" in dock.inner_text("#cz-result")
+    assert "216,000" in dock.inner_text("#cz-result")
 
 
 # --------------------------------------------------------------------------------------------- the review's findings
@@ -330,7 +330,7 @@ def test_an_admin_adding_the_secrets_lets_the_next_pull_through_without_reopenin
     world.configured = True                                          # the admin adds the secrets
     dock.click("#cz-go")
     dock.wait_for_selector("#cz-result .cz-headline")
-    assert "240,000" in dock.inner_text("#cz-result")
+    assert "216,000" in dock.inner_text("#cz-result")
 
 
 def test_a_chip_button_keeps_the_chip_size_it_had(dock):

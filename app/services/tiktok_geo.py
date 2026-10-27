@@ -188,6 +188,11 @@ def _reference_markets() -> tuple[tuple[str, Optional[str]], ...]:
     return tuple((d.dma, d.state) for d in load_dma_reference())
 
 
+# A TV market that spans two states can be named by either one: TikTok's documented list calls them "Duluth-Superior, WI" and "Wheeling-Steubenville, OH"
+# while the Nielsen reference homes them in MN and WV. The other state is accepted as this market's own.
+_EXTRA_HOME_STATES = {"Duluth-Superior": frozenset({"WI"}), "Wheeling-Steubenville": frozenset({"OH"})}
+
+
 @lru_cache(maxsize=1 << 16)
 def _fit(name: str, state: Optional[str], tiktok_name: str) -> Optional[float]:
     """How well a TikTok market name fits a TV market, or None when it does not fit at all.
@@ -200,7 +205,7 @@ def _fit(name: str, state: Optional[str], tiktok_name: str) -> Optional[float]:
     words, codes = _words(tiktok_name, True)
     if not words or not wanted:
         return None
-    home = {c for c in (set(wanted_codes) | {state}) if c}
+    home = {c for c in (set(wanted_codes) | {state} | set(_EXTRA_HOME_STATES.get(name, ())) ) if c}
     if codes and home and not (codes & home):
         return None                                       # it names another state: not this market
     overlap = _overlap(wanted, words)
@@ -368,6 +373,19 @@ def _map_countries(areas: list[ResolvedArea], client: TikTokClient, out: Mapping
             out.locations.append(Location(name, hit.name, hit.tiktok_id, hit.geo_type, hit.kind))
 
 
+_DC_NAME = re.compile(r"\bd\.?\s?c\.?\b|district of columbia")
+
+
+def _state_key(name: str) -> str:
+    """A TikTok state name for comparing. "Washington, D.C." and "District of Columbia" are the district, and are NOT "Washington" the state:
+    folding the D.C. tail away would make a search for Washington state find two exact hits (and give up), and one for D.C. find none."""
+    return "district of columbia" if _DC_NAME.search(_fold(name).lower()) else _place_key(name)
+
+
+# What a state is searched under, where TikTok's name is not the Census one (its documented name for D.C. is "Washington, D.C.").
+_STATE_SEARCH_NAME = {"DC": "Washington, D.C."}
+
+
 def _map_states(abbrs: list[str], client: TikTokClient, out: Mapping) -> None:
     missing = []
     found: dict[str, Location] = {}
@@ -379,9 +397,9 @@ def _map_states(abbrs: list[str], client: TikTokClient, out: Mapping) -> None:
             missing.append(abbr)
     if missing:
         names = [_ABBR_TO_STATE.get(a, a) for a in missing]
-        tags = client.search_locations(names, geo_types=["PROVINCE"], region_codes=["US"])
+        tags = client.search_locations([_STATE_SEARCH_NAME.get(a, n) for a, n in zip(missing, names)], geo_types=["PROVINCE"], region_codes=["US"])
         for abbr, name in zip(missing, names):
-            exact = [t for t in tags if t["enabled"] and _place_key(t["name"]) == _place_key(name) and t["parent_id"] in ("", US_COUNTRY_ID)]
+            exact = [t for t in tags if t["enabled"] and _state_key(t["name"]) == _state_key(name) and t["parent_id"] in ("", US_COUNTRY_ID)]
             if len(exact) == 1:
                 found[abbr] = Location(name, exact[0]["name"], exact[0]["geo_id"], "PROVINCE", "location_id")
                 _remember(("state", abbr), found[abbr])
