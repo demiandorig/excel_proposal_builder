@@ -87,7 +87,11 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
     if not api_key:
         return _error_result("OPENAI_API_KEY not set — roadblocks check skipped.", matrix, line_items)
 
-    client = _OpenAI(api_key=api_key)
+    client = _OpenAI(
+        api_key=api_key,
+        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        max_retries=llm_utils.OPENAI_MAX_RETRIES,
+    )
     prompt = _build_prompt(request, line_items, strategy_brief, matrix)
 
     try:
@@ -97,6 +101,12 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
     except llm_utils.ResponseTruncated:
         return _error_result(_TRUNCATED_MSG, matrix, line_items)
     except Exception as search_exc:
+        if llm_utils.is_timeout_error(search_exc):
+            return _error_result(
+                "Roadblocks check timed out before live research completed.",
+                matrix,
+                line_items,
+            )
         try:
             raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
                                       max_completion_tokens=_MAX_OUTPUT_TOKENS)

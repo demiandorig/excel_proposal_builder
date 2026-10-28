@@ -342,7 +342,11 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
             error="OPENAI_API_KEY not set — email + blurb generation skipped.",
         )
 
-    client = _OpenAI(api_key=api_key)
+    client = _OpenAI(
+        api_key=api_key,
+        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        max_retries=llm_utils.OPENAI_MAX_RETRIES,
+    )
     if totals is None:
         totals = email_totals.totals_from_legacy(request, line_items, tiers, time_unit)
     prompt = _build_prompt(request, line_items, strategy_brief=strategy_brief, tiers=tiers, time_unit=time_unit,
@@ -359,6 +363,11 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     except llm_utils.ResponseTruncated:
         return truncated
     except Exception as search_exc:
+        if llm_utils.is_timeout_error(search_exc):
+            return ProposalEnrichment(
+                campaign_name=_fallback_campaign_name(request),
+                error="Content generation timed out before the response was complete.",
+            )
         try:
             raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
                                       max_completion_tokens=_ENRICH_MAX_OUTPUT_TOKENS)

@@ -563,7 +563,7 @@ def test_enrich_proposal_forwards_time_unit_to_the_prompt(monkeypatch, stub_cata
     prompts = {}
     for unit in ("full_flight", None):
         fake = SimpleNamespace(responses=_FakeResponses(reply))
-        monkeypatch.setattr(ai_enricher, "_OpenAI", lambda api_key, fake=fake: fake)
+        monkeypatch.setattr(ai_enricher, "_OpenAI", lambda api_key, fake=fake, **kwargs: fake)
         kwargs = {} if unit is None else {"time_unit": unit}
         result = ai_enricher.enrich_proposal(_ai_request(), _ai_items(), "short", **kwargs)
         assert result.error is None and result.campaign_name == "Holiday Push"

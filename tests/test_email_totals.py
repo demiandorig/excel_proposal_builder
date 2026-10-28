@@ -776,7 +776,7 @@ def _enrich(monkeypatch, first_reply, repair_reply, **kw):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     monkeypatch.setattr(ai_enricher, "_HAS_OPENAI", True)
     fake = SimpleNamespace(responses=_FakeResponses(json.dumps(first_reply)))
-    monkeypatch.setattr(ai_enricher, "_OpenAI", lambda api_key: fake)
+    monkeypatch.setattr(ai_enricher, "_OpenAI", lambda api_key, **kwargs: fake)
     monkeypatch.setattr(ai_enricher, "_catalog_by_name", lambda name: None)
     repair_calls = _patch_repair(monkeypatch, repair_reply)
     lines = [_li("Display Alpha", 6000.0), _li("Search Beta", 4000.0)]

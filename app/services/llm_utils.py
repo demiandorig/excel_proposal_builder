@@ -10,6 +10,17 @@ _logger = logging.getLogger(__name__)
 
 REPAIR_MODEL = "gpt-5-mini"
 REPAIR_MAX_COMPLETION_TOKENS = 16000
+OPENAI_REQUEST_TIMEOUT_SECONDS = 12.0
+OPENAI_MAX_RETRIES = 0
+
+
+def is_timeout_error(exc: Exception) -> bool:
+    """Identify SDK and transport timeouts so callers do not start a slower fallback request."""
+    return (
+        isinstance(exc, TimeoutError)
+        or type(exc).__name__ in {"APITimeoutError", "TimeoutException"}
+        or "timed out" in str(exc).lower()
+    )
 
 _REPAIR_PROMPT = (
     "The text below was meant to be one JSON object, but it has a JSON syntax error. "

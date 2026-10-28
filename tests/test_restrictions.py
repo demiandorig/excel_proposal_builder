@@ -332,7 +332,7 @@ def test_risks_that_dont_mention_the_allowed_vertical_are_untouched(builtin_stat
 # --- generate_roadblocks end to end (model mocked) -------------------------------------------------
 
 class _FakeOpenAI:
-    def __init__(self, api_key=None):
+    def __init__(self, api_key=None, **kwargs):
         pass
 
 

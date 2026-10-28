@@ -499,6 +499,37 @@ def test_every_web_search_call_uses_the_plain_supported_tool_config(monkeypatch)
     assert all(tools == [{"type": "web_search"}] for tools in calls)
 
 
+def test_enrichment_and_roadblocks_bound_openai_waits_and_skip_timeout_fallback(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
+    client_kwargs = []
+
+    def fake_openai(api_key=None, **kwargs):
+        client_kwargs.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(ai_enricher, "_OpenAI", fake_openai)
+    monkeypatch.setattr(rb, "_OpenAI", fake_openai)
+
+    class APITimeoutError(Exception):
+        pass
+
+    def timed_out(*args, **kwargs):
+        raise APITimeoutError("provider timed out")
+
+    monkeypatch.setattr(llm_utils, "responses_text", timed_out)
+    monkeypatch.setattr(llm_utils, "chat_text", lambda *a, **k: pytest.fail("timeout must not start fallback"))
+
+    enrichment = ai_enricher.enrich_proposal(_request(), _items(), "EVC-1")
+    roadblocks = rb.generate_roadblocks(_request(), _items())
+
+    assert "timed out" in enrichment.error.lower()
+    assert "timed out" in roadblocks["error"].lower()
+    assert client_kwargs == [
+        {"timeout": llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS, "max_retries": 0},
+        {"timeout": llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS, "max_retries": 0},
+    ]
+
+
 # ============================================================================================================
 # 5. The code layer on what each service gets back
 # ============================================================================================================
