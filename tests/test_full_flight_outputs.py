@@ -625,7 +625,7 @@ def test_generate_brief_forwards_time_unit(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     monkeypatch.setattr(sb, "_HAS_OPENAI", True)
     fake = SimpleNamespace(responses=_FakeBriefResponses())
-    monkeypatch.setattr(sb, "_OpenAI", lambda api_key: fake)
+    monkeypatch.setattr(sb, "_OpenAI", lambda api_key, **kwargs: fake)
     brief = asyncio.run(sb.generate_brief(_brief_request(), time_unit="full_flight"))
     assert brief["error"] is None
     assert "Budget: $15,000 total flight (single billing period)" in fake.responses.calls[0]["input"]

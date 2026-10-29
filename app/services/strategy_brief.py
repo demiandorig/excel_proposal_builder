@@ -155,7 +155,11 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
         # through to the unconstrained prompt/no guardrail, same as
         # mode="new_mix", rather than constraining to an empty set.
 
-    client = _OpenAI(api_key=api_key)
+    client = _OpenAI(
+        api_key=api_key,
+        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        max_retries=llm_utils.OPENAI_MAX_RETRIES,
+    )
     prompt = _build_prompt(request, reprompt, ad_intel=ad_intel, allowed_families=allowed_families,
                            time_unit=time_unit)
     # The OpenAI client is synchronous; off the event loop so one brief can't stall every other request.
@@ -198,6 +202,8 @@ def _run_brief_call(client, prompt: str) -> dict:
     except llm_utils.ResponseTruncated:
         return _error_brief(_TRUNCATED_MSG)
     except Exception as search_exc:
+        if llm_utils.is_timeout_error(search_exc):
+            return _error_brief("Strategy brief timed out before research completed.")
         try:
             raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
                                       max_completion_tokens=_MAX_OUTPUT_TOKENS)

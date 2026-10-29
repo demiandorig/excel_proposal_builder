@@ -3157,7 +3157,7 @@ def _ingest_restrictions(data: bytes, sheet_url: str, source_title: str, synced_
 # (through the app's Drive connection) before the Step 07 chooser / check uses it. 0 turns it off.
 _RESTRICTIONS_REFRESH_MINUTES = float(os.environ.get("RESTRICTIONS_AUTO_SYNC_MINUTES", "60") or 0)
 _RESTRICTIONS_RETRY_SECONDS = 600           # a failed refresh (Drive not connected, sheet not shared...) isn't retried every request
-_RESTRICTIONS_WAIT_SECONDS = 15             # how long a request waits for a refresh before using the stored copy
+_RESTRICTIONS_WAIT_SECONDS = 1             # refresh in the background; do not hold planner requests on Drive
 _restrictions_refresh = {"attempted_at": None}
 _restrictions_refresh_lock = threading.Lock()
 

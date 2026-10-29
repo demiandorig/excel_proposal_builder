@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -468,6 +469,32 @@ def test_the_refresh_can_be_switched_off(refresh, monkeypatch):
     m, state, calls = refresh
     monkeypatch.setattr(m, "_RESTRICTIONS_REFRESH_MINUTES", 0.0)
     assert m._refresh_restrictions_if_stale() is False and not calls["fetch"]
+
+
+def test_best_effort_refresh_stops_blocking_after_its_wait_budget(monkeypatch):
+    import app.main as m
+
+    started = threading.Event()
+    finished = threading.Event()
+    release = threading.Event()
+
+    def slow_refresh():
+        started.set()
+        release.wait(timeout=2)
+        finished.set()
+        return True
+
+    monkeypatch.setattr(m, "_refresh_restrictions_if_stale", slow_refresh)
+    monkeypatch.setattr(m, "_RESTRICTIONS_WAIT_SECONDS", 0.02)
+
+    async def check():
+        await m._refresh_restrictions_best_effort()
+        assert started.is_set()
+        assert not finished.is_set()
+        release.set()
+
+    asyncio.run(check())
+    assert finished.is_set()
 
 
 def test_the_chooser_and_the_check_both_refresh_first(refresh, monkeypatch):

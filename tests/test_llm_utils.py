@@ -144,7 +144,7 @@ def test_brief_truncated_twice_returns_clear_regenerate_message(monkeypatch):
     cut = full[: full.index('"key_insights"') + 30]
     fake = _FakeOpenAI([_response(cut, "incomplete", "max_output_tokens"),
                         _response(cut, "incomplete", "max_output_tokens")])
-    monkeypatch.setattr(sb, "_OpenAI", lambda api_key: fake)
+    monkeypatch.setattr(sb, "_OpenAI", lambda api_key, **kwargs: fake)
     brief = asyncio.run(sb.generate_brief(_request()))
     assert "cut off" in brief["error"]
     assert "delimiter" not in brief["error"]
@@ -155,7 +155,7 @@ def test_brief_recovers_when_retry_completes(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     fake = _FakeOpenAI([_response(_brief_json(5)[:500], "incomplete", "max_output_tokens"),
                         _response(_brief_json(5))])
-    monkeypatch.setattr(sb, "_OpenAI", lambda api_key: fake)
+    monkeypatch.setattr(sb, "_OpenAI", lambda api_key, **kwargs: fake)
     brief = asyncio.run(sb.generate_brief(_request()))
     assert brief["error"] is None
     assert len(brief["recommended_tactics"]) == 5 and brief["key_insights"] == ["one", "two", "three"]
@@ -165,8 +165,35 @@ def test_brief_recovers_when_retry_completes(monkeypatch):
 def test_brief_folds_in_and_echoes_a_prior_ad_presence_check(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     fake = _FakeOpenAI([_response(_brief_json(1))])
-    monkeypatch.setattr(sb, "_OpenAI", lambda api_key: fake)
+    monkeypatch.setattr(sb, "_OpenAI", lambda api_key, **kwargs: fake)
     prior = {"summary": "Meta: ACTIVE, 3 ads, 100% English.", "meta": {"status": "active"}}
     brief = asyncio.run(sb.generate_brief(_request(), ad_presence=prior))
     assert "Meta: ACTIVE, 3 ads" in fake.responses.calls[0]["input"]
     assert brief["ad_presence"] is prior
+
+
+def test_brief_bounds_openai_request_and_skips_fallback_on_timeout(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    captured = {}
+
+    def fake_openai(api_key, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    class APITimeoutError(Exception):
+        pass
+
+    def timed_out(*args, **kwargs):
+        raise APITimeoutError("provider timed out")
+
+    monkeypatch.setattr(sb, "_OpenAI", fake_openai)
+    monkeypatch.setattr(llm_utils, "responses_text", timed_out)
+    monkeypatch.setattr(llm_utils, "chat_text", lambda *a, **k: pytest.fail("timeout must not start fallback"))
+
+    brief = asyncio.run(sb.generate_brief(_request()))
+
+    assert "timed out" in brief["error"].lower()
+    assert captured == {
+        "timeout": llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        "max_retries": 0,
+    }
