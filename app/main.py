@@ -3157,9 +3157,9 @@ def _ingest_restrictions(data: bytes, sheet_url: str, source_title: str, synced_
 # (through the app's Drive connection) before the Step 07 chooser / check uses it. 0 turns it off.
 _RESTRICTIONS_REFRESH_MINUTES = float(os.environ.get("RESTRICTIONS_AUTO_SYNC_MINUTES", "60") or 0)
 _RESTRICTIONS_RETRY_SECONDS = 600           # a failed refresh (Drive not connected, sheet not shared...) isn't retried every request
-_RESTRICTIONS_WAIT_SECONDS = 1             # refresh in the background; do not hold planner requests on Drive
 _restrictions_refresh = {"attempted_at": None}
 _restrictions_refresh_lock = threading.Lock()
+_restrictions_refresh_tasks: set[asyncio.Task] = set()
 
 
 def _refresh_restrictions_if_stale() -> bool:
@@ -3198,13 +3198,18 @@ def _refresh_restrictions_if_stale() -> bool:
 
 
 async def _refresh_restrictions_best_effort() -> None:
-    """Run the stale-copy refresh without letting it hold a request up for long: past the wait, the stored copy is
-    used and the refresh finishes in the background for the next request."""
-    try:
-        await asyncio.wait_for(asyncio.shield(asyncio.to_thread(_refresh_restrictions_if_stale)),
-                               timeout=_RESTRICTIONS_WAIT_SECONDS)
-    except Exception:  # noqa: BLE001 - timeouts included
-        pass
+    """Refresh stale sheet data in the background; serve the stored copy immediately."""
+    task = asyncio.create_task(asyncio.to_thread(_refresh_restrictions_if_stale))
+    _restrictions_refresh_tasks.add(task)
+
+    def _finish_refresh(done: asyncio.Task) -> None:
+        _restrictions_refresh_tasks.discard(done)
+        try:
+            done.result()
+        except Exception:  # noqa: BLE001 - best effort; stored state remains available
+            _logger.exception("background restricted-verticals refresh failed")
+
+    task.add_done_callback(_finish_refresh)
 
 
 @app.get("/api/admin/restrictions")

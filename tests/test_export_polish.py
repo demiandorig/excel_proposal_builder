@@ -471,7 +471,7 @@ def test_the_refresh_can_be_switched_off(refresh, monkeypatch):
     assert m._refresh_restrictions_if_stale() is False and not calls["fetch"]
 
 
-def test_best_effort_refresh_stops_blocking_after_its_wait_budget(monkeypatch):
+def test_best_effort_refresh_returns_while_refresh_runs_in_background(monkeypatch):
     import app.main as m
 
     started = threading.Event()
@@ -485,27 +485,37 @@ def test_best_effort_refresh_stops_blocking_after_its_wait_budget(monkeypatch):
         return True
 
     monkeypatch.setattr(m, "_refresh_restrictions_if_stale", slow_refresh)
-    monkeypatch.setattr(m, "_RESTRICTIONS_WAIT_SECONDS", 0.02)
 
     async def check():
         await m._refresh_restrictions_best_effort()
-        assert started.is_set()
+        assert await asyncio.to_thread(started.wait, 0.5)
         assert not finished.is_set()
         release.set()
+        assert await asyncio.to_thread(finished.wait, 0.5)
 
     asyncio.run(check())
-    assert finished.is_set()
 
 
 def test_the_chooser_and_the_check_both_refresh_first(refresh, monkeypatch):
     m, state, calls = refresh
     order = []
-    monkeypatch.setattr(m, "_refresh_restrictions_if_stale", lambda: order.append("refresh") or True)
+    refreshed = threading.Event()
+
+    def record_refresh():
+        order.append("refresh")
+        refreshed.set()
+        return True
+
+    monkeypatch.setattr(m, "_refresh_restrictions_if_stale", record_refresh)
     state["categories"] = []
 
     class _Req:
         request = {"client_name": "Acme"}
         product_names = []
     monkeypatch.setattr(m, "_reconstruct_proposal_request", lambda d: ProposalRequest())
-    asyncio.run(m.restriction_categories(_Req()))
+    async def check():
+        await m.restriction_categories(_Req())
+        assert await asyncio.to_thread(refreshed.wait, 0.5)
+
+    asyncio.run(check())
     assert order == ["refresh"]
