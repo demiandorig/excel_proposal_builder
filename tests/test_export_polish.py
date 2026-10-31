@@ -519,3 +519,34 @@ def test_the_chooser_and_the_check_both_refresh_first(refresh, monkeypatch):
 
     asyncio.run(check())
     assert order == ["refresh"]
+
+
+def test_roadblocks_endpoint_returns_timeout_result_with_worker_still_running(monkeypatch):
+    import app.main as m
+
+    started = threading.Event()
+    finished = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(m, "_ROADBLOCKS_TOTAL_TIMEOUT_SECONDS", 0.02)
+    monkeypatch.setattr(m, "_reconstruct_proposal_request", lambda data: object())
+    monkeypatch.setattr(m, "_refresh_restrictions_best_effort", lambda: asyncio.sleep(0))
+
+    def slow_worker(*args, **kwargs):
+        started.set()
+        release.wait(timeout=2)
+        finished.set()
+        return {}
+
+    monkeypatch.setattr(m.roadblocks_svc, "generate_roadblocks", slow_worker)
+    body = m.RoadblocksRequest(request={}, line_items=[], categories=["Political"])
+
+    async def check():
+        result = await m.roadblocks(body)
+        assert await asyncio.to_thread(started.wait, 0.5)
+        assert result["error"] == "Roadblocks check exceeded its time limit. Please retry."
+        assert result["categories"] == ["Political"]
+        assert not finished.is_set()
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 0.5)
+
+    asyncio.run(check())

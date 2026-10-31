@@ -27,6 +27,8 @@ web_search tool isn't available on this account/SDK version.
 from __future__ import annotations
 
 import os
+import logging
+import time
 from typing import Any, Optional
 
 try:
@@ -57,6 +59,11 @@ _FALLBACK_MODEL = "gpt-5.1"
 _MAX_OUTPUT_TOKENS = 16000
 _ROADBLOCKS_KEYS = ("overall_summary", "product_roadblocks")
 _TRUNCATED_MSG = "The roadblocks check was cut off before it finished, even after an automatic retry."
+_logger = logging.getLogger(__name__)
+
+
+def _log_stage(stage: str, started: float) -> None:
+    _logger.info("roadblocks stage=%s duration_ms=%d", stage, round((time.perf_counter() - started) * 1000))
 
 
 def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = None,
@@ -80,6 +87,7 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
         "error": str | None,
       }
     """
+    started = time.perf_counter()
     matrix = restrictions.build_matrix([li.product_name for li in line_items], categories)
     api_key = os.getenv("OPENAI_API_KEY")
     if not _HAS_OPENAI:
@@ -93,35 +101,58 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
         max_retries=llm_utils.OPENAI_MAX_RETRIES,
     )
     prompt = _build_prompt(request, line_items, strategy_brief, matrix)
+    _log_stage("prepare", started)
 
+    stage_started = time.perf_counter()
     try:
         raw = llm_utils.responses_text(client, model=_SEARCH_MODEL, prompt=prompt,
                                        tools=[{"type": "web_search"}],
                                        max_output_tokens=_MAX_OUTPUT_TOKENS)
     except llm_utils.ResponseTruncated:
+        _log_stage("web_search", stage_started)
         return _error_result(_TRUNCATED_MSG, matrix, line_items)
     except Exception as search_exc:
+        _log_stage("web_search", stage_started)
         if llm_utils.is_timeout_error(search_exc):
             return _error_result(
                 "Roadblocks check timed out before live research completed.",
                 matrix,
                 line_items,
             )
+        stage_started = time.perf_counter()
         try:
             raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
                                       max_completion_tokens=_MAX_OUTPUT_TOKENS)
         except llm_utils.ResponseTruncated:
+            _log_stage("fallback", stage_started)
             return _error_result(_TRUNCATED_MSG, matrix, line_items)
         except Exception as fallback_exc:
+            _log_stage("fallback", stage_started)
             return _error_result(f"Roadblocks check failed: {fallback_exc}", matrix, line_items)
+        _log_stage("fallback", stage_started)
+        stage_started = time.perf_counter()
         result = _parse(raw, used_web_search=False, client=client, matrix=matrix, line_items=line_items)
+        _log_stage("parse", stage_started)
         if not result.get("error"):
             result["error"] = (
                 f"Live web search failed ({search_exc}); this used the model's general knowledge "
                 "instead — verify against current platform policies before relying on it."
             )
         return result
-    return _parse(raw, used_web_search=True, client=client, matrix=matrix, line_items=line_items)
+    stage_started = time.perf_counter()
+    result = _parse(raw, used_web_search=True, client=client, matrix=matrix, line_items=line_items)
+    _log_stage("parse", stage_started)
+    return result
+
+
+def timeout_result(line_items, categories: Optional[list[str]] = None) -> dict:
+    """Return a stable error shape while preserving deterministic restriction checks."""
+    matrix = restrictions.build_matrix([li.product_name for li in line_items], categories)
+    return _error_result(
+        "Roadblocks check exceeded its time limit. Please retry.",
+        matrix,
+        line_items,
+    )
 
 
 def _error_result(msg: str, matrix: Optional[dict] = None, line_items=None) -> dict:

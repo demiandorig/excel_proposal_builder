@@ -106,6 +106,24 @@ from app.services.tiktok_client import TikTokAPIError
 from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, normalize_gender, parse_audience_text, split_hispanic_terms
 from app.services.line_modifier import clean_line_modifier_or_none
 
+_ROADBLOCKS_TOTAL_TIMEOUT_SECONDS = 30.0
+_roadblocks_tasks: set[asyncio.Task] = set()
+
+
+def _track_roadblocks_task(task: asyncio.Task) -> None:
+    _roadblocks_tasks.add(task)
+
+    def release(done: asyncio.Task) -> None:
+        _roadblocks_tasks.discard(done)
+        if done.cancelled():
+            return
+        try:
+            done.result()
+        except Exception:
+            _logger.exception("roadblocks background task failed")
+
+    task.add_done_callback(release)
+
 
 # ---------------------------------------------------------------------------
 # App + storage
@@ -1312,6 +1330,7 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
     context via live web search. Also writes a downloadable .docx report
     and returns a token to fetch it via /api/download-roadblocks/{token}.
     """
+    route_started = time.perf_counter()
     req = _reconstruct_proposal_request(body.request)
 
     line_items = [
@@ -1321,9 +1340,19 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
 
     await _refresh_restrictions_best_effort()      # judge against the current sheet, not an old copy
 
-    result = await asyncio.to_thread(
+    deadline = route_started + _ROADBLOCKS_TOTAL_TIMEOUT_SECONDS
+    worker = asyncio.create_task(asyncio.to_thread(
         roadblocks_svc.generate_roadblocks, req, line_items,
-        strategy_brief=body.strategy_brief, categories=body.categories)
+        strategy_brief=body.strategy_brief, categories=body.categories))
+    _track_roadblocks_task(worker)
+    remaining = max(0.0, deadline - time.perf_counter())
+    timed_out = False
+    try:
+        result = await asyncio.wait_for(asyncio.shield(worker), timeout=remaining)
+    except asyncio.TimeoutError:
+        _logger.warning("roadblocks total request budget exceeded after %.1fs", _ROADBLOCKS_TOTAL_TIMEOUT_SECONDS)
+        result = roadblocks_svc.timeout_result(line_items, body.categories)
+        timed_out = True
 
     doc_token: Optional[str] = None
     if result.get("product_roadblocks"):
@@ -1339,14 +1368,34 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
         )
         doc_filename = ai_enricher.safe_filename(doc_title) + ".docx"
         doc_path = PROPOSALS_DIR / f"roadblocks_{doc_token}.docx"
-        built = docx_builder.build_roadblocks_docx(
-            output_path=doc_path,
-            title=req.client_name or "Proposal",
-            overall_summary=result.get("overall_summary", ""),
-            product_roadblocks=result["product_roadblocks"],
-            used_web_search=result.get("used_web_search", False),
-            categories=result.get("categories") or None,
-        )
+        docx_started = time.perf_counter()
+
+        def build_docx() -> bool:
+            try:
+                return docx_builder.build_roadblocks_docx(
+                    output_path=doc_path,
+                    title=req.client_name or "Proposal",
+                    overall_summary=result.get("overall_summary", ""),
+                    product_roadblocks=result["product_roadblocks"],
+                    used_web_search=result.get("used_web_search", False),
+                    categories=result.get("categories") or None,
+                )
+            finally:
+                _logger.info("roadblocks stage=docx duration_ms=%d",
+                             round((time.perf_counter() - docx_started) * 1000))
+
+        docx_task = asyncio.create_task(asyncio.to_thread(build_docx))
+        _track_roadblocks_task(docx_task)
+        remaining = max(0.0, deadline - time.perf_counter())
+        try:
+            built = await asyncio.wait_for(asyncio.shield(docx_task), timeout=remaining)
+        except asyncio.TimeoutError:
+            docx_task.add_done_callback(lambda _done: doc_path.unlink(missing_ok=True))
+            _logger.warning("roadblocks report generation exceeded the request budget")
+            result["report_error"] = "Roadblocks were found, but the downloadable report exceeded its time limit."
+            doc_token = None
+            timed_out = True
+            built = False
         if built:
             (PROPOSALS_DIR / f"roadblocks_{doc_token}.json").write_text(json.dumps({
                 "path": str(doc_path), "filename": doc_filename,
@@ -1355,6 +1404,9 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
             doc_token = None
 
     result["doc_token"] = doc_token
+    _logger.info("roadblocks request duration_ms=%d timed_out=%s",
+                 round((time.perf_counter() - route_started) * 1000),
+                 timed_out)
     return result
 
 
@@ -3172,6 +3224,8 @@ def _refresh_restrictions_if_stale() -> bool:
         return False
     if not _restrictions_refresh_lock.acquire(blocking=False):
         return False                         # another request is already refreshing
+    refresh_started = time.perf_counter()
+    refreshed = False
     try:
         state = restrictions_svc.load_state()
         sync = state.get("sync") or {}
@@ -3188,6 +3242,7 @@ def _refresh_restrictions_if_stale() -> bool:
         sheet_url = sync.get("sheet_url") or restrictions_svc.DEFAULT_SHEET_URL
         data, title = restrictions_svc.fetch_sheet_xlsx(restrictions_svc.extract_file_id(sheet_url))
         _ingest_restrictions(data, sheet_url, title or sync.get("source_title") or "Restricted Verticals", "auto-sync")
+        refreshed = True
         _logger.info("restricted-verticals sheet re-read from Google (stored copy was from %s)", sync["synced_at"])
         return True
     except Exception as exc:  # noqa: BLE001 - the stored copy is still a valid answer
@@ -3195,6 +3250,8 @@ def _refresh_restrictions_if_stale() -> bool:
         return False
     finally:
         _restrictions_refresh_lock.release()
+        _logger.info("restrictions refresh duration_ms=%d refreshed=%s",
+                     round((time.perf_counter() - refresh_started) * 1000), refreshed)
 
 
 async def _refresh_restrictions_best_effort() -> None:
