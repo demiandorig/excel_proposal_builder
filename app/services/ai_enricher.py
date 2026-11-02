@@ -21,6 +21,7 @@ import dataclasses
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from typing import Optional
@@ -34,6 +35,13 @@ from app.services import source_rules
 from app.services.line_modifier import line_modifier_of
 from app.services.text_utils import normalize_newlines as _normalize_newlines, split_sentences, strip_variant_pricing
 from app.services.writing_style import HOUSE_VOICE_GUIDE
+
+_logger = logging.getLogger(__name__)
+
+
+def _log_enrichment_stage(stage: str, started: float) -> None:
+    _logger.info("proposal enrichment stage=%s duration_ms=%d",
+                 stage, round((time.perf_counter() - started) * 1000))
 
 try:
     from openai import OpenAI as _OpenAI
@@ -330,6 +338,7 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     writes are checked against them afterwards (see _verify_email_figures). When omitted
     they are derived here from `line_items` / `tiers`, with no add-ons or option dates.
     """
+    started = time.perf_counter()
     api_key = os.getenv("OPENAI_API_KEY")
     if not _HAS_OPENAI:
         return ProposalEnrichment(
@@ -351,43 +360,59 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
         totals = email_totals.totals_from_legacy(request, line_items, tiers, time_unit)
     prompt = _build_prompt(request, line_items, strategy_brief=strategy_brief, tiers=tiers, time_unit=time_unit,
                            totals=totals)
+    _log_enrichment_stage("prepare", started)
     truncated = ProposalEnrichment(
         campaign_name=_fallback_campaign_name(request),
         error="Content generation was cut off before it finished, even after an automatic retry.",
     )
 
+    stage_started = time.perf_counter()
     try:
         raw = llm_utils.responses_text(client, model=_SEARCH_MODEL, prompt=prompt,
                                        tools=[{"type": "web_search"}],
                                        max_output_tokens=_ENRICH_MAX_OUTPUT_TOKENS)
     except llm_utils.ResponseTruncated:
+        _log_enrichment_stage("web_search", stage_started)
         return truncated
     except Exception as search_exc:
+        _log_enrichment_stage("web_search", stage_started)
         if llm_utils.is_timeout_error(search_exc):
             return ProposalEnrichment(
                 campaign_name=_fallback_campaign_name(request),
                 error="Content generation timed out before the response was complete.",
             )
+        stage_started = time.perf_counter()
         try:
             raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
                                       max_completion_tokens=_ENRICH_MAX_OUTPUT_TOKENS)
         except llm_utils.ResponseTruncated:
+            _log_enrichment_stage("fallback", stage_started)
             return truncated
         except Exception as fallback_exc:
+            _log_enrichment_stage("fallback", stage_started)
             return ProposalEnrichment(
                 campaign_name=_fallback_campaign_name(request),
                 error=f"Content generation failed: {fallback_exc}",
             )
+        _log_enrichment_stage("fallback", stage_started)
+        stage_started = time.perf_counter()
         result = _parse_response(raw, request, line_items, used_web_search=False, client=client)
+        _log_enrichment_stage("parse", stage_started)
         if not result.error:
             result.error = (
                 f"Live web search failed ({search_exc}); this used the model's general "
                 "knowledge instead — verify stats before relying on them."
             )
+        stage_started = time.perf_counter()
         _verify_email_figures(client, result, totals, prompt)
+        _log_enrichment_stage("figure_verification", stage_started)
         return result
+    stage_started = time.perf_counter()
     result = _parse_response(raw, request, line_items, used_web_search=True, client=client)
+    _log_enrichment_stage("parse", stage_started)
+    stage_started = time.perf_counter()
     _verify_email_figures(client, result, totals, prompt)
+    _log_enrichment_stage("figure_verification", stage_started)
     return result
 
 

@@ -188,6 +188,11 @@ async def _no_cache_static(request, call_next):
 
 _logger = logging.getLogger(__name__)
 
+
+def _log_generate_stage(stage: str, started: float) -> None:
+    _logger.info("proposal generation stage=%s duration_ms=%d",
+                 stage, round((time.perf_counter() - started) * 1000))
+
 # ---------------------------------------------------------------------------
 # Login — every route needs a valid session except this small allowlist
 # (plus /static/* — just JS/CSS/images, no data) and everything under
@@ -2067,6 +2072,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     Generate an Excel proposal with AI enrichment.
     Returns proposal_id, filename, proposal_title, summary, and enrichment content.
     """
+    generate_started = time.perf_counter()
     req = _reconstruct_proposal_request(body.request)
 
     full_flight = monthly_allocation.is_full_flight(body.time_unit)
@@ -2187,11 +2193,14 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     # union above, which would drop a second line for the same product), the add-ons and any customised per-period
     # amounts — the same normalized state the workbook below is built from.
     email_figures = _email_figures_for_tiers(req, tiers, body.addons, body.time_unit, body.monthly_distribution_mode)
+    _log_generate_stage("request_prepare", generate_started)
+    enrichment_started = time.perf_counter()
     enrichment = await asyncio.to_thread(
         ai_enricher.enrich_proposal,
         req, union_line_items, short_id, strategy_brief=body.strategy_brief, tiers=tier_context,
         time_unit=body.time_unit, totals=email_figures,
     )
+    _log_generate_stage("enrichment", enrichment_started)
     # A planner-set name override wins over whatever the AI itself guessed
     # — used verbatim (not re-run through the AI) so it can't drift from
     # what was explicitly typed. Only the NAME segment changes; blurbs/
@@ -2222,6 +2231,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         AddonItem(product_name=a.product_name, amount=a.amount, notes_override=a.notes_override)
         for a in body.addons
     ]
+    workbook_started = time.perf_counter()
     try:
         summary = generate_proposal(
             req, tiers[0]["line_items"], output_path,
@@ -2243,6 +2253,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
+    finally:
+        _log_generate_stage("workbook", workbook_started)
     if full_flight_warnings:
         # generate_proposal re-normalizes (idempotently, so it has nothing left to report) — surface what THIS pass folded.
         summary["warnings"] = full_flight_warnings + list(summary.get("warnings") or [])
@@ -2298,6 +2310,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             internal_email_body = f"{internal_email_body.rstrip()}\n\n{signature}"
 
     # 8. Build client email Word doc (if AI produced content)
+    documents_started = time.perf_counter()
     if enrichment.client_email_body:
         email_doc_filename = f"{safe_base}_Client_Email.docx"
         email_doc_path = PROPOSALS_DIR / email_doc_filename
@@ -2358,6 +2371,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             except Exception:
                 logging.getLogger(__name__).exception("PPT gross deck build failed")
                 pptx_gross_filename = None
+    _log_generate_stage("optional_documents", documents_started)
 
     # 9. Track requester device/IP for the admin view
     user_agent = request.headers.get("user-agent", "")
@@ -2406,6 +2420,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         campaign_name_override=body.campaign_name_override,
         wizard_step=8,
     )
+    persistence_started = time.perf_counter()
     _save_proposal_metadata(
         proposal_id=proposal_id,
         client_name=req.client_name,
@@ -2438,6 +2453,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     # the Google Drive upload (a separate request) may be served by an instance that never saw it - see
     # app/services/proposal_files.py. Fail-safe: a database hiccup here must never fail Generate.
     await asyncio.to_thread(proposal_files_svc.save_file, proposal_id, "xlsx", output_path)
+    _log_generate_stage("persistence", persistence_started)
+    _log_generate_stage("total", generate_started)
 
     return {
         "proposal_id": proposal_id,
