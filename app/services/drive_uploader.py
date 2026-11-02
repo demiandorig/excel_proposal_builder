@@ -53,6 +53,12 @@ from app.db import get_connection
 
 _logger = logging.getLogger(__name__)
 
+
+def _log_upload_stage(stage: str, started: float) -> None:
+    _logger.info("drive upload stage=%s duration_ms=%d",
+                 stage, round((time.perf_counter() - started) * 1000))
+
+
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -805,8 +811,10 @@ def upload_proposal(
         }
 
     stage = "load credentials"
+    stage_started = time.perf_counter()
     try:
         creds = _load_credentials()
+        _log_upload_stage(stage, stage_started)
         if creds is None:
             return {
                 "uploaded": False,
@@ -815,6 +823,7 @@ def upload_proposal(
             }
 
         stage = "read file"
+        stage_started = time.perf_counter()
         if content is None:
             try:
                 content = Path(local_path).read_bytes()
@@ -824,15 +833,22 @@ def upload_proposal(
                     "Click Generate Proposal again, then upload.",
                     status_code=410, retryable=False, code="file_unavailable",
                 ) from None
+        _log_upload_stage(stage, stage_started)
 
+        stage = "build Drive client"
+        stage_started = time.perf_counter()
         root_folder_id = os.environ["DRIVE_ROOT_FOLDER_ID"]
         service = _build_service(creds)
+        _log_upload_stage(stage, stage_started)
 
         stage = "find/create folder"
+        stage_started = time.perf_counter()
         folder_name = normalize_folder_name(seller_email)
         folder_id = _find_or_create_folder(service, root_folder_id, folder_name)
+        _log_upload_stage(stage, stage_started)
 
         stage = "upload file"
+        stage_started = time.perf_counter()
         try:
             created = _create_file(
                 service, name=Path(local_path).stem, folder_id=folder_id, content=content,
@@ -843,9 +859,12 @@ def upload_proposal(
             if getattr(getattr(exc, "resp", None), "status", None) == 404:
                 _forget_folder(root_folder_id, folder_name)
             raise
+        _log_upload_stage(stage, stage_started)
 
         stage = "share file"
+        stage_started = time.perf_counter()
         link_shared = _share_with_link(service, created["id"])
+        _log_upload_stage(stage, stage_started)
 
         return {
             "uploaded": True,
@@ -856,11 +875,14 @@ def upload_proposal(
             "link_shared": link_shared,
         }
     except DriveAuthRequired:
+        _log_upload_stage(stage, stage_started)
         _forget_cached_credentials()
         return {"uploaded": False, "needs_auth": True, "reason": "Google Drive authorization required."}
     except DriveError:
+        _log_upload_stage(stage, stage_started)
         raise
     except Exception as exc:  # noqa: BLE001 - translated, logged, and raised as a DriveError
+        _log_upload_stage(stage, stage_started)
         translated = to_drive_error(exc, stage=stage, proposal_id=proposal_id)
         if isinstance(translated, DriveAuthRequired):
             _forget_cached_credentials()   # the token Google just rejected must not be served from the cache again

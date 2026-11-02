@@ -1197,6 +1197,14 @@ def test_upload_uses_the_shared_copy_when_this_instance_has_no_local_file(api):
     assert kw["seller_email"] == "ae@entravision.com" and kw["as_google_sheet"] is True
 
 
+def test_upload_logs_endpoint_stage_timings(api, caplog):
+    caplog.set_level(logging.INFO)
+    assert _call_upload()["uploaded"] is True
+    messages = [record.getMessage() for record in caplog.records]
+    for stage in ("load_proposal", "load_workbook", "google_drive_operations", "request_total"):
+        assert any(f"drive upload stage={stage} duration_ms=" in message for message in messages)
+
+
 def test_shared_copy_beats_a_stale_same_named_local_file(api):
     (api.tmp / api.meta["filename"]).write_bytes(b"STALE-from-an-earlier-generation")
     _call_upload()
@@ -1318,13 +1326,17 @@ def test_the_endpoint_never_raises_a_bare_500_even_for_a_bug(api, monkeypatch, c
     assert any(body["ref"] in r.getMessage() for r in caplog.records)
 
 
-def test_end_to_end_through_the_real_uploader_with_the_fake_drive(api_base, drive):
+def test_end_to_end_through_the_real_uploader_with_the_fake_drive(api_base, drive, caplog):
     """Endpoint -> shared copy -> real upload_proposal -> fake Drive, with a transient 503 on the way."""
+    caplog.set_level(logging.INFO)
     drive.fail("create_file", http_error(503))
     out = _call_upload(seller="o'brien@entravision.com")
     assert out["uploaded"] is True
     assert drive.files_only()[0]["content"] == b"stored-from-db"
     assert [f["name"] for f in drive.folders()] == ["o'brien@entravision.com"]
+    messages = [record.getMessage() for record in caplog.records]
+    for stage in ("load credentials", "read file", "build Drive client", "find/create folder", "upload file", "share file"):
+        assert any(f"drive upload stage={stage} duration_ms=" in message for message in messages)
 
 
 def test_the_upload_does_not_block_the_event_loop(api, monkeypatch):

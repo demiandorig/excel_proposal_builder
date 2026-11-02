@@ -193,6 +193,12 @@ def _log_generate_stage(stage: str, started: float) -> None:
     _logger.info("proposal generation stage=%s duration_ms=%d",
                  stage, round((time.perf_counter() - started) * 1000))
 
+
+def _log_drive_upload_stage(stage: str, started: float) -> None:
+    _logger.info("drive upload stage=%s duration_ms=%d",
+                 stage, round((time.perf_counter() - started) * 1000))
+
+
 # ---------------------------------------------------------------------------
 # Login — every route needs a valid session except this small allowlist
 # (plus /static/* — just JS/CSS/images, no data) and everything under
@@ -2849,7 +2855,9 @@ def _drive_upload_blocking(proposal_id: str, seller_email: str, redirect_uri: st
     for anything the caller should translate into a status code."""
     DriveError = drive_uploader.DriveError
     with drive_uploader.upload_slot(proposal_id):
+        stage_started = time.perf_counter()
         meta = drive_uploader.call_with_retries(lambda: _get_proposal_metadata(proposal_id), "load proposal")
+        _log_drive_upload_stage("load_proposal", stage_started)
         if meta is None:
             raise DriveError("That proposal wasn't found. Generate it again, then upload.",
                              status_code=404, retryable=False, code="proposal_not_found")
@@ -2862,6 +2870,7 @@ def _drive_upload_blocking(proposal_id: str, seller_email: str, redirect_uri: st
         # The shared copy first: the local file only exists on the instance that generated it (and a same-named
         # local file there can belong to an earlier proposal). The local disk is the fallback for proposals
         # generated before the shared copy existed.
+        stage_started = time.perf_counter()
         content = drive_uploader.call_with_retries(
             lambda: proposal_files_svc.load_bytes(proposal_id, "xlsx"), "load stored workbook"
         )
@@ -2877,6 +2886,8 @@ def _drive_upload_blocking(proposal_id: str, seller_email: str, redirect_uri: st
                     "has since restarted). Click Generate Proposal again, then upload.",
                     status_code=410, retryable=False, code="file_unavailable",
                 ) from None
+        _log_drive_upload_stage("load_workbook", stage_started)
+        stage_started = time.perf_counter()
         try:
             result = drive_uploader.upload_proposal(
                 local_path=path,
@@ -2890,6 +2901,8 @@ def _drive_upload_blocking(proposal_id: str, seller_email: str, redirect_uri: st
             # Never an HTTP 401: session-guard.js treats ANY 401 as "your login expired" and bounces to /login.
             # Re-authorizing Drive is the 200 {needs_auth, auth_url} contract the page already handles.
             result = {"uploaded": False, "needs_auth": True, "reason": "Google Drive authorization required."}
+        finally:
+            _log_drive_upload_stage("google_drive_operations", stage_started)
         if result.get("needs_auth"):
             result["auth_url"] = drive_uploader.get_auth_url(redirect_uri)
         return result
@@ -2918,6 +2931,7 @@ async def drive_upload(body: DriveUploadRequest, request: Request):
     """
     proposal_id = (body.proposal_id or "").strip()
     redirect_uri = str(request.base_url).rstrip("/") + "/api/drive/callback"
+    request_started = time.perf_counter()
     try:
         return await asyncio.to_thread(
             _drive_upload_blocking, proposal_id, body.seller_email or "", redirect_uri
@@ -2928,6 +2942,8 @@ async def drive_upload(body: DriveUploadRequest, request: Request):
         return _drive_failure_response(
             drive_uploader.to_drive_error(exc, stage="endpoint", proposal_id=proposal_id)
         )
+    finally:
+        _log_drive_upload_stage("request_total", request_started)
 
 
 @app.get("/api/drive/callback")
