@@ -13,7 +13,9 @@ are AI-informed rather than purely rule-based.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
 from typing import Optional
 
 try:
@@ -28,6 +30,13 @@ from app.services import source_rules
 from app.services.text_utils import normalize_newlines as _normalize_newlines
 from app.services.writing_style import HOUSE_VOICE_GUIDE
 from app.catalog import by_name as _catalog_by_name
+
+_logger = logging.getLogger(__name__)
+
+
+def _log_strategy_stage(stage: str, started: float) -> None:
+    _logger.info("strategy brief stage=%s duration_ms=%d",
+                 stage, round((time.perf_counter() - started) * 1000))
 
 
 # Entravision catalog families + one-line description for the prompt. Keyed
@@ -155,6 +164,7 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
         # through to the unconstrained prompt/no guardrail, same as
         # mode="new_mix", rather than constraining to an empty set.
 
+    stage_started = time.perf_counter()
     client = _OpenAI(
         api_key=api_key,
         timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
@@ -162,8 +172,11 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
     )
     prompt = _build_prompt(request, reprompt, ad_intel=ad_intel, allowed_families=allowed_families,
                            time_unit=time_unit)
+    _log_strategy_stage("prepare", stage_started)
     # The OpenAI client is synchronous; off the event loop so one brief can't stall every other request.
+    stage_started = time.perf_counter()
     result = await asyncio.to_thread(_run_brief_call, client, prompt)
+    _log_strategy_stage("model_and_parse", stage_started)
 
     if allowed_families and result.get("recommended_tactics"):
         # Hard guardrail, not just a prompt ask — the model can still
@@ -195,6 +208,7 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
 
 
 def _run_brief_call(client, prompt: str) -> dict:
+    stage_started = time.perf_counter()
     try:
         raw = llm_utils.responses_text(client, model=_SEARCH_MODEL, prompt=prompt,
                                        tools=[{"type": "web_search"}],
@@ -202,23 +216,33 @@ def _run_brief_call(client, prompt: str) -> dict:
     except llm_utils.ResponseTruncated:
         return _error_brief(_TRUNCATED_MSG)
     except Exception as search_exc:
+        _log_strategy_stage("web_search", stage_started)
         if llm_utils.is_timeout_error(search_exc):
             return _error_brief("Strategy brief timed out before research completed.")
+        stage_started = time.perf_counter()
         try:
             raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
                                       max_completion_tokens=_MAX_OUTPUT_TOKENS)
         except llm_utils.ResponseTruncated:
             return _error_brief(_TRUNCATED_MSG)
         except Exception as fallback_exc:
+            _log_strategy_stage("fallback", stage_started)
             return _error_brief(f"Request failed: {fallback_exc}")
+        _log_strategy_stage("fallback", stage_started)
+        stage_started = time.perf_counter()
         result = _parse(raw, used_web_search=False, client=client)
+        _log_strategy_stage("parse", stage_started)
         if not result.get("error"):
             result["error"] = (
                 f"Live web search failed ({search_exc}); this used the model's general "
                 "knowledge instead — verify stats before relying on them."
             )
         return result
-    return _parse(raw, used_web_search=True, client=client)
+    _log_strategy_stage("web_search", stage_started)
+    stage_started = time.perf_counter()
+    result = _parse(raw, used_web_search=True, client=client)
+    _log_strategy_stage("parse", stage_started)
+    return result
 
 
 # ---------------------------------------------------------------------------

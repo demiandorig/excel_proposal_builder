@@ -89,3 +89,38 @@ def test_rebuild_404s_for_an_unknown_token(proposals_dir):
     with pytest.raises(Exception) as exc_info:
         asyncio.run(main.rebuild_strategy_doc("does-not-exist", main.StrategyDocRebuildRequest(request={})))
     assert getattr(exc_info.value, "status_code", None) == 404
+
+
+def test_strategy_generation_timeout_returns_graceful_error(proposals_dir, monkeypatch, caplog):
+    async def slow_generate(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return {}
+
+    monkeypatch.setattr(main, "_STRATEGY_REQUEST_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(main.strategy_brief_svc, "generate_brief", slow_generate)
+    result = asyncio.run(main.strategy(main.StrategyRequest(request={"client_name": "Acme"})))
+
+    assert result["error"] and "time limit" in result["error"]
+    assert result["strategy_summary"] == ""
+    assert result["doc_token"] is None
+    assert "strategy request stage=brief_generation timed_out=true" in caplog.text
+
+
+def test_strategy_brief_document_is_built_off_event_loop(proposals_dir, monkeypatch):
+    async def fast_generate(*args, **kwargs):
+        return {
+            "client_summary": "Acme makes widgets.",
+            "market_context": "Local market.",
+            "objectives_analysis": "Increase awareness.",
+            "strategy_summary": "Use a focused local media mix.",
+            "recommended_tactics": [],
+            "key_insights": [],
+            "used_web_search": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(main.strategy_brief_svc, "generate_brief", fast_generate)
+    result = asyncio.run(main.strategy(main.StrategyRequest(request={"client_name": "Acme"})))
+
+    assert result["doc_token"]
+    assert (proposals_dir / f"strategy_{result['doc_token']}.docx").exists()

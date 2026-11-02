@@ -107,6 +107,7 @@ from app.services.constanza_audience import AudienceSpec, estimate_audience, loa
 from app.services.line_modifier import clean_line_modifier_or_none
 
 _ROADBLOCKS_TOTAL_TIMEOUT_SECONDS = 30.0
+_STRATEGY_REQUEST_TIMEOUT_SECONDS = 15.0
 _roadblocks_tasks: set[asyncio.Task] = set()
 
 
@@ -1192,9 +1193,32 @@ async def strategy(body: StrategyRequest) -> dict:
     """Generate (or regenerate) an AI strategy brief for the proposal. Also
     writes a downloadable .docx of the brief and returns a token to fetch it
     via /api/download-strategy/{token}, same pattern as the roadblocks step."""
+    request_started = time.perf_counter()
+    stage_started = time.perf_counter()
     req = _reconstruct_proposal_request(body.request)
-    brief = await strategy_brief_svc.generate_brief(req, reprompt=body.reprompt, mode=body.mode,
-                                                    ad_presence=body.ad_presence, time_unit=body.time_unit)
+    _logger.info("strategy request stage=prepare duration_ms=%d",
+                 round((time.perf_counter() - stage_started) * 1000))
+    stage_started = time.perf_counter()
+    try:
+        brief = await asyncio.wait_for(
+            strategy_brief_svc.generate_brief(
+                req, reprompt=body.reprompt, mode=body.mode,
+                ad_presence=body.ad_presence, time_unit=body.time_unit,
+            ),
+            timeout=_STRATEGY_REQUEST_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        _logger.warning("strategy request stage=brief_generation timed_out=true budget_seconds=%.1f",
+                        _STRATEGY_REQUEST_TIMEOUT_SECONDS)
+        _logger.info("strategy request stage=total duration_ms=%d",
+                     round((time.perf_counter() - request_started) * 1000))
+        timed_out_brief = strategy_brief_svc._error_brief(
+            f"Strategy brief exceeded the {_STRATEGY_REQUEST_TIMEOUT_SECONDS}-second time limit. Please try again."
+        )
+        timed_out_brief["doc_token"] = None
+        return timed_out_brief
+    _logger.info("strategy request stage=brief_generation duration_ms=%d",
+                 round((time.perf_counter() - stage_started) * 1000))
 
     doc_token: Optional[str] = None
     if brief.get("strategy_summary") or brief.get("recommended_tactics"):
@@ -1215,20 +1239,29 @@ async def strategy(body: StrategyRequest) -> dict:
         )
         doc_filename = ai_enricher.safe_filename(doc_title) + ".docx"
         doc_path = PROPOSALS_DIR / f"strategy_{doc_token}.docx"
-        built = docx_builder.build_strategy_brief_docx(
-            output_path=doc_path,
-            title=req.client_name or "Proposal",
-            client_summary=brief.get("client_summary", ""),
-            market_context=brief.get("market_context", ""),
-            objectives_analysis=brief.get("objectives_analysis", ""),
-            strategy_summary=brief.get("strategy_summary", ""),
-            recommended_tactics=brief.get("recommended_tactics", []),
-            key_insights=brief.get("key_insights", []),
-            monthly_budget=req.monthly_budget or 0.0,
-            total_months=req.total_months or 0,
-            ad_presence=brief.get("ad_presence"),
-            time_unit=body.time_unit,
-        )
+        stage_started = time.perf_counter()
+        remaining = _STRATEGY_REQUEST_TIMEOUT_SECONDS - (time.perf_counter() - request_started)
+        try:
+            built = await asyncio.wait_for(asyncio.to_thread(
+                docx_builder.build_strategy_brief_docx,
+                output_path=doc_path,
+                title=req.client_name or "Proposal",
+                client_summary=brief.get("client_summary", ""),
+                market_context=brief.get("market_context", ""),
+                objectives_analysis=brief.get("objectives_analysis", ""),
+                strategy_summary=brief.get("strategy_summary", ""),
+                recommended_tactics=brief.get("recommended_tactics", []),
+                key_insights=brief.get("key_insights", []),
+                monthly_budget=req.monthly_budget or 0.0,
+                total_months=req.total_months or 0,
+                ad_presence=brief.get("ad_presence"),
+                time_unit=body.time_unit,
+            ), timeout=max(0, remaining))
+        except asyncio.TimeoutError:
+            built = False
+            _logger.warning("strategy request stage=docx_creation timed_out=true")
+        _logger.info("strategy request stage=docx_creation duration_ms=%d",
+                     round((time.perf_counter() - stage_started) * 1000))
         if built:
             (PROPOSALS_DIR / f"strategy_{doc_token}.json").write_text(json.dumps({
                 "path": str(doc_path), "filename": doc_filename,
@@ -1237,6 +1270,8 @@ async def strategy(body: StrategyRequest) -> dict:
             doc_token = None
 
     brief["doc_token"] = doc_token
+    _logger.info("strategy request stage=total duration_ms=%d",
+                 round((time.perf_counter() - request_started) * 1000))
     return brief
 
 
