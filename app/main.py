@@ -107,8 +107,10 @@ from app.services.constanza_audience import AudienceSpec, estimate_audience, loa
 from app.services.line_modifier import clean_line_modifier_or_none
 
 _ROADBLOCKS_TOTAL_TIMEOUT_SECONDS = 30.0
+_GENERATE_ENRICHMENT_TIMEOUT_SECONDS = 10.0
 _STRATEGY_REQUEST_TIMEOUT_SECONDS = 15.0
 _roadblocks_tasks: set[asyncio.Task] = set()
+_generate_enrichment_tasks: set[asyncio.Task] = set()
 
 
 def _track_roadblocks_task(task: asyncio.Task) -> None:
@@ -124,6 +126,42 @@ def _track_roadblocks_task(task: asyncio.Task) -> None:
             _logger.exception("roadblocks background task failed")
 
     task.add_done_callback(release)
+
+
+def _track_generate_enrichment_task(task: asyncio.Task) -> None:
+    _generate_enrichment_tasks.add(task)
+
+    def release(done: asyncio.Task) -> None:
+        _generate_enrichment_tasks.discard(done)
+        if done.cancelled():
+            return
+        try:
+            done.result()
+        except Exception:
+            _logger.exception("generate enrichment background task failed")
+
+    task.add_done_callback(release)
+
+
+async def _generate_enrichment_with_timeout(*args, **kwargs):
+    """AI enrichment is optional: cap its wait while allowing workbook generation to continue."""
+    task = asyncio.create_task(asyncio.to_thread(ai_enricher.enrich_proposal, *args, **kwargs))
+    _track_generate_enrichment_task(task)
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(task), timeout=_GENERATE_ENRICHMENT_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        request = args[0]
+        _logger.warning(
+            "proposal generation stage=enrichment timed_out=true budget_seconds=%.1f",
+            _GENERATE_ENRICHMENT_TIMEOUT_SECONDS,
+        )
+        return ai_enricher.ProposalEnrichment(
+            campaign_name=ai_enricher._fallback_campaign_name(request),
+            error=f"AI enrichment exceeded the {_GENERATE_ENRICHMENT_TIMEOUT_SECONDS}-second time limit; "
+                  "the workbook was generated without optional enrichment.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2236,8 +2274,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     email_figures = _email_figures_for_tiers(req, tiers, body.addons, body.time_unit, body.monthly_distribution_mode)
     _log_generate_stage("request_prepare", generate_started)
     enrichment_started = time.perf_counter()
-    enrichment = await asyncio.to_thread(
-        ai_enricher.enrich_proposal,
+    enrichment = await _generate_enrichment_with_timeout(
         req, union_line_items, short_id, strategy_brief=body.strategy_brief, tiers=tier_context,
         time_unit=body.time_unit, totals=email_figures,
     )
