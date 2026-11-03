@@ -204,24 +204,78 @@ step's frequency reads 5.5. Change the multipliers (they must stay in order) wit
 Beside the scenarios the panel shows a **budget cross-check**, kept apart from avails: the retail budget ÷ the retail CPM × 1,000 (Awareness **$12**,
 Traffic / Conversion **$18**, Lead Gen / Calls **$35**; retail spend is **2× platform media spend**), and the retail spend each scenario's flight
 would imply at that CPM. The snapshot (audience, scenarios, what was asked) is saved with the proposal as `avails_data[line_id].meta_forecast`; a
-changed budget, product, CPM, geography, flight length or targeting label marks it stale and withdraws the Insert button. The Awareness catalog seed
+changed budget, product, CPM, geography, flight length or targeting label, **or any change to the panel's choices** (place, age, gender, language,
+interests; putting them back un-marks it), marks it stale and withdraws the Insert button. The Awareness catalog seed
 and migration `0003` change the old $13 default to $12 while preserving any admin-edited CPM (see "Deploying" below: a data migration does not run
 in a published deployment, so set the rate in Admin if it still reads $13).
 
-**Two ways to give it the audience.** *Manual*: type the lower end (and optionally the upper end) of the "Estimated audience size" Ads Manager shows.
-*Live*: put `META_ACCESS_TOKEN` and `META_AD_ACCOUNT_ID` in the app's secrets (below), search Meta's own geographies (DMA "geo markets", cities,
-regions, ZIPs, countries; the planner picks the exact key, nothing is guessed), optionally set age (18–65) and gender, and choose **interests and
-behaviors from Meta's own lists** (below). Everything chosen goes to Meta as the targeting spec; the chosen interests / behaviors form **one
-`flexible_spec` group, so the audience is people who match ANY of them**. Nothing else about a real campaign (exclusions, account restrictions) is
-represented, so check those in Ads Manager. Two things the figure is not: it counts people active on Meta's **default placements** (Facebook, Instagram,
-Messenger, Audience Network…), the same as Ads Manager's "Estimated audience size", not only Facebook and Instagram; and Meta's **TV markets are Comscore
-Markets** (Meta moved off Nielsen DMAs on 2026-06-22), so a market's footprint can differ from the Nielsen DMA the rest of Constanza uses.
+**One way to give it the audience: pull it from Meta.** The panel never asks for an audience size typed by hand (the Ads Manager "Estimated audience size"
+box is gone): the planner either pulls the audience from Meta, or types **avails straight into the card's own Avails fields**, as for any product.
+(`POST /api/constanza/meta-forecast` still accepts `audience_lower` / `audience_upper`, because proposals saved earlier hold snapshots with
+`potential_audience.source == "manual"`: those still render, labelled *entered manually*, and are not marked stale by the panel's choices, which they never
+used.) The pull needs `META_ACCESS_TOKEN` and `META_AD_ACCOUNT_ID` in the app's secrets (below). Everything chosen goes to Meta as the targeting spec; the
+chosen interests / behaviors form **one `flexible_spec` group, so the audience is people who match ANY of them**. Nothing else about a real campaign
+(exclusions, account restrictions) is represented, so check those in Ads Manager. Two things the figure is not: it counts people active on Meta's **default
+placements** (Facebook, Instagram, Messenger, Audience Network…), the same as Ads Manager's "Estimated audience size", not only Facebook and Instagram; and
+Meta's **TV markets are Comscore Markets** (Meta moved off Nielsen DMAs on 2026-06-22), so a market's footprint can differ from the Nielsen DMA the rest of
+Constanza uses.
+
+**The panel (Step 05, `app.js` "META PANEL", `meta-audience.css`).** A compact header (the retail budget over *N* months, the retail CPM, the one-line rule
+*lower end × 4.3 / 5.5 / 8.6* with the multipliers the server quotes, and that Meta counts its default placements) and a **connection banner** from
+`GET /api/constanza/meta/status` (asked at most once per 30 seconds, not on every redraw of the Avails grid): *Connected to Meta* with the ad account's last
+four digits, or which settings the admin must add, in which case **Estimate audience is switched off with that reason** beside it (and the controls that
+would only ask Meta are off too). Then four numbered sections built from the shared audience kit (`audience-kit.css`), each with a live one-line summary, a
+count and a *Clear*:
+
+1. **Where**: the kind of place (TV market, city, state / region, ZIP, country) and a search over Meta's own geographies (`POST /api/constanza/meta-geos`,
+   debounced, never run on a redraw). The proposal's own places are offered as one-click *Search "Los Angeles"* pills instead of an automatic search. The chosen
+   place is a chip with its type; the summary reads *Los Angeles · TV market*. Meta estimates one place at a time.
+2. **Who**: an age range (18–65+, with presets) and gender (All / Women / Men); the summary reads *Women · 25–44*. Age is sent only when it narrows.
+3. **Language**: quick picks *Spanish speakers*, *English* and *Spanish + English*, a search over Meta's whole list of languages for any other, *Browse all
+   languages* (the pop-up window), chips, and the caveat below. A quick pick is **resolved live**: it asks `GET /api/constanza/meta-languages?q=Spanish` and takes
+   every locale Meta lists whose name starts with that word (no locale id is in the page's code); the chip shows one language family ("Spanish, 3 versions").
+   When the proposal's or the line's target text names Hispanic, Latino or Spanish-speaking audiences (`_targetsHispanic`, the rule the Constanza dock uses), a
+   pill *This line targets Hispanic audiences — add Spanish?* is offered; it is **never applied silently**.
+4. **Audience**: a search over interests, behaviors and demographics (`GET /api/constanza/meta-targeting?q=`, grouped by kind, with the audience size beside each
+   hit), chips, and *Browse all interests, behaviors & demographics*, which opens the shared **SegmentBrowser** window (a sortable, searchable, multi-select
+   list with Interests / Behaviors / Demographics tabs; name, category and audience size columns; 50 picks at most counting every tab). Several picks widen the
+   audience (people who match any). A list Meta answers with nothing is **never remembered**: the pop-up says so with a *Retry* button, and the next search or
+   the next opening asks Meta again. If the pop-up's script did not load, the *Browse all* controls are switched off with the reason shown beside them.
+
+Then **Estimate audience**, and the result: the lower-end audience as the headline, the three scenarios as cards with the mid one highlighted as the default,
+the budget cross-check and *Insert the mid-case into Avails*. What the planner chose is kept per line for the session and restored from a saved snapshot's
+`meta_targeting` (languages included), so reopening a proposal shows what was asked. The request is `POST /api/constanza/meta-forecast` with `meta_geo_type`,
+`meta_geo_key`, `meta_geo_label`, `age_min` / `age_max` (null when not narrowed), `gender`, `meta_targeting` and **`meta_languages`** (`[{id, name}]`).
+Every row the lists offer can be sent back: the request model's limit for a pick's `type` is the longest key in `constanza_meta.TARGETING_KEYS` (never a
+number typed in separately), an option's name is shortened to 120 characters in the list, and a row without a numeric id is left out. If the server still
+refuses a field, the panel names the pick it was about.
 
 **The interest and behavior lists come from Meta.** `GET /api/constanza/meta-targeting?kind=interests|behaviors|demographics` returns a whole list
 (Meta's `search?type=adTargetingCategory&class=…`, cached for 12 hours; demographics are life events, industries, income, family status);
 `?q=soccer` returns the interests Meta's keyword search finds (`type=adinterest`) plus the behaviors and demographics whose name or path contains
 the words. Meta does not return every option to every ad account and retires options over time, so what is listed is what this account can use today
 (and demographic options depend on the token's home country).
+
+**Language.** Most Entravision campaigns target Spanish speakers, so the live pull takes **languages** too. They come from Meta's own list of locales:
+`GET /api/constanza/meta-languages` returns `{"items": [{"id", "name"}], "note"}`, the whole list when `q` is empty (Meta's `search?type=adlocale` with a
+blank `q` and `limit=1000`, cached 12 hours) or what Meta's search finds for `?q=Spanish` (2–60 characters; regional variants such as "Spanish (Mexico)" are
+separate locales). The chosen ones travel in `meta_languages` of `POST /api/constanza/meta-forecast` and go to Meta as the targeting spec's **`locales`**, a
+list of Meta's locale numbers (up to 25 here; Meta documents 50). No locale id is kept in the app: they always come from Meta's search. Languages are
+**ANDed** with the geography, age, gender and interests, and **several languages are ORed** with each other: Spanish + Spanish (Mexico) in a TV market is
+the people there whose app is set to either. So the first language narrows the audience compared with none, and each further language widens it again (a
+second language never makes the figure smaller than the first alone). The snapshot saved with the proposal carries them as
+`meta_forecast.meta_targeting.languages` (`[{id, name}]`, empty when none were chosen; a proposal saved earlier has no such key). **What Meta's "language"
+is:** the language people have set Facebook or Instagram to, **not who speaks it**. A Spanish speaker whose app is set to English is not counted, so a
+Spanish figure can come out lower than the Spanish-speaking population; leave languages empty to count everyone in the geography. The panel shows this
+as a short hint under the language picker (the first sentence) with the full text on demand, and says *language set to Spanish*, never "speaks Spanish", in the
+result (the same text is `language_note` in `GET /api/constanza/meta/status` and `note` in the languages answer). Meta withdrew its Hispanic
+"multicultural affinity" options from detailed targeting, so a language plus the geography is how Spanish-speaking audiences are reached on Meta; any
+related interest or behavior is whatever the interest / behavior search finds on this account (try "Hispanic", "Latino", "Spanish"), and nothing is
+assumed. The diagnostics check it: **Language search** (Meta finds a locale for "Spanish"), **Reach estimate · with a language** (U.S. accounts set to
+Spanish, printed next to the plain U.S. figure of the same run; flagged `!` if it is not clearly smaller, meaning 90% of the U.S. figure or more, which would
+mean Meta is not applying `locales`, or if there is no U.S. figure to compare with, in which case it says it is not verified rather than claiming a result),
+**Reach estimate · English, a common language** (for information only: it reports what Meta did with English in the U.S. next to the plain U.S. figure, and
+never fails the run) and **Language list**.
 
 **Setting it up (an admin, once)** — both are read-only; nothing is ever created in the ad account:
 
@@ -236,7 +290,7 @@ The steps on Meta's side: in **Business Settings → Users → System users** cr
 **Generate new token** for a Meta app that has the **`ads_read`** permission, and copy the ad account's numeric ID from Ads Manager. The app that issued the token needs **Ads Management Standard Access** (Meta's naming moved to *Limited Access* in May 2026) with business
 verification when it reads accounts beyond your own business's; a token for an app still in development works only for people with a role on the
 app. Then run `python -m app.services.meta_diagnose` (`--json` for a machine-readable answer): it checks the token and ad account, geography search,
-reach estimates (a country; a TV market with age and gender; an interest), and the three lists, and each failing line says what to fix. Errors are
+reach estimates (a country; a TV market with age and gender; an interest; a language), the language search and list, and the three lists, and each failing line says what to fix. Errors are
 told in plain words with the right status (token → 503, permission → 503, rate limit → 429, refused settings → 422); no secret appears in any answer.
 `GET /api/constanza/meta/status` says whether it is connected (which settings are missing, never their values). The Meta response of `reachestimate` is
 read whether Meta sends one object (its documented shape) or a list.
@@ -244,6 +298,16 @@ read whether Meta sends one object (its documented shape) or a list.
 **Not verified against a real account** (none existed when this was written; the request and response shapes are Meta's published reference): that
 `geo_markets` alone satisfies `reachestimate` (Meta's page lists `countries` as required in a targeting spec), that the token can read the lists, and
 which options each account sees. The diagnostics are the first thing to run after the secrets are in.
+
+For languages, Meta's reference documents the locale search (`type=adlocale`, a blank `q` lists every locale) and the `locales` field (locale numbers from
+that search, up to 50), but its pages do not spell out that `locales` is ANDed with the geography or that `reachestimate` honours it. That is how Ads
+Manager's Languages field behaves, and the **Reach estimate · with a language** check is what proves it on the real account.
+
+There is a documented qualifier too. Meta's advanced-targeting reference describes `locales` as for targeting a language that differs from the common
+language for a location. Spanish in the U.S. is such a language; English is the common one there. So the **English** and **Spanish + English** quick picks may
+narrow a U.S. audience less than expected, or not at all, and may not behave like the Spanish one. The reference does not say what Meta does with a common
+language, so this is unverified: the diagnostics' **Reach estimate · English, a common language** line asks Meta for English in the U.S. next to the plain U.S.
+figure and simply reports what came back (it never fails the run). Run it on the real account before relying on those two picks.
 
 ### The win rate (MadHive / The Trade Desk products)
 
@@ -537,6 +601,57 @@ export makes a new Netflix version instead of leaving it "unchanged".
   only qualifies the place (a state, a state and ZIP, "D.C.", the country). The "form has changed since this was pulled"
   banner compares the form with the request the result was pulled with, so reopening the dock, or changing a field and putting
   it back, shows nothing.
+* **The form is a Product card and five numbered cards**, built from the shared audience kit (`audience-kit.css`, `.aud-*`) like the
+  Meta and TikTok panels: **1 Where**, **2 When**, **3 Who**, **4 Language & heritage**, **5 Audience**. Each card's head says in one
+  line what it holds ("1 area · about 13M people", "3 months", "Women · 25–54", "Hispanic targeting on · default", "Sports Fans –
+  Soccer +1") and carries a Clear link where there is something to clear; the badge fills once a card holds a choice. Where and When
+  are always open; Who, Language & heritage and Audience fold (Language & heritage starts open, because most campaigns need it; which
+  cards the planner leaves open is remembered per browser in `localStorage`, `constanza.v2` → `sections`). A folding card's Clear / Turn off
+  link is **not inside its `<summary>`** (a button in the toggle is a control inside a control: axe's *nested-interactive*, and a screen
+  reader cannot tell the two apart): it is the `<details>`' sibling, in a `.cz-fold` wrapper, drawn over the head just left of the arrow and
+  placed *before* the card in the DOM, so the keyboard meets Clear, then the toggle, then the body. The head keeps room for it with an
+  invisible twin of the link (`.cz-fold-twin`, the same class and words, so the same width at any zoom), shown only while the link is;
+  `tests/test_constanza_dock_dom.py` checks that the link lies exactly on its twin at laptop and phone width.
+  * *Where*: the geography box, one-click picks under it (a few examples while it is empty; "Use the proposal's geography" while the
+    box says something else), what it matched as chips (kind of place and people), the disambiguation / did-you-mean help, and the
+    "treat what I typed as" control (six choices in a fixed three-by-two grid, so a phone never shows five and an orphan). Its summary reads "Matching what you typed…" from the first keystroke, so an old answer is never
+    shown as current; an emptied box clears at once.
+  * *When*: the flight stepper and unit, "Use the proposal's dates" (shows as chosen once the flight is those days) and, only for a
+    product with no avails data or a place outside the U.S., the impressions to spread.
+  * *Who*: age (two boxes that still take any age 0-120, plus presets 18+, 18–34, 18–49, 25–54, 35–54, 55+; pressing the chosen preset
+    lets go of it; a backwards range is flagged where it is typed) and gender. Sends `audience.age_min / age_max / gender`.
+  * *Language & heritage*: the Hispanic targeting switch, described as the way **Spanish-speaking audiences are modelled for
+    Entravision's own products**. The avails data has no language field, so there is no language picker here and the request has no
+    language field: the card says so in plain words and explains that each area's avails are weighted by its real Hispanic share
+    (Census ACS). The notes that were there before stay (the share and mode, the "already built from Hispanic audiences" case, which
+    disables the switch). "Turn off" in the head flips the switch. Sends `hispanic` only when the planner's choice differs from the
+    product's default (null = the server decides). (Language *is* a first-class section in the TikTok and Meta panels, where the
+    platforms have the field.)
+  * *Audience*: the interests typeahead (rate and group under each match, the typed words marked, Up/Down wrap, Enter picks, Escape
+    closes the popup alone even when it only says nothing matches; the whole list, whatever it says - answer, nothing matches or an error - is
+    scrolled into view, so a field at the bottom edge never leaves it under the action bar) and **Browse all audiences**, which opens the shared
+    `SegmentBrowser` pop-up over the whole taxonomy: Name · Group · Incidence rate, sortable (a rate column starts with the biggest;
+    an audience with no sourced rate stays in the list, says "No public rate" and sorts last either way, and can still be picked for
+    reference exactly as in the typeahead), searchable (the keywords and company names are searched but not drawn), multi-select, and
+    capped at the server's 10 in total with what the typeahead already holds counted. Only the changes come back (`added` /
+    `removed`), so the typeahead's picks stay. The chips send `audience.interest_terms` (their labels), as before. The dock fetches
+    the taxonomy quietly when it opens (for the count on the button and the group names), never on a page view; a failed fetch is not
+    remembered and the window shows the message with Retry. Without `window.SegmentBrowser` the button hides and the typeahead stays.
+  * A forecast method with its own panel (TikTok) hides cards 3-5 (they are one element, `#cz-aud`) and mounts in
+    `#cz-method-forms`; its own cards keep counting on (3, 4, 5, ...) because the dock sets `counter-reset: none` on a builder nested
+    in a method panel. Every element id the panel touches is unchanged. The `ctx` the dock hands a method's factory is documented in
+    `constanza.js` (above `registerMethod`) and pinned by `test_the_dock_only_hides_the_cards_it_replaces_and_hands_the_panel_the_same_context`:
+    `S, $, esc, num, compact, api, markStale, errorText, setMood, announce, summarize, productByName, requestBody` and
+    `targetsHispanic()`, which answers *does the line (or product) the dock is open for target Hispanic audiences?* - lazily, on every call, from
+    the dock's own switch (`S.hispanic`) or the page's reading of the line's targeting text. It is a hint: a panel may suggest from it, never
+    apply it by itself. (The TikTok panel keeps its old guarded reach for the page's globals only as a fallback for a dock without the function.)
+  * The welcome state, the action bar (Reset · Pull avails), the product picker and the wide layout (form column 420px, the action
+    bar under it) share the same look; the result card itself - numbers, notes, badges - is untouched. Every control is at least 36px
+    tall with a visible focus ring, nothing animates under `prefers-reduced-motion`, and no text reaches the page as markup (the
+    typeahead marks matches by escaping each piece).
+  * The dock's CSS names no `.aud-*` class (the kit's names belong to `audience-kit.css`): the markup carries a companion class
+    (`cz-sec-head`, `cz-hintline`, `cz-areachip` ...) and the rules hook on that. `tests/test_constanza_dock_dom.py` drives all of
+    this in headless Chromium (set `TEST_SHOTS=<dir>` to also write screenshots of the layouts).
 * **Step 05 cards** keep the per-line "Auto-calculate avails" button (still in `app.js`, because it needs the plan's state) and
   render through the same `Constanza.renderCard`, so both places read alike. A geography the planner picks for a line lives
   only in the session (`state.constanzaGeoOverride`), never in the saved proposal.

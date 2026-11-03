@@ -1,0 +1,357 @@
+/* ========================================================================
+   Audience kit - the shared look of the three audience builders: the Meta panel (Step 05 avails card), the TikTok panel and the
+   Entravision audience block (both in the Constanza dock). Every selector is .aud-*; markup is yours, this file only styles it.
+   Tokens come from styles.css (:root): purple --accent is the one accent, hairline borders, 10px radius (8px inside a card, 6px for
+   small bits), flat backgrounds, no animation when the person asks for reduced motion. Text is --ink / --ink-soft / --aud-muted (the
+   last is 5.8:1 on white; --ink-faint is NOT used for text that matters, it is 3.7:1). Every control is at least 36px tall and has a
+   visible keyboard focus ring (2px purple outline). The grid works at DOCK width (~380px) and CARD width (~1000px) alike: it fills
+   rows by itself (auto-fit), so nothing here depends on the viewport.
+
+   THE CLASSES, in the order you will use them
+   ------------------------------------------------------------------------------------------------------------------------
+   .aud-builder       the container. A grid: one column in the dock, two side by side in a wide card, three on a very wide one.
+   .aud-sec           one section card (Where / Who / Language / Audience). .aud-sec--wide spans the whole row; .has-value (toggle
+                      it from your render code when the section holds a choice) fills the step badge and tints the border. Also
+                      works as <details class="aud-sec"> with <summary class="aud-sec-head"> when a section should collapse.
+     .aud-sec-head      the head row: .aud-step (a badge numbered 1, 2, 3 ... automatically; leave it empty and aria-hidden),
+                        .aud-sec-text (.aud-sec-title + .aud-sec-sum, the one-line live summary of what is chosen, e.g. "Women · 25–44";
+                        add .is-set to the summary once something is chosen), .aud-count (count pill, set `hidden` at zero),
+                        .aud-clear (the "Clear" link, set `hidden` when there is nothing to clear).
+     .aud-sec-body      the content, a column with 12px gaps.
+   .aud-field         label + control + hint, stacked. A <div> or a <fieldset> (put a <legend class="aud-label"> in it).
+     .aud-label         the small caps label (a <label for>, <legend> or <span>). .aud-label-aside floats a note to its right.
+     .aud-hint          one line of help under a control.
+     .aud-input / .aud-select    text input / dropdown, 40px, full width. .aud-row puts fields side by side and wraps them.
+     .aud-check         a labelled checkbox row ("Hispanic households only").
+   .aud-seg           a segmented control of <button aria-pressed> for 2 to 4 options (Gender: All / Women / Men). For 5 or more,
+                      or for multi-select (age groups), add .aud-seg--wrap: separate pills that wrap, with a tick when pressed.
+   .aud-quick         a row of one-click pills ("Spanish speakers", "Bilingual"). Optional .aud-quick-label in front. A pill with
+                      aria-pressed="true" shows as chosen. Also used for the age presets next to .aud-range. Every pill starts with a "+"
+                      (it ADDS something); add .aud-quick--plain to the row when the pills do not add anything (a "Reset" or "Clear
+                      all" pill): the "+" goes, a pressed pill still shows its tick.
+   .aud-range         two selects for an age range: .aud-range-selects (select, .aud-range-sep "to", select) then a .aud-quick of presets.
+   .aud-chips         the list of picks; .aud-chip is one pick: .aud-chip-label, optional .aud-chip-meta (small, e.g. "TV market"),
+                      and .aud-chip-x, the remove button (give it aria-label="Remove X"). One variant per kind of pick: .aud-chip--geo,
+                      .aud-chip--interest, .aud-chip--lang, .aud-chip--demo, .aud-chip--excl (an exclusion); status variants:
+                      .aud-chip--ok, .aud-chip--warn.
+   .aud-ta            a typeahead: an .aud-input plus the results list .aud-ta-list (role=listbox; toggle `hidden`). Inside it:
+                      .aud-ta-group (a group label), .aud-ta-opt (role=option; .is-active or aria-selected=true is the highlighted
+                      one) holding .aud-ta-text (.aud-ta-name + .aud-ta-path) and .aud-ta-size (right-aligned audience size),
+                      .aud-ta-note (searching... / no results) and .aud-ta-foot (the "Browse all" row, sticks to the bottom).
+   .aud-browse        the full-width "Browse all 1,204 segments" button that opens SegmentBrowser. Replaces the old <details>.
+   .aud-notice        a banner: .aud-notice--info, .aud-notice--ok, .aud-notice--warn, .aud-notice--error, or .aud-notice--connected
+                      (a green status dot, for "Connected to Meta"). .aud-notice-body wraps the text, .aud-notice-title is the bold
+                      first line, .aud-notice-action is a link-button on its own line.
+   .aud-actions       the button row: .btn-primary + .btn-secondary (or .aud-btn). Wraps; the first button grows on a narrow row.
+   .aud-btn           an outlined button inside a section (.aud-btn--primary for the dark one). .aud-link is a text-link button.
+   .aud-skeleton      loading placeholder: <div class="aud-skeleton" aria-hidden="true"><span></span><span></span></div>.
+   .aud-empty         empty state: a dashed box, optional .aud-empty-title.
+   .aud-dot           an 8px status dot.   .aud-sr  text for screen readers only.
+
+   THE HIDDEN ATTRIBUTE   Anything inside .aud-builder, and anything whose class starts with aud-, that carries `hidden` is hidden, even when
+                      its class sets `display` (.aud-notice, .aud-quick, .aud-chips are flex rows): one rule near the top wins with !important,
+                      so show and hide a kit element with element.hidden = true / false and nothing else.
+   HOVER, PRESSED, DISABLED   A pressed pill / segment keeps its own look under the mouse (a slightly darker purple, white text), and a disabled
+                      control does not react to the mouse at all: every :hover rule below excludes both.
+
+   MINIMAL MARKUP
+   ------------------------------------------------------------------------------------------------------------------------
+   Section with the head, a field, a segmented control and a notice:
+     <div class="aud-builder">
+       <section class="aud-sec has-value" aria-labelledby="s-who">
+         <div class="aud-sec-head">
+           <span class="aud-step" aria-hidden="true"></span>
+           <div class="aud-sec-text"><h3 class="aud-sec-title" id="s-who">Who</h3><p class="aud-sec-sum is-set">Women · 25–44</p></div>
+           <span class="aud-count">2</span><button type="button" class="aud-clear">Clear</button>
+         </div>
+         <div class="aud-sec-body">
+           <div class="aud-field"><span class="aud-label" id="g-l">Gender</span>
+             <div class="aud-seg" role="group" aria-labelledby="g-l">
+               <button type="button" aria-pressed="false">All</button><button type="button" aria-pressed="true">Women</button>
+               <button type="button" aria-pressed="false">Men</button></div></div>
+           <div class="aud-notice aud-notice--info"><div class="aud-notice-body">Meta counts people 18 and over.</div></div>
+         </div>
+       </section>
+     </div>
+   Age range:
+     <div class="aud-range"><div class="aud-range-selects"><select class="aud-select" aria-label="From age">...</select>
+       <span class="aud-range-sep">to</span><select class="aud-select" aria-label="To age">...</select></div>
+       <div class="aud-quick"><button type="button">18–24</button><button type="button">25–44</button></div></div>
+   Quick picks, then chips:
+     <div class="aud-quick"><span class="aud-quick-label">Quick picks</span><button type="button" aria-pressed="false">Spanish speakers</button></div>
+     <div class="aud-chips"><span class="aud-chip aud-chip--lang"><span class="aud-chip-label">Spanish</span>
+       <button type="button" class="aud-chip-x" aria-label="Remove Spanish">×</button></span></div>
+   Typeahead (the script owns aria-expanded, aria-activedescendant and the option ids):
+     <div class="aud-ta"><input class="aud-input" role="combobox" aria-expanded="true" aria-controls="ta1" aria-label="Search interests">
+       <div class="aud-ta-list" id="ta1" role="listbox"><div class="aud-ta-group" role="presentation">Beauty</div>
+         <div class="aud-ta-opt is-active" role="option" aria-selected="true"><span class="aud-ta-text"><span class="aud-ta-name">Skincare</span>
+           <span class="aud-ta-path">Beauty › Skincare</span></span><span class="aud-ta-size">1.2M</span></div>
+         <div class="aud-ta-foot"><button type="button" class="aud-link">Browse all</button></div></div></div>
+   Browse button and action row:
+     <button type="button" class="aud-browse"><span class="aud-browse-label">Browse all segments</span><span class="aud-browse-count">1,204</span></button>
+     <div class="aud-actions"><button type="button" class="btn-primary">Estimate audience →</button><button type="button" class="btn-secondary">Reset</button></div>
+   ======================================================================== */
+
+:root {
+  --aud-muted: #6b665c;                    /* secondary text: 5.8:1 on white, 4.8:1 on --paper-warm */
+  --aud-line: #e3c5e5;                     /* a purple hairline (the accent at ~25%), for tinted borders */
+  --aud-press: linear-gradient(rgba(26, 24, 21, 0.16), rgba(26, 24, 21, 0.16));   /* laid over a pressed (purple) pill that the mouse is on */
+}
+
+.aud-builder {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr)); gap: 12px; align-items: stretch;
+  counter-reset: aud-step;
+  font-family: var(--font-body); font-size: 13.5px; line-height: 1.45; color: var(--ink);
+}
+.aud-builder button, .aud-builder input, .aud-builder select { font-family: inherit; }
+.aud-builder :where(button, input, select, summary, a, [role="option"]):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* `hidden` always wins in the kit: the classes below set `display` (flex rows, grids), which would beat the attribute's own display:none.
+   The second selector reaches kit elements that sit outside a .aud-builder (the Meta panel's notices and chips); [class^= / *=" "] is "a class token
+   that starts with aud-". */
+.aud-builder [hidden], :is([class^="aud-"], [class*=" aud-"])[hidden] { display: none !important; }
+
+/* ------------------------------------------------------------------ the section card */
+.aud-sec { min-width: 0; background: var(--paper-card); border: 1px solid var(--rule); border-radius: var(--radius); counter-increment: aud-step; }
+.aud-sec--wide { grid-column: 1 / -1; }
+.aud-sec.has-value { border-color: var(--aud-line); }
+.aud-sec-head { display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 10px 14px; }
+details.aud-sec > summary.aud-sec-head { cursor: pointer; list-style: none; }
+details.aud-sec > summary.aud-sec-head::-webkit-details-marker { display: none; }
+details.aud-sec > summary.aud-sec-head::after {
+  content: ""; flex: none; width: 8px; height: 8px; margin: 0 4px 3px 2px;
+  border-right: 2px solid var(--aud-muted); border-bottom: 2px solid var(--aud-muted); transform: rotate(45deg); transition: transform 0.15s;
+}
+details.aud-sec[open] > summary.aud-sec-head::after { transform: rotate(-135deg); margin-bottom: -3px; }
+.aud-step {
+  flex: none; width: 26px; height: 26px; display: grid; place-items: center; border-radius: 50%;
+  background: var(--paper-warm); color: var(--ink-soft); border: 1px solid var(--rule);
+  font-family: var(--font-kicker); font-weight: 700; font-size: 12px; line-height: 1;
+}
+.aud-step:empty::before { content: counter(aud-step); }
+.aud-sec.has-value .aud-step { background: var(--accent); border-color: var(--accent); color: #fff; }
+.aud-sec-text { flex: 1; min-width: 0; }
+.aud-sec-title { margin: 0; font-family: var(--font-kicker); font-weight: 700; font-size: 14px; line-height: 1.3; letter-spacing: 0.01em; color: var(--ink); }
+.aud-sec-sum { margin: 1px 0 0; font-size: 12.5px; line-height: 1.35; color: var(--aud-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aud-sec-sum.is-set { color: var(--ink); font-weight: 600; }
+.aud-count {
+  flex: none; min-width: 22px; padding: 1px 8px; border-radius: 999px; text-align: center;
+  background: var(--accent); color: #fff; font-size: 11px; font-weight: 700; line-height: 1.6;
+}
+.aud-clear {
+  flex: none; min-height: 36px; margin: -6px -6px -6px 0; padding: 0 8px; border: 0; border-radius: 6px; background: none; cursor: pointer;
+  font-size: 12.5px; color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
+.aud-clear:hover:not(:disabled) { background: var(--accent-soft); }
+.aud-sec-body { display: flex; flex-direction: column; gap: 12px; padding: 12px 14px 14px; border-top: 1px solid var(--rule-soft); }
+.aud-sec-body > * { min-width: 0; }
+
+/* ------------------------------------------------------------------ fields */
+.aud-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.aud-label {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin: 0; padding: 0;
+  font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-soft);
+}
+.aud-label-aside { text-transform: none; letter-spacing: 0; font-family: var(--font-body); font-size: 12px; color: var(--aud-muted); }
+.aud-hint { margin: 0; font-size: 12px; line-height: 1.4; color: var(--aud-muted); }
+.aud-row { display: flex; flex-wrap: wrap; gap: 10px 12px; }
+.aud-row > * { flex: 1 1 140px; min-width: 0; }
+
+.aud-input, .aud-select {
+  display: block; width: 100%; min-width: 0; height: 40px; padding: 0 12px; font: inherit; font-size: 14px; color: var(--ink);
+  background-color: var(--paper-card); border: 1px solid var(--rule); border-radius: 8px;
+}
+.aud-input::placeholder { color: var(--aud-muted); opacity: 1; }
+.aud-input:hover:not(:disabled), .aud-select:hover:not(:disabled) { border-color: var(--ink-faint); }
+.aud-input:focus, .aud-select:focus { border-color: var(--accent); }
+.aud-input:disabled, .aud-select:disabled { background-color: var(--paper-warm); color: var(--aud-muted); cursor: not-allowed; }
+.aud-select {
+  -webkit-appearance: none; appearance: none; padding-right: 34px; cursor: pointer;
+  background-repeat: no-repeat; background-position: right 12px center; background-size: 12px 12px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%234a463f' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m2 4.5 4 4 4-4'/%3E%3C/svg%3E");
+}
+.aud-check { display: flex; align-items: flex-start; gap: 10px; min-height: 36px; padding: 6px 0; font-size: 13.5px; line-height: 1.35; color: var(--ink); cursor: pointer; }
+.aud-check input { flex: none; width: 18px; height: 18px; margin: 1px 0 0; accent-color: var(--accent); cursor: pointer; }
+
+/* ------------------------------------------------------------------ segmented control */
+.aud-seg { display: flex; padding: 2px; gap: 2px; background: var(--paper-card); border: 1px solid var(--rule); border-radius: 8px; }
+.aud-seg > button {
+  flex: 1 1 0; min-width: 0; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent;
+  font-size: 13px; line-height: 1.2; color: var(--ink-soft); cursor: pointer; overflow-wrap: anywhere;
+}
+.aud-seg > button:hover:not(:disabled, [aria-pressed="true"]) { background: var(--paper-warm); color: var(--ink); }
+.aud-seg > button[aria-pressed="true"] { background: var(--accent); color: #fff; font-weight: 600; }
+.aud-seg > button[aria-pressed="true"]:hover:not(:disabled) { background-image: var(--aud-press); }   /* pressed under the mouse: the same pill, a shade deeper */
+.aud-seg > button:disabled { opacity: 0.4; cursor: not-allowed; }
+.aud-seg > button:focus-visible { outline-offset: 0; }
+.aud-seg--wrap { flex-wrap: wrap; gap: 6px; padding: 0; border: 0; background: transparent; }
+.aud-seg--wrap > button { flex: 0 0 auto; padding: 6px 14px; border: 1px solid var(--rule); border-radius: 999px; background: var(--paper-card); }
+.aud-seg--wrap > button:hover:not(:disabled, [aria-pressed="true"]) { border-color: var(--accent); background: var(--paper-card); color: var(--accent); }
+.aud-seg--wrap > button[aria-pressed="true"] { border-color: var(--accent); color: #fff; }
+.aud-seg--wrap > button[aria-pressed="true"]::before { content: "✓"; margin-right: 6px; font-weight: 700; }
+.aud-seg--wrap > button:focus-visible { outline-offset: 2px; }
+
+/* ------------------------------------------------------------------ quick picks */
+.aud-quick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.aud-quick-label { font-size: 12px; color: var(--aud-muted); margin-right: 2px; }
+.aud-quick > button {
+  min-height: 36px; padding: 4px 14px; border: 1px solid var(--accent); border-radius: 999px; background: var(--paper-card);
+  font-size: 13px; font-weight: 600; line-height: 1.2; color: var(--accent); cursor: pointer;
+}
+.aud-quick > button::before { content: "+"; margin-right: 6px; font-weight: 700; }
+.aud-quick > button:hover:not(:disabled, [aria-pressed="true"]) { background: var(--accent-soft); }
+.aud-quick > button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.aud-quick > button[aria-pressed="true"]::before { content: "✓"; }
+.aud-quick > button[aria-pressed="true"]:hover:not(:disabled) { background-image: var(--aud-press); }
+.aud-quick > button:disabled { opacity: 0.4; cursor: not-allowed; }
+.aud-quick--plain > button:not([aria-pressed="true"])::before { content: none; margin-right: 0; }   /* pills that do not "add" anything: no "+" (a pressed one keeps its tick) */
+.aud-range .aud-quick > button::before { content: none; }       /* presets pick a range; they do not "add" anything */
+
+/* ------------------------------------------------------------------ age range */
+.aud-range { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.aud-range-selects { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.aud-range-selects .aud-select { flex: 1 1 96px; min-width: 0; }
+.aud-range-sep { flex: none; font-size: 13px; color: var(--aud-muted); }
+
+/* ------------------------------------------------------------------ chips */
+.aud-chips { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.aud-chips:empty { display: none; }
+.aud-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 32px; padding: 3px 4px 3px 12px;
+  border: 1px solid var(--rule); border-radius: 999px; background: var(--paper-warm);
+  font-family: inherit; font-size: 13px; line-height: 1.3; color: var(--ink);
+}
+.aud-chip-label { min-width: 0; overflow-wrap: anywhere; }
+.aud-chip-meta { flex: none; font-size: 11.5px; }
+.aud-chip-x {
+  flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 36px; min-height: 36px; margin: -3px -5px -3px -4px; padding: 0;
+  border: 0; border-radius: 50%; background: transparent; color: inherit; font-size: 18px; line-height: 1; cursor: pointer; opacity: 0.75;
+}
+.aud-chip-x:hover:not(:disabled) { opacity: 1; background: rgba(26, 24, 21, 0.08); }
+.aud-chip-x:focus-visible { outline-offset: -4px; }
+.aud-chip:not(:has(.aud-chip-x)) { padding-right: 12px; }
+.aud-chip--geo { background: var(--paper-warm); }
+.aud-chip--demo { background: var(--paper-card); border-color: var(--ink-faint); }
+.aud-chip--interest { background: var(--accent-soft); border-color: var(--aud-line); color: var(--accent); }
+.aud-chip--lang { background: #e4f3fc; border-color: #bfe2f5; color: #0a5278; }
+.aud-chip--excl { background: var(--red-soft); border-color: #f5b8c4; color: #8a0a25; }
+.aud-chip--excl .aud-chip-label { text-decoration: line-through; text-decoration-thickness: 1px; }
+.aud-chip--ok { background: var(--green-soft); border-color: #cfe5d3; color: #25562f; }
+.aud-chip--warn { background: var(--amber-soft); border-color: #f5cba7; color: #8a3b00; }
+
+/* ------------------------------------------------------------------ typeahead */
+.aud-ta { position: relative; min-width: 0; }
+.aud-ta > .aud-input {
+  padding-left: 38px; background-repeat: no-repeat; background-position: 13px 50%; background-size: 16px 16px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b665c' stroke-width='2.2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E");
+  -webkit-appearance: none; appearance: none;
+}
+.aud-ta-list {
+  position: absolute; z-index: 30; left: 0; right: 0; top: calc(100% + 4px); max-height: 300px; overflow-y: auto; overscroll-behavior: contain;
+  margin: 0; padding: 4px; background: var(--paper-card); border: 1px solid var(--rule); border-radius: var(--radius);
+  box-shadow: 0 2px 0 rgba(26, 24, 21, 0.14), 0 0 0 1px rgba(26, 24, 21, 0.1);
+}
+.aud-ta-group {
+  padding: 8px 10px 4px; font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--aud-muted);
+}
+.aud-ta-opt { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 6px 10px; border-radius: 8px; cursor: pointer; }
+.aud-ta-opt:hover:not(.is-disabled, [aria-disabled="true"]), .aud-ta-opt.is-active, .aud-ta-opt[aria-selected="true"] { background: var(--accent-soft); }
+.aud-ta-opt.is-disabled, .aud-ta-opt[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+.aud-ta-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.aud-ta-name { font-size: 13.5px; line-height: 1.3; color: var(--ink); overflow-wrap: anywhere; }
+.aud-ta-path { font-size: 12px; line-height: 1.3; color: var(--aud-muted); overflow-wrap: anywhere; }
+.aud-ta-size { flex: none; margin-left: auto; padding-left: 4px; text-align: right; font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft); white-space: nowrap; }
+.aud-ta-list mark { background: transparent; color: inherit; font-weight: 700; text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 2px; }
+.aud-ta-note { padding: 12px 10px; font-size: 13px; color: var(--aud-muted); }
+.aud-ta-foot { position: sticky; bottom: -4px; margin: 4px -4px -4px; padding: 6px 10px; background: var(--paper-card); border-top: 1px solid var(--rule-soft); border-radius: 0 0 var(--radius) var(--radius); }
+
+/* ------------------------------------------------------------------ browse button, links, buttons */
+.aud-browse {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 6px 14px; text-align: left;
+  border: 1px solid var(--rule); border-radius: 8px; background: var(--paper-card); color: var(--ink); font-size: 13.5px; font-weight: 600; cursor: pointer;
+}
+.aud-browse::before {
+  content: ""; flex: none; width: 16px; height: 16px; background: var(--accent);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.aud-browse-label { flex: 1; min-width: 0; }
+.aud-browse-count { flex: none; padding: 1px 9px; border-radius: 999px; background: var(--paper-warm); font-family: var(--font-mono); font-size: 11.5px; font-weight: 400; color: var(--ink-soft); }
+.aud-browse:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+.aud-browse:hover:not(:disabled) .aud-browse-count { background: var(--paper-card); }
+.aud-browse:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.aud-link {
+  display: inline-flex; align-items: center; min-height: 36px; padding: 0 4px; border: 0; border-radius: 6px; background: none; cursor: pointer;
+  font: inherit; font-size: 13px; color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+}
+.aud-link:hover:not(:disabled) { background: var(--accent-soft); }
+.aud-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; padding: 8px 16px;
+  border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper-card); color: var(--ink);
+  font-size: 14px; font-weight: 600; letter-spacing: 0.01em; cursor: pointer;
+}
+.aud-btn:hover:not(:disabled) { background: var(--paper-warm); border-color: var(--ink-soft); }
+.aud-btn--primary { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.aud-btn--primary:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); }
+.aud-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.aud-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.aud-actions > .btn-primary, .aud-actions > .btn-secondary, .aud-actions > .aud-btn { min-height: 40px; padding-top: 8px; padding-bottom: 8px; }
+.aud-actions > :first-child { flex: 1 1 200px; max-width: 420px; }  /* the main action fills a narrow row; it stops growing in a wide card */
+
+/* ------------------------------------------------------------------ notices */
+.aud-notice {
+  --aud-n: var(--ink-soft);                                        /* the icon's colour; each kind sets its own */
+  display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--rule); border-radius: 8px;
+  background: var(--paper-warm); color: var(--ink-soft); font-size: 12.5px; line-height: 1.45;
+}
+.aud-notice::before {                                              /* the icon: a glyph, so the kind is not told by colour alone */
+  content: "i"; flex: none; width: 18px; height: 18px; margin-top: 1px; display: grid; place-items: center; border-radius: 50%;
+  background: var(--aud-n); color: #fff; font-family: var(--font-kicker); font-size: 11px; font-weight: 700; line-height: 1;
+}
+.aud-notice > .aud-notice-body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.aud-notice-title { display: block; font-weight: 700; }
+.aud-notice code { font-family: var(--font-mono); font-size: 11.5px; background: var(--paper-card); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.aud-notice-action {                                               /* a link on its own line, so it is a full-height target */
+  display: flex; align-items: center; min-height: 36px; margin-bottom: -8px; padding: 0; background: none; border: 0;
+  font: inherit; font-weight: 600; color: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
+.aud-notice--info { --aud-n: #0a4f73; background: #e4f3fc; border-color: #bfe2f5; color: #0a4f73; }
+.aud-notice--ok { --aud-n: #25562f; background: var(--green-soft); border-color: #cfe5d3; color: #25562f; }
+.aud-notice--warn { --aud-n: #8a3b00; background: var(--amber-soft); border-color: #f5cba7; color: #8a3b00; }
+.aud-notice--error { --aud-n: #8a0a25; background: var(--red-soft); border-color: #f5b8c4; color: #8a0a25; }
+.aud-notice--ok::before { content: "✓"; }
+.aud-notice--warn::before, .aud-notice--error::before { content: "!"; }
+.aud-notice--connected { --aud-n: var(--green); background: var(--green-soft); border-color: #cfe5d3; color: #25562f; align-items: center; }
+.aud-notice--connected::before {                                   /* a status dot with a soft ring */
+  content: ""; width: 8px; height: 8px; margin: 0 4px 0 5px; box-shadow: 0 0 0 4px rgba(63, 122, 79, 0.2);
+}
+.aud-dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--green); vertical-align: 1px; }
+
+/* ------------------------------------------------------------------ loading and empty */
+.aud-skeleton { display: flex; flex-direction: column; gap: 10px; padding: 4px 0; }
+.aud-skeleton > span { display: block; height: 14px; border-radius: 6px; background: var(--paper-warm); animation: aud-pulse 1.3s ease-in-out infinite; }
+.aud-skeleton > span:nth-child(odd) { width: 100%; }
+.aud-skeleton > span:nth-child(even) { width: 72%; animation-delay: 0.2s; }
+@keyframes aud-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+.aud-empty {
+  padding: 16px 14px; border: 1px dashed var(--rule); border-radius: 8px; text-align: center; font-size: 13px; line-height: 1.45; color: var(--aud-muted);
+}
+.aud-empty-title { display: block; margin-bottom: 2px; font-size: 13.5px; color: var(--ink-soft); }
+
+.aud-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* ------------------------------------------------------------------ small screens and special modes */
+@media (max-width: 480px) {
+  .aud-sec-head { padding: 10px 12px; }
+  .aud-sec-body { padding: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .aud-skeleton > span, details.aud-sec > summary.aud-sec-head::after { animation: none; transition: none; }
+}
+/* a pressed button must still look pressed when the system colours replace ours (Windows high contrast) */
+@media (forced-colors: active) {
+  .aud-seg > button[aria-pressed="true"], .aud-quick > button[aria-pressed="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
+  .aud-seg > button[aria-pressed="true"]:hover:not(:disabled), .aud-quick > button[aria-pressed="true"]:hover:not(:disabled) { background-image: none; }
+  .aud-sec.has-value .aud-step, .aud-count { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+}
+@media print { .aud-ta-list { display: none; } }

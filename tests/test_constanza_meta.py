@@ -3,7 +3,9 @@
 Meta's reach estimate is a head count (a range); Entravision's planning rule turns its LOWER end into impressions as conservative x 4.3,
 mid x 5.5 (the default) and upper x 8.6 (platform_scenarios.py). Pinned here: those scenarios and the budget cross-check, the targeting spec
 sent to Meta (geography, age, gender, interests / behaviors as ONE any-of group), Meta's interest / behavior / demographic lists, how Meta's errors
-are told to the planner (never with the token), the secret handling, and the API round trip - against a fake Graph API shaped like Meta's reference."""
+are told to the planner (never with the token), the secret handling, and the API round trip - against a fake Graph API shaped like Meta's reference.
+Languages (Meta's `locales`, most campaigns target Spanish speakers) are pinned too: the spec, the search and its row shapes, the cache, the route,
+the snapshot and the diagnostics. The locale ids below are INVENTED for the fake (the app never carries a locale id of its own; they come from Meta's search)."""
 from __future__ import annotations
 
 import json
@@ -30,7 +32,7 @@ def clean(monkeypatch):
 
 
 class FakeGraph:
-    """A Graph API shaped like Meta's reference: /search (adgeolocation, adinterest, adTargetingCategory) and act_<id>/reachestimate."""
+    """A Graph API shaped like Meta's reference: /search (adgeolocation, adinterest, adTargetingCategory, adlocale) and act_<id>/reachestimate."""
 
     def __init__(self):
         self.calls: list[dict] = []
@@ -39,7 +41,15 @@ class FakeGraph:
         self.http_status = 200
         self.estimate_ready = True
         self.empty = False             # the lists answer with no rows (a transient empty answer must not stick)
+        self.narrow_by_language = True   # a language narrows the reach estimate (False: the fake "ignores" locales, like a Meta that did not apply them)
+        self.refuse_locales = False      # reachestimate refuses a spec that carries locales (Meta's "Invalid parameter")
+        self.language_jitter = 0         # a spec with locales answers this much BELOW the same spec without them (0 = no change; use with narrow_by_language=False)
+        self.plain_us_failures = 0       # the next N asks for the plain U.S. estimate (a country alone) fail with a transient error
+        self.extra_demographics: list[dict] = []     # more rows in the demographics list (e.g. a long type or name)
         self.shape = "object"          # how reachestimate wraps its node: Meta's reference says "a single node" = one object ("list", "bare" also read)
+        # adlocale rows: Meta's reference shows `key` (a number) and `name`; invented ids
+        self.locales = [{"key": 6, "name": "English (US)"}, {"key": 24, "name": "English (UK)"}, {"key": 1001, "name": "Spanish"},
+                        {"key": 1002, "name": "Spanish (Mexico)"}, {"key": 1003, "name": "Spanish (Spain)"}, {"key": 1004, "name": "Portuguese (Brazil)"}]
 
     def get(self, url, params=None, headers=None, timeout=None):
         self.calls.append({"url": url, "params": dict(params or {}), "headers": dict(headers or {}), "timeout": timeout})
@@ -57,6 +67,10 @@ class FakeGraph:
                 return Resp({"data": [{"id": "6003107902433", "name": "Soccer", "audience_size_lower_bound": 100_000_000, "audience_size_upper_bound": 120_000_000,
                                        "path": ["Interests", "Sports and outdoors", "Soccer"]},
                                       {"id": "6003012345678", "name": "Soccer balls", "audience_size": 4_000_000}]})
+            if kind == "adlocale":
+                q = (params.get("q") or "").lower()
+                rows = [r for r in self.locales if not isinstance(r, dict) or str(r.get("name") or "").lower().startswith(q)]       # autocomplete: a prefix
+                return Resp({"data": [] if self.empty else rows[:int(params.get("limit", 8))]})                                      # Meta's default limit is 8
             if kind == "adTargetingCategory" and self.empty:
                 return Resp({"data": []})
             if kind == "adTargetingCategory":
@@ -69,9 +83,19 @@ class FakeGraph:
                                          {"id": "6015559470583", "name": "Likely to engage with political content (US)", "type": "politics", "path": ["Demographics", "Politics"]},
                                          {"id": "6004854404172", "name": "iPhone 15", "type": "user_device", "path": ["Demographics", "Mobile Device User", "iPhone"]},
                                          {"id": "6006", "name": "No type at all"}]}[cls]
-                return Resp({"data": rows})
+                return Resp({"data": rows + (self.extra_demographics if cls == "demographics" else [])})
         if rest.endswith("/reachestimate"):
             lo, hi = self.reach
+            spec = json.loads(params["targeting_spec"])
+            if spec == {"geo_locations": {"countries": ["US"]}} and self.plain_us_failures > 0:
+                self.plain_us_failures -= 1
+                return Resp({"error": {"message": "transient", "code": 1}}, 500)
+            if spec.get("locales"):
+                if self.refuse_locales:
+                    return Resp({"error": {"message": "Invalid parameter", "code": 100}}, 400)
+                if self.narrow_by_language:                                        # a language only narrows the audience
+                    lo, hi = lo // 3, hi // 3
+                lo, hi = lo - self.language_jitter, hi - self.language_jitter
             node = {"users_lower_bound": lo, "users_upper_bound": hi, "estimate_ready": self.estimate_ready}
             return Resp({"data": node if self.shape == "object" else ([node] if self.shape == "list" else None)} if self.shape != "bare" else node)
         if rest.startswith("act_") and "/" not in rest:
@@ -253,7 +277,9 @@ def test_unconfigured_calls_say_which_secret_is_missing(monkeypatch, env):
     missing = meta.missing_config()
     assert missing and not meta.is_configured()
     for call in (lambda: meta.fetch_reach_estimate(geo_type="country", geo_key="US"), lambda: meta.search_geography("Los Angeles", "geo_market"),
-                 lambda: meta.targeting_catalog("interests"), lambda: meta.search_targeting("soccer")):
+                 lambda: meta.targeting_catalog("interests"), lambda: meta.search_targeting("soccer"),
+                 lambda: meta.search_locales(), lambda: meta.search_locales("Spanish"),
+                 lambda: meta.fetch_reach_estimate(geo_type="country", geo_key="US", locales=[{"id": "1001", "name": "Spanish"}])):
         with pytest.raises(meta.MetaAPIError) as err:
             call()
         assert err.value.kind == "not_configured" and err.value.status_code == 503 and missing[0].split(" ")[0] in str(err.value) and "Replit" in str(err.value)
@@ -271,6 +297,7 @@ def test_the_status_never_carries_a_secret(monkeypatch, graph):
     out = main.constanza_meta_status()
     assert out["configured"] is True and out["missing"] == [] and out["account"] == "…2345" and out["version"] == "v26.0"
     assert out["scenarios"]["multipliers"] == {"conservative": 4.3, "mid": 5.5, "upper": 8.6}
+    assert out["language_note"] == meta.LANGUAGE_NOTE
     blob = json.dumps(out)
     assert TOKEN not in blob and "7000000000012345" not in blob
 
@@ -462,8 +489,46 @@ def test_the_diagnostics_walk_the_whole_connection(graph):
     assert all(c.ok for c in checks), [(c.name, c.detail) for c in checks if not c.ok]
     assert names[0] == "Settings" and any("ad account" in n for n in names) and any("TV market" in n for n in names) and any("interest" in n.lower() for n in names)
     assert any("Targeting list · behaviors" == n for n in names) and any("lower end x5.5" in c.detail for c in checks)
+    assert names.index("Language search") < names.index("Reach estimate · with a language") < names.index("Targeting list · interests") and names[-1] == "Language list"
+    by_name = {c.name: c for c in checks}
+    assert "Spanish" in by_name["Language search"].detail and "smaller than the whole U.S." in by_name["Reach estimate · with a language"].detail
+    assert not any(c.warn for c in checks if c.name.startswith(("Language", "Reach estimate")))          # (the fake's short targeting lists are flagged, as before)
+    search = next(c for c in graph.calls if c["params"].get("type") == "adlocale" and c["params"].get("q") == "Spanish")
+    assert search["params"]["limit"] == 50
+    asked = [json.loads(c["params"]["targeting_spec"]) for c in graph.calls if "targeting_spec" in c["params"]]
+    assert {"geo_locations": {"countries": ["US"]}, "locales": [1001]} in asked                 # the estimate WITH the language the search found
     blob = json.dumps([c.to_public() for c in checks])
     assert TOKEN not in blob and "7000000000012345" not in blob
+
+
+def test_the_language_checks_say_what_is_wrong_and_the_rest_still_run(graph):
+    from app.services import meta_diagnose
+    graph.locales = []                                                                    # Meta finds no language
+    by_name = {c.name: c for c in meta_diagnose.run_checks()}
+    assert not by_name["Language search"].ok and "found nothing" in by_name["Language search"].detail and "adlocale" in by_name["Language search"].detail
+    assert not by_name["Reach estimate · with a language"].ok and "no language to ask about" in by_name["Reach estimate · with a language"].detail
+    assert not by_name["Language list"].ok and "empty language list" in by_name["Language list"].detail
+    assert by_name["Reach estimate · United States"].ok and by_name["Targeting list · behaviors"].ok          # nothing else is held back
+    graph.locales = FakeGraph().locales
+    meta.reset_cache()
+    graph.refuse_locales = True                                                           # Meta answers a spec with locales: "Invalid parameter"
+    by_name = {c.name: c for c in meta_diagnose.run_checks()}
+    assert by_name["Language search"].ok and not by_name["Reach estimate · with a language"].ok
+    assert "Meta refused these settings" in by_name["Reach estimate · with a language"].detail and by_name["Language list"].ok
+
+
+def test_a_language_that_does_not_narrow_the_estimate_is_flagged_not_failed(graph):
+    from app.services import meta_diagnose
+    graph.narrow_by_language = False
+    check = {c.name: c for c in meta_diagnose.run_checks()}["Reach estimate · with a language"]
+    assert check.ok and check.warn and "may not be applying" in check.detail and check.to_public()["warn"] is True
+
+
+def test_the_language_check_uses_the_exact_spanish_when_meta_lists_it_among_others(monkeypatch, graph):
+    from app.services import meta_diagnose
+    monkeypatch.setattr(meta, "search_locales", lambda q="": [{"id": "7", "name": "Latin American Spanish"}, {"id": "1001", "name": "Spanish"}])
+    check = {c.name: c for c in meta_diagnose.run_checks()}["Language search"]
+    assert "using: Spanish (locale 1001)" in check.detail
 
 
 def test_the_diagnostics_stop_with_a_clear_line_when_unconfigured_or_the_token_is_bad(monkeypatch, graph):
@@ -579,3 +644,467 @@ def test_the_diagnostics_name_every_documented_account_status(graph, monkeypatch
         monkeypatch.setattr(meta.requests, "get", get)
         check = meta_diagnose.run_checks()[1]
         assert check.ok and words in check.detail and check.warn is warns, (raw, check)
+
+
+# ---------------------------------------------------------------------------------------------------------------- languages (Meta's `locales`)
+
+SPANISH = {"id": "1001", "name": "Spanish"}
+SPANISH_MX = {"id": "1002", "name": "Spanish (Mexico)"}
+ENGLISH_US = {"id": "6", "name": "English (US)"}
+
+
+def _spec_sent(graph) -> dict:
+    return json.loads(graph.calls[-1]["params"]["targeting_spec"])
+
+
+def test_languages_go_into_the_spec_as_plain_locale_ids_and_the_rest_of_the_spec_is_unchanged():
+    base = meta.build_targeting_spec(geo_type="geo_market", geo_key="803", age_min=25, gender="female",
+                                     targeting=[{"id": "6003107902433", "name": "Soccer", "type": "interests"}])
+    spec = meta.build_targeting_spec(geo_type="geo_market", geo_key="803", age_min=25, gender="female",
+                                     targeting=[{"id": "6003107902433", "name": "Soccer", "type": "interests"}], locales=[SPANISH_MX, SPANISH])
+    assert spec["locales"] == [1001, 1002] and all(type(i) is int for i in spec["locales"])        # integers, in a stable order; ids only (the names are for display)
+    assert {k: v for k, v in spec.items() if k != "locales"} == base                                 # geography, age, gender, interests exactly as before
+    assert "Spanish" not in json.dumps(spec)
+    for none in (None, [], ()):
+        assert "locales" not in meta.build_targeting_spec(geo_type="country", geo_key="US", locales=none)
+
+
+def test_chosen_languages_are_cleaned_for_display_and_a_duplicate_counts_once():
+    assert meta.clean_locales(None) == [] and meta.clean_locales([]) == []
+    cleaned = meta.clean_locales([{"id": 1001, "name": "  Spanish "}, {"id": "1001", "name": "Spanish again"}, {"id": "6", "name": "English (US)"}])
+    assert cleaned == [{"id": "1001", "name": "Spanish"}, {"id": "6", "name": "English (US)"}]        # an int id is read, names are kept, the repeat is dropped
+    assert meta.build_targeting_spec(geo_type="country", geo_key="US", locales=[SPANISH, SPANISH, ENGLISH_US])["locales"] == [6, 1001]
+
+
+@pytest.mark.parametrize("locales", [
+    "Spanish", {"id": "1001", "name": "Spanish"}, [["1001", "Spanish"]], ["1001"], [None],
+    [{"id": "abc", "name": "x"}], [{"id": "", "name": "x"}], [{"id": None, "name": "x"}], [{"id": True, "name": "x"}], [{"id": 6.5, "name": "x"}],
+    [{"id": "0", "name": "x"}], [{"id": "-5", "name": "x"}], [{"id": "01", "name": "x"}], [{"id": "12345678901", "name": "x"}], [{"id": "٦", "name": "x"}],
+    [{"id": "6", "name": ""}], [{"id": "6", "name": "   "}], [{"id": "6"}], [{"id": "6", "name": "n" * 121}],
+    [{"id": str(i), "name": "n"} for i in range(1, 27)],
+])
+def test_a_language_meta_would_refuse_is_refused_before_a_call(graph, locales):
+    with pytest.raises(ValueError):
+        meta.build_targeting_spec(geo_type="country", geo_key="US", locales=locales)
+    with pytest.raises(ValueError):
+        meta.fetch_reach_estimate(geo_type="country", geo_key="US", locales=locales)
+    assert graph.calls == []
+
+
+def test_up_to_the_maximum_number_of_languages_is_accepted_with_a_plain_message_beyond_it():
+    full = [{"id": str(i), "name": f"Language {i}"} for i in range(1, meta.MAX_LOCALES + 1)]
+    assert meta.build_targeting_spec(geo_type="country", geo_key="US", locales=full)["locales"] == list(range(1, meta.MAX_LOCALES + 1))
+    with pytest.raises(ValueError, match=f"at most {meta.MAX_LOCALES} languages"):
+        meta.clean_locales(full + [{"id": "999", "name": "One too many"}])
+
+
+def test_the_live_reach_request_carries_the_locales_and_a_language_never_answers_for_another(graph):
+    plain = meta.fetch_reach_estimate(geo_type="country", geo_key="US")
+    spanish = meta.fetch_reach_estimate(geo_type="country", geo_key="US", locales=[SPANISH])
+    assert plain == (900, 1100) and spanish == (300, 366)                                        # the fake narrows by a language: they are different answers
+    assert _spec_sent(graph) == {"geo_locations": {"countries": ["US"]}, "locales": [1001]}
+    assert len(graph.calls) == 2
+    meta.fetch_reach_estimate(geo_type="country", geo_key="US", locales=[SPANISH])               # the same Spanish estimate: from memory
+    assert len(graph.calls) == 2
+    english = meta.fetch_reach_estimate(geo_type="country", geo_key="US", locales=[ENGLISH_US])  # another language: asked of Meta, not answered with Spanish's number
+    assert len(graph.calls) == 3 and _spec_sent(graph)["locales"] == [6] and english == (300, 366)
+    meta.fetch_reach_estimate(geo_type="country", geo_key="US", locales=[SPANISH, SPANISH_MX])
+    meta.fetch_reach_estimate(geo_type="country", geo_key="US", locales=[SPANISH_MX, SPANISH])   # the same set in another order is the same question
+    assert len(graph.calls) == 4 and _spec_sent(graph)["locales"] == [1001, 1002]
+    assert TOKEN not in json.dumps(graph.calls[-1]["params"])
+
+
+def test_a_spec_with_languages_and_interests_keeps_both(graph):
+    meta.fetch_reach_estimate(geo_type="geo_market", geo_key="803", age_min=25, locales=[SPANISH],
+                              targeting=[{"id": "6003107902433", "name": "Soccer", "type": "interests"}])
+    assert _spec_sent(graph) == {"geo_locations": {"geo_markets": [{"key": "803"}]}, "age_min": 25, "locales": [1001],
+                                 "flexible_spec": [{"interests": [{"id": "6003107902433", "name": "Soccer"}]}]}
+
+
+# ---- the language search
+
+def test_the_whole_language_list_is_one_blank_search_with_a_big_limit_cached_for_hours(graph):
+    items = meta.search_locales()
+    assert [i["name"] for i in items] == ["English (UK)", "English (US)", "Portuguese (Brazil)", "Spanish", "Spanish (Mexico)", "Spanish (Spain)"]
+    assert items[1] == {"id": "6", "name": "English (US)"} and all(isinstance(i["id"], str) for i in items)    # the id is a string, the number Meta sends is read
+    p = graph.calls[-1]["params"]
+    assert p == {"type": "adlocale", "q": "", "limit": 1000}                                                   # Meta's documented way to list every locale
+    assert graph.calls[-1]["url"] == "https://graph.facebook.com/v26.0/search" and graph.calls[-1]["headers"] == {"Authorization": f"Bearer {TOKEN}"}
+    meta.search_locales()
+    meta.search_locales("   ")                                                                                  # blank after trimming = the whole list
+    assert len(graph.calls) == 1
+
+
+def test_an_empty_language_list_is_asked_again_but_a_real_one_is_remembered(graph):
+    graph.empty = True
+    assert meta.search_locales() == []
+    graph.empty = False
+    assert len(meta.search_locales()) == 6
+    n = len(graph.calls)
+    meta.search_locales()
+    assert len(graph.calls) == n
+
+
+def test_a_keyword_search_asks_meta_for_that_text_sorted_by_name(graph):
+    found = meta.search_locales(" Spanish ")
+    assert [f["name"] for f in found] == ["Spanish", "Spanish (Mexico)", "Spanish (Spain)"]
+    p = graph.calls[-1]["params"]
+    assert p["type"] == "adlocale" and p["q"] == "Spanish" and p["limit"] == 50
+    meta.search_locales("Spanish")
+    assert len(graph.calls) == 2                                                                                # a keyword search is not remembered
+    assert meta.search_locales("zzz") == []
+
+
+@pytest.mark.parametrize("q", ["a", "x" * 61])
+def test_a_language_search_text_must_be_two_to_sixty_characters(graph, q):
+    with pytest.raises(ValueError, match="2–60"):
+        meta.search_locales(q)
+    assert graph.calls == []
+
+
+def test_every_row_shape_meta_might_send_is_read_and_junk_is_dropped(graph):
+    graph.locales = [
+        {"key": 6, "name": "English (US)"},                          # Meta's reference shape: a numeric `key`
+        {"id": "24", "name": "English (UK)"},                         # the number under `id`
+        {"key": "1001", "name": "  Spanish "},                        # a numeric string, a name with padding
+        {"key": None, "id": 5, "name": "German"},                     # `key` null: `id` is used
+        {"key": 6, "name": "English (US) again"},                     # the same id twice: the first one is kept
+        {"key": True, "name": "bool"}, {"key": 1.5, "name": "float"}, {"key": "abc", "name": "letters"}, {"key": 0, "name": "zero"},
+        {"key": "007", "name": "leading zeros"}, {"key": -3, "name": "negative"}, {"key": [6], "name": "list"},
+        {"key": 7}, {"key": 8, "name": ""}, {"key": 9, "name": None}, {"name": "no id"},
+        "junk", None, 42, ["list"],
+    ]
+    assert meta.search_locales() == [{"id": "24", "name": "English (UK)"}, {"id": "6", "name": "English (US)"}, {"id": "5", "name": "German"},
+                                     {"id": "1001", "name": "Spanish"}]
+
+
+def test_a_language_list_that_is_empty_null_or_not_a_list_is_an_empty_list_not_a_500(graph, monkeypatch):
+    for body in ({"data": []}, {"data": None}, {"data": {"key": 6, "name": "English (US)"}}, {"data": "English"}, {}):
+        monkeypatch.setattr(meta.requests, "get", lambda url, params=None, headers=None, timeout=None, body=body: Resp(body))
+        meta.reset_cache()
+        assert meta.search_locales() == [] and meta.search_locales("Spanish") == []
+
+
+def test_a_name_longer_than_a_selection_can_carry_is_shortened_so_it_can_still_be_chosen(graph):
+    graph.locales = [{"key": 6, "name": "L" * 300}]
+    [row] = meta.search_locales()
+    assert len(row["name"]) == 120
+    assert meta.clean_locales([row]) == [row]
+
+
+def test_meta_errors_on_the_language_search_are_planner_readable(graph):
+    graph.error, graph.http_status = {"message": "bad", "code": 190}, 401
+    with pytest.raises(meta.MetaAPIError) as err:
+        meta.search_locales()
+    assert err.value.kind == "token" and err.value.status_code == 503 and TOKEN not in str(err.value)
+    graph.error, graph.http_status = {"message": "x", "code": 613}, 400
+    with pytest.raises(meta.MetaAPIError) as err:
+        meta.search_locales("Spanish")
+    assert err.value.kind == "rate_limit" and err.value.status_code == 429
+
+
+def test_the_language_note_says_in_plain_words_what_a_meta_language_is():
+    note = meta.LANGUAGE_NOTE
+    assert "set Facebook or Instagram to" in note and "not a count of who speaks it" in note and "set to English is not included" in note
+    assert "Leave languages empty" in note
+    assert TOKEN not in note
+
+
+# ---- the routes
+
+def test_the_languages_route_serves_the_list_the_search_and_the_note(graph):
+    out = main.constanza_meta_languages()
+    assert out == {"items": meta.search_locales(), "note": meta.LANGUAGE_NOTE} and len(out["items"]) == 6
+    assert out["items"][0] == {"id": "24", "name": "English (UK)"}
+    found = main.constanza_meta_languages(q="Spanish")
+    assert [i["id"] for i in found["items"]] == ["1001", "1002", "1003"] and found["note"] == meta.LANGUAGE_NOTE
+    assert "meta-languages" in {getattr(r, "path", "").rsplit("/", 1)[-1] for r in main.app.router.routes if "GET" in (getattr(r, "methods", None) or ())}
+
+
+@pytest.mark.parametrize("q", ["a", "x" * 61])
+def test_the_languages_route_rejects_a_bad_search_text_with_422(graph, q):
+    with pytest.raises(HTTPException) as bad:
+        main.constanza_meta_languages(q=q)
+    assert bad.value.status_code == 422 and "2–60" in bad.value.detail and graph.calls == []
+
+
+def test_the_languages_route_maps_meta_errors_like_the_other_routes(graph):
+    graph.error, graph.http_status = {"message": "x", "code": 613}, 400
+    with pytest.raises(HTTPException) as limited:
+        main.constanza_meta_languages()
+    assert limited.value.status_code == 429 and "rate-limiting" in limited.value.detail
+    graph.error, graph.http_status = {"message": f"bad {TOKEN}", "code": 190}, 401
+    with pytest.raises(HTTPException) as token:
+        main.constanza_meta_languages(q="Spanish")
+    assert token.value.status_code == 503 and TOKEN not in token.value.detail
+
+
+def test_the_languages_route_says_which_secret_is_missing_when_meta_is_not_connected():
+    with pytest.raises(HTTPException) as missing:
+        main.constanza_meta_languages()
+    assert missing.value.status_code == 503 and "META_ACCESS_TOKEN" in missing.value.detail
+    assert main.constanza_meta_status()["language_note"] == meta.LANGUAGE_NOTE and main.constanza_meta_status()["configured"] is False
+
+
+def test_the_forecast_request_takes_languages_as_id_and_name_only():
+    assert main.MetaAuctionForecastRequest(product_name=AWARENESS, retail_budget=1).meta_languages == []                  # omitted: nothing changes
+    request = main.MetaAuctionForecastRequest(product_name=AWARENESS, retail_budget=1, meta_languages=[{"id": "1001", "name": "Spanish"}])
+    assert request.meta_languages[0].model_dump() == {"id": "1001", "name": "Spanish"}
+    with pytest.raises(Exception):
+        main.MetaLanguageItem(id="1001", name="Spanish", extra="x")
+
+
+def test_a_live_forecast_with_languages_sends_them_and_saves_them_with_the_snapshot(graph):
+    live = main.constanza_meta_forecast(main.MetaAuctionForecastRequest(
+        product_name=AWARENESS, retail_budget=700, meta_geo_type="geo_market", meta_geo_key="803", age_min=25,
+        meta_languages=[main.MetaLanguageItem(id="1002", name="Spanish (Mexico)"), main.MetaLanguageItem(id="1001", name="Spanish")]))
+    assert _spec_sent(graph)["locales"] == [1001, 1002] and _spec_sent(graph)["geo_locations"] == {"geo_markets": [{"key": "803"}]}
+    assert live["potential_audience"] == {"lower": 300, "upper": 366, "source": "meta_api"}
+    assert live["scenarios"]["monthly"] == {"conservative": 1290, "mid": 1650, "upper": 2580}                  # the lower end of the Spanish estimate (300)
+    assert live["meta_targeting"]["languages"] == [{"id": "1002", "name": "Spanish (Mexico)"}, {"id": "1001", "name": "Spanish"}]        # as chosen, names kept
+    saved = main.AvailsEntry(meta_forecast=live, max_imps=live["scenarios"]["monthly"]["mid"], est_uniques=300).model_dump()
+    assert main.AvailsEntry(**saved).meta_forecast["meta_targeting"]["languages"][1] == {"id": "1001", "name": "Spanish"}
+
+
+def test_a_live_forecast_without_languages_is_unchanged_except_for_an_empty_languages_list(graph):
+    live = main.constanza_meta_forecast(main.MetaAuctionForecastRequest(
+        product_name=AWARENESS, retail_budget=700, meta_geo_type="geo_market", meta_geo_key="803", age_min=25,
+        meta_targeting=[main.MetaTargetingItem(id="6003107902433", name="Soccer", type="interests")]))
+    assert "locales" not in _spec_sent(graph) and live["potential_audience"] == {"lower": 900, "upper": 1100, "source": "meta_api"}
+    assert live["meta_targeting"] == {"geo_type": "geo_market", "geo_key": "803", "geo_name": None, "age_min": 25, "age_max": None, "gender": None,
+                                      "detailed": [{"id": "6003107902433", "name": "Soccer", "type": "interests"}], "languages": []}
+    # a proposal saved before languages existed has no `languages` key and still reopens
+    old = {k: v for k, v in live["meta_targeting"].items() if k != "languages"}
+    assert main.AvailsEntry(meta_forecast={**live, "meta_targeting": old}).meta_forecast["meta_targeting"] == old
+
+
+def test_the_manual_audience_path_still_works_and_carries_no_targeting_snapshot(graph):
+    manual = main.constanza_meta_forecast(main.MetaAuctionForecastRequest(product_name=AWARENESS, retail_budget=700, audience_lower=1000, audience_upper=1200))
+    assert manual["potential_audience"]["source"] == "manual" and "meta_targeting" not in manual and graph.calls == []
+
+
+def test_forecast_language_mistakes_are_422_before_any_call_to_meta(graph):
+    def ask(**kwargs):
+        with pytest.raises(HTTPException) as error:
+            main.constanza_meta_forecast(main.MetaAuctionForecastRequest(product_name=AWARENESS, retail_budget=700, **kwargs))
+        assert error.value.status_code == 422
+        return error.value.detail
+    assert "Languages need a live Meta pull" in ask(meta_languages=[{"id": "1001", "name": "Spanish"}])                                   # no geography
+    assert "Use either the live Meta audience" in ask(meta_geo_type="country", meta_geo_key="US", audience_lower=5, meta_languages=[{"id": "1001", "name": "Spanish"}])
+    assert "numeric Meta locale id" in ask(meta_geo_type="country", meta_geo_key="US", meta_languages=[{"id": "abc", "name": "Spanish"}])
+    assert "numeric Meta locale id" in ask(meta_geo_type="country", meta_geo_key="US", meta_languages=[{"id": "1001", "name": ""}])
+    assert f"at most {meta.MAX_LOCALES} languages" in ask(meta_geo_type="country", meta_geo_key="US",
+                                                          meta_languages=[{"id": str(i), "name": "n"} for i in range(1, meta.MAX_LOCALES + 2)])
+    assert graph.calls == []
+
+
+def test_meta_refusing_a_language_estimate_is_a_planner_readable_422(graph):
+    graph.refuse_locales = True
+    with pytest.raises(HTTPException) as error:
+        main.constanza_meta_forecast(main.MetaAuctionForecastRequest(
+            product_name=AWARENESS, retail_budget=700, meta_geo_type="country", meta_geo_key="US", meta_languages=[{"id": "1001", "name": "Spanish"}]))
+    assert error.value.status_code == 422 and "Meta refused these settings" in error.value.detail and TOKEN not in error.value.detail
+    graph.refuse_locales, graph.error, graph.http_status = False, {"message": "x", "code": 613}, 400
+    with pytest.raises(HTTPException) as limited:
+        main.constanza_meta_forecast(main.MetaAuctionForecastRequest(
+            product_name=AWARENESS, retail_budget=700, meta_geo_type="country", meta_geo_key="US", meta_languages=[{"id": "1001", "name": "Spanish"}]))
+    assert limited.value.status_code == 429
+
+
+# ---------------------------------------------------------------------------------------------------------------- every pick the lists offer can be sent back
+
+def test_every_targeting_key_fits_the_request_model():
+    for key in meta.TARGETING_KEYS:
+        item = main.MetaTargetingItem(id="6023005404983", name="n" * meta.MAX_NAME_LENGTH, type=key)        # no key is longer than the model allows
+        assert item.type == key
+    longest = max(meta.TARGETING_KEYS, key=len)
+    assert meta.MAX_TARGETING_TYPE_LENGTH == len(longest) >= len("household_composition")               # the limit IS the longest key, not a number typed in beside it
+    assert main.MetaTargetingItem.model_fields["type"].metadata[0].max_length == meta.MAX_TARGETING_TYPE_LENGTH
+    with pytest.raises(Exception):
+        main.MetaTargetingItem(id="1", name="n", type="x" * (meta.MAX_TARGETING_TYPE_LENGTH + 1))      # a made-up long type is still refused
+    # and the language items and request lists carry what the service takes
+    assert main.MetaLanguageItem(id="1001", name="n" * meta.MAX_NAME_LENGTH).name == "n" * meta.MAX_NAME_LENGTH
+
+
+def test_a_long_name_is_shortened_in_the_lists_so_the_row_can_still_be_chosen(graph):
+    graph.extra_demographics = [{"id": "6023005404983", "name": "D" * 300, "type": "household_composition", "path": ["Demographics", "Household composition"]}]
+    row = next(i for i in meta.targeting_catalog("demographics") if i["type"] == "household_composition")
+    assert len(row["name"]) == meta.MAX_NAME_LENGTH == 120
+    picked = {"id": row["id"], "name": row["name"], "type": row["type"]}
+    assert meta.build_targeting_spec(geo_type="country", geo_key="US", targeting=[picked])["flexible_spec"] == [{"household_composition": [{"id": row["id"], "name": row["name"]}]}]
+    assert main.MetaTargetingItem(**picked).name == row["name"]                                       # the request model takes it too
+    graph.reach = (900, 1100)
+
+
+def test_a_row_without_a_numeric_id_is_left_out_of_the_lists_because_a_pick_could_not_carry_it(graph):
+    graph.extra_demographics = [{"id": "not-a-number", "name": "Bad id", "type": "life_events"}, {"id": "1" * 31, "name": "Too long id", "type": "life_events"},
+                                {"id": " 6012345 ", "name": "Padded id", "type": "life_events"}]
+    names = {i["name"]: i["id"] for i in meta.targeting_catalog("demographics")}
+    assert "Bad id" not in names and "Too long id" not in names and names["Padded id"] == "6012345"
+
+
+@pytest.fixture
+def client(monkeypatch):
+    """The real app over HTTP (the request model, the routes, the 422 answers) with a signed-in session and no database."""
+    monkeypatch.setattr(main.auth_svc, "get_user_by_session", lambda token: {"id": 1, "email": "planner@example.com", "is_admin": False})
+    monkeypatch.setattr(main.auth_svc, "refresh_session", lambda token: None)
+    try:
+        from fastapi.testclient import TestClient
+        return TestClient(main.app, cookies={main.SESSION_COOKIE_NAME: "test-session"})
+    except (ImportError, RuntimeError) as exc:                                                    # Starlette's test client needs httpx2 (or httpx) installed
+        pytest.skip(f"no HTTP test client here: {exc}")
+
+
+def test_picking_a_household_demographic_is_estimated_over_http_not_refused_with_a_422(graph, client):
+    graph.extra_demographics = [{"id": "6023005404983", "name": "Parents (all)", "type": "household_composition", "path": ["Demographics", "Household composition"],
+                                 "audience_size_lower_bound": 1000, "audience_size_upper_bound": 2000}]
+    listed = client.get("/api/constanza/meta-targeting", params={"kind": "demographics"})
+    assert listed.status_code == 200
+    pick = next(i for i in listed.json()["items"] if i["type"] == "household_composition")             # the browse list offers it...
+    body = {"product_name": AWARENESS, "retail_budget": 2000, "retail_cpm": 12, "months": 1, "meta_geo_type": "geo_market", "meta_geo_key": "803",
+            "meta_geo_label": "Los Angeles", "gender": "all", "meta_languages": [],
+            "meta_targeting": [{"id": pick["id"], "name": pick["name"], "type": pick["type"]}]}
+    answer = client.post("/api/constanza/meta-forecast", json=body)                                    # ...and the estimate accepts it
+    assert answer.status_code == 200, answer.json()
+    assert _spec_sent(graph)["flexible_spec"] == [{"household_composition": [{"id": "6023005404983", "name": "Parents (all)"}]}]
+    assert answer.json()["meta_targeting"]["detailed"] == [{"id": "6023005404983", "name": "Parents (all)", "type": "household_composition"}]
+
+
+def test_every_kind_of_pick_is_accepted_by_the_route_over_http(graph, client):
+    for key in meta.TARGETING_KEYS:
+        body = {"product_name": AWARENESS, "retail_budget": 2000, "meta_geo_type": "country", "meta_geo_key": "US",
+                "meta_targeting": [{"id": "6023005404983", "name": "A pick", "type": key}]}
+        answer = client.post("/api/constanza/meta-forecast", json=body)
+        assert answer.status_code == 200, (key, answer.json())
+
+
+def test_a_refused_field_is_a_422_that_names_the_field_so_the_panel_can_say_which_pick(graph, client):
+    body = {"product_name": AWARENESS, "retail_budget": 2000, "meta_geo_type": "country", "meta_geo_key": "US",
+            "meta_targeting": [{"id": "1", "name": "ok", "type": "interests"}, {"id": "2", "name": "n" * 121, "type": "interests"}]}
+    answer = client.post("/api/constanza/meta-forecast", json=body)
+    assert answer.status_code == 422
+    assert answer.json()["detail"][0]["loc"] == ["body", "meta_targeting", 1, "name"] and graph.calls == []
+
+
+# ---------------------------------------------------------------------------------------------------------------- the language diagnostics
+
+def _checks(graph=None):
+    from app.services import meta_diagnose
+    return {c.name: c for c in meta_diagnose.run_checks()}
+
+
+LANGUAGE = "Reach estimate · with a language"
+ENGLISH = "Reach estimate · English, a common language (information)"
+
+
+def test_the_language_check_prints_what_it_compared_the_language_figure_next_to_the_plain_us_one(graph):
+    check = _checks()[LANGUAGE]
+    assert check.ok and not check.warn
+    assert "U.S. accounts set to Spanish: 300 – 366" in check.detail and "against 900 – 1,100 for the whole U.S." in check.detail
+    assert "smaller than the whole U.S." in check.detail and "33.3% of it" in check.detail
+
+
+def test_a_language_figure_only_a_little_below_the_us_figure_is_not_taken_as_proof(graph):
+    graph.narrow_by_language, graph.language_jitter, graph.reach = False, 1000, (240_000_000, 241_000_000)      # Meta ignored `locales`; the figure moved by rounding
+    check = _checks()[LANGUAGE]
+    assert check.ok and check.warn and "not clearly smaller" in check.detail and "may not be applying" in check.detail and "100.0% of it" in check.detail
+    graph.language_jitter = 0
+    meta.reset_cache()
+    assert _checks()[LANGUAGE].warn                                                               # the very same figure as the U.S.: flagged too
+    graph.narrow_by_language = True
+    meta.reset_cache()
+    assert not _checks()[LANGUAGE].warn                                                           # a real drop is the result the check is looking for
+
+
+def test_a_language_that_takes_nine_tenths_or_more_of_the_us_is_flagged_and_one_clearly_below_is_not(graph):
+    from app.services import meta_diagnose
+    assert meta_diagnose.LANGUAGE_NARROWS_BELOW == 0.9
+    graph.narrow_by_language, graph.reach = False, (1000, 1200)
+    graph.language_jitter = 99                                                                    # 901 of 1000: 90.1%
+    assert _checks()[LANGUAGE].warn
+    graph.language_jitter = 101                                                                   # 899 of 1000: 89.9%
+    meta.reset_cache()
+    assert not _checks()[LANGUAGE].warn
+
+
+def test_without_a_plain_us_figure_the_language_check_says_it_could_not_compare_and_claims_nothing(graph):
+    graph.plain_us_failures = 99                                                                  # the plain U.S. estimate fails every time
+    checks = _checks()
+    assert not checks["Reach estimate · United States"].ok
+    for narrows in (True, False):                                                                 # whether or not Meta applied the language
+        graph.narrow_by_language = narrows
+        meta.reset_cache()
+        graph.plain_us_failures = 99
+        check = _checks()[LANGUAGE]
+        assert check.ok and check.warn and "not verified" in check.detail and "no plain U.S. figure to compare with" in check.detail
+        assert "smaller than the whole U.S." not in check.detail and "narrowed the estimate" not in check.detail
+
+
+def test_a_plain_us_estimate_that_failed_once_is_asked_again_for_the_language_check(graph):
+    graph.plain_us_failures = 1                                                                   # the check above fails; asking once more works
+    checks = _checks()
+    assert not checks["Reach estimate · United States"].ok
+    assert checks[LANGUAGE].ok and not checks[LANGUAGE].warn and "against 900 – 1,100 for the whole U.S." in checks[LANGUAGE].detail
+
+
+def test_the_english_line_reports_what_meta_did_next_to_the_plain_us_figure(graph):
+    checks = _checks()
+    names = list(checks)
+    assert names.index(LANGUAGE) < names.index(ENGLISH) < names.index("Targeting list · interests")
+    english = checks[ENGLISH]
+    assert english.ok and not english.warn
+    assert "U.S. accounts set to English (US): 300 – 366" in english.detail and "against 900 – 1,100 for the whole U.S." in english.detail
+    assert "narrowed the estimate for English too" in english.detail and "For information only" in english.detail
+    asked = [json.loads(c["params"]["targeting_spec"]) for c in graph.calls if "targeting_spec" in c["params"]]
+    assert {"geo_locations": {"countries": ["US"]}, "locales": [6]} in asked                      # English (US), exactly as Meta's list names it
+
+
+def test_the_english_line_says_so_when_meta_did_not_narrow_and_names_the_documented_qualifier_but_never_warns(graph):
+    graph.narrow_by_language = False
+    english = _checks()[ENGLISH]
+    assert english.ok and not english.warn and english.to_public()["warn"] is False
+    assert "no clear narrowing" in english.detail and "100.0% of it" in english.detail
+    assert "a language other than the common one for a location" in english.detail
+
+
+def test_the_english_line_never_fails_the_run_even_when_meta_will_not_answer_it(monkeypatch, graph, capsys):
+    from app.services import meta_diagnose
+    real = meta.search_locales
+
+    def search(q=""):
+        if q == "English":
+            raise meta.MetaAPIError("Meta is rate-limiting this ad account.", "rate_limit", 429)
+        return real(q)
+    monkeypatch.setattr(meta, "search_locales", search)
+    english = _checks()[ENGLISH]
+    assert english.ok and not english.warn and "Could not ask" in english.detail and "does not change the result of the run" in english.detail
+    assert meta_diagnose.main([]) == 0                                                            # every other line passed: the exit status is 0
+    assert "✓ Reach estimate · English" in capsys.readouterr().out
+    graph.locales = [r for r in graph.locales if not r["name"].startswith("English")]             # Meta lists no English at all
+    monkeypatch.setattr(meta, "search_locales", real)
+    meta.reset_cache()
+    english = _checks()[ENGLISH]
+    assert english.ok and not english.warn and "no language called English" in english.detail
+
+
+# ---------------------------------------------------------------------------------------------------------------- the words around the manual path and the docs
+
+def test_the_route_and_the_env_example_no_longer_invite_a_typed_audience():
+    doc = main.constanza_meta_forecast.__doc__
+    assert "may enter the audience" not in doc and "predates the panel" in doc
+    from pathlib import Path
+    env = (Path(__file__).resolve().parents[1] / ".env.example").read_text(encoding="utf-8")
+    assert "manually entered audience" not in env and "Meta isn't connected yet" in env and "Avails fields" in env
+    with pytest.raises(HTTPException) as both:                                                    # the backend path itself stays: old callers and old snapshots
+        main.constanza_meta_forecast(main.MetaAuctionForecastRequest(product_name=AWARENESS, retail_budget=700, meta_geo_type="country", meta_geo_key="US", audience_lower=5))
+    assert "Use either the live Meta audience" in both.value.detail and "manually" not in both.value.detail
+
+
+def test_the_docs_say_languages_are_ored_without_also_saying_a_language_can_only_shrink_the_audience():
+    from pathlib import Path
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "forecast_data_platform.md").read_text(encoding="utf-8")
+    assert "adding a language can only make the audience smaller" not in docs
+    assert "the first language narrows the audience compared with none, and each further language widens it again" in docs.replace("\n", " ")
+    assert "can only narrow the audience\n    compared with none" not in meta.build_targeting_spec.__doc__ and "each further one widens it again" in meta.build_targeting_spec.__doc__.replace("\n", " ")
+    # the unverified qualifier from Meta's own reference is written down next to the check that answers it
+    assert "differs from the common" in docs and "Reach estimate · English, a common language" in docs

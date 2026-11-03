@@ -431,7 +431,7 @@ def test_the_summary_describes_what_the_result_was_pulled_for_not_what_the_form_
 
 
 def test_a_failed_audience_request_is_not_remembered_and_never_an_unhandled_rejection():
-    load = _between(CZ_JS, "async function loadTaxonomy()", "async function renderBrowse()")
+    load = _between(CZ_JS, "async function loadTaxonomy()", "function showBrowseCount()")
     assert "try {" in load and "if (r.ok) { S.taxonomy = r.data; return S.taxonomy; }" in load       # only a good answer is cached
     search = _between(CZ_JS, "async function searchInterests()", "function groupLabel(")
     assert "try {" in search and "isn’t available right now" in search
@@ -854,7 +854,7 @@ def test_the_dock_resets_its_hispanic_choice_per_product_and_never_sends_off_for
     assert "if (name !== S.product) S.hispanic = null;" in CZ_JS                                   # a choice belongs to the product it was made for
     assert "box.disabled = !!(p && p.hispanicAlready);" in CZ_JS and "if (p && p.hispanicAlready) return true;" in CZ_JS
     assert "(p && e.target.checked === !!p.hispanicDefault) ? null : e.target.checked" in CZ_JS      # back to the default = no preference (no false "form changed" banner)
-    assert 'if ($("cz-aud-count")) refreshAudienceUI(); else refreshHispanicUI();' in CZ_JS            # the Audience badge follows the product
+    assert "refreshAudienceUI();" in _between(CZ_JS, "function updateProductUI()", "// ---- picker")        # Language & heritage and Audience follow the product
 
 
 def test_the_share_of_voice_helper_says_when_the_avails_were_also_narrowed_to_the_hispanic_audience():
@@ -874,3 +874,168 @@ def test_the_share_of_voice_helper_says_when_the_avails_were_also_narrowed_to_th
     assert plain["badge"] == "85% of expected delivery" and "Hispanic" not in plain["helper"] and "(the avails x a 15% win rate)" in plain["helper"]
     assert helper({})["badge"] == "85% of avails"
     assert "delete entry.hispanic_share;" in APP_JS and "entry.hispanic_share = geoInfo.hispanic_share" in APP_JS
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The numbered cards (Where / When / Who / Language & heritage / Audience), their summaries and the browse window
+# ---------------------------------------------------------------------------------------------------------------------
+
+def test_the_form_is_five_numbered_cards_built_from_the_kit_in_this_order():
+    order = ['id="cz-sec-where"', 'id="cz-sec-when"', 'id="cz-sec-who"', 'id="cz-sec-lang"', 'id="cz-sec-aud"', 'id="cz-method-forms"', 'id="cz-result"']
+    spots = [CZ_JS.index(o) for o in order]
+    assert spots == sorted(spots), order
+    assert CZ_JS.index('class="cz-prod"') < spots[0]                                  # the product card comes first and is not numbered
+    assert 'class="aud-builder cz-builder"' in CZ_JS and CZ_JS.count('class="aud-sec') >= 5
+    for title in ('"Where"', '"When"', '"Who"', '"Language &amp; heritage"', '"Audience"'):
+        assert f"secHeadInner(" in CZ_JS and title in CZ_JS, title
+    # Who, Language & heritage and Audience are the Entravision audience block: one element, so a forecast method's own panel can replace them
+    block = _between(CZ_JS, 'id="cz-aud">', 'id="cz-method-forms"')
+    for card in ('id="cz-sec-who"', 'id="cz-sec-lang"', 'id="cz-sec-aud"'):
+        assert card in block, card
+    assert 'id="cz-sec-where"' not in block and 'id="cz-sec-when"' not in block        # geography and flight are the dock's, whatever the product
+
+
+def test_the_old_browse_every_audience_list_of_chips_is_gone_for_the_window():
+    for gone in ("Browse every audience", "cz-browse-body", "renderBrowse", 'id="cz-aud-count"', 'class="cz-details" id="cz-aud"', "cz-interest-item"):
+        assert gone not in CZ_JS, gone
+    assert 'id="cz-browse"' in CZ_JS and "aud-browse" in CZ_JS and "window.SegmentBrowser" in CZ_JS and "SB.open({" in CZ_JS
+
+
+def test_the_ids_the_tiktok_panel_and_its_tests_rely_on_are_still_in_the_dock():
+    for ident in ("cz-method-forms", "cz-result", "cz-go", "cz-reset", "cz-geo", "cz-product-btn", "cz-picker", "cz-picker-pop", "cz-picker-search", "cz-picker-list",
+                  "cz-flight", "cz-flight-dec", "cz-flight-inc", "cz-flight-hint", "cz-unit", "cz-use-dates", "cz-aud", "cz-hispanic", "cz-status", "cz-body", "cz-form", "cz-sub"):
+        assert f'id="{ident}"' in CZ_JS, ident
+    # ... and the object a forecast method's factory is given is the same one
+    assert "return { S, $, esc, num, compact, api, markStale, errorText, setMood, announce, summarize, productByName, requestBody: () => requestBody(), targetsHispanic };" in CZ_JS
+    assert '$("cz-aud").classList.toggle("hidden", !!plug);' in CZ_JS
+
+
+def test_the_browse_window_is_wired_to_the_taxonomy_with_the_same_ten_pick_limit_as_the_server():
+    opener = _between(CZ_JS, "function openBrowse() {", "// ---- results")
+    for needle in ('title: "Browse all audiences"', "columns: BROWSE_COLUMNS", "max: MAX_INTERESTS", "chosenCount: () => S.interests.length", "isChosen:",
+                   'returnFocus: $("cz-browse")', "onApply:", "removed.forEach", "added.forEach"):
+        assert needle in opener, needle
+    assert "const MAX_INTERESTS = 10;" in CZ_JS and "_CONSTANZA_MAX_INTERESTS = 10" in (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    assert "At most ${MAX_INTERESTS} interests at a time." in CZ_JS
+    assert 'if ($("cz-browse")' not in CZ_JS and 'if (!window.SegmentBrowser) $("cz-browse").hidden = true;' in CZ_JS         # without the script the button steps aside
+
+
+def test_the_typeahead_closes_on_escape_whenever_its_popup_is_on_screen():
+    assert 'e.key === "Escape" && interestPopupOpen()' in CZ_JS and 'const interestPopupOpen = () => !$("cz-interest-results").hidden;' in CZ_JS
+    assert "e.key === \"Escape\" && interestHits.length" not in CZ_JS                  # (a popup that only says "nothing matches" holds no option, and used to close the dock)
+
+
+def test_the_dialog_is_not_the_docks_escape_and_the_dock_asks_for_the_taxonomy_only_once_it_opens():
+    open_fn = _between(CZ_JS, "  function open(opts) {", "  function close() {")
+    assert "if (!S.taxonomy) loadTaxonomy().then(showBrowseCount);" in open_fn
+    mount_fn = _between(CZ_JS, "  function mount() {", "  // Which of the folding cards")
+    assert "loadTaxonomy" not in mount_fn                                             # not on every page view, only when the dock is opened
+    bind_fn = _between(CZ_JS, "  function bind() {", "  // ------------------------------------------------------------------ the launcher hint")
+    assert bind_fn.index('document.addEventListener("keydown"') > bind_fn.index("openBrowse")      # the dock's Escape is a bubble-phase listener: the dialog's capture-phase one wins
+
+
+def test_the_cards_css_leaves_the_kits_class_names_to_the_kit_and_covers_the_modes():
+    assert ".aud-" not in re.sub(r"/\*.*?\*/", "", CZ_CSS, flags=re.S).replace("--aud-", "")
+    for rule in (".cz-builder", ".cz-switch", ".cz-prod", ".cz-welcome", ".cz-foot .cz-reset", "forced-colors: active", "min-width: 1001px"):
+        assert rule in CZ_CSS, rule
+    assert 'counter-reset: none' in CZ_CSS                                             # a forecast method's panel keeps counting on from Where and When
+
+
+def test_the_dock_stylesheet_keeps_no_rules_for_classes_the_rebuilt_panels_no_longer_draw():
+    """The redesign moved the TikTok banner / pills onto the kit (.aud-notice, .aud-seg) and the Meta card onto meta-audience.css; their old rules stayed behind."""
+    statics = "\n".join(f.read_text(encoding="utf-8") for f in (ROOT / "app" / "static").iterdir() if f.suffix in (".js", ".html")) + (ROOT / "app" / "templates" / "index.html").read_text(encoding="utf-8")
+    for cls in ("cz-tt-status", "cz-tt-on", "cz-tt-off", "cz-dot", "cz-seg", "meta-plan-block", "meta-plan-fields", "meta-plan-result", "meta-plan-feedback", "meta-live-details"):
+        assert not re.search(rf"(?<![\w-]){cls}(?![\w-])", re.sub(r"/\*.*?\*/", "", CZ_CSS, flags=re.S)), f".{cls} is back in constanza.css"
+        assert not re.search(rf"class=[\"'`][^\"'`]*(?<![\w-]){cls}(?![\w-])", statics), f"{cls} is in use: its rules are not dead"
+    assert "id=\"cz-tt-status\"" in statics                                           # (the banner's element id is the only thing still called that)
+
+
+def test_the_context_a_panel_is_given_is_documented_where_the_factory_is_called():
+    doc = _between(CZ_JS, "// ctx (what the dock hands a panel", "const plugins = {};")
+    for name in ("S", "$(id)", "api(path", "markStale()", "announce(text)", "requestBody()", "targetsHispanic()"):
+        assert name in doc, name
+    assert "boolean" in doc and "lazily" in doc and "never apply" in doc          # a hint, evaluated per call, never acted on by itself
+
+
+@pytest.mark.parametrize("geo,resolve,phase,expected", [
+    ("", None, "", ["Type a place to start", False]),
+    ("   ", None, "", ["Type a place to start", False]),
+    ("Phoenix", None, "busy", ["Matching what you typed…", False]),
+    ("Phoenix", None, "", ["Matching what you typed…", False]),
+    ("Phoenix", None, "failed", ["Couldn’t check this place just now", False]),
+    ("Phoenix", {"areas": [{"area_population": 5100000}]}, "", ["1 area · about 5.1M people", True]),
+    ("Texas", {"areas": [{"area_population": 8100000}, {"area_population": 7300000}]}, "", ["2 areas · about 15M people", True]),
+    ("Texas", {"areas": [{"area_population": 8100000}], "ambiguous": [{"input": "x"}]}, "", ["1 area · about 8.1M people · one more needs your pick", True]),
+    ("Springfield", {"areas": [], "ambiguous": [{"input": "Springfield"}]}, "", ["Pick the place you mean", False]),
+    ("zzzz", {"areas": [], "ambiguous": []}, "", ["No match yet — see the suggestions", False]),
+    ("Phoenix", {"areas": [{"area_population": 5100000}]}, "busy", ["Matching what you typed…", False]),                      # a newer keystroke is out: never show the old answer as current
+])
+def test_the_where_summary_says_what_the_typed_place_came_to(geo, resolve, phase, expected):
+    out = run(f"return JSON.stringify(P.whereSummary({json.dumps(geo)}, {json.dumps(resolve)}, {json.dumps(phase)}));")
+    assert [out["text"], out["set"]] == expected
+
+
+def test_the_when_who_language_and_audience_summaries():
+    out = run("""return JSON.stringify({
+        when: [P.whenSummary(1, "months"), P.whenSummary(3, "months"), P.whenSummary(1, "days"), P.whenSummary(49, "days")],
+        who: [P.whoSummary("", "", ""), P.whoSummary("25", "54", ""), P.whoSummary("", "", "female"), P.whoSummary("18", "34", "male"), P.whoSummary("55", "", ""), P.whoSummary("", "34", ""), P.whoSummary("0", "17", "")],
+        age: [P.ageText("", ""), P.ageText("25", "54"), P.ageText("55", ""), P.ageText("", "34"), P.ageText(null, null)],
+        lang: [P.languageSummary(null, false, false), P.languageSummary({ hispanicDefault: true }, true, false), P.languageSummary({ hispanicDefault: false }, true, true),
+               P.languageSummary({ hispanicAlready: true }, true, false), P.languageSummary({ hispanicDefault: true }, false, true)],
+        aud: [P.interestsSummary([]), P.interestsSummary([{ label: "A" }]), P.interestsSummary([{ label: "A" }, { label: "B" }]), P.interestsSummary([{ label: "A" }, { label: "B" }, { label: "C" }, { label: "D" }])],
+    });""")
+    assert out["when"] == ["1 month", "3 months", "1 day", "49 days"]
+    assert [[w["text"], w["set"]] for w in out["who"]] == [["Everyone, all ages", False], ["25–54", True], ["Women", True], ["Men · 18–34", True], ["55+", True], ["Up to 34", True], ["0–17", True]]
+    assert out["age"] == ["", "25–54", "55+", "Up to 34", ""]
+    assert [[w["text"], w["set"]] for w in out["lang"]] == [["Not applied", False], ["Hispanic targeting on · default", True], ["Hispanic targeting on", True],
+                                                           ["Built from Hispanic audiences", True], ["Not applied", False]]
+    assert [[w["text"], w["set"]] for w in out["aud"]] == [["No interests chosen", False], ["A", True], ["A, B", True], ["A, B +2", True]]
+
+
+def test_the_age_presets_are_the_usual_brackets_and_open_ended_ones_have_no_upper_age():
+    out = run("return JSON.stringify(P.AGE_PRESETS);")
+    assert out == [[18, None], [18, 34], [18, 49], [25, 54], [35, 54], [55, None]]
+    assert all(0 <= lo <= 120 and (hi is None or lo <= hi <= 120) for lo, hi in out)                  # the server takes 0-120 and refuses a backwards range
+
+
+def test_a_rate_is_shown_with_a_decimal_under_ten_percent_where_a_whole_number_hides_it():
+    out = run("""return JSON.stringify([0.8, 0.31, 0.1, 0.0994, 0.079, 0.0053, 0.0133, null, NaN, undefined].map(P.rateText));""")
+    assert out == ["80%", "31%", "10%", "9.9%", "7.9%", "0.5%", "1.3%", "", "", ""]
+
+
+def test_matched_words_are_marked_and_everything_else_is_escaped():
+    out = run("""return JSON.stringify([P.markHtml("Sports Fans – Soccer", "soccer fans"), P.markHtml("<img src=x onerror=alert(1)> & co", "img co"), P.markHtml("a+b (c)", "a+b (c"), P.markHtml("Plain", ""), P.markHtml("Plain", "   ")]);""")
+    assert out[0] == "Sports <mark>Fans</mark> – <mark>Soccer</mark>"
+    assert out[1] == "&lt;<mark>img</mark> src=x onerror=alert(1)&gt; &amp; <mark>co</mark>" and "<img" not in out[1]
+    assert out[2] == "<mark>a+b</mark> <mark>(c</mark>)"                                               # regex characters in what was typed are just characters
+    assert out[3] == "Plain" and out[4] == "Plain"
+
+
+def test_the_window_gets_every_audience_as_a_row_with_its_keywords_searchable_and_unrated_ones_flagged():
+    out = run("""const t = { groups: [
+        { key: "a", label: "Automotive", segments: [
+          { id: "auto_in_market", label: "Auto Intenders", supported: true, rate_all: 0.31, keywords: ["car buyer"], company_names: ["Automotive In-Market"] },
+          { id: "auto_import", label: "Import Brands", supported: false, rate_all: null, keywords: ["toyota"], company_names: [] }] },
+        { key: "e", label: "Empty", segments: [] }] };
+        const items = P.interestItems(t), cols = P.BROWSE_COLUMNS;
+        return JSON.stringify({ items, none: P.interestItems(null), empty: P.interestItems({ groups: [] }),
+          cols: cols.map(c => [c.key, c.label, !!c.numeric]), rates: items.map(i => cols[2].value(i)),
+          shown: [cols[2].format(0.31, items[0]), cols[2].format(0.0053, items[0]), cols[2].format(null, items[1])],
+          from: P.interestFrom({ id: "x", label: "L", supported: 1, rate_all: 0.2, source: "dropped" }) });""")
+    assert [i["id"] for i in out["items"]] == ["auto_in_market", "auto_import"] and out["items"][0]["name"] == "Auto Intenders" and out["items"][0]["group"] == "Automotive"
+    assert out["items"][1]["path"] == ["Automotive", "toyota"] and out["items"][0]["path"] == ["Automotive", "car buyer", "Automotive In-Market"]       # searched, never drawn
+    assert out["none"] == [] and out["empty"] == []
+    assert out["cols"] == [["name", "Name", False], ["group", "Group", False], ["rate", "Incidence rate", True]]
+    assert out["rates"] == [0.31, None]                                                                  # an audience with no rate sorts last in either direction
+    assert out["shown"] == ["31%", "0.5%", "No public rate"]
+    assert out["from"] == {"id": "x", "label": "L", "supported": True, "rate_all": 0.2}                 # the pick keeps only what the request and the chip need
+
+
+def test_the_request_still_carries_what_the_cards_hold_in_the_fields_the_server_reads():
+    out = run("""state.catalog = { families: ["F"], products_by_family: { F: [{ name: "Roku", forecast: { enabled: true, method: "platform", series: { key: "roku", channel: "platform_model" } } }] } };
+        const S = window.Constanza._state;
+        S.product = "Roku"; S.products = P.loadProducts(); S.geo = "Phoenix"; S.flight = 2; S.unit = "months";
+        S.ageMin = "25"; S.ageMax = "54"; S.gender = "female"; S.interests = [{ id: "i", label: "Sports Fans – Soccer", supported: true, rate_all: 0.17 }]; S.hispanic = true;
+        return JSON.stringify(P.requestBody());""")
+    assert out["audience"] == {"age_min": 25, "age_max": 54, "gender": "female", "interest_terms": ["Sports Fans – Soccer"]}
+    assert out["hispanic"] is True and out["months"] == 2 and out["geo_text"] == "Phoenix" and out["flight_days"] is None

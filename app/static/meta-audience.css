@@ -1,0 +1,123 @@
+/* ========================================================================
+   The Meta panel of a Step 05 avails card (app.js: _metaForecastPanelHtml). The four numbered sections (Where / Who / Language / Audience),
+   their chips, typeaheads, quick picks and notices are the shared audience kit (audience-kit.css); this file only adds what is the Meta
+   panel's own: the title and plan strip, the connection banner's list, the language caveat, the suggestion pill, the result (the headline
+   audience, the three scenario cards, the cross-check) and the Insert row. Every selector is .meta-*, scoped under .meta-panel.
+   ======================================================================== */
+
+.meta-panel {
+  margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--rule);
+  font-family: var(--font-body); font-size: 13.5px; line-height: 1.45; color: var(--ink);
+}
+/* an author `display` (flex on a notice, grid on a list) beats the `hidden` attribute: put it back */
+.meta-panel [hidden] { display: none !important; }
+.meta-panel button, .meta-panel input, .meta-panel select { font-family: inherit; }
+
+/* ------------------------------------------------------------------ title and plan strip */
+.meta-head { display: flex; flex-direction: column; gap: 10px; margin-bottom: 12px; }
+.meta-title { margin: 0; font-family: var(--font-kicker); font-weight: 700; font-size: 15px; line-height: 1.3; letter-spacing: 0.01em; color: var(--ink); }
+.meta-plan { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.meta-plan > li {
+  flex: 1 1 150px; min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 8px 12px;
+  background: var(--paper-card); border: 1px solid var(--rule); border-radius: 8px;
+}
+.meta-plan-k { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-soft); }
+.meta-plan-v { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.meta-plan-v small { font-size: 12px; font-weight: 400; color: var(--aud-muted); }
+.meta-plan-note { margin: 0; }
+
+/* ------------------------------------------------------------------ connection banner */
+.meta-status { margin-bottom: 12px; }
+.meta-missing { margin: 6px 0 0; padding: 0 0 0 18px; }
+.meta-missing li { margin: 2px 0; }
+.meta-more { margin-top: 6px; }
+.meta-more > summary {
+  display: flex; align-items: center; min-height: 36px; cursor: pointer; font-weight: 600; text-decoration: underline; text-underline-offset: 2px;
+  list-style: none;
+}
+.meta-more > summary::-webkit-details-marker { display: none; }
+.meta-more > summary::before { content: "▸"; display: inline-block; width: 16px; flex: none; font-size: 14px; text-decoration: none; transition: transform 0.15s; }
+.meta-more[open] > summary::before { transform: rotate(90deg); }
+.meta-more > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.meta-more > p { margin: 0 0 6px; padding-left: 14px; }
+.meta-status .meta-more { margin-top: 2px; margin-bottom: -6px; }
+.meta-status .meta-more > p { font-size: 12.5px; line-height: 1.5; }
+
+/* ------------------------------------------------------------------ the four sections */
+.meta-builder .aud-sec-body > .aud-chips { margin-top: -2px; }
+.meta-panel .aud-link:disabled { color: var(--aud-muted); text-decoration: none; cursor: not-allowed; }
+.meta-quick--plain > button::before { content: none; }              /* a search suggestion is not an "add" */
+.meta-suggest > button { border-style: dashed; text-align: left; line-height: 1.3; }
+.meta-suggest > button::before { content: "✦"; font-weight: 400; }
+.meta-langnote { display: flex; flex-direction: column; gap: 2px; padding-top: 10px; border-top: 1px dashed var(--rule); }
+.meta-langnote .aud-hint { margin: 0; }
+.meta-langnote .meta-more { margin-top: 0; }
+.meta-langnote .meta-more > summary { font-size: 12.5px; font-weight: 400; color: var(--accent); }
+
+/* ------------------------------------------------------------------ the estimate button and its messages */
+.meta-run { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.meta-run .aud-hint { margin: 0; }
+.meta-reason { color: #8a3b00; font-weight: 600; }
+.meta-error:empty { display: none; }
+.meta-error { margin-top: 12px; }
+
+/* ------------------------------------------------------------------ the result */
+.meta-feedback:empty { display: none; }
+.meta-result {
+  display: flex; flex-direction: column; gap: 12px; margin-top: 16px; padding: 16px;
+  background: var(--paper-card); border: 1px solid var(--aud-line); border-radius: var(--radius);
+}
+.meta-result p { margin: 0; }
+.meta-result-title { font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-soft); }
+.meta-headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.meta-headline strong { font-family: var(--font-kicker); font-size: 30px; font-weight: 700; line-height: 1.1; letter-spacing: -0.01em; color: var(--accent); }
+.meta-headline span { font-size: 14px; color: var(--ink-soft); }
+.meta-range, .meta-pulled, .meta-note { font-size: 12.5px; line-height: 1.55; color: var(--ink-soft); }
+.meta-range strong, .meta-pulled strong, .meta-note strong { color: var(--ink); }
+.meta-pulled { padding-left: 10px; border-left: 3px solid var(--aud-line); }
+.meta-note { font-size: 12px; color: var(--aud-muted); }
+.meta-result-empty { font-size: 13px; color: var(--aud-muted); }
+
+.meta-scen { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.meta-card { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 12px; background: var(--paper-card); border: 1px solid var(--rule); border-radius: 8px; }
+.meta-card.meta-mid { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent); }
+.meta-card-name { font-size: 12.5px; font-weight: 700; color: var(--ink); }
+.meta-card-name small { font-weight: 400; font-size: 12px; color: var(--ink-soft); }
+.meta-card-big { display: flex; flex-direction: column; line-height: 1.15; }
+.meta-card-big strong { font-family: var(--font-mono); font-size: 17px; font-weight: 700; letter-spacing: -0.02em; color: var(--ink); overflow-wrap: anywhere; }
+.meta-card-big span { font-size: 11.5px; color: var(--ink-soft); }
+.meta-mid .meta-card-big strong { color: var(--accent); }
+.meta-card-rows { display: grid; grid-template-columns: 1fr; gap: 0; margin: 4px 0 0; padding-top: 8px; border-top: 1px solid var(--rule-soft); font-size: 12px; }
+.meta-mid .meta-card-rows { border-top-color: var(--aud-line); }
+.meta-card-rows dt { margin-top: 6px; color: var(--ink-soft); line-height: 1.3; }
+.meta-card-rows dt:first-child { margin-top: 0; }
+.meta-card-rows dd { margin: 0; font-family: var(--font-mono); font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+
+.meta-check { padding: 10px 12px; background: var(--paper-warm); border-radius: 8px; font-size: 12.5px; line-height: 1.5; color: var(--ink-soft); }
+.meta-check strong { color: var(--ink); }
+.meta-insert-row { display: flex; }
+.meta-insert-btn { min-height: 40px; padding: 8px 18px; text-align: left; line-height: 1.3; }
+.meta-foot { font-size: 11.5px; color: var(--aud-muted); }
+
+/* a result for the earlier choices: still readable, but no longer the page's best answer (colour only moves to grey: no opacity, so it stays legible) */
+.meta-result.is-stale { border-color: var(--rule); border-style: dashed; }
+.meta-result.is-stale .meta-headline strong,
+.meta-result.is-stale .meta-mid .meta-card-big strong { color: var(--aud-muted); }
+.meta-result.is-stale .meta-card.meta-mid { border-color: var(--rule); background: var(--paper-card); box-shadow: none; }
+
+/* ------------------------------------------------------------------ narrow screens and special modes */
+@media (max-width: 560px) {
+  .meta-scen { grid-template-columns: 1fr; }
+  .meta-card { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .meta-card-name { flex: 1 1 100%; }
+  .meta-card-big { flex: 1 1 auto; }
+  .meta-card-rows { flex: 1 1 100%; }
+  .meta-insert-btn { width: 100%; }
+  .meta-result { padding: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .meta-more > summary::before { transition: none; }
+}
+@media (forced-colors: active) {
+  .meta-card.meta-mid { forced-color-adjust: none; border-color: Highlight; box-shadow: 0 0 0 1px Highlight; }
+}

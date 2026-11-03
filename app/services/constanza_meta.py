@@ -12,7 +12,9 @@ What the planner can set, all from Meta itself (nothing is typed from memory):
   * geography: Meta's own geography search (DMA "geo markets", cities, regions, ZIPs, countries) - the planner picks the exact key, nothing is guessed;
   * age (18-65) and gender;
   * interests and behaviors (and the other "detailed targeting" lists): searched or browsed from Meta's `search` endpoint, then sent in the
-    targeting spec as ONE `flexible_spec` group, so the audience is "people who match ANY of the chosen interests / behaviors".
+    targeting spec as ONE `flexible_spec` group, so the audience is "people who match ANY of the chosen interests / behaviors";
+  * languages (most Entravision campaigns target Spanish speakers): Meta's own list of locales (`search?type=adlocale`), sent as the spec's
+    `locales`. See `build_targeting_spec` for how they combine with the rest and LANGUAGE_NOTE for what a "language" is to Meta.
 
 Setup (the app runs fine without it - every caller checks `is_configured()`):
     META_ACCESS_TOKEN     a long-lived token (a system user's is best) that can READ the ad account: the `ads_read` permission
@@ -63,10 +65,29 @@ _GEO_FIELDS = {"country": "countries", "region": "regions", "city": "cities", "z
 TARGETING_KEYS = ("interests", "behaviors", "life_events", "industries", "income", "family_statuses", "politics", "generation",
                   "home_ownership", "home_type", "home_value", "household_composition", "net_worth", "office_type", "moms")
 MAX_TARGETING_ITEMS = 50
+# What a chosen option may carry. One place for the lists (_item), the check of a pick (_clean_targeting) and the request model in main.py, so a row
+# the lists offer is always one a request can carry: the model's limit for `type` is the longest key above, never a number typed in separately.
+MAX_TARGETING_ID_LENGTH = 30
+MAX_NAME_LENGTH = 120
+MAX_TARGETING_TYPE_LENGTH = max(len(key) for key in TARGETING_KEYS)
+_TARGETING_ID_RE = re.compile(rf"[0-9]{{1,{MAX_TARGETING_ID_LENGTH}}}")
+# Meta documents a limit of 50 locales in a targeting spec; a planner never needs close to that many, so the app stops at half.
+MAX_LOCALES = 25
+_LOCALE_ID_RE = re.compile(r"[1-9][0-9]{0,9}")           # a locale id is a positive whole number (Meta's reference: `key`, e.g. 6 = English (US))
+_LOCALE_LIST_LIMIT = 1000                                 # Meta's own advice for "all of them": a blank `q` with limit=1000
+_LOCALE_SEARCH_LIMIT = 50                                 # a keyword search (Meta's default of 8 would hide the regional variants)
+_LANGUAGE_TTL = 12 * 3600
 # kind -> the `class` Meta's adTargetingCategory browse takes (interests are also searchable by keyword: type=adinterest)
 CATALOG_CLASSES = {"interests": "interests", "behaviors": "behaviors", "demographics": "demographics"}
 _CATALOG_TTL = 12 * 3600
 _ESTIMATE_TTL = 600
+
+# What Meta's "language" is, in the words the panel shows next to the language picker (and returns from the status and languages routes).
+LANGUAGE_NOTE = (
+    "Meta's languages are the language people have set Facebook or Instagram to, not a count of who speaks it. A Spanish speaker whose app is "
+    "set to English is not included, so a Spanish audience can come out smaller than the Spanish-speaking population. Leave languages empty to "
+    "count everyone in the geography, whatever language they use."
+)
 
 
 class MetaAPIError(Exception):
@@ -98,8 +119,9 @@ def model_auction(
 ) -> dict:
     """The planning numbers for one Meta line: three impression scenarios from the lower-end audience, and the budget cross-check.
 
-    `audience_lower` is the LOWER end of the platform's range (what the scenarios multiply); `audience_upper` is context (a manual entry may
-    give only the lower end). Without an audience there are no scenarios, only the budget figure."""
+    `audience_lower` is the LOWER end of the platform's range (what the scenarios multiply); `audience_upper` is context (a caller may give only the
+    lower end). `audience_source` says where the range came from: "meta_api" for a live pull, "manual" for bounds a caller supplied itself (the panel
+    never does; snapshots saved before it pulled everything from Meta carry it). Without an audience there are no scenarios, only the budget figure."""
     default_cpm = product_cpm(product_name)
     if default_cpm is None:
         raise ValueError("Choose one of the three paid Facebook & Instagram Ads products.")
@@ -202,7 +224,7 @@ def status() -> dict:
     """Whether the Meta connection is set up - which settings are missing, never their values - and the planning multipliers."""
     missing = missing_config()
     return {"configured": not missing, "missing": missing, "account": account_hint(), "version": (os.environ.get("META_GRAPH_API_VERSION") or DEFAULT_GRAPH_VERSION).strip(),
-            "scenarios": platform_scenarios.to_public(), "setup_hint": SETUP_HINT}
+            "scenarios": platform_scenarios.to_public(), "setup_hint": SETUP_HINT, "language_note": LANGUAGE_NOTE}
 
 
 SETUP_HINT = ("Add META_ACCESS_TOKEN (a token with the ads_read permission for the ad account) and META_AD_ACCOUNT_ID in the app's secrets "
@@ -311,6 +333,19 @@ def reset_cache() -> None:
         _cache.clear()
 
 
+def _remembered_list(key: str, ttl: float, fetch) -> list:
+    """A list Meta is asked for once per `ttl` seconds. Only a non-empty list is remembered: an empty answer is asked again."""
+    with _lock:
+        hit = _cache.get(key)
+        if hit and time.monotonic() - hit[0] < ttl:
+            return list(hit[1])
+    items = fetch()
+    if items:
+        with _lock:
+            _cache[key] = (time.monotonic(), items)
+    return list(items)
+
+
 def search_geography(query: str, location_type: str) -> list[dict]:
     """Candidate geographies for explicit planner selection; never guess a DMA."""
     if location_type not in _GEO_FIELDS:
@@ -338,15 +373,19 @@ def _size(row: dict, side: str) -> Optional[int]:
 
 
 def _item(row: dict, kind: Optional[str]) -> Optional[dict]:
-    """One detailed-targeting option as the panel shows it; None for a row without an id or a name, or whose type this app cannot put in a
-    targeting spec (a row keeps its OWN type: it is never relabelled to the list it was browsed from)."""
+    """One detailed-targeting option as the panel shows it; None for a row without a numeric id or a name, or whose type this app cannot put in a
+    targeting spec (a row keeps its OWN type: it is never relabelled to the list it was browsed from). A name longer than a pick can carry is
+    shortened, as `_locale` does, so every row offered can be chosen."""
     if not isinstance(row, dict) or row.get("id") is None or not str(row.get("name") or "").strip():
+        return None
+    item_id = str(row["id"]).strip()
+    if not _TARGETING_ID_RE.fullmatch(item_id):
         return None
     item_type = str(row.get("type") or kind or "")
     if item_type not in TARGETING_KEYS:
         return None
     path = row.get("path")
-    return {"id": str(row["id"]), "name": str(row["name"]).strip(), "type": item_type,
+    return {"id": item_id, "name": str(row["name"]).strip()[:MAX_NAME_LENGTH], "type": item_type,
             "path": [str(p) for p in path] if isinstance(path, list) else [],
             "audience_lower": _size(row, "lower"), "audience_upper": _size(row, "upper"),
             "description": str(row.get("description") or "")[:240]}
@@ -365,16 +404,7 @@ def targeting_catalog(kind: str) -> list[dict]:
         return sorted(items, key=lambda i: i["name"].lower())
     if not is_configured():
         return fetch()                                        # raises the "not configured" message
-    key = f"catalog:{graph_version()}:{_account()}:{kind}"
-    with _lock:
-        hit = _cache.get(key)
-        if hit and time.monotonic() - hit[0] < _CATALOG_TTL:
-            return list(hit[1])
-    items = fetch()
-    if items:                                                  # only a non-empty list is remembered for hours: an empty answer is asked again
-        with _lock:
-            _cache[key] = (time.monotonic(), items)
-    return list(items)
+    return _remembered_list(f"catalog:{graph_version()}:{_account()}:{kind}", _CATALOG_TTL, fetch)
 
 
 def search_targeting(q: str) -> dict[str, list[dict]]:
@@ -412,7 +442,7 @@ def _clean_targeting(items) -> list[dict]:
         if not isinstance(raw, dict):
             raise ValueError("Each interest or behavior needs an id, a name and a type.")
         item_id, name, kind = str(raw.get("id") or ""), str(raw.get("name") or "").strip(), str(raw.get("type") or "")
-        if not re.fullmatch(r"[0-9]{1,30}", item_id) or not 1 <= len(name) <= 120 or kind not in TARGETING_KEYS:
+        if not _TARGETING_ID_RE.fullmatch(item_id) or not 1 <= len(name) <= MAX_NAME_LENGTH or kind not in TARGETING_KEYS:
             raise ValueError("Each interest or behavior needs a numeric Meta id, a name and a known type; pick it from Meta's list.")
         if (kind, item_id) not in seen:
             seen.add((kind, item_id))
@@ -420,10 +450,78 @@ def _clean_targeting(items) -> list[dict]:
     return out
 
 
+def _locale(row) -> Optional[dict]:
+    """One language as the picker shows it. Meta's reference puts the number under `key` (`id` is read too, in case the shape moves); None for
+    a row without a whole-number id or a name."""
+    if not isinstance(row, dict):
+        return None
+    raw = row.get("key") if row.get("key") is not None else row.get("id")
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        return None
+    locale_id, name = str(raw).strip(), str(row.get("name") or "").strip()
+    if not _LOCALE_ID_RE.fullmatch(locale_id) or not name:
+        return None
+    return {"id": locale_id, "name": name[:MAX_NAME_LENGTH]}
+
+
+def search_locales(q: str = "") -> list[dict]:
+    """The languages Meta can target, as [{id, name}] sorted by name (the id is a string; `build_targeting_spec` sends it as a number).
+
+    Without `q`: the whole list. Meta's targeting search documents this (`type=adlocale`, a blank `q`, `limit=1000`), so no curated list is
+    needed; it is cached for hours, and an empty answer is asked again. With `q` (2-60 characters): the locales Meta's search finds for those
+    letters, e.g. "Spanish" (regional variants such as "Spanish (Spain)" are separate locales). A language is whatever Meta lists: this app
+    never carries a locale id of its own."""
+    q = (q or "").strip()
+    if q and not 2 <= len(q) <= 60:
+        raise ValueError("Search text must be 2–60 characters.")
+
+    def fetch():
+        result = _graph_get("search", {"type": "adlocale", "q": q, "limit": _LOCALE_SEARCH_LIMIT if q else _LOCALE_LIST_LIMIT})
+        rows = result.get("data")
+        found: dict[str, dict] = {}
+        for row in rows if isinstance(rows, list) else []:
+            item = _locale(row)
+            if item and item["id"] not in found:
+                found[item["id"]] = item
+        return sorted(found.values(), key=lambda i: (i["name"].lower(), int(i["id"])))
+    if q or not is_configured():
+        return fetch()                                        # a keyword search is asked fresh; unconfigured raises the "not configured" message
+    return _remembered_list(f"locales:{graph_version()}", _LANGUAGE_TTL, fetch)
+
+
+def clean_locales(items) -> list[dict]:
+    """The planner's chosen languages ([{id, name}] picked from search_locales), validated to what a targeting spec takes: at most MAX_LOCALES,
+    each with a whole-number Meta locale id and a name. A language chosen twice counts once."""
+    if items is None:
+        return []
+    if not isinstance(items, (list, tuple)) or len(items) > MAX_LOCALES:
+        raise ValueError(f"Choose at most {MAX_LOCALES} languages.")
+    out, seen = [], set()
+    for raw in items:
+        if not isinstance(raw, dict):
+            raise ValueError("Each language needs a Meta locale id and a name; pick it from Meta's language list.")
+        raw_id = raw.get("id")
+        item_id = "" if isinstance(raw_id, bool) or not isinstance(raw_id, (int, str)) else str(raw_id).strip()
+        name = str(raw.get("name") or "").strip()
+        if not _LOCALE_ID_RE.fullmatch(item_id) or not 1 <= len(name) <= MAX_NAME_LENGTH:
+            raise ValueError("Each language needs a numeric Meta locale id and a name; pick it from Meta's language list.")
+        if item_id not in seen:
+            seen.add(item_id)
+            out.append({"id": item_id, "name": name})
+    return out
+
+
 def build_targeting_spec(*, geo_type: str, geo_key: str, age_min: Optional[int] = None, age_max: Optional[int] = None,
-                         gender: Optional[str] = None, targeting=None) -> dict:
-    """The targeting_spec sent to Meta for explicitly selected geography, age, gender and interests / behaviors. ValueError for a choice Meta
-    would refuse. Chosen options form ONE flexible_spec group: the audience is people who match ANY of them."""
+                         gender: Optional[str] = None, targeting=None, locales=None) -> dict:
+    """The targeting_spec sent to Meta for explicitly selected geography, age, gender, interests / behaviors and languages. ValueError for a
+    choice Meta would refuse.
+
+    How the choices combine (Meta's Ads Manager rule): different kinds of choice are ANDed - geography AND age AND gender AND the interests /
+    behaviors AND the languages. Inside a kind they are ORed: the chosen interests / behaviors form ONE flexible_spec group (people who match
+    ANY of them), and several languages are ANY of them too (`locales` is a plain list of locale ids; Meta's reference documents up to 50).
+    So "Spanish + English" in Los Angeles is people there whose app is set to either: the first language narrows the audience compared with none,
+    and each further one widens it again. The names that came with the chosen languages stay with the snapshot for display; the spec carries the
+    ids only."""
     if geo_type not in _GEO_FIELDS or not re.fullmatch(r"[A-Za-z0-9_:-]{1,40}", geo_key or ""):
         raise ValueError("Select a valid Meta geography from the search results.")
     if age_min is not None and not 18 <= age_min <= 65:
@@ -448,13 +546,18 @@ def build_targeting_spec(*, geo_type: str, geo_key: str, age_min: Optional[int] 
         for it in chosen:
             group.setdefault(it["type"], []).append({"id": it["id"], "name": it["name"]})
         spec["flexible_spec"] = [group]
+    languages = clean_locales(locales)
+    if languages:
+        spec["locales"] = sorted(int(language["id"]) for language in languages)      # a stable order: the same languages share one cached estimate
     return spec
 
 
 def fetch_reach_estimate(*, geo_type: str, geo_key: str, age_min: Optional[int] = None, age_max: Optional[int] = None,
-                         gender: Optional[str] = None, targeting=None) -> tuple[int, int]:
-    """Meta's potential audience (lower, upper) for explicitly selected targeting - the account-scoped `reachestimate`."""
-    spec = build_targeting_spec(geo_type=geo_type, geo_key=geo_key, age_min=age_min, age_max=age_max, gender=gender, targeting=targeting)
+                         gender: Optional[str] = None, targeting=None, locales=None) -> tuple[int, int]:
+    """Meta's potential audience (lower, upper) for explicitly selected targeting - the account-scoped `reachestimate`. The estimate is
+    remembered for ten minutes under the whole targeting spec, languages included, so a Spanish estimate never answers an English one."""
+    spec = build_targeting_spec(geo_type=geo_type, geo_key=geo_key, age_min=age_min, age_max=age_max, gender=gender, targeting=targeting,
+                                locales=locales)
     missing = missing_config()
     if missing:
         raise MetaAPIError(f"Meta is not configured: add {' and '.join(missing)} in the app's secrets (Replit -> Secrets).", "not_configured", 503)

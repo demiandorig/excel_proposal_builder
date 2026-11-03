@@ -6442,6 +6442,59 @@ function _jumpToCurateField(field, lineId) {
   }, 80);
 }
 
+// ======================================================================
+// The Meta panel of a Step 05 avails card (the three paid Facebook & Instagram Ads products). One way to give it the audience: PULL it from
+// Meta (constanza_meta.py), in four numbered sections built from the shared audience kit (audience-kit.css) - 1 Where (a Meta geography),
+// 2 Who (age, gender), 3 Language (Meta locales), 4 Audience (interests / behaviors / demographics, with the SegmentBrowser pop-up for the
+// whole lists) - then "Estimate audience" and the three monthly-impression scenarios (lower end x 4.3 / 5.5 / 8.6) with Insert into Avails.
+// The planner never types an audience size: they may type avails straight into the card's own fields, as for any product. (A proposal saved
+// earlier can hold a snapshot whose potential_audience.source is "manual": it still renders, labelled "entered manually".)
+//
+// State: state.metaSel[lineId] is what the planner has chosen for that line (kept for the session; restored from a saved snapshot's
+// meta_targeting, languages included); state.metaStatus caches GET /api/constanza/meta/status for META_STATUS_TTL_MS so a re-render of the
+// Avails grid does not ask again. The panel is rebuilt whenever the grid is; _metaSync(panel) keeps the parts that depend on the choices
+// (summaries, chips, pressed buttons) in step without touching an input the planner is typing in.
+// META PANEL: begin
+// ======================================================================
+const META_GEO_TYPES = [["geo_market", "TV market"], ["city", "City"], ["region", "State / region"], ["zip", "ZIP code"], ["country", "Country"]];
+const META_GEO_PLACEHOLDER = { geo_market: "TV market, e.g. Los Angeles", city: "City, e.g. Phoenix", region: "State or region, e.g. Texas", zip: "ZIP code, e.g. 90210", country: "Country, e.g. United States" };
+const META_AGE_MIN = 18;
+const META_AGE_MAX = 65;
+const META_AGE_PRESETS = [["All ages", 18, 65], ["18–24", 18, 24], ["25–34", 25, 34], ["25–54", 25, 54], ["35–54", 35, 54], ["55+", 55, 65]];
+// A quick pick names the language(s) to look for: the locale ids always come from Meta's own list (GET /meta-languages?q=...), never from here.
+const META_LANG_QUICK = [{ key: "spanish", label: "Spanish speakers", words: ["Spanish"] }, { key: "english", label: "English", words: ["English"] }, { key: "both", label: "Spanish + English", words: ["Spanish", "English"] }];
+const META_KIND_LABEL = { interests: "Interest", behaviors: "Behavior", life_events: "Life event", industries: "Industry", income: "Income", family_statuses: "Family status", politics: "Politics", generation: "Generation", home_ownership: "Home ownership", home_type: "Home type", home_value: "Home value", household_composition: "Household", net_worth: "Net worth", office_type: "Office type", moms: "Moms" };
+const META_MAX_LANGUAGES = 25;      // constanza_meta.MAX_LOCALES
+const META_MAX_DETAILED = 50;       // constanza_meta.MAX_TARGETING_ITEMS
+const META_STATUS_TTL_MS = 30000;
+// The longest search text each box can hold: what the server takes (search_geography 2-100, search_targeting 2-80, search_locales 2-60), so a long paste
+// is cut in the box instead of coming back as "Search text must be 2-80 characters".
+const META_SEARCH_MAX = { geo: 100, aud: 80, lang: 60 };
+const META_LIVE_ID = "meta-live-announce";
+// "Browse all ..." opens the shared pop-up (segment-browser.js). If that script did not load, the controls say so instead of doing nothing.
+const META_BROWSE_MISSING = "The browse window didn’t load, so “Browse all” is off. Reload the page to get it back.";
+// What a request field is called when the server refuses it by name (FastAPI's 422 lists the field as `loc`).
+const META_FIELD_WORDS = { product_name: "the product", retail_budget: "the retail budget", retail_cpm: "the retail CPM", months: "the flight length", meta_geo_type: "the kind of place",
+  meta_geo_key: "the place", meta_geo_label: "the place’s name", age_min: "the youngest age", age_max: "the oldest age", gender: "gender" };
+// What an empty list is called in "Meta sent back an empty list of ...".
+const META_CATALOG_WORDS = { interests: "interests", behaviors: "behaviors", demographics: "demographic options" };
+// Shown only until the server's own wording arrives (status.language_note / the languages answer); keep it the same as constanza_meta.LANGUAGE_NOTE.
+const META_LANGUAGE_NOTE = "Meta's languages are the language people have set Facebook or Instagram to, not a count of who speaks it. A Spanish speaker whose app is set to English is not included, so a Spanish audience can come out smaller than the Spanish-speaking population. Leave languages empty to count everyone in the geography, whatever language they use.";
+
+// 33862.5 -> "$33,862.50", 2000 -> "$2,000": whole dollars when there are no cents, two decimals otherwise, never "$33,862.5". One rule for every amount
+// the panel shows (the plan strip and the result).
+function _metaMoney(value) {
+  const n = Number(value);
+  if (value == null || value === "" || !isFinite(n)) return "—";
+  const cents = Math.round(Math.abs(n) * 100);
+  const digits = cents % 100 ? 2 : 0;
+  return `${n < 0 ? "-" : ""}$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+}
+
+function _metaCount(value) {
+  return Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
 function _metaFullFlightRetailBudget(li) {
   // Step 04's line budget is per selected billing period; li.months is
   // that period's count (1 for full-flight), so this is the actual retail
@@ -6449,38 +6502,281 @@ function _metaFullFlightRetailBudget(li) {
   return Math.max(0, Number(li.monthly_budget) || 0) * Math.max(1, Number(li.months) || 1);
 }
 
-// The interests / behaviors / demographics a planner picked from Meta's own lists for a line (kept for the session; a saved snapshot restores them).
-function _metaSelected(lid) {
-  state.metaTargeting = state.metaTargeting || {};
-  if (!state.metaTargeting[lid]) {
-    const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
-    state.metaTargeting[lid] = ((saved && saved.meta_targeting && saved.meta_targeting.detailed) || []).map(x => ({ id: x.id, name: x.name, type: x.type }));
+// ---------------------------------------------------------------- what the planner has chosen
+
+// The choices for a line, read back from a saved snapshot's meta_targeting (no snapshot, or a manual one: the defaults = everyone, no place yet).
+function _metaSelFromSnapshot(saved) {
+  const t = saved && saved.meta_targeting;
+  const sel = { geoType: "geo_market", geo: null, ageMin: META_AGE_MIN, ageMax: META_AGE_MAX, gender: "all", languages: [], detailed: [] };
+  if (!t) return sel;
+  if (META_GEO_TYPES.some(([key]) => key === t.geo_type)) sel.geoType = t.geo_type;
+  if (t.geo_key != null && t.geo_key !== "") {
+    const label = String(t.geo_name || "");
+    const [name, region, country] = label ? label.split(" · ") : [];
+    sel.geo = { type: sel.geoType, key: String(t.geo_key), name: name || `Meta geography ${t.geo_key}`, region: region || "", country: country || "", label };
   }
-  return state.metaTargeting[lid];
+  const age = value => Math.min(Math.max(Math.round(Number(value)) || META_AGE_MIN, META_AGE_MIN), META_AGE_MAX);
+  if (t.age_min != null) sel.ageMin = age(t.age_min);
+  if (t.age_max != null) sel.ageMax = Math.max(age(t.age_max), sel.ageMin);
+  if (t.gender === "male" || t.gender === "female") sel.gender = t.gender;
+  sel.languages = (t.languages || []).filter(x => x && x.id != null && x.name).map(x => ({ id: String(x.id), name: String(x.name) }));
+  sel.detailed = (t.detailed || []).filter(x => x && x.id != null && x.name).map(x => ({ id: String(x.id), name: String(x.name), type: String(x.type || "interests") }));
+  return sel;
 }
 
-function _metaChipsHtml(lid) {
-  const chosen = _metaSelected(lid);
-  if (!chosen.length) return `<span class="cz-note">None chosen: the audience is everyone Meta counts on its default placements (Facebook, Instagram, Messenger, Audience Network) in the geography.</span>`;
-  return chosen.map((x, i) => `<span class="cz-chip cz-ok">${escapeHtml(x.name)} <small>${escapeHtml(x.type.replace("_", " "))}</small>`
-    + `<button type="button" class="cz-x" data-meta-act="remove" data-i="${i}" aria-label="Remove ${escapeHtml(x.name)}">×</button></span>`).join("");
+function _metaSel(lid) {
+  state.metaSel = state.metaSel || {};
+  if (!state.metaSel[lid]) state.metaSel[lid] = _metaSelFromSnapshot(((state.availsData || {})[lid] || {}).meta_forecast);
+  return state.metaSel[lid];
 }
 
-// What a live pull was for, in words: "Los Angeles (TV market), women 25–44, any of: Soccer".
+// What an estimate depends on, as text: two choices with the same signature ask Meta the same question.
+function _metaSelSignature(sel) {
+  return JSON.stringify([sel.geo ? `${sel.geo.type}:${sel.geo.key}` : "", sel.ageMin, sel.ageMax, sel.gender,
+    sel.languages.map(x => String(x.id)).sort(), sel.detailed.map(x => `${x.type}:${x.id}`).sort()]);
+}
+
+// Has the planner changed what is asked since this snapshot was calculated? A manual snapshot has no choices to compare.
+function _metaChoicesChanged(saved, lid) {
+  if (!saved || !saved.meta_targeting) return false;
+  return _metaSelSignature(_metaSel(lid)) !== _metaSelSignature(_metaSelFromSnapshot(saved));
+}
+
+// ---------------------------------------------------------------- words for what is chosen
+
+function _metaFold(value) {
+  let s = value == null ? "" : String(value);
+  if (typeof s.normalize === "function") s = s.normalize("NFD").replace(/[̀-ͯ]/g, "");
+  return s.toLowerCase();
+}
+
+function _metaTypeLabel(type) {
+  const hit = META_GEO_TYPES.find(([key]) => key === type);
+  return hit ? hit[1] : String(type || "");
+}
+
+function _metaKindLabel(type) {
+  return META_KIND_LABEL[type] || String(type || "").replace(/_/g, " ");
+}
+
+// 25–44, 55+ (65 is "65 and over" to Meta), or "" for all ages.
+function _metaAgeText(min, max) {
+  if (min <= META_AGE_MIN && max >= META_AGE_MAX) return "";
+  return max >= META_AGE_MAX ? `${min}+` : `${min}–${max}`;
+}
+
+// "Spanish (Mexico)" -> "Spanish": the language without its regional variant.
+function _metaLangFamily(name) {
+  return String(name || "").split(/\s*[(,]/)[0].trim() || String(name || "");
+}
+
+function _metaLangStarts(name, word) {
+  return _metaFold(name).startsWith(_metaFold(word));
+}
+
+// The chosen languages grouped by family, in the order chosen. A family with several variants shows as one ("Spanish", 3 versions): the
+// quick pick adds every Spanish locale Meta lists, and a row of near-identical chips would bury the one that matters.
+function _metaLangFamilies(languages) {
+  const out = [];
+  (languages || []).forEach(l => {
+    const name = _metaLangFamily(l.name);
+    let group = out.find(x => x.key === _metaFold(name));
+    if (!group) { group = { key: _metaFold(name), name, items: [] }; out.push(group); }
+    group.items.push(l);
+  });
+  out.forEach(g => { g.label = g.items.length > 1 ? g.name : g.items[0].name; });
+  return out;
+}
+
+// The live one-line summary and the count pill of each section.
+function _metaSummaries(sel) {
+  const age = _metaAgeText(sel.ageMin, sel.ageMax);
+  const gender = sel.gender === "female" ? "Women" : (sel.gender === "male" ? "Men" : "");
+  const families = _metaLangFamilies(sel.languages);
+  const names = sel.detailed.map(x => x.name);
+  const picks = !names.length ? "No interests or behaviors yet" : (names.length <= 2 ? names.join(", ") : `${names.slice(0, 2).join(", ")} +${names.length - 2} more`);
+  return {
+    where: { text: sel.geo ? `${sel.geo.name} · ${_metaTypeLabel(sel.geo.type)}` : "Choose a place", set: !!sel.geo, count: 0 },
+    who: { text: `${gender || "All genders"} · ${age || "all ages"}`, set: !!(gender || age), count: (gender ? 1 : 0) + (age ? 1 : 0) },
+    lang: { text: families.length ? families.map(f => f.label).join(" · ") : "Any language", set: families.length > 0, count: families.length },
+    aud: { text: picks, set: names.length > 0, count: names.length },
+  };
+}
+
+// What a live pull was for, in words: "Los Angeles (TV market), women ages 25–44, language set to Spanish, any of: Soccer". A language is
+// what people have SET their Facebook / Instagram to, so it is never said to be what they speak.
 function _metaPulledFor(data) {
   const t = data && data.meta_targeting;
   if (!t) return "";
   const kind = { geo_market: "TV market", city: "city", region: "state / region", zip: "ZIP", country: "country" }[t.geo_type] || t.geo_type;
   const age = t.age_min != null || t.age_max != null ? `ages ${t.age_min != null ? t.age_min : "18"}–${t.age_max != null ? t.age_max : "65+"}` : "";
   const gender = t.gender === "male" ? "men" : (t.gender === "female" ? "women" : "");
+  const languages = _metaLangFamilies(t.languages).map(f => f.label);
+  const language = languages.length ? `language set to ${languages.join(" or ")}` : "";
   const detailed = (t.detailed || []).length ? `any of: ${t.detailed.map(x => x.name).join(", ")}` : "";
-  return [`${t.geo_name || "Meta geography " + t.geo_key} (${kind})`, [gender, age].filter(Boolean).join(" "), detailed].filter(Boolean).join(", ");
+  return [`${t.geo_name || "Meta geography " + t.geo_key} (${kind})`, [gender, age].filter(Boolean).join(" "), language, detailed].filter(Boolean).join(", ");
 }
+
+// 1,234,567 -> "1.2M": an audience size is an estimate, so the short form reads better than seven digits.
+function _metaCompact(value) {
+  const n = Number(value);
+  if (!isFinite(n)) return "";
+  const a = Math.abs(n);
+  if (a < 1000) return String(Math.round(a));
+  const round = x => (x >= 10 ? Math.round(x) : Math.round(x * 10) / 10);
+  if (round(a / 1e3) < 1000) return round(a / 1e3) + "K";
+  if (round(a / 1e6) < 1000) return round(a / 1e6) + "M";
+  return round(a / 1e9) + "B";
+}
+
+function _metaSizeText(lower, upper) {
+  if (lower == null || !isFinite(Number(lower))) return "";
+  return upper != null && Number(upper) > Number(lower) ? `${_metaCompact(lower)} – ${_metaCompact(upper)}` : _metaCompact(lower);
+}
+
+// The text with the typed words in <mark>, everything escaped.
+function _metaHighlight(text, query) {
+  const t = String(text == null ? "" : text);
+  const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
+  const low = t.toLowerCase();
+  if (!words.length || low.length !== t.length) return escapeHtml(t);
+  const spans = [];
+  words.forEach(w => { for (let at = low.indexOf(w); at >= 0; at = low.indexOf(w, at + w.length)) spans.push([at, at + w.length]); });
+  spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged = [];
+  spans.forEach(([start, end]) => {
+    const last = merged[merged.length - 1];
+    if (last && start <= last[1]) last[1] = Math.max(last[1], end); else merged.push([start, end]);
+  });
+  let out = "", pos = 0;
+  merged.forEach(([start, end]) => {
+    out += escapeHtml(t.slice(pos, start)) + "<mark>" + escapeHtml(t.slice(start, end)) + "</mark>";
+    pos = end;
+  });
+  return out + escapeHtml(t.slice(pos));
+}
+
+// The places named in the proposal's geography, as search words: "Phoenix, AZ and Los Angeles DMA" -> ["Phoenix", "Los Angeles"]. At most three;
+// a state code, "TBD" or "national" is no place to search for.
+function _metaGeoSuggestions(text) {
+  const seen = new Set();
+  const out = [];
+  String(text || "").split(/[,;\n|]+|\s+(?:and|&)\s+/i).forEach(raw => {
+    const q = raw.replace(/\([^)]*\)/g, " ").replace(/\b(?:dmas?|markets?|metro|area)\s*$/i, "").replace(/\s+/g, " ").trim();
+    if (q.length < 3 || q.length > 60 || seen.has(q.toLowerCase()) || /^(?:tbd|n\/?a|none|national|nationwide|usa)$/i.test(q)) return;
+    seen.add(q.toLowerCase());
+    out.push(q);
+  });
+  return out.slice(0, 3);
+}
+
+// "(no flight dates: ...)" when the line has no readable dates: the flight length is then a stand-in, not the flight's.
+function _metaFlightHint(li) {
+  const start = _mbParseDate(_effectiveStartDate(state.activeTierLabel));
+  const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
+  return start && end ? "" : "No flight dates on this option: the flight length is not known, so 1 month is assumed.";
+}
+
+// ---------------------------------------------------------------- the connection to Meta
+
+// null while unknown (not asked yet, or the check failed: the estimate then tells its own error), else whether the admin has set Meta up.
+function _metaConnected(st) {
+  return st && st.data && typeof st.data.configured === "boolean" ? st.data.configured : null;
+}
+
+function _metaOffReason(st) {
+  const names = ((st && st.data && st.data.missing) || []).map(x => String(x).split(/\s/)[0]).filter(Boolean);
+  return `Meta isn't connected yet: an admin needs to add ${names.length ? names.join(" and ") : "the Meta settings"} in the app's secrets.`;
+}
+
+// The banner under the panel's title: asking, connected (with the ad account's last four digits), not set up (naming what is missing), or unreachable.
+function _metaStatusHtml(st) {
+  if (!st || (!st.data && !st.error)) {
+    return `<div class="aud-notice aud-notice--info" role="status"><div class="aud-notice-body">Checking the connection to Meta…</div></div>`;
+  }
+  if (!st.data) {
+    return `<div class="aud-notice aud-notice--warn" role="status"><div class="aud-notice-body"><span class="aud-notice-title">Couldn’t check the Meta connection</span>${escapeHtml(st.error)}`
+      + `<button type="button" class="aud-notice-action" data-meta-act="recheck">Check again</button></div></div>`;
+  }
+  const d = st.data;
+  if (d.configured) {
+    return `<div class="aud-notice aud-notice--connected" role="status"><div class="aud-notice-body"><span class="aud-notice-title">Connected to Meta</span>`
+      + `${d.account ? `Ad account <code>${escapeHtml(d.account)}</code>` : "Ad account connected"}${d.version ? ` · API ${escapeHtml(d.version)}` : ""}</div></div>`;
+  }
+  const missing = (d.missing || []).map(item => {
+    const m = String(item).match(/^(\S+)([\s\S]*)$/);
+    return `<li><code>${escapeHtml(m ? m[1] : item)}</code>${m && m[2] ? escapeHtml(m[2]) : ""}</li>`;
+  }).join("");
+  return `<div class="aud-notice aud-notice--warn" role="status"><div class="aud-notice-body"><span class="aud-notice-title">Meta isn’t connected yet</span>`
+    + `An admin needs to add ${missing ? "these settings" : "the Meta settings"} in the app’s secrets before audiences can be pulled.${missing ? `<ul class="meta-missing">${missing}</ul>` : ""}`
+    + `${d.setup_hint ? `<details class="meta-more"><summary>How an admin sets this up</summary><p>${escapeHtml(d.setup_hint)}</p></details>` : ""}</div></div>`;
+}
+
+// Asks the server whether Meta is set up, at most once per META_STATUS_TTL_MS and never twice at once; every panel on the page then shows the answer.
+function _metaStatusEnsure(force) {
+  const cur = state.metaStatus;
+  if (cur && cur.pending) return cur.pending;
+  if (!force && cur && cur.at && Date.now() - cur.at < META_STATUS_TTL_MS) return Promise.resolve(cur);
+  const pending = fetch("/api/constanza/meta/status")
+    .then(async response => {
+      const data = await response.json();
+      if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+      state.metaStatus = { at: Date.now(), data, error: null, pending: null };
+    })
+    .catch(error => { state.metaStatus = { at: Date.now(), data: null, error: String((error && error.message) || error), pending: null }; })
+    .then(() => { _metaRenderStatus(); return state.metaStatus; });
+  state.metaStatus = Object.assign({}, cur || {}, { pending });
+  return pending;
+}
+
+function _metaRenderStatus() {
+  document.querySelectorAll(".meta-panel").forEach(panel => {
+    const slot = panel.querySelector("[data-meta-status]");
+    if (slot) slot.innerHTML = _metaStatusHtml(state.metaStatus);
+    _metaApplyStatus(panel);
+  });
+}
+
+// The language caveat in the server's own words (status.language_note, or the languages answer's note): a short first sentence, the rest on demand.
+function _metaLanguageNote() {
+  const st = state.metaStatus;
+  return (st && st.data && st.data.language_note) || state.metaLanguageNote || META_LANGUAGE_NOTE;
+}
+
+function _metaShortNote(note) {
+  const first = String(note || "").match(/^[\s\S]*?[.!?](?=\s|$)/);
+  return first ? first[0] : String(note || "");
+}
+
+function _metaBrowseOff() {
+  return window.SegmentBrowser ? "" : META_BROWSE_MISSING;
+}
+
+// What the connection state means for the controls: no connection = the estimate button off (with the reason beside it) and the controls that
+// ask Meta off too, since each would only answer with the same error.
+function _metaApplyStatus(panel) {
+  const rt = _metaRt(panel);
+  const off = _metaConnected(state.metaStatus) === false;
+  const btn = panel.querySelector('[data-meta-act="estimate"]');
+  const reason = panel.querySelector("[data-meta-reason]");
+  if (btn) btn.disabled = off || rt.busy;
+  if (reason) { reason.hidden = !off; reason.textContent = off ? _metaOffReason(state.metaStatus) : ""; }
+  const browseOff = _metaBrowseOff();
+  panel.querySelectorAll("[data-meta-needs-api]").forEach(el => { el.disabled = off || (!!browseOff && /^browse/.test(el.dataset.metaAct || "")); });
+  panel.querySelectorAll("[data-meta-browse-reason]").forEach(el => { el.hidden = !browseOff; el.textContent = browseOff; });
+  const note = _metaLanguageNote();
+  const short = panel.querySelector("[data-meta-langshort]");
+  const full = panel.querySelector("[data-meta-langfull]");
+  if (short) short.textContent = _metaShortNote(note);
+  if (full) full.textContent = note;
+}
+
+// ---------------------------------------------------------------- the result
 
 function _metaForecastSummaryHtml(data, li, p, forceStale) {
   if (!data) return "";
   const n = value => Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 });
-  const money = value => "$" + Number(value).toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const money = _metaMoney;
   const audience = data.potential_audience;
   const sc = data.scenarios;
   const effectiveCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm;
@@ -6490,77 +6786,935 @@ function _metaForecastSummaryHtml(data, li, p, forceStale) {
     || Number(data.months) !== _constanzaFlightMonths(li)
     || data.proposal_geo !== _constanzaGeoFor(li.id)
     || data.target_text !== _effectiveTargetText(li)
-    || Math.abs(Number(data.retail_cpm) - Number(effectiveCpm)) > 0.01;
-  let table = "";
+    || Math.abs(Number(data.retail_cpm) - Number(effectiveCpm)) > 0.01
+    || _metaChoicesChanged(data, li.id);
+  let head = `<p class="meta-result-empty">Estimate an audience to see the scenarios.</p>`;
+  if (audience) {
+    const range = Number(audience.upper) > Number(audience.lower) ? `${n(audience.lower)} – ${n(audience.upper)}` : n(audience.lower);
+    const pulled = data.meta_targeting ? `<p class="meta-pulled"><strong>Pulled for</strong> ${escapeHtml(_metaPulledFor(data))}.</p>` : "";
+    const language = data.meta_targeting && (data.meta_targeting.languages || []).length
+      ? " The language is the one people have set on Facebook or Instagram, not who speaks it, so it can be fewer than all speakers." : "";
+    head = `<p class="meta-headline"><strong>${n(audience.lower)}</strong><span>accounts at the lower end of Meta’s audience</span></p>`
+      + `<p class="meta-range">Meta’s range (lower – upper end): <strong>${range}</strong> accounts ${audience.source === "meta_api" ? "(from Meta)" : "(entered manually)"}.</p>`
+      + pulled
+      + `<p class="meta-note">The scenarios use the <strong>lower end</strong>: it is the est. uniques the Avails step gets, so its frequency reads ${sc ? escapeHtml(String(sc.multipliers.mid)) : "5.5"}.${language}</p>`;
+  }
+  let cards = "";
   if (sc) {
     const m = sc.multipliers;
     const cols = [["conservative", "Conservative"], ["mid", "Mid · default"], ["upper", "Upper"]];
-    table = `<table class="constanza-range-table meta-scenarios"><tr><th></th>${cols.map(([k, label]) => `<th>${label} <small>× ${escapeHtml(String(m[k]))}</small></th>`).join("")}</tr>
-      <tr><td>Imps / month</td>${cols.map(([k]) => `<td${k === "mid" ? " class=\"meta-mid\"" : ""}>${n(sc.monthly[k])}</td>`).join("")}</tr>
-      ${sc.months > 1 ? `<tr><td>Flight · ${n(sc.months)} mo</td>${cols.map(([k]) => `<td>${n(sc.flight[k])}</td>`).join("")}</tr>` : ""}
-      <tr><td>Retail spend at the planning CPM</td>${cols.map(([k]) => `<td>${money(sc.retail_spend_at_flight[k])}</td>`).join("")}</tr></table>`;
+    cards = `<div class="meta-scen">${cols.map(([k, label]) => `<div class="meta-card${k === "mid" ? " meta-mid" : ""}">`
+      + `<p class="meta-card-name">${label} <small>× ${escapeHtml(String(m[k]))}</small></p>`
+      + `<p class="meta-card-big"><strong>${n(sc.monthly[k])}</strong> <span>imps / month</span></p>`
+      + `<dl class="meta-card-rows">${sc.months > 1 ? `<dt>Flight · ${n(sc.months)} mo</dt><dd>${n(sc.flight[k])}</dd>` : ""}`
+      + `<dt>Retail spend at the planning CPM</dt><dd>${money(sc.retail_spend_at_flight[k])}</dd></dl></div>`).join("")}</div>`;
   }
-  return `<div class="meta-plan-result">
-    <strong>${stale ? "⚠ Inputs changed — recalculate" : "Meta audience scenarios"}</strong>
-    ${audience ? `<p>Meta audience (lower – upper end): <strong>${n(audience.lower)}</strong> – ${n(audience.upper)} accounts ${audience.source === "meta_api" ? "(from Meta)" : "(entered manually)"}.${data.meta_targeting ? ` Pulled for ${escapeHtml(_metaPulledFor(data))}.` : ""} The scenarios use the <strong>lower end</strong>: it is the est. uniques the Avails step gets, so its frequency reads ${sc ? escapeHtml(String(sc.multipliers.mid)) : "5.5"}.</p>` : `<p>Enter or pull an audience to see the scenarios.</p>`}
-    ${table}
-    <p>Budget cross-check: ${money(data.retail_budget)} retail → ${money(data.media_budget)} media at a ${money(data.retail_cpm)} retail CPM buys about ${n(data.budget_impressions)} impressions over the ${n(data.months)}-month flight. That is what the budget pays for, not avails.</p>
-    ${sc && !stale ? `<button type="button" class="btn-secondary meta-insert-btn" data-meta-act="insert" data-lid="${escapeAttr(li.id)}">Insert the mid-case (${n(sc.monthly.mid)} / month) into Avails →</button>` : ""}
-    <small>Planning scenarios, not a delivery forecast · ${escapeHtml(String(data.as_of || "").slice(0, 10))}</small>
+  return `<div class="meta-result${stale ? " is-stale" : ""}">
+    <p class="meta-result-title">Meta audience scenarios</p>
+    ${stale ? `<div class="aud-notice aud-notice--warn"><div class="aud-notice-body"><span class="aud-notice-title">Inputs changed — recalculate</span>Choose the audience above and press “Estimate audience” again. These numbers are for the earlier choices.</div></div>` : ""}
+    ${head}
+    ${cards}
+    <p class="meta-check"><strong>Budget cross-check:</strong> ${money(data.retail_budget)} retail → ${money(data.media_budget)} media at a ${money(data.retail_cpm)} retail CPM buys about ${n(data.budget_impressions)} impressions over the ${n(data.months)}-month flight. That is what the budget pays for, not avails.</p>
+    ${sc && !stale ? `<div class="meta-insert-row"><button type="button" class="btn-primary meta-insert-btn" data-meta-act="insert" data-lid="${escapeAttr(li.id)}">Insert the mid-case (${n(sc.monthly.mid)} / month) into Avails →</button></div>` : ""}
+    <small class="meta-foot">Planning scenarios, not a delivery forecast · ${escapeHtml(String(data.as_of || "").slice(0, 10))}</small>
   </div>`;
 }
 
-// "(no flight dates: 1 month assumed)" when the line has no readable dates: the flight length is then a stand-in, not the flight's.
-function _metaFlightHint(li) {
-  const start = _mbParseDate(_effectiveStartDate(state.activeTierLabel));
-  const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
-  return start && end ? "" : " (no flight dates: the flight length is not known, so 1 month is assumed)";
+// What a refused request says, in the planner's words. A plain message passes through; a refusal field by field (FastAPI's 422: detail is a list of
+// { loc, msg }) names the pick or setting it was about, read from the body that was sent, instead of a bare "String should have at most 20 characters".
+function _metaErrorText(data, fallback, body) {
+  const detail = data && data.detail;
+  if (!Array.isArray(detail) || !detail.length) return _constanzaErrorText(data, fallback);
+  const sent = body || {};
+  const lines = [];
+  detail.forEach(item => {
+    const loc = item && Array.isArray(item.loc) ? item.loc.filter(x => x !== "body") : [];
+    const msg = String((item && (item.msg || item.message)) || "").trim().replace(/\.$/, "");
+    const key = String(loc[0] == null ? "" : loc[0]);
+    const at = typeof loc[1] === "number" ? loc[1] : -1;
+    const pick = key === "meta_targeting" ? (sent.meta_targeting || [])[at] : null;
+    const language = key === "meta_languages" ? (sent.meta_languages || [])[at] : null;
+    let who = "";
+    if (pick) who = `“${pick.name}” (${_metaKindLabel(pick.type)})`;
+    else if (language) who = `the language “${language.name}”`;
+    else if (key) who = META_FIELD_WORDS[key] || key.replace(/_/g, " ");
+    const line = who ? `${who}: ${msg || "not accepted"}` : msg;
+    if (line && lines.indexOf(line) < 0) lines.push(line);
+  });
+  return lines.length ? `${lines.join("; ")}. Change that choice and estimate again.` : (fallback || "Request failed.");
+}
+
+// ---------------------------------------------------------------- the panel
+
+function _metaChipHtml(cls, label, meta, act, attrs, title) {
+  return `<li class="aud-chip ${cls}"${title ? ` title="${escapeHtml(title)}"` : ""}><span class="aud-chip-label">${escapeHtml(label)}</span>`
+    + `${meta ? `<span class="aud-chip-meta">${escapeHtml(meta)}</span>` : ""}`
+    + `<button type="button" class="aud-chip-x" data-meta-act="${act}" ${attrs} aria-label="Remove ${escapeHtml(label)}">×</button></li>`;
+}
+
+function _metaGeoChipsHtml(sel) {
+  const g = sel.geo;
+  return g ? _metaChipHtml("aud-chip--geo", g.name, [_metaTypeLabel(g.type), g.region].filter(Boolean).join(" · "), "remove-geo", "", g.label || "") : "";
+}
+
+function _metaLangChipsHtml(sel) {
+  return _metaLangFamilies(sel.languages).map(f => _metaChipHtml("aud-chip--lang", f.label, f.items.length > 1 ? `${f.items.length} versions` : "", "remove-lang",
+    `data-fam="${escapeHtml(f.key)}"`, f.items.length > 1 ? f.items.map(x => x.name).join(", ") : "")).join("");
+}
+
+function _metaDetailedChipsHtml(sel) {
+  return sel.detailed.map((x, i) => _metaChipHtml(x.type === "interests" || x.type === "behaviors" ? "aud-chip--interest" : "aud-chip--demo", x.name, _metaKindLabel(x.type),
+    "remove-detailed", `data-i="${i}"`, "")).join("");
+}
+
+function _metaSecHtml(key, title, clearLabel, lid, sums, body) {
+  const s = sums[key];
+  const id = escapeAttr(lid);
+  return `<section class="aud-sec${s.set ? " has-value" : ""}" data-meta-sec="${key}" aria-labelledby="meta-h-${key}-${id}">
+    <div class="aud-sec-head">
+      <span class="aud-step" aria-hidden="true"></span>
+      <div class="aud-sec-text"><h4 class="aud-sec-title" id="meta-h-${key}-${id}">${title}</h4><p class="aud-sec-sum${s.set ? " is-set" : ""}" data-meta-sum>${escapeHtml(s.text)}</p></div>
+      <span class="aud-count" data-meta-count${s.count ? "" : " hidden"}>${s.count}</span>
+      <button type="button" class="aud-clear" data-meta-act="clear" data-sec="${key}" aria-label="${clearLabel}"${s.set ? "" : " hidden"}>Clear</button>
+    </div>
+    <div class="aud-sec-body">${body}</div>
+  </section>`;
+}
+
+function _metaTypeaheadHtml(which, id, label, placeholder, aside, after) {
+  return `<div class="aud-field"><label class="aud-label" for="meta-${which}-q-${id}">${label}${aside ? `<span class="aud-label-aside">${aside}</span>` : ""}</label>
+    <div class="aud-ta" data-meta-ta="${which}"><input class="aud-input" id="meta-${which}-q-${id}" data-meta-input data-meta-ta-input="${which}" data-meta-needs-api type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="meta-${which}-l-${id}" autocomplete="off" maxlength="${META_SEARCH_MAX[which] || 100}" placeholder="${escapeHtml(placeholder)}" />
+      <div class="aud-ta-list" id="meta-${which}-l-${id}" role="listbox" aria-label="${escapeHtml(label)}" data-meta-ta-list="${which}" hidden></div></div>${after || ""}</div>`;
+}
+
+function _metaWhereBodyHtml(li, sel, id) {
+  const types = META_GEO_TYPES.map(([key, label]) => `<button type="button" data-meta-act="geotype" data-type="${key}" aria-pressed="${sel.geoType === key}">${label}</button>`).join("");
+  const places = _metaGeoSuggestions(_constanzaGeoFor(li.id));
+  const pills = places.length
+    ? `<div class="aud-quick meta-quick--plain" data-meta-geosuggest${sel.geo ? " hidden" : ""} role="group" aria-label="Places named in this proposal"><span class="aud-quick-label">In this proposal</span>`
+      + places.map(q => `<button type="button" data-meta-act="geo-suggest" data-meta-needs-api data-q="${escapeHtml(q)}">Search “${escapeHtml(q)}”</button>`).join("") + `</div>`
+    : "";
+  return `<div class="aud-field"><span class="aud-label" id="meta-gt-l-${id}">Kind of place</span>
+      <div class="aud-seg aud-seg--wrap" role="group" aria-labelledby="meta-gt-l-${id}">${types}</div>
+      <p class="aud-hint" data-meta-geohint>${sel.geoType === "geo_market" ? "Meta’s TV markets are Comscore markets, so they can differ a little from the Nielsen markets used elsewhere in this app." : ""}</p></div>
+    ${_metaTypeaheadHtml("geo", id, "Find the place", META_GEO_PLACEHOLDER[sel.geoType] || META_GEO_PLACEHOLDER.geo_market, "one place at a time", "")}
+    ${pills}
+    <ul class="aud-chips" data-meta-chips="geo" aria-label="Chosen place">${_metaGeoChipsHtml(sel)}</ul>`;
+}
+
+function _metaWhoBodyHtml(sel, id) {
+  const options = (from, to, current) => { let out = ""; for (let a = from; a <= to; a++) out += `<option value="${a}"${a === current ? " selected" : ""}>${a === META_AGE_MAX ? "65+" : a}</option>`; return out; };
+  const presets = META_AGE_PRESETS.map(([label, min, max]) => `<button type="button" data-meta-act="age-preset" data-min="${min}" data-max="${max}" aria-pressed="${sel.ageMin === min && sel.ageMax === max}">${label}</button>`).join("");
+  const genders = [["all", "All"], ["female", "Women"], ["male", "Men"]].map(([key, label]) => `<button type="button" data-meta-act="gender" data-gender="${key}" aria-pressed="${sel.gender === key}">${label}</button>`).join("");
+  return `<div class="aud-field"><span class="aud-label" id="meta-age-l-${id}">Age</span>
+      <div class="aud-range">
+        <div class="aud-range-selects"><select class="aud-select" data-meta-age="min" aria-label="Youngest age">${options(META_AGE_MIN, META_AGE_MAX, sel.ageMin)}</select><span class="aud-range-sep">to</span><select class="aud-select" data-meta-age="max" aria-label="Oldest age">${options(META_AGE_MIN, META_AGE_MAX, sel.ageMax)}</select></div>
+        <div class="aud-quick" role="group" aria-label="Age ranges">${presets}</div></div></div>
+    <div class="aud-field"><span class="aud-label" id="meta-gender-l-${id}">Gender</span>
+      <div class="aud-seg" role="group" aria-labelledby="meta-gender-l-${id}">${genders}</div></div>`;
+}
+
+function _metaLanguageBodyHtml(li, sel, id) {
+  const spanishOn = sel.languages.some(l => _metaLangStarts(l.name, "Spanish"));
+  const quick = META_LANG_QUICK.map(q => `<button type="button" data-meta-act="lang-quick" data-meta-needs-api data-key="${q.key}" aria-pressed="${q.words.every(w => sel.languages.some(l => _metaLangStarts(l.name, w)))}">${escapeHtml(q.label)}</button>`).join("");
+  const suggest = _targetsHispanic(li)
+    ? `<div class="aud-quick meta-suggest" data-meta-suggest${spanishOn ? " hidden" : ""}><button type="button" data-meta-act="lang-quick" data-meta-needs-api data-key="spanish">This line targets Hispanic audiences — add Spanish?</button></div>` : "";
+  const note = _metaLanguageNote();
+  return `${suggest}
+    <div class="aud-quick" role="group" aria-label="Quick language picks"><span class="aud-quick-label">Quick picks</span>${quick}</div>
+    <ul class="aud-chips" data-meta-chips="lang" aria-label="Chosen languages">${_metaLangChipsHtml(sel)}</ul>
+    ${_metaTypeaheadHtml("lang", id, "Another language", "Language, e.g. Portuguese", "", `<p class="aud-hint"><button type="button" class="aud-link" data-meta-act="browse-lang" data-meta-needs-api>Browse all languages</button></p><p class="aud-hint" data-meta-browse-reason hidden></p>`)}
+    <div class="aud-notice aud-notice--error" data-meta-msg="lang" role="alert" hidden><div class="aud-notice-body"></div></div>
+    <div class="meta-langnote"><p class="aud-hint" data-meta-langshort>${escapeHtml(_metaShortNote(note))}</p>
+      <details class="meta-more"><summary>Why this can be fewer than all Spanish speakers</summary><p class="aud-hint" data-meta-langfull>${escapeHtml(note)}</p></details></div>`;
+}
+
+function _metaAudienceBodyHtml(sel, id) {
+  return `${_metaTypeaheadHtml("aud", id, "Interests, behaviors and more", "e.g. soccer, new parents, travel", "optional", "")}
+    <ul class="aud-chips" data-meta-chips="aud" aria-label="Chosen interests, behaviors and more">${_metaDetailedChipsHtml(sel)}</ul>
+    <p class="aud-hint" data-meta-audhint>Meta’s own lists. Choose several and the audience gets wider: Meta counts people who match <strong>any</strong> of them. <span data-meta-none${sel.detailed.length ? " hidden" : ""}>None chosen yet: everyone in the place, age, gender and language above is counted.</span></p>
+    <button type="button" class="aud-browse" data-meta-act="browse" data-meta-needs-api><span class="aud-browse-label">Browse all interests, behaviors &amp; demographics</span><span class="aud-browse-count" data-meta-browsecount${sel.detailed.length ? "" : " hidden"}>${sel.detailed.length ? `${sel.detailed.length} chosen` : ""}</span></button>
+    <p class="aud-hint" data-meta-browse-reason hidden></p>`;
 }
 
 function _metaForecastPanelHtml(li, p, existing) {
   const saved = existing.meta_forecast || null;
   const mult = (state.catalog && state.catalog.audience_multipliers) || { conservative: 4.3, mid: 5.5, upper: 8.6 };
-  const was = (saved && saved.meta_targeting) || {};
-  const manualLower = saved && saved.potential_audience && saved.potential_audience.source === "manual" ? saved.potential_audience.lower : "";
-  const manualUpper = saved && saved.potential_audience && saved.potential_audience.source === "manual" && saved.potential_audience.upper !== saved.potential_audience.lower
-    ? saved.potential_audience.upper : "";
-  const geo = _constanzaGeoFor(li.id);
+  const sel = _metaSel(li.id);
+  const sums = _metaSummaries(sel);
+  const id = escapeAttr(li.id);
   const effectiveCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm;
-  return `<div class="meta-plan-block" data-meta-lid="${escapeAttr(li.id)}">
-    <strong>Meta audience scenarios</strong>
-    <p>Retail budget ${_metaFullFlightRetailBudget(li).toLocaleString("en-US", { style: "currency", currency: "USD" })} over ${_constanzaFlightMonths(li)} month(s)${_metaFlightHint(li)}; retail CPM $${escapeHtml(effectiveCpm)}. Monthly impressions are the <strong>lower end</strong> of Meta's audience × ${escapeHtml(String(mult.conservative))} (conservative), ${escapeHtml(String(mult.mid))} (mid, the default) or ${escapeHtml(String(mult.upper))} (upper). Meta counts people on its default placements (Facebook, Instagram, Messenger, Audience Network), as Ads Manager's estimated audience size does.</p>
-    <div class="meta-plan-fields">
-      <label>Audience size, lower end <input data-meta-input class="meta-audience" type="number" min="0" max="1000000000" placeholder="From Ads Manager" value="${escapeHtml(manualLower)}" /></label>
-      <label>Upper end (optional) <input data-meta-input class="meta-audience-upper" type="number" min="0" max="1000000000" placeholder="Same as lower" value="${escapeHtml(manualUpper)}" /></label>
+  const budget = _metaFullFlightRetailBudget(li);
+  const months = _constanzaFlightMonths(li);
+  const rule = `${mult.conservative} / ${mult.mid} / ${mult.upper}`;
+  const flightHint = _metaFlightHint(li);
+  return `<div class="meta-panel" data-meta-lid="${id}">
+    <div class="meta-head">
+      <h4 class="meta-title">Meta audience scenarios</h4>
+      <ul class="meta-plan" aria-label="What the estimate is based on">
+        <li><span class="meta-plan-k">Retail budget</span><span class="meta-plan-v">${_metaMoney(budget)} <small>over ${months} month${months === 1 ? "" : "s"}</small></span></li>
+        <li><span class="meta-plan-k">Retail CPM</span><span class="meta-plan-v">${escapeHtml(_metaMoney(effectiveCpm))}</span></li>
+        <li title="Monthly impressions are the lower end of Meta’s audience × ${escapeHtml(String(mult.conservative))} (conservative), ${escapeHtml(String(mult.mid))} (mid, the default) or ${escapeHtml(String(mult.upper))} (upper)."><span class="meta-plan-k">Monthly impressions</span><span class="meta-plan-v">lower end × ${escapeHtml(rule)}</span></li>
+        <li><span class="meta-plan-k">Placements</span><span class="meta-plan-v">Meta’s defaults</span></li>
+      </ul>
+      <p class="aud-hint meta-plan-note">${flightHint ? `${escapeHtml(flightHint)} ` : ""}Monthly impressions are the <strong>lower end</strong> of Meta’s audience × ${escapeHtml(String(mult.conservative))} (conservative), ${escapeHtml(String(mult.mid))} (mid, the default) or ${escapeHtml(String(mult.upper))} (upper). Meta counts people on its default placements (Facebook, Instagram, Messenger, Audience Network), as Ads Manager’s estimated audience size does.</p>
     </div>
-    <button type="button" class="btn-secondary meta-model-btn" data-lid="${escapeAttr(li.id)}">Calculate scenarios</button>
-    <details class="meta-live-details"><summary>Pull the audience from Meta (API)</summary>
-      <p>Choose the exact Meta geography; age, gender and interests are optional (any of the chosen interests / behaviors). Anything else about the campaign (exclusions, placements, account restrictions) must be checked in Ads Manager.</p>
-      <div class="meta-plan-fields">
-        <label>Meta geography type <select class="meta-geo-type"><option value="geo_market">TV market (Meta's Comscore markets)</option><option value="city">City</option><option value="region">State / region</option><option value="zip">ZIP</option><option value="country">Country</option></select></label>
-        <label>Search <input data-meta-input class="meta-geo-query" type="text" maxlength="100" value="${escapeHtml(geo)}" /></label>
-        <button type="button" class="btn-secondary meta-search-btn" data-lid="${escapeAttr(li.id)}">Find Meta geographies</button>
-        <label>Matched geography <select class="meta-geo-choice"><option value="">Search and choose an exact match</option></select></label>
-        <label>Minimum age <input data-meta-input class="meta-age-min" type="number" min="18" max="65" placeholder="All" value="${escapeHtml(was.age_min != null ? was.age_min : "")}" /></label>
-        <label>Maximum age <input data-meta-input class="meta-age-max" type="number" min="18" max="65" placeholder="All" value="${escapeHtml(was.age_max != null ? was.age_max : "")}" /></label>
-        <label>Gender <select class="meta-gender"><option value="all">All</option><option value="male"${was.gender === "male" ? " selected" : ""}>Male</option><option value="female"${was.gender === "female" ? " selected" : ""}>Female</option></select></label>
-      </div>
-      <div class="meta-targeting">
-        <strong>Interests &amp; behaviors</strong> <small>(Meta's own lists)</small>
-        <div class="meta-plan-fields">
-          <label>Search <input data-meta-input class="meta-target-query" type="search" maxlength="80" placeholder="soccer, new parents, small business…" /></label>
-          <button type="button" class="btn-secondary" data-meta-act="search" data-lid="${escapeAttr(li.id)}">Search Meta</button>
-          <label>Or browse a whole list (A–Z; type above to narrow it) <select class="meta-browse-kind"><option value="interests">Interests</option><option value="behaviors">Behaviors</option><option value="demographics">Demographics (life events, income, …)</option></select></label>
-          <button type="button" class="btn-secondary" data-meta-act="browse" data-lid="${escapeAttr(li.id)}">Browse</button>
-        </div>
-        <div class="meta-target-results" aria-live="polite"></div>
-        <div class="cz-chips meta-target-chips">${_metaChipsHtml(li.id)}</div>
-      </div>
-      <button type="button" class="btn-secondary meta-pull-btn" data-lid="${escapeAttr(li.id)}">Pull audience and calculate</button>
-    </details>
-    <div class="meta-plan-feedback" aria-live="polite">${_metaForecastSummaryHtml(saved, li, p)}</div>
+    <div class="meta-status" data-meta-status>${_metaStatusHtml(state.metaStatus)}</div>
+    <div class="aud-builder meta-builder">
+      ${_metaSecHtml("where", "Where", "Clear the place", li.id, sums, _metaWhereBodyHtml(li, sel, id))}
+      ${_metaSecHtml("who", "Who", "Clear age and gender", li.id, sums, _metaWhoBodyHtml(sel, id))}
+      ${_metaSecHtml("lang", "Language", "Clear languages", li.id, sums, _metaLanguageBodyHtml(li, sel, id))}
+      ${_metaSecHtml("aud", "Audience", "Clear interests and behaviors", li.id, sums, _metaAudienceBodyHtml(sel, id))}
+    </div>
+    <div class="meta-run">
+      <div class="aud-actions"><button type="button" class="btn-primary meta-estimate-btn" data-meta-act="estimate" aria-describedby="meta-reason-${id}">Estimate audience</button></div>
+      <p class="aud-hint meta-reason" id="meta-reason-${id}" data-meta-reason hidden></p>
+      <p class="aud-hint">Exclusions, placements and account restrictions are not part of the estimate: check them in Ads Manager.</p>
+    </div>
+    <div class="meta-error" data-meta-error role="alert"></div>
+    <div class="meta-feedback">${_metaForecastSummaryHtml(saved, li, p)}</div>
+    <div class="aud-sr" data-meta-live aria-live="polite"></div>
   </div>`;
 }
+
+// ---------------------------------------------------------------- keeping the screen in step with the choices
+
+function _metaPanel(lid) {
+  return document.querySelector(`.meta-panel[data-meta-lid="${escapeAttr(lid)}"]`);
+}
+
+// What the panel remembers while it is on screen (it is rebuilt with the grid): the open lists, a search in flight, a request in flight.
+function _metaRt(panel) {
+  if (!panel._meta) {
+    const ta = () => ({ opts: [], rows: [], active: -1, seq: 0, timer: null });
+    panel._meta = { busy: false, ta: { geo: ta(), lang: ta(), aud: ta() } };
+  }
+  return panel._meta;
+}
+
+function _metaSay(panel, message) {
+  const el = panel && panel.querySelector("[data-meta-live]");
+  if (el) el.textContent = message;
+}
+
+// A problem with the request, shown above the last result (which stays: it is still saved with the proposal). "" clears it.
+function _metaFeedback(panel, message) {
+  const el = panel && panel.querySelector("[data-meta-error]");
+  if (!el) return;
+  el.innerHTML = message ? `<div class="aud-notice aud-notice--error"><div class="aud-notice-body">${escapeHtml(message)}</div></div>` : "";
+}
+
+function _metaLocalMessage(panel, sec, message) {
+  const el = panel && panel.querySelector(`[data-meta-msg="${sec}"]`);
+  if (!el) return;
+  el.hidden = !message;
+  el.querySelector(".aud-notice-body").textContent = message || "";
+}
+
+// Brings everything that shows a choice into line with state.metaSel: each section's summary, count and Clear, the chips, the pressed buttons,
+// the age menus (a "to" age below the "from" age cannot be picked). It never replaces an input, so typing and focus are not disturbed.
+function _metaSync(panel) {
+  const lid = panel.dataset.metaLid;
+  const sel = _metaSel(lid);
+  const sums = _metaSummaries(sel);
+  ["where", "who", "lang", "aud"].forEach(key => {
+    const sec = panel.querySelector(`[data-meta-sec="${key}"]`);
+    if (!sec) return;
+    const s = sums[key];
+    sec.classList.toggle("has-value", s.set);
+    const sum = sec.querySelector("[data-meta-sum]");
+    sum.textContent = s.text;
+    sum.classList.toggle("is-set", s.set);
+    const count = sec.querySelector("[data-meta-count]");
+    count.hidden = !s.count;
+    count.textContent = String(s.count);
+    sec.querySelector(".aud-clear").hidden = !s.set;
+  });
+  const chips = { geo: _metaGeoChipsHtml(sel), lang: _metaLangChipsHtml(sel), aud: _metaDetailedChipsHtml(sel) };
+  Object.keys(chips).forEach(key => { const el = panel.querySelector(`[data-meta-chips="${key}"]`); if (el && el.innerHTML !== chips[key]) el.innerHTML = chips[key]; });
+  const pressed = (selector, test) => panel.querySelectorAll(selector).forEach(b => b.setAttribute("aria-pressed", String(test(b))));
+  pressed('[data-meta-act="geotype"]', b => b.dataset.type === sel.geoType);
+  pressed('[data-meta-act="gender"]', b => b.dataset.gender === sel.gender);
+  pressed('[data-meta-act="age-preset"]', b => Number(b.dataset.min) === sel.ageMin && Number(b.dataset.max) === sel.ageMax);
+  pressed('.aud-quick:not([data-meta-suggest]) > [data-meta-act="lang-quick"]', b => {
+    const quick = META_LANG_QUICK.find(q => q.key === b.dataset.key);
+    return !!quick && quick.words.every(w => sel.languages.some(l => _metaLangStarts(l.name, w)));
+  });
+  const input = panel.querySelector('[data-meta-ta-input="geo"]');
+  if (input) input.placeholder = META_GEO_PLACEHOLDER[sel.geoType] || META_GEO_PLACEHOLDER.geo_market;
+  const hint = panel.querySelector("[data-meta-geohint]");
+  if (hint) hint.textContent = sel.geoType === "geo_market" ? "Meta’s TV markets are Comscore markets, so they can differ a little from the Nielsen markets used elsewhere in this app." : "";
+  const places = panel.querySelector("[data-meta-geosuggest]");
+  if (places) places.hidden = !!sel.geo;
+  const min = panel.querySelector('[data-meta-age="min"]');
+  const max = panel.querySelector('[data-meta-age="max"]');
+  if (min && max) {
+    min.value = String(sel.ageMin);
+    max.value = String(sel.ageMax);
+    Array.from(min.options).forEach(o => { o.disabled = Number(o.value) > sel.ageMax; });
+    Array.from(max.options).forEach(o => { o.disabled = Number(o.value) < sel.ageMin; });
+  }
+  const suggest = panel.querySelector("[data-meta-suggest]");
+  if (suggest) suggest.hidden = sel.languages.some(l => _metaLangStarts(l.name, "Spanish"));
+  const none = panel.querySelector("[data-meta-none]");
+  if (none) none.hidden = sel.detailed.length > 0;
+  const browse = panel.querySelector("[data-meta-browsecount]");
+  if (browse) { browse.hidden = !sel.detailed.length; browse.textContent = sel.detailed.length ? `${sel.detailed.length} chosen` : ""; }
+  _metaApplyStatus(panel);
+}
+
+// A choice that changes the estimate was changed: show it, and say whether the saved result still answers what is now asked (withdrawing Insert if not).
+function _metaChanged(panel) {
+  _metaSync(panel);
+  _metaMarkStale(panel);
+}
+
+// Re-draws the saved result against what is chosen now: stale (and without its Insert button) the moment the choices, the line's budget, product,
+// CPM, geography, flight length or target stop matching what was asked, current again if the choices are put back.
+function _metaMarkStale(panel) {
+  const lid = panel.dataset.metaLid;
+  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
+  const li = state.lineItems.find(x => x.id === lid);
+  if (!saved || !li) return;
+  const wasStale = !!panel.querySelector(".meta-result.is-stale");
+  panel.querySelector(".meta-feedback").innerHTML = _metaForecastSummaryHtml(saved, li, state.productIndex[li.product_name] || {});
+  // the result is redrawn on every choice, so it is not a live region itself: only a change of its state is said, once
+  const isStale = !!panel.querySelector(".meta-result.is-stale");
+  if (isStale !== wasStale) _metaSay(panel, isStale ? "The estimate below is out of date: your choices changed." : "The estimate below matches your choices again.");
+}
+
+// After a chip's remove button is gone, the keyboard goes to the next chip's remove button, else the one before it, else the section's own control.
+function _metaFocusChips(panel, which, index, fallbackSelector) {
+  const buttons = panel.querySelectorAll(`[data-meta-chips="${which}"] .aud-chip-x`);
+  const next = buttons[Math.min(index, buttons.length - 1)];
+  const target = next || panel.querySelector(fallbackSelector);
+  if (target) target.focus();
+}
+
+// ---------------------------------------------------------------- typeahead lists (Where, Language, Audience)
+
+function _metaTaInput(panel, which) {
+  return panel.querySelector(`[data-meta-ta-input="${which}"]`);
+}
+
+// rows: { group } a label | { note } a line of text | { foot: { act, label } } the "Browse all" row | an option { nameHtml, path, size, disabled, pick }.
+function _metaTaShow(panel, which, rows) {
+  const input = _metaTaInput(panel, which);
+  const list = panel.querySelector(`[data-meta-ta-list="${which}"]`);
+  if (!input || !list) return;
+  const t = _metaRt(panel).ta[which];
+  t.rows = rows;
+  t.opts = [];
+  t.active = -1;
+  let html = "";
+  rows.forEach(row => {
+    if (row.group) html += `<div class="aud-ta-group" role="presentation">${escapeHtml(row.group)}</div>`;
+    else if (row.note != null) html += `<div class="aud-ta-note" role="presentation">${escapeHtml(row.note)}</div>`;
+    else if (row.foot) {
+      const off = /^browse/.test(row.foot.act) ? _metaBrowseOff() : "";
+      html += `<div class="aud-ta-foot" role="presentation"><button type="button" class="aud-link" data-meta-act="${row.foot.act}"${off ? ` disabled title="${escapeHtml(off)}"` : ""}>${escapeHtml(row.foot.label)}</button></div>`;
+    }
+    else {
+      const k = t.opts.length;
+      t.opts.push(row);
+      html += `<div class="aud-ta-opt${row.disabled ? " is-disabled" : ""}" role="option" id="${list.id}-o${k}" aria-selected="false"${row.disabled ? ' aria-disabled="true"' : ""} data-k="${k}">`
+        + `<span class="aud-ta-text"><span class="aud-ta-name">${row.nameHtml}</span>${row.path ? `<span class="aud-ta-path">${escapeHtml(row.path)}</span>` : ""}</span>`
+        + `${row.size ? `<span class="aud-ta-size">${escapeHtml(row.size)}</span>` : ""}</div>`;
+    }
+  });
+  list.innerHTML = html;
+  list.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+  input.removeAttribute("aria-activedescendant");
+}
+
+// Closes a list AND drops the search that was about to fill it (a debounce that has not fired, or an answer still on its way): otherwise it would
+// open the list again after Escape, or after the keyboard has left the box.
+function _metaTaClose(panel, which) {
+  const t = _metaRt(panel).ta[which];
+  clearTimeout(t.timer);
+  t.seq++;
+  const input = _metaTaInput(panel, which);
+  const list = panel.querySelector(`[data-meta-ta-list="${which}"]`);
+  if (list) list.hidden = true;
+  if (input) { input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); }
+}
+
+function _metaTaMove(panel, which, delta) {
+  const t = _metaRt(panel).ta[which];
+  const list = panel.querySelector(`[data-meta-ta-list="${which}"]`);
+  const input = _metaTaInput(panel, which);
+  const enabled = t.opts.map((o, k) => (o.disabled ? -1 : k)).filter(k => k >= 0);
+  if (!enabled.length || !list) return;
+  const at = enabled.indexOf(t.active);
+  const next = at < 0 ? (delta > 0 ? enabled[0] : enabled[enabled.length - 1]) : enabled[(at + delta + enabled.length) % enabled.length];
+  list.querySelectorAll(".aud-ta-opt").forEach(el => {
+    const on = Number(el.dataset.k) === next;
+    el.classList.toggle("is-active", on);
+    el.setAttribute("aria-selected", String(on));
+    if (on) { input.setAttribute("aria-activedescendant", el.id); el.scrollIntoView({ block: "nearest" }); }
+  });
+  t.active = next;
+}
+
+function _metaTaPick(panel, which, k) {
+  const opt = _metaRt(panel).ta[which].opts[k];
+  if (opt && !opt.disabled && typeof opt.pick === "function") opt.pick();
+}
+
+// The list of a typeahead is done with: close it, empty the box, put the keyboard back in the box for the next pick.
+function _metaTaDone(panel, which) {
+  const input = _metaTaInput(panel, which);
+  _metaRt(panel).ta[which].seq++;
+  _metaTaClose(panel, which);
+  if (input) { input.value = ""; input.focus(); }
+}
+
+// 1 Where: Meta's own geography search for the chosen kind of place.
+async function _metaGeoSearch(panel, query) {
+  const lid = panel.dataset.metaLid;
+  const sel = _metaSel(lid);
+  const t = _metaRt(panel).ta.geo;
+  const seq = ++t.seq;
+  _metaTaShow(panel, "geo", [{ note: "Searching Meta…" }]);
+  try {
+    const response = await fetch("/api/constanza/meta-geos", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, location_type: sel.geoType }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+    if (seq !== t.seq || !panel.isConnected) return;
+    const rows = (data.locations || []).map(loc => ({
+      nameHtml: _metaHighlight(loc.name, query), path: [loc.region, loc.country_code].filter(Boolean).join(" · "),
+      pick: () => {
+        const label = [loc.name, loc.region, loc.country_code].filter(Boolean).join(" · ");
+        sel.geo = { type: loc.type || sel.geoType, key: String(loc.key), name: loc.name, region: loc.region || "", country: loc.country_code || "", label };
+        _metaTaDone(panel, "geo");
+        _metaChanged(panel);
+        _metaSay(panel, `Place chosen: ${loc.name}`);
+      },
+    }));
+    _metaTaShow(panel, "geo", rows.length ? rows : [{ note: "Meta found no matching place. Try a city, ZIP, state, or the market name as Meta lists it (Meta’s markets are Comscore markets, which can differ from Nielsen DMAs)." }]);
+    _metaSay(panel, rows.length ? `${rows.length} places found` : "No places found");
+  } catch (error) {
+    if (seq === t.seq && panel.isConnected) _metaTaShow(panel, "geo", [{ note: String((error && error.message) || error) }]);
+  }
+}
+
+// 4 Audience: what Meta's keyword search finds, grouped by kind, with the audience size beside each.
+async function _metaAudSearch(panel, query) {
+  const lid = panel.dataset.metaLid;
+  const sel = _metaSel(lid);
+  const t = _metaRt(panel).ta.aud;
+  const seq = ++t.seq;
+  _metaTaShow(panel, "aud", [{ note: "Searching Meta…" }]);
+  try {
+    const response = await fetch(`/api/constanza/meta-targeting?q=${encodeURIComponent(query)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+    if (seq !== t.seq || !panel.isConnected) return;
+    const have = new Set(sel.detailed.map(x => `${x.type}:${x.id}`));
+    const full = sel.detailed.length >= META_MAX_DETAILED;
+    const found = data.results || {};
+    let rows = [];
+    [["Interests", found.interests], ["Behaviors", found.behaviors], ["Demographics", found.demographics]].forEach(([label, items]) => {
+      if (!items || !items.length) return;
+      rows.push({ group: label });
+      items.slice(0, 40).forEach(it => {
+        const chosen = have.has(`${it.type}:${it.id}`);
+        rows.push({
+          nameHtml: _metaHighlight(it.name, query), path: (it.path || []).join(" › "), size: chosen ? "Added ✓" : _metaSizeText(it.audience_lower, it.audience_upper),
+          disabled: chosen || full, pick: () => _metaAddDetailed(panel, it),
+        });
+      });
+    });
+    if (!rows.length) rows = [{ note: `Nothing found for “${query}”. Try other words, or browse the full lists.` }];
+    if (full) rows.unshift({ note: `You have reached the limit of ${META_MAX_DETAILED} picks. Remove one to add another.` });
+    rows.push({ foot: { act: "browse", label: "Browse all interests, behaviors & demographics" } });
+    _metaTaShow(panel, "aud", rows);
+  } catch (error) {
+    if (seq === t.seq && panel.isConnected) _metaTaShow(panel, "aud", [{ note: String((error && error.message) || error) }]);
+  }
+}
+
+function _metaAddDetailed(panel, it) {
+  const sel = _metaSel(panel.dataset.metaLid);
+  if (sel.detailed.length >= META_MAX_DETAILED || sel.detailed.some(x => x.id === String(it.id) && x.type === it.type)) return;
+  sel.detailed.push({ id: String(it.id), name: it.name, type: it.type });
+  _metaTaDone(panel, "aud");
+  _metaChanged(panel);
+  _metaSay(panel, `Added ${it.name}`);
+}
+
+// 3 Language: Meta's whole list of languages, asked for once and then searched here. Only a list with something in it is kept: an empty answer (like an
+// error) is asked again the next time, as the server does, so a hiccup at Meta does not leave the picker empty until the page is reloaded.
+function _metaLanguageList() {
+  if (!state.metaLanguages) {
+    const asked = fetch("/api/constanza/meta-languages")
+      .then(async response => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+        if (data.note) state.metaLanguageNote = data.note;
+        return (data.items || []).map(x => ({ id: String(x.id), name: String(x.name) }));
+      })
+      .then(items => { if (!items.length && state.metaLanguages === asked) state.metaLanguages = null; return items; })
+      .catch(error => { if (state.metaLanguages === asked) state.metaLanguages = null; throw error; });
+    state.metaLanguages = asked;
+  }
+  return state.metaLanguages;
+}
+
+async function _metaLangSearch(panel, query) {
+  const lid = panel.dataset.metaLid;
+  const sel = _metaSel(lid);
+  const t = _metaRt(panel).ta.lang;
+  const seq = ++t.seq;
+  if (!query) { _metaTaClose(panel, "lang"); return; }
+  if (!state.metaLanguages) _metaTaShow(panel, "lang", [{ note: "Loading Meta’s languages…" }]);
+  try {
+    const all = await _metaLanguageList();
+    if (seq !== t.seq || !panel.isConnected) return;
+    if (!all.length) {
+      _metaTaShow(panel, "lang", [{ note: "Meta’s list of languages came back empty just now." }, { foot: { act: "lang-retry", label: "Try again" } }]);
+      return;
+    }
+    const words = _metaFold(query).split(/\s+/).filter(Boolean);
+    const have = new Set(sel.languages.map(x => x.id));
+    const hits = all.filter(it => words.every(w => _metaFold(it.name).includes(w)));
+    hits.sort((a, b) => Number(_metaFold(b.name).startsWith(words[0])) - Number(_metaFold(a.name).startsWith(words[0])));
+    const rows = hits.slice(0, 40).map(it => ({
+      nameHtml: _metaHighlight(it.name, query), path: "", size: have.has(it.id) ? "Added ✓" : "", disabled: have.has(it.id),
+      pick: () => {
+        const capped = _metaAddLanguages(sel, [it]);
+        _metaTaDone(panel, "lang");
+        _metaLocalMessage(panel, "lang", capped ? `You can choose at most ${META_MAX_LANGUAGES} languages.` : "");
+        _metaChanged(panel);
+        _metaSay(panel, `Added ${it.name}`);
+      },
+    }));
+    if (hits.length > 40) rows.push({ note: `${hits.length - 40} more: type more letters to narrow.` });
+    _metaTaShow(panel, "lang", rows.length ? rows : [{ note: `Meta lists no language matching “${query}”.` }]);
+  } catch (error) {
+    if (seq === t.seq && panel.isConnected) _metaTaShow(panel, "lang", [{ note: String((error && error.message) || error) }, { foot: { act: "lang-retry", label: "Try again" } }]);
+  }
+}
+
+// The locales Meta lists whose name starts with one word ("Spanish" -> Spanish, Spanish (Spain), ...). Remembered for the session once found.
+async function _metaResolveLanguages(word) {
+  state.metaLangQuick = state.metaLangQuick || {};
+  const key = _metaFold(word);
+  if (state.metaLangQuick[key]) return state.metaLangQuick[key];
+  const response = await fetch(`/api/constanza/meta-languages?q=${encodeURIComponent(word)}`);
+  const data = await response.json();
+  if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+  if (data.note) state.metaLanguageNote = data.note;
+  const found = (data.items || []).filter(it => _metaLangStarts(it.name, word)).map(it => ({ id: String(it.id), name: String(it.name) }));
+  if (found.length) state.metaLangQuick[key] = found;
+  return found;
+}
+
+// Adds the languages not yet chosen, up to Meta's limit here; true when some were left out for that.
+function _metaAddLanguages(sel, items) {
+  let capped = false;
+  items.forEach(it => {
+    if (sel.languages.some(x => x.id === it.id)) return;
+    if (sel.languages.length >= META_MAX_LANGUAGES) { capped = true; return; }
+    sel.languages.push({ id: it.id, name: it.name });
+  });
+  return capped;
+}
+
+// A language quick pick: pressed = every locale of those languages is in, so a press takes them out; otherwise they are looked up LIVE and added.
+async function _metaQuickLanguage(panel, key) {
+  const quick = META_LANG_QUICK.find(q => q.key === key);
+  if (!quick) return;
+  const lid = panel.dataset.metaLid;
+  const sel = _metaSel(lid);
+  _metaLocalMessage(panel, "lang", "");
+  if (quick.words.every(w => sel.languages.some(l => _metaLangStarts(l.name, w)))) {
+    sel.languages = sel.languages.filter(l => !quick.words.some(w => _metaLangStarts(l.name, w)));
+    _metaChanged(panel);
+    _metaSay(panel, `${quick.label} removed`);
+    return;
+  }
+  const buttons = Array.from(panel.querySelectorAll(`[data-meta-act="lang-quick"][data-key="${key}"]`));
+  buttons.forEach(b => { b.disabled = true; b.setAttribute("aria-busy", "true"); });
+  let message = "";
+  let found = [];
+  try {
+    for (const word of quick.words) {
+      const hits = await _metaResolveLanguages(word);
+      if (!hits.length) { message = `Meta lists no language called ${word} for this ad account.`; found = []; break; }
+      found = found.concat(hits);
+    }
+  } catch (error) {
+    message = String((error && error.message) || error);
+    found = [];
+  }
+  const live = _metaPanel(lid) || panel;
+  buttons.forEach(b => b.removeAttribute("aria-busy"));
+  if (message) { _metaLocalMessage(live, "lang", message); _metaApplyStatus(live); return; }
+  const capped = _metaAddLanguages(sel, found);
+  _metaLocalMessage(live, "lang", capped ? `You can choose at most ${META_MAX_LANGUAGES} languages: some were left out.` : "");
+  _metaChanged(live);                       // also hands the buttons back to the connection state (_metaApplyStatus)
+  _metaSay(live, `${quick.label} added`);
+}
+
+// ---------------------------------------------------------------- the whole lists in the pop-up
+
+// One list from Meta (interests, behaviors or demographics) as SegmentBrowser items; kept for the session once it has loaded with something in it. An
+// empty answer is not kept and is handed to the window as a message, which gives it a Retry that asks Meta again.
+function _metaLoadCatalog(tab) {
+  state.metaCatalog = state.metaCatalog || {};
+  if (!state.metaCatalog[tab]) {
+    const asked = fetch(`/api/constanza/meta-targeting?kind=${encodeURIComponent(tab)}`)
+      .then(async response => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
+        return (data.items || []).map(it => ({
+          id: `${it.type}:${it.id}`, metaId: String(it.id), name: it.name, type: it.type, path: it.path || [],
+          size: it.audience_lower, sizeUpper: it.audience_upper, description: it.description || "",
+        }));
+      })
+      .then(items => {
+        if (items.length) return items;
+        if (state.metaCatalog[tab] === asked) state.metaCatalog[tab] = null;
+        return { error: `Meta sent back an empty list of ${META_CATALOG_WORDS[tab] || "options"} just now. Press Retry to ask again.` };
+      })
+      .catch(error => { if (state.metaCatalog[tab] === asked) state.metaCatalog[tab] = null; return { error: String((error && error.message) || error) }; });
+    state.metaCatalog[tab] = asked;
+  }
+  return state.metaCatalog[tab];
+}
+
+function _metaTabOf(type) {
+  return type === "interests" || type === "behaviors" ? type : "demographics";
+}
+
+function _metaBrowseAudience(panel) {
+  const lid = panel.dataset.metaLid;
+  if (!window.SegmentBrowser) { _metaFeedback(panel, "The browse window did not load. Reload the page and try again."); return; }
+  const sel = _metaSel(lid);
+  const opener = panel.querySelector(".aud-browse");
+  window.SegmentBrowser.open({
+    title: "Browse interests, behaviors & demographics",
+    subtitle: "Meta’s own lists for this ad account. Meta counts people who match any pick, so each one you add widens the audience.",
+    tabs: [{ key: "interests", label: "Interests" }, { key: "behaviors", label: "Behaviors" }, { key: "demographics", label: "Demographics" }],
+    activeTab: "interests",
+    load: tab => _metaLoadCatalog(tab),
+    columns: [{ key: "name", label: "Name" }, { key: "category", label: "Category", value: it => (it.path || []).join(" › ") }, { key: "size", label: "Audience size", numeric: true }],
+    isChosen: (tab, item) => sel.detailed.some(x => x.id === item.metaId && x.type === item.type),
+    max: META_MAX_DETAILED,
+    chosenCount: tab => sel.detailed.filter(x => _metaTabOf(x.type) === tab).length,
+    noun: "options", nounSingular: "option", applyLabel: "Add to audience",
+    returnFocus: opener,
+    onApply: ({ added, removed }) => {
+      removed.forEach(({ item }) => {
+        const at = sel.detailed.findIndex(x => x.id === item.metaId && x.type === item.type);
+        if (at >= 0) sel.detailed.splice(at, 1);
+      });
+      added.forEach(({ item }) => {
+        if (sel.detailed.length < META_MAX_DETAILED && !sel.detailed.some(x => x.id === item.metaId && x.type === item.type)) {
+          sel.detailed.push({ id: item.metaId, name: item.name, type: item.type });
+        }
+      });
+      const live = _metaPanel(lid);
+      if (live) { _metaChanged(live); _metaSay(live, `${sel.detailed.length} chosen`); }
+    },
+  });
+}
+
+function _metaBrowseLanguages(panel) {
+  const lid = panel.dataset.metaLid;
+  if (!window.SegmentBrowser) { _metaFeedback(panel, "The browse window did not load. Reload the page and try again."); return; }
+  const sel = _metaSel(lid);
+  window.SegmentBrowser.open({
+    title: "Browse languages",
+    subtitle: "Meta’s own list. A language here is the one people have set Facebook or Instagram to, not who speaks it.",
+    load: () => _metaLanguageList().then(
+      items => (items.length ? items.map(it => ({ id: it.id, name: it.name })) : { error: "Meta sent back an empty list of languages just now. Press Retry to ask again." }),
+      error => ({ error: String((error && error.message) || error) })),
+    columns: [{ key: "name", label: "Language" }],
+    searchPlaceholder: "Search languages",
+    isChosen: (tab, item) => sel.languages.some(x => x.id === item.id),
+    max: META_MAX_LANGUAGES, noun: "languages", nounSingular: "language", applyLabel: "Add languages",
+    returnFocus: panel.querySelector('[data-meta-act="browse-lang"]'),
+    onApply: ({ added, removed }) => {
+      removed.forEach(({ item }) => { sel.languages = sel.languages.filter(x => x.id !== item.id); });
+      _metaAddLanguages(sel, added.map(({ item }) => ({ id: item.id, name: item.name })));
+      const live = _metaPanel(lid);
+      if (live) { _metaChanged(live); _metaSay(live, `${sel.languages.length} languages chosen`); }
+    },
+  });
+}
+
+// ---------------------------------------------------------------- events (all delegated from the panel)
+
+function _metaClearSection(panel, sec) {
+  const sel = _metaSel(panel.dataset.metaLid);
+  if (sec === "where") sel.geo = null;
+  else if (sec === "who") { sel.ageMin = META_AGE_MIN; sel.ageMax = META_AGE_MAX; sel.gender = "all"; }
+  else if (sec === "lang") { sel.languages = []; _metaLocalMessage(panel, "lang", ""); }
+  else if (sec === "aud") sel.detailed = [];
+  _metaChanged(panel);
+  const first = panel.querySelector(`[data-meta-sec="${sec}"] [data-meta-ta-input], [data-meta-sec="${sec}"] [data-meta-act="gender"]`);
+  if (first) first.focus();
+}
+
+function onMetaPanelClick(panel, event) {
+  const option = event.target.closest(".aud-ta-opt");
+  if (option && panel.contains(option)) {
+    _metaTaPick(panel, option.closest("[data-meta-ta-list]").dataset.metaTaList, Number(option.dataset.k));
+    return;
+  }
+  const target = event.target.closest("[data-meta-act]");
+  if (!target || !panel.contains(target) || target.disabled) return;
+  const lid = panel.dataset.metaLid;
+  const sel = _metaSel(lid);
+  const d = target.dataset;
+  const chipIndex = () => Array.from(panel.querySelectorAll(`[data-meta-chips="${target.closest("[data-meta-chips]").dataset.metaChips}"] .aud-chip-x`)).indexOf(target);
+  switch (d.metaAct) {
+    case "geotype": {
+      sel.geoType = d.type;
+      _metaSync(panel);
+      const q = _metaTaInput(panel, "geo").value.trim();
+      if (q.length >= 2) _metaGeoSearch(panel, q); else _metaTaClose(panel, "geo");
+      break;
+    }
+    case "geo-suggest": {
+      const input = _metaTaInput(panel, "geo");
+      input.value = d.q;
+      input.focus();
+      _metaGeoSearch(panel, d.q);
+      break;
+    }
+    case "remove-geo":
+      sel.geo = null;
+      _metaChanged(panel);
+      _metaSay(panel, "Place removed");
+      _metaTaInput(panel, "geo").focus();
+      break;
+    case "age-preset":
+      sel.ageMin = Number(d.min);
+      sel.ageMax = Number(d.max);
+      _metaChanged(panel);
+      break;
+    case "gender":
+      sel.gender = d.gender;
+      _metaChanged(panel);
+      break;
+    case "lang-quick": _metaQuickLanguage(panel, d.key); break;
+    case "remove-lang": {
+      const at = chipIndex();
+      sel.languages = sel.languages.filter(l => _metaFold(_metaLangFamily(l.name)) !== d.fam);
+      _metaChanged(panel);
+      _metaFocusChips(panel, "lang", at, '[data-meta-ta-input="lang"]');
+      break;
+    }
+    case "remove-detailed": {
+      const at = chipIndex();
+      sel.detailed.splice(Number(d.i), 1);
+      _metaChanged(panel);
+      _metaFocusChips(panel, "aud", at, '[data-meta-ta-input="aud"]');
+      break;
+    }
+    case "browse": _metaTaClose(panel, "aud"); _metaBrowseAudience(panel); break;
+    case "browse-lang": _metaBrowseLanguages(panel); break;
+    case "lang-retry": {
+      const q = _metaTaInput(panel, "lang").value.trim();
+      if (q) _metaLangSearch(panel, q);
+      break;
+    }
+    case "clear": _metaClearSection(panel, d.sec); break;
+    case "estimate": onMetaForecast(lid); break;
+    case "insert": if (onMetaInsert(lid)) _metaAfterInsert(lid); break;
+    case "recheck": _metaStatusEnsure(true); break;
+    default: break;
+  }
+}
+
+function onMetaPanelInput(panel, event) {
+  const input = event.target.closest("[data-meta-ta-input]");
+  if (!input) return;
+  const which = input.dataset.metaTaInput;
+  const t = _metaRt(panel).ta[which];
+  clearTimeout(t.timer);
+  const query = input.value.trim();
+  if (which === "lang") { _metaLangSearch(panel, query); return; }
+  t.seq++;
+  if (query.length < 2) {
+    if (query) _metaTaShow(panel, which, [{ note: "Type at least two letters." }]); else _metaTaClose(panel, which);
+    return;
+  }
+  _metaTaShow(panel, which, [{ note: "Searching Meta…" }]);
+  t.timer = setTimeout(() => (which === "geo" ? _metaGeoSearch(panel, query) : _metaAudSearch(panel, query)), 300);
+}
+
+function onMetaPanelChange(panel, event) {
+  const age = event.target.closest("[data-meta-age]");
+  if (!age) return;
+  const sel = _metaSel(panel.dataset.metaLid);
+  if (age.dataset.metaAge === "min") sel.ageMin = Number(age.value); else sel.ageMax = Number(age.value);
+  _metaChanged(panel);
+}
+
+function onMetaPanelKeydown(panel, event) {
+  const input = event.target.closest("[data-meta-ta-input]");
+  if (!input) return;
+  const which = input.dataset.metaTaInput;
+  const t = _metaRt(panel).ta[which];
+  const list = panel.querySelector(`[data-meta-ta-list="${which}"]`);
+  const open = !!list && !list.hidden;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    if (!open && t.rows.length) _metaTaShow(panel, which, t.rows);
+    _metaTaMove(panel, which, event.key === "ArrowDown" ? 1 : -1);
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    if (open) {
+      const first = t.active >= 0 ? t.active : t.opts.findIndex(o => !o.disabled);
+      if (first >= 0) _metaTaPick(panel, which, first);
+    } else if (which === "geo" && input.value.trim().length >= 2) {
+      _metaGeoSearch(panel, input.value.trim());
+    }
+  } else if (event.key === "Escape") {
+    if (open) { event.preventDefault(); event.stopPropagation(); _metaTaClose(panel, which); }
+    else if (input.value) { event.preventDefault(); event.stopPropagation(); input.value = ""; _metaTaClose(panel, which); }
+  }
+}
+
+function onMetaPanelFocusOut(panel, event) {
+  const ta = event.target.closest(".aud-ta");
+  if (ta && !ta.contains(event.relatedTarget)) _metaTaClose(panel, ta.dataset.metaTa);
+}
+
+// Wires one panel (the grid calls this for each, right after it builds the HTML), then shows the choices and asks about the connection.
+function _metaBind(panel) {
+  panel.addEventListener("click", e => onMetaPanelClick(panel, e));
+  panel.addEventListener("input", e => onMetaPanelInput(panel, e));
+  panel.addEventListener("change", e => onMetaPanelChange(panel, e));
+  panel.addEventListener("keydown", e => onMetaPanelKeydown(panel, e));
+  panel.addEventListener("focusout", e => onMetaPanelFocusOut(panel, e));
+  panel.addEventListener("mousedown", e => { if (e.target.closest(".aud-ta-list")) e.preventDefault(); });   // a click in a list must not take the keyboard out of its box
+  _metaAnnouncer();
+  _metaSync(panel);
+  _metaStatusEnsure();
+}
+
+// ---------------------------------------------------------------- the request
+
+// The body of POST /api/constanza/meta-forecast for what is chosen: always a live pull (the server still takes a manual audience, for old callers).
+// Age is sent only when it narrows (18 and 65+ are Meta's own limits); gender is all / male / female; languages are [{id, name}] from Meta's list.
+function _metaRequestBody(li, p, sel) {
+  return {
+    product_name: li.product_name, retail_budget: _metaFullFlightRetailBudget(li),
+    retail_cpm: _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm, months: _constanzaFlightMonths(li),
+    meta_geo_type: sel.geo.type, meta_geo_key: sel.geo.key, meta_geo_label: (sel.geo.label || sel.geo.name || "").slice(0, 160) || null,
+    age_min: sel.ageMin > META_AGE_MIN ? sel.ageMin : null, age_max: sel.ageMax < META_AGE_MAX ? sel.ageMax : null,
+    gender: sel.gender,
+    meta_targeting: sel.detailed.map(x => ({ id: x.id, name: x.name, type: x.type })),
+    meta_languages: sel.languages.map(x => ({ id: x.id, name: x.name })),
+  };
+}
+
+async function onMetaForecast(lid) {
+  const panel = _metaPanel(lid);
+  const li = state.lineItems.find(x => x.id === lid);
+  if (!panel || !li) return;
+  const p = state.productIndex[li.product_name] || {};
+  const sel = _metaSel(lid);
+  const retailBudget = _metaFullFlightRetailBudget(li);
+  const months = _constanzaFlightMonths(li);
+  const geoAtRequest = _constanzaGeoFor(lid);
+  const targetAtRequest = _effectiveTargetText(li);
+  _metaFeedback(panel, "");
+  if (!(retailBudget > 0)) { _metaFeedback(panel, "Set a positive retail budget for this line in Step 04 first."); return; }
+  if (!sel.geo) {
+    _metaFeedback(panel, "Choose where first: search for a place in step 1 and pick one from the list.");
+    const input = _metaTaInput(panel, "geo");
+    if (input) input.focus();
+    return;
+  }
+  if (_metaConnected(state.metaStatus) === false) { _metaFeedback(panel, _metaOffReason(state.metaStatus)); return; }
+  const rt = _metaRt(panel);
+  const btn = panel.querySelector('[data-meta-act="estimate"]');
+  rt.busy = true;
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
+  btn.textContent = "Asking Meta…";
+  try {
+    const body = _metaRequestBody(li, p, sel);
+    const response = await fetch("/api/constanza/meta-forecast", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(_metaErrorText(data, response.statusText, body));
+    // Save the provenance with the proposal. A changed line/geo/length is shown as stale (and the insert button withdrawn).
+    const stillThere = state.lineItems.find(x => x.id === lid);
+    if (!stillThere || stillThere.product_name !== li.product_name ||
+        _metaFullFlightRetailBudget(stillThere) !== retailBudget || _constanzaFlightMonths(stillThere) !== months ||
+        _constanzaGeoFor(lid) !== geoAtRequest || _effectiveTargetText(stillThere) !== targetAtRequest) return;
+    data.proposal_geo = geoAtRequest;
+    data.target_text = targetAtRequest;
+    state.availsData[lid] = state.availsData[lid] || {};
+    state.availsData[lid].meta_forecast = data;
+    const live = _metaPanel(lid) || panel;
+    live.querySelector(".meta-feedback").innerHTML = _metaForecastSummaryHtml(data, li, p);
+    _metaFeedback(live, "");
+    _metaSay(live, "The estimate is ready.");
+  } catch (error) {
+    _metaFeedback(_metaPanel(lid) || panel, String((error && error.message) || error));
+  } finally {
+    rt.busy = false;
+    btn.removeAttribute("aria-busy");
+    btn.textContent = "Estimate audience";
+    _metaApplyStatus(panel);
+  }
+}
+
+// Writes the MID scenario (the default) into the line's Avails: monthly impressions, and the lower-end audience as est. uniques.
+function onMetaInsert(lid) {
+  const li = state.lineItems.find(x => x.id === lid);
+  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
+  if (!li || !saved || !saved.scenarios) return false;
+  const geo = saved.meta_targeting ? (saved.meta_targeting.geo_name || `Meta geography ${saved.meta_targeting.geo_key}`) : "entered audience";
+  return applyConstanzaEstimate(lid, saved.scenarios.monthly.mid, saved.scenarios.est_uniques,
+    { method: "meta_audience", dmas: [geo], unmatched_tokens: [], win_rate: null, hispanic_share: null });
+}
+
+// One polite live region on the page itself, not in a panel: the panels are rebuilt with the Avails grid and take their own messages with them.
+function _metaAnnouncer() {
+  let el = document.getElementById(META_LIVE_ID);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = META_LIVE_ID;
+    el.className = "aud-sr";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    el.setAttribute("aria-atomic", "true");
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function _metaAnnounce(message) {
+  const el = _metaAnnouncer();
+  el.textContent = "";                                          // emptied first, so the same words said twice are read twice
+  setTimeout(() => { el.textContent = message; }, 50);
+}
+
+// Insert redraws the whole Avails grid, so the button that was pressed is gone and the keyboard would drop to the top of the page. It goes to the new
+// panel's Insert button (where the planner was working), and what was written into Avails is said.
+function _metaAfterInsert(lid) {
+  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
+  const panel = _metaPanel(lid);
+  const target = panel && (panel.querySelector(".meta-insert-btn") || panel.querySelector('[data-meta-act="estimate"]'));
+  if (target) target.focus();
+  const sc = saved && saved.scenarios;
+  if (sc) _metaAnnounce(`Inserted into Avails: ${_metaCount(sc.monthly.mid)} impressions a month and ${_metaCount(sc.est_uniques)} unique accounts.`);
+}
+// META PANEL: end
 
 function renderAvailsGrid() {
   renderAllTierTabStrips();
@@ -6900,30 +8054,7 @@ function renderAvailsGrid() {
   grid.querySelectorAll(".constanza-line-dock-btn").forEach(btn => {
     btn.addEventListener("click", () => openConstanzaForLine(btn.dataset.lid));
   });
-  grid.querySelectorAll(".meta-plan-block").forEach(panel => {
-    panel.addEventListener("click", e => onMetaPanelClick(panel, e));
-    const q = panel.querySelector(".meta-target-query");
-    if (q) q.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); onMetaTargetLookup(panel.dataset.metaLid, false); } });
-    panel.querySelectorAll(".meta-audience, .meta-audience-upper, .meta-geo-choice, .meta-age-min, .meta-age-max, .meta-gender").forEach(el => {
-      el.addEventListener("input", () => _metaMarkStale(panel));
-      el.addEventListener("change", () => _metaMarkStale(panel));
-    });
-  });
-  grid.querySelectorAll(".meta-model-btn").forEach(btn => {
-    btn.addEventListener("click", () => onMetaForecast(btn.dataset.lid, false));
-  });
-  grid.querySelectorAll(".meta-pull-btn").forEach(btn => {
-    btn.addEventListener("click", () => onMetaForecast(btn.dataset.lid, true));
-  });
-  grid.querySelectorAll(".meta-search-btn").forEach(btn => {
-    btn.addEventListener("click", () => onMetaGeoSearch(btn.dataset.lid));
-  });
-  grid.querySelectorAll(".meta-geo-type, .meta-geo-query").forEach(input => {
-    input.addEventListener("input", () => {
-      const choice = input.closest(".meta-plan-block").querySelector(".meta-geo-choice");
-      choice.innerHTML = '<option value="">Search and choose an exact match</option>';
-    });
-  });
+  grid.querySelectorAll(".meta-panel").forEach(_metaBind);
   if (window.Constanza) Constanza.hintOnce();
 }
 
@@ -7026,181 +8157,6 @@ function _constanzaFlightDays() {
   const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
   if (!start || !end || end < start) return null;
   return Math.min(Math.round((end - start) / 86400000) + 1, 3660);
-}
-
-function _metaPanel(lid) {
-  return document.querySelector(`.meta-plan-block[data-meta-lid="${escapeAttr(lid)}"]`);
-}
-
-function _metaFeedback(panel, message) {
-  const el = panel && panel.querySelector(".meta-plan-feedback");
-  if (el) el.innerHTML = `<p class="constanza-error">${escapeHtml(message)}</p>`;
-}
-
-async function onMetaGeoSearch(lid) {
-  const panel = _metaPanel(lid);
-  if (!panel) return;
-  const query = panel.querySelector(".meta-geo-query").value.trim();
-  const locationType = panel.querySelector(".meta-geo-type").value;
-  const btn = panel.querySelector(".meta-search-btn");
-  const choice = panel.querySelector(".meta-geo-choice");
-  if (!query) { _metaFeedback(panel, "Enter a Meta geography to search."); return; }
-  btn.disabled = true;
-  choice.innerHTML = '<option value="">Searching…</option>';
-  try {
-    const response = await fetch("/api/constanza/meta-geos", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, location_type: locationType }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-    choice.innerHTML = '<option value="">Choose an exact Meta match</option>' +
-      (data.locations || []).map(loc => `<option value="${escapeHtml(loc.key)}">${escapeHtml(loc.name)}${loc.region ? " · " + escapeHtml(loc.region) : ""}${loc.country_code ? " · " + escapeHtml(loc.country_code) : ""}</option>`).join("");
-    if (!data.locations || !data.locations.length) _metaFeedback(panel, "Meta found no matching geography. Try a city, ZIP, state, or the market name as Meta lists it (Meta's markets are Comscore markets, which can differ from Nielsen DMAs).");
-  } catch (error) {
-    choice.innerHTML = '<option value="">Search and choose an exact match</option>';
-    _metaFeedback(panel, String(error.message || error));
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-// What a keyword (or a whole list) finds in Meta's interests / behaviors / demographics, as buttons a planner clicks to choose.
-function _metaTargetResultsHtml(groups, chosen) {
-  const have = new Set(chosen.map(x => `${x.type}:${x.id}`));
-  const sections = groups.filter(([, items]) => items.length).map(([label, items]) =>
-    `<div class="meta-target-group"><span class="cz-note">${escapeHtml(label)}</span><div class="cz-chips">${items.slice(0, 60).map(it =>
-      `<button type="button" class="cz-chip ${have.has(`${it.type}:${it.id}`) ? "cz-ok" : ""}" data-meta-act="add" data-id="${escapeHtml(it.id)}" data-type="${escapeHtml(it.type)}" data-name="${escapeHtml(it.name)}"` +
-      `${it.path && it.path.length ? ` title="${escapeHtml(it.path.join(" › "))}"` : ""}>${escapeHtml(it.name)}${it.audience_lower != null ? ` <small>${Number(it.audience_lower).toLocaleString("en-US")}+</small>` : ""}</button>`).join("")}</div>${items.length > 60 ? `<span class="cz-note">${items.length - 60} more: search to narrow.</span>` : ""}</div>`);
-  return sections.length ? sections.join("") : `<span class="cz-note">Nothing found: try other words, or browse the list.</span>`;
-}
-
-async function onMetaTargetLookup(lid, browse) {
-  const panel = _metaPanel(lid);
-  if (!panel) return;
-  const box = panel.querySelector(".meta-target-results");
-  const query = panel.querySelector(".meta-target-query").value.trim();
-  const kind = panel.querySelector(".meta-browse-kind").value;
-  if (!browse && query.length < 2) { box.innerHTML = '<span class="cz-note">Type at least two letters to search.</span>'; return; }
-  box.innerHTML = '<span class="cz-note">Asking Meta…</span>';
-  try {
-    const response = await fetch(browse ? `/api/constanza/meta-targeting?kind=${encodeURIComponent(kind)}` : `/api/constanza/meta-targeting?q=${encodeURIComponent(query)}`);
-    const data = await response.json();
-    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-    const narrowed = (data.items || []).filter(it => words.every(w => (it.name + " " + (it.path || []).join(" ")).toLowerCase().includes(w)));
-    const groups = browse ? [[kind, narrowed]]
-      : [["Interests", data.results.interests || []], ["Behaviors", data.results.behaviors || []], ["Demographics", data.results.demographics || []]];
-    box.innerHTML = _metaTargetResultsHtml(groups, _metaSelected(lid));
-  } catch (error) {
-    box.innerHTML = `<p class="constanza-error">${escapeHtml(String(error.message || error))}</p>`;
-  }
-}
-
-// Clicks inside a Meta panel: choose / remove an interest, search or browse Meta's lists, insert the mid scenario into Avails.
-function onMetaPanelClick(panel, event) {
-  const target = event.target.closest("[data-meta-act]");
-  if (!target || !panel.contains(target)) return;
-  const lid = panel.dataset.metaLid;
-  const act = target.dataset.metaAct;
-  if (act === "search") onMetaTargetLookup(lid, false);
-  else if (act === "browse") onMetaTargetLookup(lid, true);
-  else if (act === "insert") onMetaInsert(lid);
-  else if (act === "add" || act === "remove") {
-    const chosen = _metaSelected(lid);
-    if (act === "add") {
-      const item = { id: target.dataset.id, name: target.dataset.name, type: target.dataset.type };
-      if (!chosen.some(x => x.id === item.id && x.type === item.type)) chosen.push(item);
-      target.classList.add("cz-ok");
-    } else {
-      chosen.splice(Number(target.dataset.i), 1);
-    }
-    panel.querySelector(".meta-target-chips").innerHTML = _metaChipsHtml(lid);
-    _metaMarkStale(panel);
-  }
-}
-
-// A control that changes the number was changed after a calculation: say the saved snapshot no longer matches what is on screen.
-function _metaMarkStale(panel) {
-  const lid = panel.dataset.metaLid;
-  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
-  const li = state.lineItems.find(x => x.id === lid);
-  if (!saved || !li) return;
-  panel.querySelector(".meta-plan-feedback").innerHTML = _metaForecastSummaryHtml(saved, li, state.productIndex[li.product_name] || {}, true);
-}
-
-async function onMetaForecast(lid, liveAudience) {
-  const panel = _metaPanel(lid);
-  const li = state.lineItems.find(x => x.id === lid);
-  if (!panel || !li) return;
-  const p = state.productIndex[li.product_name] || {};
-  const retailBudget = _metaFullFlightRetailBudget(li);
-  const months = _constanzaFlightMonths(li);
-  const geoAtRequest = _constanzaGeoFor(lid);
-  const targetAtRequest = _effectiveTargetText(li);
-  if (!(retailBudget > 0)) { _metaFeedback(panel, "Set a positive retail budget for this line in Step 04 first."); return; }
-  const lowerText = panel.querySelector(".meta-audience").value.trim();
-  const upperText = panel.querySelector(".meta-audience-upper").value.trim();
-  const lower = lowerText ? Number(lowerText) : null;
-  const upper = upperText ? Number(upperText) : null;
-  if (!liveAudience && (lower === null || !Number.isSafeInteger(lower) || lower < 0 || (upper !== null && (!Number.isSafeInteger(upper) || upper < lower)))) {
-    _metaFeedback(panel, "Enter the lower end of Meta's audience size (a whole number), and, if you give one, an upper end that is not below it.");
-    return;
-  }
-  const body = {
-    product_name: li.product_name, retail_budget: retailBudget,
-    retail_cpm: _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm, months,
-  };
-  if (liveAudience) {
-    const key = panel.querySelector(".meta-geo-choice").value;
-    if (!key) { _metaFeedback(panel, "Search and choose the exact Meta geography first."); return; }
-    body.meta_geo_type = panel.querySelector(".meta-geo-type").value;
-    body.meta_geo_key = key;
-    const picked = panel.querySelector(".meta-geo-choice");
-    body.meta_geo_label = picked.options[picked.selectedIndex] ? picked.options[picked.selectedIndex].text.slice(0, 160) : null;
-    const min = panel.querySelector(".meta-age-min").value.trim();
-    const max = panel.querySelector(".meta-age-max").value.trim();
-    body.age_min = min ? Number(min) : null;
-    body.age_max = max ? Number(max) : null;
-    body.gender = panel.querySelector(".meta-gender").value;
-    body.meta_targeting = _metaSelected(lid).map(x => ({ id: x.id, name: x.name, type: x.type }));
-  } else {
-    body.audience_lower = lower;
-    body.audience_upper = upper === null ? lower : upper;
-  }
-  const btn = panel.querySelector(liveAudience ? ".meta-pull-btn" : ".meta-model-btn");
-  btn.disabled = true;
-  try {
-    const response = await fetch("/api/constanza/meta-forecast", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-    // Save the provenance with the proposal. A changed line/geo/length is shown as stale (and the insert button withdrawn).
-    const stillThere = state.lineItems.find(x => x.id === lid);
-    if (!stillThere || stillThere.product_name !== li.product_name ||
-        _metaFullFlightRetailBudget(stillThere) !== retailBudget || _constanzaFlightMonths(stillThere) !== months ||
-        _constanzaGeoFor(lid) !== geoAtRequest || _effectiveTargetText(stillThere) !== targetAtRequest) return;
-    data.proposal_geo = geoAtRequest;
-    data.target_text = targetAtRequest;
-    state.availsData[lid] = state.availsData[lid] || {};
-    state.availsData[lid].meta_forecast = data;
-    panel.querySelector(".meta-plan-feedback").innerHTML = _metaForecastSummaryHtml(data, li, p);
-  } catch (error) {
-    _metaFeedback(panel, String(error.message || error));
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-// Writes the MID scenario (the default) into the line's Avails: monthly impressions, and the lower-end audience as est. uniques.
-function onMetaInsert(lid) {
-  const li = state.lineItems.find(x => x.id === lid);
-  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
-  if (!li || !saved || !saved.scenarios) return false;
-  const geo = saved.meta_targeting ? (saved.meta_targeting.geo_name || `Meta geography ${saved.meta_targeting.geo_key}`) : "entered audience";
-  return applyConstanzaEstimate(lid, saved.scenarios.monthly.mid, saved.scenarios.est_uniques,
-    { method: "meta_audience", dmas: [geo], unmatched_tokens: [], win_rate: null, hispanic_share: null });
 }
 
 async function onConstanzaAutoCalc(lid) {

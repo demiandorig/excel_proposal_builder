@@ -964,22 +964,32 @@ class MetaTargetingItem(BaseModel):
     """One interest / behavior / demographic option picked from Meta's own list (id, name and type come from /meta-targeting)."""
     model_config = ConfigDict(extra="forbid")
 
+    id: str = Field(..., max_length=constanza_meta.MAX_TARGETING_ID_LENGTH)
+    name: str = Field(..., max_length=constanza_meta.MAX_NAME_LENGTH)
+    # the longest key a pick can have (household_composition is 21 characters): derived from the keys, so the lists and this model cannot disagree
+    type: str = Field(..., max_length=constanza_meta.MAX_TARGETING_TYPE_LENGTH)
+
+
+class MetaLanguageItem(BaseModel):
+    """One language picked from Meta's own list (id and name come from /meta-languages)."""
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(..., max_length=30)
-    name: str = Field(..., max_length=120)
-    type: str = Field(..., max_length=20)
+    name: str = Field(..., max_length=constanza_meta.MAX_NAME_LENGTH)
 
 
 class MetaAuctionForecastRequest(BaseModel):
     product_name: str
     retail_budget: float
-    # a manually entered audience: its LOWER end is what the three impression scenarios multiply (the upper end is context and optional)
+    # typed audience bounds, kept for callers that predate the panel (it pulls every audience from Meta and never sends these): the LOWER end is
+    # what the three impression scenarios multiply (the upper end is context and optional)
     audience_lower: Optional[int] = None
     audience_upper: Optional[int] = None
     # the flight's length in months: the flight total is the monthly scenario times it
     months: int = 1
     retail_cpm: Optional[float] = None
     # Select a geography returned by /meta-geos for a live audience pull.
-    # Omit both fields for a manually supplied audience or budget-only model.
+    # Omit both fields only for a budget-only model (or the typed bounds above).
     meta_geo_type: Optional[str] = None
     meta_geo_key: Optional[str] = None
     # the chosen geography's name as Meta listed it, kept with the snapshot so the result can say what it was pulled for
@@ -989,6 +999,9 @@ class MetaAuctionForecastRequest(BaseModel):
     gender: Optional[str] = None
     # interests / behaviors / demographics chosen from Meta's lists: the audience is people who match ANY of them
     meta_targeting: list[MetaTargetingItem] = Field(default_factory=list, max_length=50)
+    # languages chosen from /meta-languages (most campaigns target Spanish speakers): the audience is people whose Facebook / Instagram is set to
+    # ANY of them, AND-ed with the geography, age, gender and interests. Omitted or empty = everyone in the geography, whatever their language.
+    meta_languages: list[MetaLanguageItem] = Field(default_factory=list, max_length=50)
 
 
 class ConstanzaParseAudienceRequest(BaseModel):
@@ -1774,29 +1787,45 @@ def constanza_meta_targeting(kind: str = "", q: str = "") -> dict:
         raise _meta_error(exc) from exc
 
 
+@app.get("/api/constanza/meta-languages")
+def constanza_meta_languages(q: str = "") -> dict:
+    """The languages Meta can target, straight from Meta's own list: without `q` the whole list (cached for hours), with `q` (2-60 characters)
+    the languages Meta's search finds for those letters. `note` says what a Meta "language" is (the language people have set Facebook /
+    Instagram to), for the panel to show beside the picker."""
+    try:
+        return {"items": constanza_meta.search_locales(q), "note": constanza_meta.LANGUAGE_NOTE}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except constanza_meta.MetaAPIError as exc:
+        raise _meta_error(exc) from exc
+
+
 @app.post("/api/constanza/meta-forecast")
 def constanza_meta_forecast(body: MetaAuctionForecastRequest) -> dict:
     """The Meta line's audience scenarios: the LOWER end of Meta's audience range x 4.3 / 5.5 / 8.6 (conservative / mid / upper; platform_scenarios.py), a
     month's avails and the flight, plus the budget cross-check.
 
-    A live Meta request requires an explicitly selected Meta geo ID, optionally with age, gender and interests / behaviors from Meta's lists;
-    nothing else about the campaign's targeting is represented, so the planner checks the rest in Ads Manager. Without the selection a planner may
-    enter the audience (its lower end) manually.
+    A live Meta request requires an explicitly selected Meta geo ID, optionally with age, gender, languages and interests / behaviors from Meta's
+    lists; nothing else about the campaign's targeting is represented, so the planner checks the rest in Ads Manager. The panel always pulls its
+    audience this way. `audience_lower` / `audience_upper` (typed bounds) are still accepted, but only from a caller that predates the panel.
     """
     if bool(body.meta_geo_type) != bool(body.meta_geo_key):
         raise HTTPException(status_code=422, detail="Select both a Meta geography type and its key.")
     if body.meta_geo_type and (body.audience_lower is not None or body.audience_upper is not None):
-        raise HTTPException(status_code=422, detail="Use either the live Meta audience or manually entered bounds.")
+        raise HTTPException(status_code=422, detail="Use either the live Meta audience or typed audience bounds, not both.")
     if body.meta_targeting and not body.meta_geo_type:
         raise HTTPException(status_code=422, detail="Interests and behaviors need a live Meta pull: select a Meta geography too.")
+    if body.meta_languages and not body.meta_geo_type:
+        raise HTTPException(status_code=422, detail="Languages need a live Meta pull: select a Meta geography too.")
     try:
         audience_source = "manual"
         lower, upper = body.audience_lower, body.audience_upper
         targeting = [item.model_dump() for item in body.meta_targeting]
+        languages = constanza_meta.clean_locales([item.model_dump() for item in body.meta_languages])
         if body.meta_geo_type:
             lower, upper = constanza_meta.fetch_reach_estimate(
                 geo_type=body.meta_geo_type, geo_key=body.meta_geo_key,
-                age_min=body.age_min, age_max=body.age_max, gender=body.gender, targeting=targeting,
+                age_min=body.age_min, age_max=body.age_max, gender=body.gender, targeting=targeting, locales=languages,
             )
             audience_source = "meta_api"
         result = constanza_meta.model_auction(
@@ -1808,6 +1837,7 @@ def constanza_meta_forecast(body: MetaAuctionForecastRequest) -> dict:
             result["meta_targeting"] = {
                 "geo_type": body.meta_geo_type, "geo_key": body.meta_geo_key, "geo_name": (body.meta_geo_label or "").strip() or None,
                 "age_min": body.age_min, "age_max": body.age_max, "gender": body.gender, "detailed": targeting,
+                "languages": languages,
             }
         return result
     except ValueError as exc:

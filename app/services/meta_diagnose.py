@@ -1,7 +1,9 @@
 """
 Checks the Meta connection end to end, against the real ad account: is the token good and can it read the account, can geographies be
-searched, does a reach estimate come back (a country, a TV market with age and gender, interests), and can the interest / behavior /
-demographic lists be read.
+searched, does a reach estimate come back (a country, a TV market with age and gender, interests, a language), can languages be searched
+and listed, and can the interest / behavior / demographic lists be read. Two lines are about what Meta does with `locales`: the Spanish one
+is a check (the figure must come out clearly smaller than the plain U.S. one), the English one only REPORTS what Meta did with a language that
+is common in the U.S. (Meta's reference describes `locales` as for a language other than the common one for a location) and never fails the run.
 
     python -m app.services.meta_diagnose
     python -m app.services.meta_diagnose --json
@@ -33,6 +35,11 @@ class Check:
 
     def to_public(self) -> dict:
         return {"name": self.name, "ok": self.ok, "warn": self.warn and self.ok, "detail": self.detail, "seconds": round(self.seconds, 2)}
+
+
+# A language only narrows an estimate, so the figure for Spanish must come out clearly below the plain U.S. figure of the same run. Meta answers the
+# same spec with the same rounded bounds, so a language it did not apply gives the U.S. figure itself; below this share of it counts as applied.
+LANGUAGE_NARROWS_BELOW = 0.9
 
 
 def _timed(name: str, fn: Callable[[], tuple[str, bool]]) -> Check:
@@ -73,7 +80,23 @@ def run_checks() -> list[Check]:
     if not add(_timed("Token and ad account (ads_read)", account)).ok:
         return checks
 
-    state = {"market": None}
+    state = {"market": None, "language": None, "us": None}
+
+    def us_baseline():
+        """The plain U.S. estimate of this run: the one the check above got, else asked once more (None when Meta will not give it)."""
+        if state["us"] is None:
+            try:
+                state["us"] = meta.fetch_reach_estimate(geo_type="country", geo_key="US")
+            except (meta.MetaAPIError, ValueError):
+                return None
+        return state["us"]
+
+    def against_us(lower):
+        """(the plain U.S. range as words, the language's lower end as a share of the plain U.S. lower end) - both None without a usable baseline."""
+        baseline = us_baseline()
+        if not baseline or baseline[0] <= 0:
+            return None, None
+        return f"against {baseline[0]:,} – {baseline[1]:,} for the whole U.S.", lower / baseline[0]
 
     def geography():
         found = meta.search_geography("Los Angeles", "geo_market")
@@ -86,6 +109,7 @@ def run_checks() -> list[Check]:
 
     def country():
         lower, upper = meta.fetch_reach_estimate(geo_type="country", geo_key="US")
+        state["us"] = (lower, upper)
         return f"U.S.: {lower:,} – {upper:,} accounts; lower end x{platform_scenarios.multipliers()['mid']:g} = {lower * platform_scenarios.multipliers()['mid']:,.0f} impressions a month (mid)", False
 
     add(_timed("Reach estimate · United States", country))
@@ -110,6 +134,55 @@ def run_checks() -> list[Check]:
 
     add(_timed("Interest search + a reach estimate with an interest", interests))
 
+    def language_search():
+        found = meta.search_locales("Spanish")
+        if not found:
+            raise meta.MetaAPIError("Meta's language search found nothing for “Spanish”: the token may not be able to use the targeting search "
+                                    "(`type=adlocale`).")
+        state["language"] = next((f for f in found if f["name"].lower() == "spanish"), found[0])
+        return f"{len(found)} match(es); using: {state['language']['name']} (locale {state['language']['id']})", False
+
+    add(_timed("Language search", language_search))
+
+    def language_reach():
+        language = state["language"]
+        if not language:
+            raise meta.MetaAPIError("no language to ask about (the language search above failed)")
+        lower, upper = meta.fetch_reach_estimate(geo_type="country", geo_key="US", locales=[language])
+        detail = f"U.S. accounts set to {language['name']}: {lower:,} – {upper:,}"
+        compared, share = against_us(lower)
+        if share is None:                                              # nothing to compare with: say so instead of claiming a result
+            return detail + " (no plain U.S. figure to compare with, so whether Meta applied `locales` is not verified)", True
+        if share >= LANGUAGE_NARROWS_BELOW:                            # a language only narrows: about the U.S. figure means Meta did not apply it
+            return (f"{detail}, {compared} - not clearly smaller than the whole U.S. ({share:.1%} of it), so Meta may not be applying `locales`; "
+                    "compare in Ads Manager (Languages field)"), True
+        return f"{detail}, {compared} (smaller than the whole U.S.: {share:.1%} of it, so the language narrowed the estimate)", False
+
+    add(_timed("Reach estimate · with a language", language_reach))
+
+    def common_language():
+        """For information only: what Meta does with English, the language most common in the U.S. It is reported, never judged, and never fails."""
+        try:
+            found = meta.search_locales("English")
+            language = (next((f for f in found if f["name"].lower() == "english (us)"), None)
+                        or next((f for f in found if f["name"].lower().startswith("english")), None))
+            if not language:
+                return "Meta lists no language called English, so there is nothing to compare (for information only).", False
+            lower, upper = meta.fetch_reach_estimate(geo_type="country", geo_key="US", locales=[language])
+            detail = f"U.S. accounts set to {language['name']}: {lower:,} – {upper:,}"
+            compared, share = against_us(lower)
+        except (meta.MetaAPIError, ValueError) as exc:
+            return f"Could not ask ({exc}). For information only: this does not change the result of the run.", False
+        if share is None:
+            return detail + " (no plain U.S. figure to compare with). For information only.", False
+        if share < LANGUAGE_NARROWS_BELOW:
+            return f"{detail}, {compared} ({share:.1%} of it): Meta narrowed the estimate for English too. For information only.", False
+        return (f"{detail}, {compared} ({share:.1%} of it): no clear narrowing, Meta gave about the whole U.S. figure for English. For information only: "
+                "Meta's reference describes `locales` as for a language other than the common one for a location, so check what the English and "
+                "Spanish + English picks do in Ads Manager."), False
+
+    add(_timed("Reach estimate · English, a common language (information)", common_language))
+
     for kind in ("interests", "behaviors", "demographics"):
         def listing(kind=kind):
             items = meta.targeting_catalog(kind)
@@ -117,6 +190,14 @@ def run_checks() -> list[Check]:
                 raise meta.MetaAPIError(f"Meta returned an empty {kind} list. Demographic options also depend on the token's home country.")
             return f"{len(items):,} options; first: {items[0]['name']}", len(items) < 5
         add(_timed(f"Targeting list · {kind}", listing))
+
+    def language_list():
+        items = meta.search_locales()
+        if not items:
+            raise meta.MetaAPIError("Meta returned an empty language list (a blank search with limit=1000); a language can still be searched by name.")
+        return f"{len(items):,} languages; first: {items[0]['name']}", len(items) < 5
+
+    add(_timed("Language list", language_list))
     return checks
 
 

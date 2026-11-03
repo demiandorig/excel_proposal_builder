@@ -65,24 +65,54 @@ Constanza is unaffected.
 
 ## In the dock
 
-Pick **Tiktok Ads** (group *TikTok · live audience estimate*). The Entravision audience block is replaced by the targeting
-Ads Manager offers, the same way it is laid out there:
+Pick **Tiktok Ads** (group *TikTok · live audience estimate*). The Entravision audience block is replaced by a panel built from the
+shared audience kit (`audience-kit.css`, the same cards Meta and the Entravision block use): a **connection banner**, then numbered
+section cards. The geography and the flight dates are the dock's own cards above (*Where*, *When*), so the panel's numbering carries on
+from them: **Who**, **Language**, **Audience**, **More targeting**.
 
 | Section | What it sets | TikTok field |
 |---|---|---|
-| Geography (the dock's usual box) | markets, states, ZIPs, counties, cities, "National" | `location_ids`, `zipcode_ids` |
-| Age | 18–24 · 25–34 · 35–44 · 45–54 · 55+ | `age_groups` |
-| Gender | all · men · women | `gender` |
-| Languages | from TikTok's own list | `languages` |
-| Interests & behaviors | search, or browse every category: interests, purchase intent, video / creator / hashtag interactions, additional interests | `interest_category_ids`, `interest_keyword_ids`, `purchase_intention_keyword_ids`, `actions[]` |
-| Spending power · household income (U.S.) · device (OS, connection) | | `spending_power`, `household_income`, `operating_systems`, `network_types` |
-| Placement · objective | TikTok (always) + Pangle · Reach / Video views / Traffic | `placements`, `objective_type` + `optimization_goal` |
+| Where (the dock's usual card) | markets, states, ZIPs, counties, cities, "National" | `location_ids`, `zipcode_ids` |
+| **Who** | age brackets 18–24 · 25–34 · 35–44 · 45–54 · 55+ (multi-select, with presets 18–34, 25–54, 35+) and gender (All / Women / Men). The line under the title reads like *Women · 25–44*; neighbouring brackets read as one range | `age_groups`, `gender` |
+| **Language** | quick picks **Spanish speakers**, **English**, **Spanish + English**; a search over TikTok's whole list (and *Browse all languages*, a pop-up, up to 20); chips | `languages` |
+| **Audience** | interests & behaviors: a search (every kind, grouped under headings), chips, and **Browse all categories** — the shared pop-up window with a tab each for Interests, Purchase intent, Video, Creators and Hashtags, name and category columns, searchable and sortable, tick as many as you like | `interest_category_ids`, `interest_keyword_ids`, `purchase_intention_keyword_ids`, `actions[]` |
+| **More targeting** (folded) | spending power · household income (U.S.) · device (OS, connection) · placement (TikTok always, + Pangle) · campaign objective Reach / Video views / Traffic | `spending_power`, `household_income`, `operating_systems`, `network_types`, `placements`, `objective_type` + `optimization_goal` |
+
+Each section's title carries a live one-line summary of what is chosen, a count and its own **Clear**. The words stay *Clear*; the accessible name says what it
+clears (*Clear age and gender*, *Clear languages*, *Clear interests and behaviors*, *Clear more targeting*, as in the Meta panel). *More targeting* folds,
+and its Clear is not inside the `<summary>` (a button in the toggle is a control inside a control): it sits beside the `<details>` in a `.cz-fold` wrapper
+(`constanza.css`), drawn over the row just left of the arrow, so the keyboard meets Clear, then the toggle, then the body. The request the panel sends is
+unchanged by the redesign (same fields, same values); the copied summary and the result card read as they did.
+
+**Language** is the first-class setting it should be (most campaigns target Spanish speakers). The quick picks are looked up **live in TikTok's own
+list** (`GET /tool/language/`, asked the moment the panel is shown and kept for the session, so the picks are ready before anyone types): by
+code first (`es`, `en`), then by name (a list entry called "Spanish…"), and added with the code the list itself uses; nothing is sent blind. While the list
+is loading, or TikTok refuses it (or the connection is not set up), the pills are shown **disabled with the reason beside them** and a *Try again* link; a
+list that lacks Spanish disables that pick, and *Spanish + English* is offered only when both exist. When the line open in the dock **targets Hispanic
+audiences** (the dock answers that through `ctx.targetsHispanic()`: its own switch, or the page's reading of the line's targeting text) the panel *suggests*
+adding Spanish — *Add Spanish* / *Not now* — and never adds it by itself.
+
+What TikTok's language field means, as the panel tells the planner: **the language people have set in their TikTok app** (TikTok may also work it out from
+the videos they watch); it is not the language of the ad. *Confirmed:* TikTok's own newsroom explainer says ads are shown by app language and gives
+"an advertiser who wants to reach Spanish speakers" as the example; TikTok's official SDK lists `GET /open_api/v1.3/tool/language/` ("Get languages") for an
+ad account. *From a search result, not read on the page itself:* TikTok's help-center description of the Language setting as the TikTok app's language "and/or" a
+language predicted from the content viewed, and that it does not replace a country's accepted ad language. *Assumed:* that the `languages` codes of the
+audience-size estimate mean the same as Ads Manager's Language setting (the API reference is a script-rendered portal that could not be read here); an
+estimate with a language, asked through the real ad account, is how to confirm it.
 
 The panel refuses, before spending a call, what TikTok refuses: interactions with Pangle as a placement, purchase intent on a Reach
 campaign (it offers *Use the Traffic objective*), purchase intent together with additional interests, locations that overlap (the
-geography reader already folds a ZIP into a market that is also listed). The result shows the audience (range and TikTok's
-verdict), the impressions, what was asked, and the places that were sent to TikTok — and anything that could not be placed,
-with the reason, so nothing is dropped silently.
+geography reader already folds a ZIP into a market that is also listed), more than 50 categories of one kind (the pop-up takes the picks it can and says how many it left
+out) and more than 20 languages. The result shows the audience (range and TikTok's verdict), the impressions, what was asked, and the places that were
+sent to TikTok — and anything that could not be placed, with the reason, so nothing is dropped silently.
+
+The pop-up is `segment-browser.js` (shared with the Meta panel and the Entravision block), opened by the panel with one tab per kind; each tab is loaded
+when first shown (`/api/constanza/tiktok/targeting?kind=…`, cached by the server for hours) and the picks come back as one change, which adds and removes
+chips exactly as clicking them does. The pop-up's button names what it will do: the panel's own label (*Add to audience (2)*, *Add languages (1)*) while the
+changes are only additions, *Remove 2* when they are only removals, *Apply changes (3)* for a mix. TikTok's lists carry no audience sizes, so there is no size
+column. If `segment-browser.js` did not load, the two buttons that open it (*Browse all categories*, *Browse all languages*) are hidden, like the dock's own
+*Browse all audiences*, and the hints stop pointing at them; the searches and quick picks still work. The two search lists (interests, languages) open over
+the dock's scrolling body, and whatever they say — answer, nothing matches or an error — is scrolled fully into view. The panel's own styles are `constanza-tiktok.css`.
 
 On **Step 05**, the line's *Auto-calculate avails* asks TikTok about the proposal's geography alone (all genders and ages, 18+) and
 says so; *Refine in Constanza* opens the line in the dock to set the audience, and *Insert into Avails* writes the numbers.

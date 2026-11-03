@@ -1,0 +1,49 @@
+/* ========================================================================
+   The TikTok panel of the Constanza dock (constanza-tiktok.js). Almost everything is the shared audience kit (audience-kit.css, .aud-*)
+   and the SegmentBrowser pop-up (segment-browser.css); this file only holds what is specific to this panel. Loaded after both.
+   ======================================================================== */
+
+/* The kit's flex/grid rules set `display`, which would beat the [hidden] attribute of a panel element. */
+.tt-panel [hidden] { display: none !important; }
+
+.tt-panel { display: flex; flex-direction: column; gap: 12px; margin: 0 0 14px; }
+.tt-panel > .aud-notice { margin: 0; }
+
+/* A typeahead answer for older text is on screen only until the new one arrives: it cannot be picked from, and says so by fading. */
+.tt-panel .aud-ta-list.is-pending { opacity: 0.55; }
+.tt-panel .aud-ta-note.tt-more { border-top: 1px solid var(--rule-soft); }
+
+/* The kit's hover for a wrapped pill (white background, accent text) outranks the pressed look's background, so a pressed pill went white-on-white
+   under the mouse. A pressed pill stays pressed while it is hovered. */
+.tt-panel .aud-seg--wrap > button[aria-pressed="true"]:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* A text link that opens the pop-up sits flush with the field above it (the kit's link has 4px of side padding for its hover shape). */
+.tt-panel #cz-tt-lang-browse { margin-left: -4px; }
+/* ... and when the pop-up's script did not load the link is hidden: its row goes with it, so it leaves no gap behind. */
+.tt-panel .aud-field > div:has(> #cz-tt-lang-browse[hidden]) { display: none; }
+
+/* The search box's own clear button, in the page's ink instead of the browser's blue. */
+.tt-panel .aud-ta > input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none; appearance: none; width: 16px; height: 16px; margin-left: 6px; cursor: pointer; opacity: 0.75;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%234a463f' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='m3.5 3.5 9 9m0-9-9 9'/%3E%3C/svg%3E") center / 16px 16px no-repeat;
+}
+
+/* The notes under the chips (purchase-intent warnings, "several interests widen the audience"); nothing to show = no gap in the section. */
+.tt-notes { display: flex; flex-direction: column; gap: 8px; }
+.tt-notes:empty { display: none; }
+
+/* Two actions on one suggestion: side by side, each still a full-height target. */
+#cz-tt-lang-suggest .aud-notice-body { display: flex; flex-wrap: wrap; align-items: center; gap: 0 16px; }
+#cz-tt-lang-suggest .aud-notice-title, #cz-tt-lang-suggest .aud-notice-body > :not(button) { flex: 1 1 100%; }
+#cz-tt-lang-suggest .aud-notice-action { margin-bottom: -4px; }
+
+/* "More targeting" folds: the whole summary row (not just the arrow) opens it, and the row stays one line. Its Clear link is not in the row but
+   beside the <details> (the .cz-fold wrapper, constanza.css), drawn over the row's right end. */
+#cz-tt-more > summary .aud-sec-sum { max-width: 100%; }
+
+/* The sections stack in the ~380px dock and sit two to a row in a wide dock; "More targeting" (in its wrapper) always spans the row. */
+.tt-panel .aud-builder > .cz-fold { grid-column: 1 / -1; }
+
+@media (forced-colors: active) {
+  .tt-panel .aud-ta-list { border: 1px solid CanvasText; }
+}

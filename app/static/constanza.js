@@ -132,7 +132,7 @@
     geo: "", geoType: "", flight: 1, unit: "months", total: "",
     ageMin: "", ageMax: "", gender: "", interests: [], hispanic: null,     // hispanic: null = the product's default, true / false = the planner's choice
     lineId: null, needTotal: false,
-    resolve: null, result: null, busy: false, resSeq: 0, pullSeq: 0, taxonomy: null,
+    resolve: null, resolving: false, resolveFailed: false, result: null, busy: false, resSeq: 0, pullSeq: 0, taxonomy: null,
     resultCtx: null,                  // what the shown result was pulled for: the geography as typed and the areas it resolved to
     resultSig: null,                  // the request that result was pulled with, to tell whether the form still asks for it
   };
@@ -567,14 +567,39 @@
   // its own result card. constanza-tiktok.js registers one with registerMethod(name, factory); the factory gets `ctx` (the dock's
   // state and helpers) and returns { formHtml, bind, onSelect, requestPart, canPull, reset, context, headlineHtml, bodyHtml, cardHtml,
   // badgeHtml, summaryLines, aboutHtml, goLabel }.
+  //
+  // ctx (what the dock hands a panel: use these rather than reaching for the dock's or the page's globals):
+  //   S                          the dock's live state (S.lineId is the Step 05 line it is open for, or null)
+  //   $(id), esc(text), num(n), compact(n)            document.getElementById, HTML escaping, number formats
+  //   api(path, body?)           fetch: a GET, or a POST of `body` as JSON -> { ok, status, data };  errorText(data, fallback) the plain-language message of an error answer
+  //   markStale()                the request changed: any result on the screen no longer matches it
+  //   setMood(name, revertMs?), announce(text)        the dock's avatar mood, and a polite screen-reader announcement (#cz-status)
+  //   summarize(data), productByName(name), requestBody()      the dock's own result reading, product lookup and the request it would send
+  //   targetsHispanic()          -> boolean. Does the line (or product) the dock is open for target Hispanic audiences? Evaluated lazily, on
+  //                              every call, for whatever the dock is open for at that moment: true when the dock was told so (S.hispanic: the
+  //                              line's own choice or the proposal's targeting), else when the page reads the line's own targeting text that
+  //                              way. A hint only: a panel may suggest something from it, never apply it by itself.
   const plugins = {};
   const pluginOf = (p) => (p && plugins[p.method]) || null;
   const pluginFor = (data) => (data && data.tiktok && plugins.tiktok) || null;
   const activePlugin = () => pluginOf(productByName(S.product));
   const goLabel = () => { const plug = activePlugin(); return plug && plug.goLabel ? plug.goLabel : "Pull avails →"; };
 
+  // Does the line the dock is open for target Hispanic audiences? The dock's own switch says so when it was told (S.hispanic), else the page's own
+  // reading of the line's targeting text (app.js _targetsHispanic) does. Read fresh on every call: the dock is opened for another line all the time.
+  function targetsHispanic() {
+    if (S.hispanic === true) return true;
+    try {
+      if (S.lineId && typeof state !== "undefined" && state && Array.isArray(state.lineItems) && typeof _targetsHispanic === "function") {
+        const li = state.lineItems.find((x) => x.id === S.lineId);
+        return !!(li && _targetsHispanic(li));
+      }
+    } catch (e) { /* the page has no such helper: not known to be Hispanic */ }
+    return false;
+  }
+
   function pluginCtx() {
-    return { S, $, esc, num, compact, api, markStale, errorText, setMood, announce, summarize, productByName, requestBody: () => requestBody() };
+    return { S, $, esc, num, compact, api, markStale, errorText, setMood, announce, summarize, productByName, requestBody: () => requestBody(), targetsHispanic };
   }
 
   function mountPlugin(name) {
@@ -619,6 +644,27 @@
 </button>`;
   }
 
+  // The head every section card shares (the kit's .aud-sec-head): the numbered badge, the title, the live one-line summary, an optional
+  // count pill and an optional Clear link. `stem` names the ids the script updates: #cz-<stem>-sum, -count, -clear.
+  // The Clear link of each card that can be cleared: [what it says, what a screen reader is told it does].
+  const CLEAR_WHO = ["Clear", "Clear age and gender"], CLEAR_LANG = ["Turn off", "Turn off Hispanic targeting"], CLEAR_AUD = ["Clear", "Clear all interests"];
+  const clearLink = (stem, clear, extraClass) => `<button type="button" class="aud-clear${extraClass ? " " + extraClass : ""}" id="cz-${stem}-clear" aria-label="${esc(clear[1])}" hidden>${esc(clear[0])}</button>`;
+  // A card that folds is a <details> with a <summary> head, and a <summary> may not hold a button (a control inside the toggle). So its link is made
+  // by foldClear() and put BESIDE the <details>, in a .cz-fold wrapper (constanza.css), and the head (`opts.fold`) keeps room for it with an invisible
+  // twin of the link.
+  const foldClear = (stem, clear) => clearLink(stem, clear, "cz-fold-clear");
+  function secHeadInner(stem, title, opts) {
+    opts = opts || {};
+    return `<span class="aud-step" aria-hidden="true"></span>
+      <div class="aud-sec-text"><h3 class="aud-sec-title cz-sec-title" id="cz-${stem}-t">${title}</h3><p class="aud-sec-sum cz-sum" id="cz-${stem}-sum"></p></div>
+      ${opts.count ? `<span class="aud-count" id="cz-${stem}-count" hidden>0</span>` : ""}
+      ${opts.clear ? (opts.fold ? `<span class="aud-clear cz-fold-twin" aria-hidden="true">${esc(opts.clear[0])}</span>` : clearLink(stem, opts.clear)) : ""}`;
+  }
+
+  // The age presets: the usual media-buying brackets. A preset only fills the two boxes (which still take any age); null = open-ended.
+  const AGE_PRESETS = [[18, null], [18, 34], [18, 49], [25, 54], [35, 54], [55, null]];
+  const presetLabel = (p) => (p[1] == null ? `${p[0]}+` : `${p[0]}–${p[1]}`);
+
   function dockHtml() {
     return `
 <section class="constanza-dock hidden" id="constanza-dock" role="dialog" aria-label="Constanza avails puller">
@@ -635,11 +681,13 @@
   </header>
   <div class="cz-body" id="cz-body">
     <div class="cz-form" id="cz-form">
-      <div class="cz-field">
-        <label class="cz-label" for="cz-product-btn"><span>Product</span><span class="cz-hint" id="cz-product-count"></span></label>
+     <div class="aud-builder cz-builder" id="cz-builder">
+
+      <section class="cz-prod" aria-labelledby="cz-prod-l">
+        <label class="cz-prod-label" id="cz-prod-l" for="cz-product-btn"><span>Product</span><span class="cz-hint" id="cz-product-count"></span></label>
         <div class="cz-picker" id="cz-picker">
           <button type="button" class="cz-picker-btn" id="cz-product-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="cz-picker-pop">
-            <span class="cz-pname" id="cz-pname">Loading products…</span><span aria-hidden="true">▾</span>
+            <span class="cz-ptext"><span class="cz-pname" id="cz-pname">Loading products…</span><span class="cz-pmeta" id="cz-pmeta"></span></span><span class="cz-pcaret" aria-hidden="true"></span>
           </button>
           <div class="cz-picker-pop hidden" id="cz-picker-pop">
             <input type="search" class="cz-input cz-picker-search" id="cz-picker-search" placeholder="Search products…" autocomplete="off" aria-label="Search products"
@@ -648,74 +696,128 @@
           </div>
         </div>
         <div id="cz-product-note"></div>
-      </div>
+      </section>
 
-      <div class="cz-field">
-        <label class="cz-label" for="cz-geo"><span>Geography</span><span class="cz-hint">market · county · city · ZIP · district</span></label>
-        <input type="text" class="cz-input" id="cz-geo" placeholder="e.g. Adams County, WA" autocomplete="off" spellcheck="false" />
-        <div class="cz-seg" id="cz-geotype" role="group" aria-label="Treat the text as">
-          <button type="button" data-type="" aria-pressed="true" title="Work it out from what you typed">Auto</button>
-          <button type="button" data-type="city" aria-pressed="false">City</button>
-          <button type="button" data-type="county" aria-pressed="false">County</button>
-          <button type="button" data-type="zip" aria-pressed="false">ZIP</button>
-          <button type="button" data-type="congressional_district" aria-pressed="false">District</button>
-          <button type="button" data-type="country" aria-pressed="false">Country</button>
-        </div>
-        <div id="cz-geo-chips"></div>
-        <div id="cz-geo-help" aria-live="polite"></div>
-      </div>
-
-      <div class="cz-field">
-        <label class="cz-label" for="cz-flight"><span>Flight length</span><span class="cz-hint" id="cz-flight-hint"></span></label>
-        <div class="cz-row">
-          <div class="cz-stepper">
-            <button type="button" id="cz-flight-dec" aria-label="Decrease">−</button>
-            <input type="number" id="cz-flight" min="1" step="1" value="1" inputmode="numeric" aria-label="Flight length" />
-            <button type="button" id="cz-flight-inc" aria-label="Increase">+</button>
+      <section class="aud-sec" id="cz-sec-where" aria-labelledby="cz-where-t">
+        <div class="aud-sec-head">${secHeadInner("where", "Where", { clear: ["Clear", "Clear the geography"] })}</div>
+        <div class="aud-sec-body">
+          <div class="aud-field">
+            <label class="aud-label" for="cz-geo"><span>Geography</span><span class="aud-label-aside">market · county · city · ZIP · district</span></label>
+            <input type="text" class="aud-input" id="cz-geo" placeholder="e.g. Adams County, WA" autocomplete="off" spellcheck="false" aria-describedby="cz-geo-hint" />
+            <p class="aud-hint" id="cz-geo-hint">One place or a list: separate several with “;” or “and”.</p>
           </div>
-          <div class="cz-seg" id="cz-unit" role="group" aria-label="Unit">
-            <button type="button" data-unit="months" aria-pressed="true">Months</button>
-            <button type="button" data-unit="days" aria-pressed="false">Days</button>
+          <div class="aud-quick" id="cz-geo-quick" hidden></div>
+          <div id="cz-geo-chips"></div>
+          <div id="cz-geo-help" aria-live="polite"></div>
+          <div class="aud-field">
+            <span class="aud-label" id="cz-geotype-l">Treat what I typed as</span>
+            <div class="aud-seg" id="cz-geotype" role="group" aria-labelledby="cz-geotype-l">
+              <button type="button" data-type="" aria-pressed="true" title="Work it out from what you typed">Auto</button>
+              <button type="button" data-type="city" aria-pressed="false">City</button>
+              <button type="button" data-type="county" aria-pressed="false">County</button>
+              <button type="button" data-type="zip" aria-pressed="false">ZIP</button>
+              <button type="button" data-type="congressional_district" aria-pressed="false">District</button>
+              <button type="button" data-type="country" aria-pressed="false">Country</button>
+            </div>
           </div>
         </div>
-        <div class="cz-chips"><button type="button" class="cz-chip cz-sugg hidden" id="cz-use-dates"></button></div>
-      </div>
+      </section>
 
-      <div class="cz-field hidden" id="cz-total-field">
-        <label class="cz-label" for="cz-total"><span>Impressions per month to spread</span><span class="cz-hint">by population share</span></label>
-        <input type="number" class="cz-input" id="cz-total" min="0" step="1000" placeholder="e.g. 1,000,000" inputmode="numeric" />
-        <p class="cz-note" id="cz-total-note"></p>
-      </div>
-
-      <details class="cz-details" id="cz-aud">
-        <summary><span>Audience</span><span class="cz-count hidden" id="cz-aud-count">0</span><span class="cz-hint">Hispanic · age · gender · interests</span></summary>
-        <div class="cz-field cz-hispanic-field">
-          <label class="cz-check"><input type="checkbox" id="cz-hispanic" /> <span><strong>Hispanic targeting</strong></span></label>
-          <p class="cz-note" id="cz-hispanic-note"></p>
-        </div>
-        <div class="cz-row">
-          <div class="cz-grow"><label class="cz-label" for="cz-age-min"><span>Age from</span></label><input type="number" class="cz-input" id="cz-age-min" min="0" max="120" placeholder="18" inputmode="numeric" /></div>
-          <div class="cz-grow"><label class="cz-label" for="cz-age-max"><span>to</span></label><input type="number" class="cz-input" id="cz-age-max" min="0" max="120" placeholder="34" inputmode="numeric" /></div>
-        </div>
-        <div class="cz-field" style="margin-top:12px">
-          <span class="cz-label"><span>Gender</span></span>
-          <div class="cz-seg" id="cz-gender" role="group" aria-label="Gender">
-            <button type="button" data-g="" aria-pressed="true">All</button>
-            <button type="button" data-g="male" aria-pressed="false">Men</button>
-            <button type="button" data-g="female" aria-pressed="false">Women</button>
+      <section class="aud-sec has-value" id="cz-sec-when" aria-labelledby="cz-when-t">
+        <div class="aud-sec-head">${secHeadInner("when", "When")}</div>
+        <div class="aud-sec-body">
+          <div class="aud-field">
+            <label class="aud-label" for="cz-flight"><span>Flight length</span><span class="aud-label-aside" id="cz-flight-hint"></span></label>
+            <div class="cz-flight-row">
+              <div class="cz-stepper">
+                <button type="button" id="cz-flight-dec" aria-label="Decrease">−</button>
+                <input type="number" id="cz-flight" min="1" step="1" value="1" inputmode="numeric" aria-label="Flight length" />
+                <button type="button" id="cz-flight-inc" aria-label="Increase">+</button>
+              </div>
+              <div class="aud-seg" id="cz-unit" role="group" aria-label="Unit">
+                <button type="button" data-unit="months" aria-pressed="true">Months</button>
+                <button type="button" data-unit="days" aria-pressed="false">Days</button>
+              </div>
+            </div>
+          </div>
+          <div class="aud-quick" id="cz-dates-quick" hidden><button type="button" id="cz-use-dates"></button></div>
+          <div class="aud-field hidden" id="cz-total-field">
+            <label class="aud-label" for="cz-total"><span>Impressions per month to spread</span><span class="aud-label-aside">by population share</span></label>
+            <input type="number" class="aud-input" id="cz-total" min="0" step="1000" placeholder="e.g. 1,000,000" inputmode="numeric" aria-describedby="cz-total-note" />
+            <p class="aud-hint cz-hintline" id="cz-total-note"></p>
           </div>
         </div>
-        <div class="cz-field" style="margin-bottom:0">
-          <label class="cz-label" for="cz-interest-q"><span>Interests</span><span class="cz-hint" id="cz-interest-hint"></span></label>
-          <input type="search" class="cz-input" id="cz-interest-q" placeholder="Search — soccer, dentist, new parents…" autocomplete="off"
-                 role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="cz-interest-results" aria-haspopup="listbox" />
-          <div class="cz-interest-results hidden" id="cz-interest-results" role="listbox" aria-label="Matching audiences"></div>
-          <div class="cz-chips" id="cz-interest-chips"></div>
-          <p class="cz-note" id="cz-interest-note"></p>
-          <details class="cz-browse" id="cz-browse"><summary>Browse every audience</summary><div id="cz-browse-body"><p class="cz-note">Loading…</p></div></details>
+      </section>
+
+      <div class="cz-aud" id="cz-aud">
+        <div class="cz-fold">
+          ${foldClear("who", CLEAR_WHO)}
+          <details class="aud-sec" id="cz-sec-who">
+            <summary class="aud-sec-head cz-sec-head">${secHeadInner("who", "Who", { count: true, clear: CLEAR_WHO, fold: true })}</summary>
+            <div class="aud-sec-body">
+              <div class="aud-field">
+                <span class="aud-label" id="cz-age-l"><span>Age</span><span class="aud-label-aside">any age from 0 to 120</span></span>
+                <div class="aud-range" role="group" aria-labelledby="cz-age-l">
+                  <div class="aud-range-selects">
+                    <input type="number" class="aud-input" id="cz-age-min" min="0" max="120" placeholder="From" inputmode="numeric" aria-label="Age from" />
+                    <span class="aud-range-sep">to</span>
+                    <input type="number" class="aud-input" id="cz-age-max" min="0" max="120" placeholder="To" inputmode="numeric" aria-label="Age to" />
+                  </div>
+                  <div class="aud-quick" id="cz-age-presets" role="group" aria-label="Common age ranges">${AGE_PRESETS.map((p) =>
+                    `<button type="button" data-min="${p[0]}" data-max="${p[1] == null ? "" : p[1]}" aria-pressed="false">${presetLabel(p)}</button>`).join("")}</div>
+                </div>
+                <p class="aud-hint cz-hintline" id="cz-age-note" aria-live="polite">Leave both boxes empty for all ages.</p>
+              </div>
+              <div class="aud-field">
+                <span class="aud-label" id="cz-gender-l">Gender</span>
+                <div class="aud-seg" id="cz-gender" role="group" aria-labelledby="cz-gender-l">
+                  <button type="button" data-g="" aria-pressed="true">All</button>
+                  <button type="button" data-g="female" aria-pressed="false">Women</button>
+                  <button type="button" data-g="male" aria-pressed="false">Men</button>
+                </div>
+              </div>
+            </div>
+          </details>
         </div>
-      </details>
+
+        <div class="cz-fold">
+          ${foldClear("lang", CLEAR_LANG)}
+          <details class="aud-sec" id="cz-sec-lang" open>
+            <summary class="aud-sec-head cz-sec-head">${secHeadInner("lang", "Language &amp; heritage", { clear: CLEAR_LANG, fold: true })}</summary>
+            <div class="aud-sec-body">
+              <label class="cz-switch" for="cz-hispanic">
+                <input type="checkbox" id="cz-hispanic" role="switch" aria-labelledby="cz-hispanic-name" aria-describedby="cz-hispanic-desc cz-hispanic-note" />
+                <span class="cz-switch-text"><span class="cz-switch-name" id="cz-hispanic-name">Hispanic targeting</span><span class="cz-switch-desc" id="cz-hispanic-desc">How Entravision’s own products reach Spanish-speaking audiences</span></span>
+              </label>
+              <p class="aud-hint cz-hintline" id="cz-hispanic-note"></p>
+              <div class="aud-notice aud-notice--info" id="cz-lang-why"><div class="aud-notice-body">The avails data has no language field, so Constanza can’t filter by language directly. It weights each area’s avails by that area’s real Hispanic share (U.S. Census ACS), the closest stand-in for a Spanish-speaking audience.</div></div>
+            </div>
+          </details>
+        </div>
+
+        <div class="cz-fold">
+          ${foldClear("aud", CLEAR_AUD)}
+          <details class="aud-sec" id="cz-sec-aud">
+            <summary class="aud-sec-head cz-sec-head">${secHeadInner("aud", "Audience", { count: true, clear: CLEAR_AUD, fold: true })}</summary>
+            <div class="aud-sec-body">
+              <div class="aud-field">
+                <label class="aud-label" for="cz-interest-q"><span>Interests</span><span class="aud-label-aside" id="cz-interest-hint"></span></label>
+                <div class="aud-ta">
+                  <input type="search" class="aud-input" id="cz-interest-q" placeholder="Search — soccer, dentist, new parents…" autocomplete="off"
+                         role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="cz-interest-results" aria-haspopup="listbox" />
+                  <div class="aud-ta-list" id="cz-interest-results" role="listbox" aria-label="Matching audiences" hidden></div>
+                </div>
+                <div class="aud-chips" id="cz-interest-chips"></div>
+                <p class="aud-hint cz-hintline" id="cz-interest-note"></p>
+                <button type="button" class="aud-browse" id="cz-browse" aria-haspopup="dialog"><span class="aud-browse-label">Browse all audiences</span><span class="aud-browse-count" id="cz-browse-count" hidden></span></button>
+              </div>
+            </div>
+          </details>
+        </div>
+      </div>
+
       <div id="cz-method-forms"></div>
+     </div>
     </div>
     <div class="cz-result" id="cz-result"></div>
   </div>
@@ -735,9 +837,18 @@
     root.innerHTML = bubbleHtml() + dockHtml();
     document.body.appendChild(root);
     bind();
+    restoreSections();
     Object.keys(plugins).forEach(mountPlugin);
     applyWide();
+    refreshAudienceUI(); refreshWhere(); refreshGeoQuick();
     renderResultWelcome();
+  }
+
+  // Which of the folding cards the planner left open last time (kept per browser). Language & heritage starts open: most campaigns need it.
+  const SECTION_DEFAULTS = { "cz-sec-who": false, "cz-sec-lang": true, "cz-sec-aud": false };
+  function restoreSections() {
+    const saved = store.get().sections || {};
+    document.querySelectorAll("#cz-aud details.aud-sec").forEach((d) => { d.open = d.id in saved ? !!saved[d.id] : !!SECTION_DEFAULTS[d.id]; });
   }
 
   function applyWide() {
@@ -769,10 +880,11 @@
   const productByName = (name) => S.products.find((p) => p.name === name) || null;
 
   function updateProductUI() {
-    if ($("cz-aud-count")) refreshAudienceUI(); else refreshHispanicUI();       // the Audience badge counts a default-on Hispanic cut too
+    refreshAudienceUI();                                                        // Who, Language & heritage and Audience follow the product (its Hispanic default)
     const p = productByName(S.product);
     $("cz-pname").textContent = p ? p.name : (S.products.length ? "Choose a product…" : "Loading products…");
     $("cz-pname").title = p ? p.name : "";
+    $("cz-pmeta").textContent = p ? (CHANNEL_LABEL[p.channel] || "") : "";
     const note = $("cz-product-note");
     if (!p) { note.innerHTML = ""; return; }
     const bits = [`<span class="cz-hint">${esc(seriesMeta(p.series, p.method))}</span>`];
@@ -867,45 +979,90 @@
 
   function resolveSoon(ms) {
     clearTimeout(resolveTimer);
+    if (!S.geo.trim()) {                          // an emptied box: nothing to match, and what was shown for the old text goes at once
+      S.resSeq++; S.resolve = null; S.resolving = false; S.resolveFailed = false;
+      renderGeoStatus();
+      return;
+    }
+    S.resolving = true;                           // the summary says "Matching…" from the first keystroke, not from when the request goes out
+    refreshWhere();
+    refreshGeoQuick();
     resolveTimer = setTimeout(resolveNow, ms == null ? 380 : ms);
   }
 
   async function resolveNow() {
     const text = S.geo.trim();
     const seq = ++S.resSeq;
-    if (!text) { S.resolve = null; renderGeoStatus(); return; }
+    if (!text) { S.resolve = null; S.resolving = false; S.resolveFailed = false; renderGeoStatus(); return; }
+    S.resolving = true;
     let r;
-    try { r = await api("/api/constanza/resolve", { geo_text: text, geo_type_hint: S.geoType || null }); } catch (e) { return; }
+    try { r = await api("/api/constanza/resolve", { geo_text: text, geo_type_hint: S.geoType || null }); } catch (e) { r = { ok: false, data: {} }; }
     if (seq !== S.resSeq) return;                 // a newer keystroke superseded this answer
+    S.resolving = false;
+    S.resolveFailed = !r.ok;
     S.resolve = r.ok ? r.data : null;
     renderGeoStatus();
   }
 
-  function areaChipLabel(a) {
-    const name = a.label || a.dma || "";
-    return `${esc(name)} <small>${compact(a.area_population)}</small>`;
+  // The proposal's own geography (what the dock fills in when nothing is typed), for the "use it again" pill.
+  function proposalGeo() {
+    try {
+      if (typeof _effectiveGeo !== "function" || typeof state === "undefined" || !state.parsed) return "";
+      return String(_effectiveGeo(state.activeTierLabel) || "").trim();
+    } catch (e) { return ""; }
+  }
+
+  const EXAMPLE_GEOS = [["National", "National"], ["Texas", "Texas"], ["Phoenix", "Phoenix"], ["90210", "ZIP 90210"]];
+
+  // The one-click picks under the box: the proposal's geography (when the box says something else) and, while it is empty, a few examples.
+  function refreshGeoQuick() {
+    const box = $("cz-geo-quick");
+    if (!box) return;
+    const typed = S.geo.trim(), mine = proposalGeo(), btns = [];
+    if (mine && mine !== typed) btns.push(`<button type="button" data-use-proposal="1" title="${esc(mine)}">Use the proposal’s geography${mine.length <= 28 ? ` · ${esc(mine)}` : ""}</button>`);
+    if (!typed) EXAMPLE_GEOS.forEach(([text, label]) => btns.push(`<button type="button" data-example="${esc(text)}">${esc(label)}</button>`));
+    const html = btns.length ? `<span class="aud-quick-label">${typed ? "Quick pick" : "Try"}</span>${btns.join("")}` : "";
+    if (box.dataset.sig !== html) { box.dataset.sig = html; box.innerHTML = html; }
+    box.hidden = !btns.length;
+  }
+
+  // The Where card's head: what the typed place came to (areas and people), the Clear link, the filled badge.
+  function refreshWhere() {
+    const phase = S.resolving ? "busy" : (S.resolveFailed ? "failed" : "");
+    setSection("where", whereSummary(S.geo, S.resolve, phase), { clearable: !!S.geo.trim() });
   }
 
   function renderGeoStatus() {
     const chipsEl = $("cz-geo-chips"), helpEl = $("cz-geo-help");
     const r = S.resolve;
+    refreshGeoQuick();
+    refreshWhere();
     if (!r) {
-      chipsEl.innerHTML = S.geo.trim() ? "" : `<p class="cz-note">Try <button type="button" class="cz-link" data-example="National">National</button>, <button type="button" class="cz-link" data-example="Texas">Texas</button>, <button type="button" class="cz-link" data-example="Phoenix">Phoenix</button> or a ZIP like <button type="button" class="cz-link" data-example="90210">90210</button>.</p>`;
+      chipsEl.innerHTML = "";
       helpEl.innerHTML = "";
       updateTotalField();
       return;
     }
     const areas = r.areas || [];
     const shown = areas.slice(0, 6);
-    let chips = shown.map((a) => `<span class="cz-chip cz-ok" title="${esc(GEO_TYPE_LABEL[a.source_type] || a.source_type)}${a.dma && a.dma !== a.label ? " · " + esc(a.dma) : ""}">✓ ${areaChipLabel(a)}</span>`).join("");
-    if (areas.length > shown.length) chips += `<span class="cz-chip">+${areas.length - shown.length} more</span>`;
-    const totalPop = areas.reduce((s, a) => s + (a.area_population || 0), 0);
-    const summary = areas.length ? `<p class="cz-note">${areas.length} area${areas.length === 1 ? "" : "s"} · about ${compact(totalPop)} people${r.geo_confidence === "medium" ? " · spans more than one county or market" : ""}${r.geo_confidence === "low_confidence_international" ? " · outside the U.S." : ""}</p>` : "";
-    chipsEl.innerHTML = areas.length ? `<div class="cz-chips">${chips}</div>${summary}` : "";
+    let chips = shown.map((a) => areaChipHtml(a)).join("");
+    if (areas.length > shown.length) chips += `<span class="aud-chip">+${areas.length - shown.length} more</span>`;
+    // (how many areas and people is in the card's summary line; only what that line does not say goes here)
+    const extra = [r.geo_confidence === "medium" ? "Spans more than one county or market." : "", r.geo_confidence === "low_confidence_international" ? "Outside the U.S." : ""].filter(Boolean).join(" ");
+    chipsEl.innerHTML = areas.length ? `<div class="aud-chips">${chips}</div>${extra ? `<p class="aud-hint">${esc(extra)}</p>` : ""}` : "";
     const notes = (r.notes || []).map((n) => `<li>${esc(n)}</li>`).join("");
     mountGeoHelp(helpEl, r, { getText: () => S.geo, setText: (next, meta) => setGeo(next, meta) });
     if (notes) helpEl.insertAdjacentHTML("beforeend", `<ul class="cz-list">${notes}</ul>`);
     updateTotalField();
+  }
+
+  // A matched place: a green chip with what it is (TV market, county...) and how many people live there.
+  function areaChipHtml(a) {
+    const name = a.label || a.dma || "";
+    const kind = GEO_TYPE_LABEL[a.source_type] || a.source_type || "";
+    const meta = [kind, a.area_population != null ? compact(a.area_population) : ""].filter(Boolean).join(" · ");
+    const title = `${kind}${a.dma && a.dma !== a.label ? " · " + a.dma : ""}`;
+    return `<span class="aud-chip aud-chip--ok cz-areachip" title="${esc(title)}"><span class="cz-tick" aria-hidden="true">✓</span><span class="aud-chip-label">${esc(name)}</span>${meta ? `<span class="aud-chip-meta">${esc(meta)}</span>` : ""}</span>`;
   }
 
   // ---- flight
@@ -926,6 +1083,7 @@
     const weekly = (productByName(S.product) || {}).series;
     $("cz-flight-hint").textContent = S.unit === "days" ? `≈ ${(S.flight / 7).toFixed(1)} weeks` : `≈ ${(S.flight * 4.348).toFixed(1)} weeks`;
     if (!weekly || weekly.unit !== "weekly") $("cz-flight-hint").textContent = S.unit === "days" ? `≈ ${(S.flight / 30.4375).toFixed(1)} months` : "";
+    setSection("when", { text: whenSummary(S.flight, S.unit), set: true });
   }
 
   // Commits a value: clamps it, writes it into the box and updates the hint. Used by the +/- buttons, the unit switch, "use the
@@ -936,15 +1094,18 @@
     $("cz-flight").value = S.flight;
     $("cz-unit").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.unit === S.unit)));
     updateFlightHint();
+    refreshContextChip();
     markStale();
   }
 
+  // "Use the proposal's dates": a one-click pick under the stepper while a proposal is loaded; it shows as chosen once the flight IS those days.
   function refreshContextChip() {
-    const chip = $("cz-use-dates"), ctx = contextFlight();
-    if (!ctx) { chip.classList.add("hidden"); return; }
-    chip.classList.remove("hidden");
+    const chip = $("cz-use-dates"), box = $("cz-dates-quick"), ctx = contextFlight();
+    if (!ctx) { box.hidden = true; return; }
+    box.hidden = false;
     chip.textContent = `Use the proposal’s dates · ${ctx.label} (${ctx.days} days)`;
     chip.dataset.days = ctx.days;
+    chip.setAttribute("aria-pressed", String(S.unit === "days" && S.flight === ctx.days));
   }
 
   // ---- population-share fallback field
@@ -958,7 +1119,71 @@
       : (p && p.method === "generic" ? "This product has no platform avails data — enter the monthly impressions to spread across the geography by population." : "");
   }
 
+  // ---- the sections' live summaries
+  // Each numbered card says in one line what it holds, so a collapsed card still tells the planner what the pull will use. These are pure
+  // (they read only their arguments): tests/test_constanza_frontend.py runs them without a browser.
+  const GENDER_LABEL = { male: "Men", female: "Women" };
+
+  // 0.31 -> "31%", 0.079 -> "7.9%", 0.0053 -> "0.5%": one decimal under 10%, where a whole number would hide most of the rate
+  const rateText = (r) => (r == null || isNaN(r) ? "" : r >= 0.1 ? `${Math.round(r * 100)}%` : `${Math.round(r * 1000) / 10}%`);
+
+  function ageText(min, max) {
+    const a = min === "" || min == null ? null : Number(min), b = max === "" || max == null ? null : Number(max);
+    if (a != null && b != null) return `${a}–${b}`;
+    if (a != null) return `${a}+`;
+    if (b != null) return `Up to ${b}`;
+    return "";
+  }
+
+  // resolve: the /resolve answer for what is typed (or null); phase: "busy" (a request is out), "failed" (it did not come back) or "".
+  function whereSummary(geo, resolve, phase) {
+    const text = String(geo || "").trim();
+    if (!text) return { text: "Type a place to start", set: false };
+    if (phase === "busy") return { text: "Matching what you typed…", set: false };
+    if (!resolve) return { text: phase === "failed" ? "Couldn’t check this place just now" : "Matching what you typed…", set: false };
+    const areas = resolve.areas || [];
+    if (!areas.length) return { text: (resolve.ambiguous || []).length ? "Pick the place you mean" : "No match yet — see the suggestions", set: false };
+    const pop = areas.reduce((s, a) => s + (a.area_population || 0), 0);
+    const more = (resolve.ambiguous || []).length ? " · one more needs your pick" : "";
+    return { text: `${areas.length} area${areas.length === 1 ? "" : "s"} · about ${compact(pop)} people${more}`, set: true };
+  }
+
+  const whenSummary = (flight, unit) => `${flight} ${unit === "days" ? (flight === 1 ? "day" : "days") : (flight === 1 ? "month" : "months")}`;
+
+  function whoSummary(ageMin, ageMax, gender) {
+    const parts = [GENDER_LABEL[gender] || "", ageText(ageMin, ageMax)].filter(Boolean);
+    return parts.length ? { text: parts.join(" · "), set: true } : { text: "Everyone, all ages", set: false };
+  }
+
+  // p: the product (or null); on: whether the cut will run; chosen: the planner made the choice (false = the product's default)
+  function languageSummary(p, on, chosen) {
+    if (p && p.hispanicAlready) return { text: "Built from Hispanic audiences", set: true };
+    if (!on) return { text: "Not applied", set: false };
+    return { text: chosen ? "Hispanic targeting on" : "Hispanic targeting on · default", set: true };
+  }
+
+  function interestsSummary(list) {
+    if (!list.length) return { text: "No interests chosen", set: false };
+    const names = list.map((i) => i.label);
+    return { text: names.length > 2 ? `${names.slice(0, 2).join(", ")} +${names.length - 2}` : names.join(", "), set: true };
+  }
+
+  // Draws one section's head: the summary line, the filled badge, the count pill and the Clear link.
+  function setSection(stem, sum, opts) {
+    const sec = $(`cz-sec-${stem}`), line = $(`cz-${stem}-sum`);
+    if (!sec || !line) return;
+    opts = opts || {};
+    line.textContent = sum.text;
+    line.classList.toggle("is-set", !!sum.set);
+    sec.classList.toggle("has-value", !!sum.set);
+    const count = $(`cz-${stem}-count`), clear = $(`cz-${stem}-clear`);
+    if (count) { count.textContent = opts.count || 0; count.hidden = !opts.count; }
+    if (clear) clear.hidden = !opts.clearable;
+  }
+
   // ---- audience
+  const MAX_INTERESTS = 10;                                      // the server's limit (_CONSTANZA_MAX_INTERESTS)
+
   // Hispanic targeting for the product in the dock: the planner's choice when they made one, else the product's own default.
   function hispanicOn() {
     const p = productByName(S.product);
@@ -966,10 +1191,7 @@
     return S.hispanic === null ? !!(p && p.hispanicDefault) : S.hispanic;
   }
 
-  function audienceCount() {
-    const p = productByName(S.product);
-    return (S.ageMin !== "" || S.ageMax !== "" ? 1 : 0) + (S.gender ? 1 : 0) + S.interests.length + (hispanicOn() && !(p && p.hispanicAlready) ? 1 : 0);
-  }
+  const whoCount = () => (S.ageMin !== "" || S.ageMax !== "" ? 1 : 0) + (S.gender ? 1 : 0);
 
   function refreshHispanicUI() {
     const box = $("cz-hispanic");
@@ -983,47 +1205,95 @@
     else if (on) note = `Narrows the avails to each area’s real Hispanic share (Census ACS)${S.hispanic === null && p && p.hispanicDefault ? " — on by default for this product" : ""}. Assumes Hispanic households use the platform in proportion to their population.`;
     else note = "Narrow the avails to the Hispanic audience, using each area’s Census Hispanic %.";
     $("cz-hispanic-note").textContent = note;
+    setSection("lang", languageSummary(p, on, S.hispanic !== null), { clearable: on && !(p && p.hispanicAlready) });
   }
+
+  // The age presets and the gender buttons show what the state holds (the two boxes are the planner's own typing: never rewritten here).
+  function refreshWho() {
+    const norm = (v) => (v === "" ? "" : String(Number(v)));
+    const min = norm(S.ageMin), max = norm(S.ageMax);
+    $("cz-age-presets").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.min === min && b.dataset.max === max)));
+    $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === S.gender)));
+    const backwards = S.ageMin !== "" && S.ageMax !== "" && Number(S.ageMin) > Number(S.ageMax);
+    const note = $("cz-age-note");
+    note.textContent = backwards ? "The “from” age is above the “to” age. Swap them before you pull avails." : "Leave both boxes empty for all ages.";
+    note.classList.toggle("cz-warn-text", backwards);
+    setSection("who", whoSummary(S.ageMin, S.ageMax, S.gender), { count: whoCount(), clearable: whoCount() > 0 });
+  }
+
+  // Puts an age range in the two boxes (they still take any age 0-120); "" leaves that end open.
+  function setAge(min, max) {
+    S.ageMin = min == null ? "" : String(min);
+    S.ageMax = max == null ? "" : String(max);
+    $("cz-age-min").value = S.ageMin;
+    $("cz-age-max").value = S.ageMax;
+    refreshAudienceUI();
+    markStale();
+  }
+
+  const interestFrom = (seg) => ({ id: seg.id, label: seg.label, supported: !!seg.supported, rate_all: seg.rate_all });
 
   function refreshAudienceUI() {
     refreshHispanicUI();
-    const n = audienceCount();
-    const badge = $("cz-aud-count");
-    badge.textContent = n;
-    badge.classList.toggle("hidden", !n);
+    refreshWho();
+    const n = S.interests.length;
     $("cz-interest-chips").innerHTML = S.interests.map((i, idx) => {
-      const rate = i.supported ? `${Math.round(i.rate_all * 100)}%` : "no public rate";
-      return `<span class="cz-chip ${i.supported ? "cz-ok" : "cz-warn"}">${esc(i.label)} <small>${esc(rate)}</small><button type="button" class="cz-x" data-rm="${idx}" aria-label="Remove ${esc(i.label)}">×</button></span>`;
+      const rate = i.supported ? rateText(i.rate_all) : "no public rate";
+      return `<span class="aud-chip ${i.supported ? "aud-chip--interest" : "aud-chip--warn"} cz-ichip"><span class="aud-chip-label">${esc(i.label)}</span><span class="aud-chip-meta cz-chipmeta">${esc(rate)}</span><button type="button" class="aud-chip-x" data-rm="${idx}" aria-label="Remove ${esc(i.label)}">×</button></span>`;
     }).join("");
     const notes = [];
     if (S.interests.some((i) => !i.supported)) notes.push("Audiences marked “no public rate” are listed for reference only — they won’t change the estimate.");
     if (S.interests.filter((i) => i.supported).length > 1) notes.push("Several interests are multiplied together as if they were independent, so the range widens with each one.");
     $("cz-interest-note").textContent = notes.join(" ");
-    $("cz-interest-hint").textContent = S.interests.length ? `${S.interests.length} chosen` : "";
+    $("cz-interest-hint").textContent = n ? `${n} of ${MAX_INTERESTS} chosen` : `up to ${MAX_INTERESTS}`;
+    setSection("aud", interestsSummary(S.interests), { count: n, clearable: n > 0 });
   }
 
   function addInterest(seg) {
     if (S.interests.some((i) => i.id === seg.id)) return;
-    if (S.interests.length >= 10) { $("cz-interest-note").textContent = "At most 10 interests at a time."; return; }
-    S.interests.push({ id: seg.id, label: seg.label, supported: !!seg.supported, rate_all: seg.rate_all });
+    if (S.interests.length >= MAX_INTERESTS) { $("cz-interest-note").textContent = `At most ${MAX_INTERESTS} interests at a time.`; return; }
+    S.interests.push(interestFrom(seg));
     $("cz-interest-q").value = "";
     hideInterestResults();
     refreshAudienceUI();
     markStale();
   }
 
+  // The typeahead is open (a list of options, or a line saying there are none): Escape closes it and the dock stays.
+  const interestPopupOpen = () => !$("cz-interest-results").hidden;
+
   function hideInterestResults() {
-    $("cz-interest-results").classList.add("hidden");
+    $("cz-interest-results").hidden = true;
     $("cz-interest-q").setAttribute("aria-expanded", "false");
     $("cz-interest-q").removeAttribute("aria-activedescendant");
     interestHits = []; interestActive = -1;
   }
 
   function markInterestActive() {
-    $("cz-interest-results").querySelectorAll(".cz-interest-item").forEach((el, i) => el.classList.toggle("cz-active", i === interestActive));
+    $("cz-interest-results").querySelectorAll(".aud-ta-opt").forEach((el, i) => {
+      const on = i === interestActive;
+      el.classList.toggle("is-active", on);
+      el.setAttribute("aria-selected", String(on));
+      if (on && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+    });
     const input = $("cz-interest-q");
     if (interestActive >= 0 && interestHits[interestActive]) input.setAttribute("aria-activedescendant", `cz-int-${interestActive}`);
     else input.removeAttribute("aria-activedescendant");
+  }
+
+  // `text` with the typed words marked, escaped piece by piece (the kit styles <mark> inside the list).
+  function markHtml(text, q) {
+    const words = String(q || "").trim().split(/\s+/).filter(Boolean).map(escRe);
+    if (!words.length) return esc(text);
+    return String(text).split(new RegExp(`(${words.join("|")})`, "gi")).map((part, i) => (i % 2 ? `<mark>${esc(part)}</mark>` : esc(part))).join("");
+  }
+
+  function interestOptionHtml(h, i, q) {
+    const tip = h.supported ? `${h.source || ""}${h.source_date ? ", " + h.source_date : ""} — ${h.confidence} confidence` : "No defensible public rate was found for this audience";
+    const grp = groupLabel(h.group);
+    return `<div class="aud-ta-opt${h.supported ? "" : " cz-norate"}${i === interestActive ? " is-active" : ""}" role="option" id="cz-int-${i}" data-i="${i}" aria-selected="${i === interestActive}" title="${esc(tip)}">`
+      + `<span class="aud-ta-text"><span class="aud-ta-name cz-ta-name">${markHtml(h.label, q)}</span>${grp ? `<span class="aud-ta-path">${esc(grp)}</span>` : ""}</span>`
+      + `<span class="aud-ta-size cz-ta-rate">${h.supported ? `${esc(rateText(h.rate_all))} of adults` : "no public rate"}</span></div>`;
   }
 
   async function searchInterests() {
@@ -1036,22 +1306,24 @@
       r = { ok: false, data: {} };
     }
     if ($("cz-interest-q").value.trim() !== q) return;
+    const box = $("cz-interest-results");
+    $("cz-interest-q").setAttribute("aria-expanded", "true");
     if (!r.ok) {
       interestHits = []; interestActive = -1;
-      const failed = $("cz-interest-results");
-      failed.classList.remove("hidden");
-      failed.innerHTML = `<div class="cz-empty">The audience search isn’t available right now. Try again in a moment.</div>`;
+      box.hidden = false;
+      box.innerHTML = `<div class="aud-ta-note">The audience search isn’t available right now. Try again in a moment.</div>`;
+      markInterestActive();
+      if (box.scrollIntoView) box.scrollIntoView({ block: "nearest" });
       return;
     }
     interestHits = (r.data.results || []);
     interestActive = interestHits.length ? 0 : -1;
-    const box = $("cz-interest-results");
-    box.classList.remove("hidden");
-    $("cz-interest-q").setAttribute("aria-expanded", "true");
+    box.hidden = false;
     box.innerHTML = interestHits.length
-      ? interestHits.map((h, i) => `<div class="cz-interest-item ${h.supported ? "" : "cz-norate"} ${i === interestActive ? "cz-active" : ""}" role="option" id="cz-int-${i}" data-i="${i}" title="${esc(h.supported ? `${h.source || ""}${h.source_date ? ", " + h.source_date : ""} — ${h.confidence} confidence` : "No defensible public rate was found for this audience")}"><span>${esc(h.label)} <span class="cz-grp">${esc(groupLabel(h.group))}</span></span><span class="cz-rate">${h.supported ? Math.round(h.rate_all * 100) + "% of adults" : "no public rate"}</span></div>`).join("")
-      : `<div class="cz-empty">Nothing matches “${esc(q)}”. Try a simpler word, or browse the list below.</div>`;
+      ? interestHits.map((h, i) => interestOptionHtml(h, i, q)).join("")
+      : `<div class="aud-ta-note">Nothing matches “${esc(q)}”. Try a simpler word, or browse all audiences below.</div>`;
     markInterestActive();
+    if (box.scrollIntoView) box.scrollIntoView({ block: "nearest" });                 // the list opens downwards: bring all of it into the dock's view
   }
 
   function groupLabel(key) {
@@ -1059,7 +1331,7 @@
     return g ? g.label : "";
   }
 
-  // A failed request is NOT remembered: the next open of "Browse every audience" tries again.
+  // A failed request is NOT remembered: the next open of "Browse all audiences" tries again.
   async function loadTaxonomy() {
     if (S.taxonomy) return S.taxonomy;
     try {
@@ -1069,12 +1341,57 @@
     return { groups: [] };
   }
 
-  async function renderBrowse() {
-    const t = await loadTaxonomy();
-    $("cz-browse-body").innerHTML = (t.groups || []).filter((g) => g.segments.length).map((g, gi) =>
-      `<div class="cz-browse-group"><h4>${esc(g.label)}</h4><div class="cz-chips">${g.segments.map((s, si) =>
-        `<button type="button" class="cz-chip ${s.supported ? "" : "cz-norate"}" data-g="${gi}" data-s="${si}" title="${esc(s.supported ? Math.round(s.rate_all * 100) + "% of US adults — " + (s.source || "") : "No public rate yet")}">${esc(s.label)}</button>`).join("")}</div></div>`).join("")
-      || `<p class="cz-note">The audience list isn’t available right now.</p>`;
+  // "Browse all audiences  90" - the count appears once the list has come (the dock asks for it quietly when it opens).
+  function showBrowseCount() {
+    const el = $("cz-browse-count"), n = S.taxonomy ? (S.taxonomy.groups || []).reduce((s, g) => s + g.segments.length, 0) : 0;
+    if (!el) return;
+    el.hidden = !n;
+    el.textContent = n ? num(n) : "";
+  }
+
+  // The taxonomy as the window's rows. The keywords and company names go into `path`, which the window searches but does not draw
+  // (the typeahead finds "Toyota" under Auto Intenders the same way).
+  function interestItems(taxonomy) {
+    const out = [];
+    ((taxonomy && taxonomy.groups) || []).forEach((g) => (g.segments || []).forEach((s) => {
+      out.push({ id: s.id, name: s.label, group: g.label, path: [g.label].concat(s.keywords || [], s.company_names || []),
+        supported: !!s.supported, rate_all: s.supported ? s.rate_all : null, seg: s });
+    }));
+    return out;
+  }
+
+  const BROWSE_COLUMNS = [
+    { key: "name", label: "Name" },
+    { key: "group", label: "Group" },
+    // an audience with no sourced rate stays in the list (the planner may pick it for reference) but says so, and sorts last either way
+    { key: "rate", label: "Incidence rate", numeric: true, value: (it) => (it.supported ? it.rate_all : null), format: (v) => (v == null ? "No public rate" : rateText(v)) },
+  ];
+
+  // The window. What it hands back is only the CHANGES, so the picks made with the typeahead stay, and the same cap (10) applies.
+  function openBrowse() {
+    const SB = window.SegmentBrowser;
+    if (!SB) return;
+    SB.open({
+      title: "Browse all audiences",
+      subtitle: "Tick the audiences to narrow the avails to. The incidence rate is the share of U.S. adults who fit it; “no public rate” ones are kept for reference and never change the estimate.",
+      noun: "audiences", nounSingular: "audience", searchPlaceholder: "Search audiences: soccer, dentist, new parents…",
+      columns: BROWSE_COLUMNS,
+      load: () => loadTaxonomy().then((t) => {
+        showBrowseCount();
+        const items = interestItems(t);
+        return items.length ? items : { error: "The audience list isn’t available right now. Try again in a moment." };
+      }),
+      isChosen: (tab, item) => S.interests.some((i) => i.id === item.id),
+      max: MAX_INTERESTS, chosenCount: () => S.interests.length,
+      returnFocus: $("cz-browse"),
+      onApply: ({ added, removed }) => {
+        removed.forEach(({ item }) => { const at = S.interests.findIndex((i) => i.id === item.id); if (at >= 0) S.interests.splice(at, 1); });
+        added.forEach(({ item }) => { if (S.interests.length < MAX_INTERESTS && !S.interests.some((i) => i.id === item.id)) S.interests.push(interestFrom(item.seg)); });
+        refreshAudienceUI();
+        markStale();
+        announce(`${S.interests.length} of ${MAX_INTERESTS} interests chosen.`);
+      },
+    });
   }
 
   // ---- results
@@ -1096,7 +1413,8 @@
   }
 
   function renderResultWelcome() {
-    $("cz-result").innerHTML = `<p class="cz-welcome">Pick a product and a place, then <strong>Pull avails</strong>.<br>Numbers come with the data they were modeled from.</p>`;
+    $("cz-result").innerHTML = `<div class="cz-welcome"><span class="cz-welcome-ico" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`
+      + `<p class="cz-welcome-lead">Pick a product and a place, then <strong>Pull avails</strong>.</p><p class="cz-welcome-sub">Numbers come with the data they were modeled from.</p></div>`;
   }
 
   // "Live Sports - MLB · All 18+ | Registered to vote…" — enough to tell two lines of one product apart, short enough for a button.
@@ -1300,10 +1618,9 @@
     S.pullSeq++; S.resSeq++;
     clearTimeout(resolveTimer);
     setBusy(false);
-    Object.assign(S, { geoType: "", total: "", ageMin: "", ageMax: "", gender: "", interests: [], hispanic: null, needTotal: false, result: null, resultCtx: null, resultSig: null });
+    Object.assign(S, { geoType: "", total: "", ageMin: "", ageMax: "", gender: "", interests: [], hispanic: null, needTotal: false, resolving: false, resolveFailed: false, result: null, resultCtx: null, resultSig: null });
     setGeoType("", true);
     $("cz-total").value = ""; $("cz-age-min").value = ""; $("cz-age-max").value = ""; $("cz-interest-q").value = "";
-    $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === "")));
     Object.values(plugins).forEach((plug) => plug.reset && plug.reset());
     refreshAudienceUI(); hideInterestResults(); renderResultWelcome(); updateTotalField();
     $("constanza-bubble").classList.remove("cz-has-result");
@@ -1319,10 +1636,9 @@
     S.pullSeq++; S.resSeq++;                      // discard any pull or resolve still in flight
     clearTimeout(resolveTimer);
     setBusy(false);
-    Object.assign(S, { geo: "", geoType: "", flight: 1, unit: "months", total: "", ageMin: "", ageMax: "", gender: "", interests: [], hispanic: null, needTotal: false, resolve: null, result: null, resultCtx: null, resultSig: null, lineId: null });
+    Object.assign(S, { geo: "", geoType: "", flight: 1, unit: "months", total: "", ageMin: "", ageMax: "", gender: "", interests: [], hispanic: null, needTotal: false, resolve: null, resolving: false, resolveFailed: false, result: null, resultCtx: null, resultSig: null, lineId: null });
     $("cz-geo").value = ""; $("cz-total").value = ""; $("cz-age-min").value = ""; $("cz-age-max").value = ""; $("cz-interest-q").value = "";
     setGeoType("", true); setFlight(1, "months");
-    $("cz-gender").querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.g === "")));
     $("cz-sub").textContent = "Avails for any market, from the platform data we’ve loaded.";
     Object.values(plugins).forEach((plug) => plug.reset && plug.reset());
     refreshAudienceUI(); hideInterestResults(); renderGeoStatus(); renderResultWelcome(); updateTotalField();
@@ -1364,6 +1680,7 @@
     else if (!wasOpen && !S.lineId) $("cz-sub").textContent = "Avails for any market, from the platform data we’ve loaded.";
     refreshContextChip();
     refreshAudienceUI();
+    if (!S.taxonomy) loadTaxonomy().then(showBrowseCount);           // quietly: the "Browse all audiences" count and the typeahead's group names
     if (S.geo.trim()) resolveSoon(0); else renderGeoStatus();
     setTimeout(() => { (S.geo.trim() ? $("cz-go") : $("cz-geo")).focus({ preventScroll: true }); }, 60);
     if (opts.run) setTimeout(pull, 120);
@@ -1409,13 +1726,24 @@
     $("cz-geo").addEventListener("input", (e) => { S.geo = e.target.value; markStale(); resolveSoon(); });
     $("cz-geo").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); clearTimeout(resolveTimer); pull(); } });
     $("cz-geotype").addEventListener("click", (e) => { const b = e.target.closest("button[data-type]"); if (b) setGeoType(b.dataset.type); });
-    $("cz-geo-chips").addEventListener("click", (e) => { const b = e.target.closest("[data-example]"); if (b) setGeo(b.dataset.example); });
+    $("cz-geo-quick").addEventListener("click", (e) => {
+      const b = e.target.closest("button");
+      if (!b) return;
+      if (b.dataset.example != null) setGeo(b.dataset.example);
+      else if (b.dataset.useProposal) setGeo(proposalGeo(), { geoType: "" });
+      $("cz-geo").focus();                                   // the pick is spent (its button goes): the planner carries on in the box
+    });
+    $("cz-where-clear").addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      setGeo("", { geoType: "" });
+      $("cz-geo").focus();
+    });
 
     // flight
     // While typing, only the state follows: clearing the box and typing a new number must not be rewritten under the cursor.
     $("cz-flight").addEventListener("input", (e) => {
       const n = Math.round(Number(e.target.value));
-      if (Number.isFinite(n) && n >= 1) { S.flight = n; updateFlightHint(); markStale(); }
+      if (Number.isFinite(n) && n >= 1) { S.flight = n; updateFlightHint(); refreshContextChip(); markStale(); }
     });
     $("cz-flight").addEventListener("change", (e) => setFlight(e.target.value));
     $("cz-flight").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); pull(); } });
@@ -1430,23 +1758,42 @@
     $("cz-use-dates").addEventListener("click", (e) => setFlight(Number(e.target.dataset.days), "days"));
     $("cz-total").addEventListener("input", (e) => { S.total = e.target.value; markStale(); });
 
-    // audience
+    // who: age and gender
     $("cz-age-min").addEventListener("input", (e) => { S.ageMin = e.target.value; refreshAudienceUI(); markStale(); });
     $("cz-age-max").addEventListener("input", (e) => { S.ageMax = e.target.value; refreshAudienceUI(); markStale(); });
+    $("cz-age-presets").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-min]");
+      if (!b) return;
+      if (b.getAttribute("aria-pressed") === "true") setAge("", "");       // pressing the chosen range again lets go of it
+      else setAge(b.dataset.min, b.dataset.max);
+    });
+    $("cz-gender").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-g]");
+      if (!b) return;
+      S.gender = b.dataset.g;
+      refreshAudienceUI();
+      markStale();
+    });
+    $("cz-who-clear").addEventListener("click", () => {             // (beside the <details>, not in its summary: pressing it never folds the card)
+      S.gender = "";
+      setAge("", "");
+      $("cz-sec-who").querySelector("summary").focus();                   // the Clear link goes with what it cleared: the card's head keeps the focus
+    });
+
+    // language and heritage
     $("cz-hispanic").addEventListener("change", (e) => {
       const p = productByName(S.product);
       S.hispanic = (p && e.target.checked === !!p.hispanicDefault) ? null : e.target.checked;       // back to the default = no preference, so nothing looks changed
       refreshAudienceUI();
       markStale();
     });
-    $("cz-gender").addEventListener("click", (e) => {
-      const b = e.target.closest("button[data-g]");
-      if (!b) return;
-      S.gender = b.dataset.g;
-      $("cz-gender").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
-      refreshAudienceUI();
-      markStale();
+    $("cz-lang-clear").addEventListener("click", () => {                 // "Turn off" is the switch, flipped: the same handler decides what that means
+      const box = $("cz-hispanic");
+      if (box.checked && !box.disabled) { box.checked = false; box.dispatchEvent(new Event("change", { bubbles: true })); }
+      $("cz-sec-lang").querySelector("summary").focus();
     });
+
+    // audience: the typeahead, the chips and the browse window
     $("cz-interest-q").addEventListener("input", () => { clearTimeout(interestTimer); interestTimer = setTimeout(searchInterests, 180); });
     $("cz-interest-q").addEventListener("keydown", (e) => {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -1457,22 +1804,33 @@
       } else if (e.key === "Enter") {
         e.preventDefault();
         if (interestHits[interestActive]) addInterest(interestHits[interestActive]);
-      } else if (e.key === "Escape" && interestHits.length) { e.preventDefault(); e.stopPropagation(); hideInterestResults(); }
+      } else if (e.key === "Escape" && interestPopupOpen()) { e.preventDefault(); e.stopPropagation(); hideInterestResults(); }       // the popup closes; the dock stays
     });
     $("cz-interest-results").addEventListener("click", (e) => {
-      const el = e.target.closest(".cz-interest-item");
+      const el = e.target.closest(".aud-ta-opt");
       if (el && interestHits[Number(el.dataset.i)]) addInterest(interestHits[Number(el.dataset.i)]);
     });
     $("cz-interest-chips").addEventListener("click", (e) => {
       const x = e.target.closest("[data-rm]");
-      if (x) { S.interests.splice(Number(x.dataset.rm), 1); refreshAudienceUI(); markStale(); }
+      if (!x) return;
+      const at = Number(x.dataset.rm);
+      S.interests.splice(at, 1);
+      refreshAudienceUI();
+      markStale();
+      const next = $("cz-interest-chips").querySelectorAll(".aud-chip-x")[Math.min(at, S.interests.length - 1)];
+      (next || $("cz-interest-q")).focus();                               // the chip that was pressed is gone: the focus moves to its neighbour
     });
-    $("cz-browse").addEventListener("toggle", (e) => { if (e.target.open) renderBrowse(); });
-    $("cz-browse-body").addEventListener("click", (e) => {
-      const b = e.target.closest("[data-g]");
-      if (!b || !S.taxonomy) return;
-      addInterest(S.taxonomy.groups[Number(b.dataset.g)].segments[Number(b.dataset.s)]);
+    $("cz-aud-clear").addEventListener("click", () => {
+      S.interests = [];
+      refreshAudienceUI();
+      markStale();
+      $("cz-sec-aud").querySelector("summary").focus();
     });
+    $("cz-browse").addEventListener("click", openBrowse);
+    if (!window.SegmentBrowser) $("cz-browse").hidden = true;             // the window's script did not load: the typeahead is still there
+
+    // the cards that fold: remember which ones the planner left open
+    document.querySelectorAll("#cz-aud details.aud-sec").forEach((d) => d.addEventListener("toggle", () => store.set({ sections: Object.assign({}, store.get().sections, { [d.id]: d.open }) })));
 
     // outside clicks close the dropdowns; Escape closes the dock
     document.addEventListener("mousedown", (e) => {
@@ -1503,7 +1861,8 @@
     _state: S, _plugin: (name) => plugins[name] || null,
     // Pure helpers, exposed so tests/test_constanza_frontend.py can run them without a browser.
     _pure: { compact, editGeoItem, tidyList, removeGeoItems, replaceItem, looksLikeList, summarize, normGeo, geoHelpHtml, badgesHtml, lineLabel, seriesMeta, notesOf,
-      markStale, requestBody, audienceBoxHtml, winRateHtml, reachLinesHtml, summaryText, hispanicToggleHtml, loadProducts },
+      markStale, requestBody, audienceBoxHtml, winRateHtml, reachLinesHtml, summaryText, hispanicToggleHtml, loadProducts,
+      whereSummary, whenSummary, whoSummary, languageSummary, interestsSummary, ageText, rateText, markHtml, interestItems, interestFrom, BROWSE_COLUMNS, AGE_PRESETS },
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount);
