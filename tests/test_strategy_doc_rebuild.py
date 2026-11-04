@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from types import SimpleNamespace
 
 import pytest
 from docx import Document
+from fastapi.responses import JSONResponse
 
 from app import main
 
@@ -103,7 +106,7 @@ def test_strategy_generation_timeout_returns_graceful_error(proposals_dir, monke
     assert result["error"] and "time limit" in result["error"]
     assert result["strategy_summary"] == ""
     assert result["doc_token"] is None
-    assert "strategy request stage=brief_generation timed_out=true" in caplog.text
+    assert "stage=brief_generation timed_out=true" in caplog.text
 
 
 def test_strategy_brief_document_is_built_off_event_loop(proposals_dir, monkeypatch):
@@ -124,3 +127,28 @@ def test_strategy_brief_document_is_built_off_event_loop(proposals_dir, monkeypa
 
     assert result["doc_token"]
     assert (proposals_dir / f"strategy_{result['doc_token']}.docx").exists()
+
+
+def test_strategy_request_id_correlates_stage_logs_and_response(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="app.main")
+
+    async def empty_brief(*args, **kwargs):
+        return {"strategy_summary": "", "recommended_tactics": [], "error": None}
+
+    monkeypatch.setattr(main.strategy_brief_svc, "generate_brief", empty_brief)
+    request = SimpleNamespace(
+        method="POST",
+        url=SimpleNamespace(path="/api/strategy"),
+    )
+
+    async def call_strategy(_request):
+        result = await main.strategy(main.StrategyRequest(request={"client_name": "Acme"}))
+        return JSONResponse(result)
+
+    response = asyncio.run(main._no_cache_static(request, call_strategy))
+
+    request_id = response.headers["x-request-id"]
+    assert response.status_code == 200
+    assert f"strategy request id={request_id} stage=handler_start" in caplog.text
+    assert f"strategy request id={request_id} stage=total" in caplog.text
+    assert f"strategy request id={request_id} stage=handler_total" in caplog.text
