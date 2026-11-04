@@ -149,6 +149,30 @@ def test_strategy_request_id_correlates_stage_logs_and_response(monkeypatch, cap
 
     request_id = response.headers["x-request-id"]
     assert response.status_code == 200
-    assert f"strategy request id={request_id} stage=handler_start" in caplog.text
+    assert f"api request id={request_id} path=/api/strategy stage=handler_start" in caplog.text
     assert f"strategy request id={request_id} stage=total" in caplog.text
-    assert f"strategy request id={request_id} stage=handler_total" in caplog.text
+    assert f"api request id={request_id} path=/api/strategy stage=handler_total" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("path", "stage_logger", "stage_name"),
+    [
+        ("/api/generate", main._log_generate_stage, "enrichment"),
+        ("/api/drive/upload", main._log_drive_upload_stage, "google_drive_operations"),
+    ],
+)
+def test_slow_request_routes_correlate_stage_logs_and_response(path, stage_logger, stage_name, caplog):
+    caplog.set_level(logging.INFO, logger="app.main")
+    request = SimpleNamespace(method="POST", url=SimpleNamespace(path=path))
+
+    async def call_next(_request):
+        stage_logger(stage_name, main.time.perf_counter())
+        return JSONResponse({"ok": True})
+
+    response = asyncio.run(main._no_cache_static(request, call_next))
+    request_id = response.headers["x-request-id"]
+
+    assert response.status_code == 200
+    assert f"api request id={request_id} path={path} stage=handler_start" in caplog.text
+    assert f"stage={stage_name} id={request_id} duration_ms=" in caplog.text
+    assert f"api request id={request_id} path={path} stage=handler_total" in caplog.text

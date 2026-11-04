@@ -1202,7 +1202,7 @@ def test_upload_logs_endpoint_stage_timings(api, caplog):
     assert _call_upload()["uploaded"] is True
     messages = [record.getMessage() for record in caplog.records]
     for stage in ("load_proposal", "load_workbook", "google_drive_operations", "request_total"):
-        assert any(f"drive upload stage={stage} duration_ms=" in message for message in messages)
+        assert any(f"drive upload stage={stage} id=" in message and " duration_ms=" in message for message in messages)
 
 
 def test_shared_copy_beats_a_stale_same_named_local_file(api):
@@ -1336,7 +1336,7 @@ def test_end_to_end_through_the_real_uploader_with_the_fake_drive(api_base, driv
     assert [f["name"] for f in drive.folders()] == ["o'brien@entravision.com"]
     messages = [record.getMessage() for record in caplog.records]
     for stage in ("load credentials", "read file", "build Drive client", "find/create folder", "upload file", "share file"):
-        assert any(f"drive upload stage={stage} duration_ms=" in message for message in messages)
+            assert any(f"drive upload stage={stage} duration_ms=" in message for message in messages)
 
 
 def test_the_upload_does_not_block_the_event_loop(api, monkeypatch):

@@ -171,7 +171,7 @@ async def _generate_enrichment_with_timeout(*args, **kwargs):
 
 app = FastAPI(title="Entravision Proposal Builder", version="0.1.0")
 _logger = logging.getLogger(__name__)
-_strategy_request_id: ContextVar[str] = ContextVar("strategy_request_id", default="-")
+_api_request_id: ContextVar[str] = ContextVar("api_request_id", default="-")
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -221,19 +221,19 @@ async def _no_cache_static(request, call_next):
     site — trading away asset caching entirely is a trivial cost next to
     "the browser might be running old code and nobody can tell."
     """
-    is_strategy_request = request.method == "POST" and request.url.path == "/api/strategy"
-    request_id = secrets.token_hex(8) if is_strategy_request else None
-    context_token = _strategy_request_id.set(request_id) if request_id else None
+    traced_paths = {"/api/strategy", "/api/generate", "/api/drive/upload"}
+    request_id = secrets.token_hex(8) if request.method == "POST" and request.url.path in traced_paths else None
+    context_token = _api_request_id.set(request_id) if request_id else None
     started = time.perf_counter() if request_id else None
     if request_id:
-        _logger.info("strategy request id=%s stage=handler_start", request_id)
+        _logger.info("api request id=%s path=%s stage=handler_start", request_id, request.url.path)
     try:
         response = await call_next(request)
     finally:
         if request_id:
-            _logger.info("strategy request id=%s stage=handler_total duration_ms=%d",
-                         request_id, round((time.perf_counter() - started) * 1000))
-            _strategy_request_id.reset(context_token)
+            _logger.info("api request id=%s path=%s stage=handler_total duration_ms=%d",
+                         request_id, request.url.path, round((time.perf_counter() - started) * 1000))
+            _api_request_id.reset(context_token)
     if request_id:
         response.headers["X-Request-ID"] = request_id
     if request.url.path.startswith("/static/"):
@@ -243,13 +243,13 @@ async def _no_cache_static(request, call_next):
 
 
 def _log_generate_stage(stage: str, started: float) -> None:
-    _logger.info("proposal generation stage=%s duration_ms=%d",
-                 stage, round((time.perf_counter() - started) * 1000))
+    _logger.info("proposal generation stage=%s id=%s duration_ms=%d",
+                 stage, _api_request_id.get(), round((time.perf_counter() - started) * 1000))
 
 
 def _log_drive_upload_stage(stage: str, started: float) -> None:
-    _logger.info("drive upload stage=%s duration_ms=%d",
-                 stage, round((time.perf_counter() - started) * 1000))
+    _logger.info("drive upload stage=%s id=%s duration_ms=%d",
+                 stage, _api_request_id.get(), round((time.perf_counter() - started) * 1000))
 
 
 # ---------------------------------------------------------------------------
@@ -1246,7 +1246,7 @@ async def strategy(body: StrategyRequest) -> dict:
     writes a downloadable .docx of the brief and returns a token to fetch it
     via /api/download-strategy/{token}, same pattern as the roadblocks step."""
     request_started = time.perf_counter()
-    request_id = _strategy_request_id.get()
+    request_id = _api_request_id.get()
     stage_started = time.perf_counter()
     req = _reconstruct_proposal_request(body.request)
     _logger.info("strategy request id=%s stage=prepare duration_ms=%d",
