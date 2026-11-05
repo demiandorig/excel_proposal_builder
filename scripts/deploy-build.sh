@@ -3,6 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Reject unresolved merge conflicts before installing anything or preparing the
+# deployment runtime.
+python scripts/check_conflict_markers.py
+python -m compileall -q app
+
 # The Python package is only Playwright's driver.  The browser is a separate
 # artifact and must be provisioned during the deployment build so it exists in
 # the published runtime; the post-merge hook only prepares the interactive
