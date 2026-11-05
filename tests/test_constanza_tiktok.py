@@ -326,7 +326,7 @@ def test_the_tiktok_product_is_on_by_default_with_the_tiktok_method_and_no_platf
     cfg = fm.resolve_forecast(TIKTOK)
     assert (cfg.enabled, cfg.method, cfg.platform, cfg.hispanic_weighted, cfg.source) == (True, "tiktok", None, False, "default")
     assert cfg.to_public()["method"] == "tiktok"
-    assert "tiktok" in fm.METHODS and fm.DEFAULT_API_PRODUCTS == {"Tiktok Ads": "tiktok"}
+    assert "tiktok" in fm.METHODS and fm.DEFAULT_API_PRODUCTS["Tiktok Ads"] == "tiktok"          # (the registry's answer: the Meta SKUs are in it too)
 
 
 def test_an_admin_can_choose_the_tiktok_method_for_a_product_and_it_carries_no_platform():
@@ -426,15 +426,6 @@ def test_the_admin_connection_test_says_what_is_missing_when_nothing_is_set(monk
     monkeypatch.delenv("TIKTOK_ADVERTISER_ID", raising=False)
     out = main.admin_tiktok_test()
     assert out["ok"] is False and len(out["checks"]) == 1 and "TIKTOK_ACCESS_TOKEN" in out["checks"][0]["detail"]
-
-
-def test_the_admin_page_offers_the_tiktok_method_and_the_connection_test():
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[1]
-    html = (root / "app" / "templates" / "admin.html").read_text(encoding="utf-8")
-    js = (root / "app" / "static" / "admin.js").read_text(encoding="utf-8")
-    assert 'id="fc-tt-test"' in html and 'id="fc-tt-checks"' in html and "TIKTOK_ACCESS_TOKEN" in html and "TIKTOK_ADVERTISER_ID" in html
-    assert 'value="tiktok"' in js and "TikTok API (live)" in js and "/api/admin/tiktok/test" in js and "/api/constanza/tiktok/status" in js
 
 
 def test_the_optimization_goal_of_a_reach_estimate_can_be_replaced_by_a_setting_and_a_traffic_one_cannot(monkeypatch):

@@ -6442,1280 +6442,6 @@ function _jumpToCurateField(field, lineId) {
   }, 80);
 }
 
-// ======================================================================
-// The Meta panel of a Step 05 avails card (the three paid Facebook & Instagram Ads products). One way to give it the audience: PULL it from
-// Meta (constanza_meta.py), in four numbered sections built from the shared audience kit (audience-kit.css) - 1 Where (a Meta geography),
-// 2 Who (age, gender), 3 Language (Meta locales), 4 Audience (interests / behaviors / demographics, with the SegmentBrowser pop-up for the
-// whole lists) - then "Estimate audience" and the three monthly-impression scenarios (lower end x 4.3 / 5.5 / 8.6) with Insert into Avails.
-// The planner never types an audience size: they may type avails straight into the card's own fields, as for any product. (A proposal saved
-// earlier can hold a snapshot whose potential_audience.source is "manual": it still renders, labelled "entered manually".)
-//
-// State: state.metaSel[lineId] is what the planner has chosen for that line (kept for the session; restored from a saved snapshot's
-// meta_targeting, languages included); state.metaStatus caches GET /api/constanza/meta/status for META_STATUS_TTL_MS so a re-render of the
-// Avails grid does not ask again. The panel is rebuilt whenever the grid is; _metaSync(panel) keeps the parts that depend on the choices
-// (summaries, chips, pressed buttons) in step without touching an input the planner is typing in.
-// META PANEL: begin
-// ======================================================================
-const META_GEO_TYPES = [["geo_market", "TV market"], ["city", "City"], ["region", "State / region"], ["zip", "ZIP code"], ["country", "Country"]];
-const META_GEO_PLACEHOLDER = { geo_market: "TV market, e.g. Los Angeles", city: "City, e.g. Phoenix", region: "State or region, e.g. Texas", zip: "ZIP code, e.g. 90210", country: "Country, e.g. United States" };
-const META_AGE_MIN = 18;
-const META_AGE_MAX = 65;
-const META_AGE_PRESETS = [["All ages", 18, 65], ["18–24", 18, 24], ["25–34", 25, 34], ["25–54", 25, 54], ["35–54", 35, 54], ["55+", 55, 65]];
-// A quick pick names the language(s) to look for: the locale ids always come from Meta's own list (GET /meta-languages?q=...), never from here.
-const META_LANG_QUICK = [{ key: "spanish", label: "Spanish speakers", words: ["Spanish"] }, { key: "english", label: "English", words: ["English"] }, { key: "both", label: "Spanish + English", words: ["Spanish", "English"] }];
-const META_KIND_LABEL = { interests: "Interest", behaviors: "Behavior", life_events: "Life event", industries: "Industry", income: "Income", family_statuses: "Family status", politics: "Politics", generation: "Generation", home_ownership: "Home ownership", home_type: "Home type", home_value: "Home value", household_composition: "Household", net_worth: "Net worth", office_type: "Office type", moms: "Moms" };
-const META_MAX_LANGUAGES = 25;      // constanza_meta.MAX_LOCALES
-const META_MAX_DETAILED = 50;       // constanza_meta.MAX_TARGETING_ITEMS
-const META_STATUS_TTL_MS = 30000;
-// The longest search text each box can hold: what the server takes (search_geography 2-100, search_targeting 2-80, search_locales 2-60), so a long paste
-// is cut in the box instead of coming back as "Search text must be 2-80 characters".
-const META_SEARCH_MAX = { geo: 100, aud: 80, lang: 60 };
-const META_LIVE_ID = "meta-live-announce";
-// "Browse all ..." opens the shared pop-up (segment-browser.js). If that script did not load, the controls say so instead of doing nothing.
-const META_BROWSE_MISSING = "The browse window didn’t load, so “Browse all” is off. Reload the page to get it back.";
-// What a request field is called when the server refuses it by name (FastAPI's 422 lists the field as `loc`).
-const META_FIELD_WORDS = { product_name: "the product", retail_budget: "the retail budget", retail_cpm: "the retail CPM", months: "the flight length", meta_geo_type: "the kind of place",
-  meta_geo_key: "the place", meta_geo_label: "the place’s name", age_min: "the youngest age", age_max: "the oldest age", gender: "gender" };
-// What an empty list is called in "Meta sent back an empty list of ...".
-const META_CATALOG_WORDS = { interests: "interests", behaviors: "behaviors", demographics: "demographic options" };
-// Shown only until the server's own wording arrives (status.language_note / the languages answer); keep it the same as constanza_meta.LANGUAGE_NOTE.
-const META_LANGUAGE_NOTE = "Meta's languages are the language people have set Facebook or Instagram to, not a count of who speaks it. A Spanish speaker whose app is set to English is not included, so a Spanish audience can come out smaller than the Spanish-speaking population. Leave languages empty to count everyone in the geography, whatever language they use.";
-
-// 33862.5 -> "$33,862.50", 2000 -> "$2,000": whole dollars when there are no cents, two decimals otherwise, never "$33,862.5". One rule for every amount
-// the panel shows (the plan strip and the result).
-function _metaMoney(value) {
-  const n = Number(value);
-  if (value == null || value === "" || !isFinite(n)) return "—";
-  const cents = Math.round(Math.abs(n) * 100);
-  const digits = cents % 100 ? 2 : 0;
-  return `${n < 0 ? "-" : ""}$${(cents / 100).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
-}
-
-function _metaCount(value) {
-  return Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 });
-}
-
-function _metaFullFlightRetailBudget(li) {
-  // Step 04's line budget is per selected billing period; li.months is
-  // that period's count (1 for full-flight), so this is the actual retail
-  // spend for the whole line, not a monthly-equivalent approximation.
-  return Math.max(0, Number(li.monthly_budget) || 0) * Math.max(1, Number(li.months) || 1);
-}
-
-// ---------------------------------------------------------------- what the planner has chosen
-
-// The choices for a line, read back from a saved snapshot's meta_targeting (no snapshot, or a manual one: the defaults = everyone, no place yet).
-function _metaSelFromSnapshot(saved) {
-  const t = saved && saved.meta_targeting;
-  const sel = { geoType: "geo_market", geo: null, ageMin: META_AGE_MIN, ageMax: META_AGE_MAX, gender: "all", languages: [], detailed: [] };
-  if (!t) return sel;
-  if (META_GEO_TYPES.some(([key]) => key === t.geo_type)) sel.geoType = t.geo_type;
-  if (t.geo_key != null && t.geo_key !== "") {
-    const label = String(t.geo_name || "");
-    const [name, region, country] = label ? label.split(" · ") : [];
-    sel.geo = { type: sel.geoType, key: String(t.geo_key), name: name || `Meta geography ${t.geo_key}`, region: region || "", country: country || "", label };
-  }
-  const age = value => Math.min(Math.max(Math.round(Number(value)) || META_AGE_MIN, META_AGE_MIN), META_AGE_MAX);
-  if (t.age_min != null) sel.ageMin = age(t.age_min);
-  if (t.age_max != null) sel.ageMax = Math.max(age(t.age_max), sel.ageMin);
-  if (t.gender === "male" || t.gender === "female") sel.gender = t.gender;
-  sel.languages = (t.languages || []).filter(x => x && x.id != null && x.name).map(x => ({ id: String(x.id), name: String(x.name) }));
-  sel.detailed = (t.detailed || []).filter(x => x && x.id != null && x.name).map(x => ({ id: String(x.id), name: String(x.name), type: String(x.type || "interests") }));
-  return sel;
-}
-
-function _metaSel(lid) {
-  state.metaSel = state.metaSel || {};
-  if (!state.metaSel[lid]) state.metaSel[lid] = _metaSelFromSnapshot(((state.availsData || {})[lid] || {}).meta_forecast);
-  return state.metaSel[lid];
-}
-
-// What an estimate depends on, as text: two choices with the same signature ask Meta the same question.
-function _metaSelSignature(sel) {
-  return JSON.stringify([sel.geo ? `${sel.geo.type}:${sel.geo.key}` : "", sel.ageMin, sel.ageMax, sel.gender,
-    sel.languages.map(x => String(x.id)).sort(), sel.detailed.map(x => `${x.type}:${x.id}`).sort()]);
-}
-
-// Has the planner changed what is asked since this snapshot was calculated? A manual snapshot has no choices to compare.
-function _metaChoicesChanged(saved, lid) {
-  if (!saved || !saved.meta_targeting) return false;
-  return _metaSelSignature(_metaSel(lid)) !== _metaSelSignature(_metaSelFromSnapshot(saved));
-}
-
-// ---------------------------------------------------------------- words for what is chosen
-
-function _metaFold(value) {
-  let s = value == null ? "" : String(value);
-  if (typeof s.normalize === "function") s = s.normalize("NFD").replace(/[̀-ͯ]/g, "");
-  return s.toLowerCase();
-}
-
-function _metaTypeLabel(type) {
-  const hit = META_GEO_TYPES.find(([key]) => key === type);
-  return hit ? hit[1] : String(type || "");
-}
-
-function _metaKindLabel(type) {
-  return META_KIND_LABEL[type] || String(type || "").replace(/_/g, " ");
-}
-
-// 25–44, 55+ (65 is "65 and over" to Meta), or "" for all ages.
-function _metaAgeText(min, max) {
-  if (min <= META_AGE_MIN && max >= META_AGE_MAX) return "";
-  return max >= META_AGE_MAX ? `${min}+` : `${min}–${max}`;
-}
-
-// "Spanish (Mexico)" -> "Spanish": the language without its regional variant.
-function _metaLangFamily(name) {
-  return String(name || "").split(/\s*[(,]/)[0].trim() || String(name || "");
-}
-
-function _metaLangStarts(name, word) {
-  return _metaFold(name).startsWith(_metaFold(word));
-}
-
-// The chosen languages grouped by family, in the order chosen. A family with several variants shows as one ("Spanish", 3 versions): the
-// quick pick adds every Spanish locale Meta lists, and a row of near-identical chips would bury the one that matters.
-function _metaLangFamilies(languages) {
-  const out = [];
-  (languages || []).forEach(l => {
-    const name = _metaLangFamily(l.name);
-    let group = out.find(x => x.key === _metaFold(name));
-    if (!group) { group = { key: _metaFold(name), name, items: [] }; out.push(group); }
-    group.items.push(l);
-  });
-  out.forEach(g => { g.label = g.items.length > 1 ? g.name : g.items[0].name; });
-  return out;
-}
-
-// The live one-line summary and the count pill of each section.
-function _metaSummaries(sel) {
-  const age = _metaAgeText(sel.ageMin, sel.ageMax);
-  const gender = sel.gender === "female" ? "Women" : (sel.gender === "male" ? "Men" : "");
-  const families = _metaLangFamilies(sel.languages);
-  const names = sel.detailed.map(x => x.name);
-  const picks = !names.length ? "No interests or behaviors yet" : (names.length <= 2 ? names.join(", ") : `${names.slice(0, 2).join(", ")} +${names.length - 2} more`);
-  return {
-    where: { text: sel.geo ? `${sel.geo.name} · ${_metaTypeLabel(sel.geo.type)}` : "Choose a place", set: !!sel.geo, count: 0 },
-    who: { text: `${gender || "All genders"} · ${age || "all ages"}`, set: !!(gender || age), count: (gender ? 1 : 0) + (age ? 1 : 0) },
-    lang: { text: families.length ? families.map(f => f.label).join(" · ") : "Any language", set: families.length > 0, count: families.length },
-    aud: { text: picks, set: names.length > 0, count: names.length },
-  };
-}
-
-// What a live pull was for, in words: "Los Angeles (TV market), women ages 25–44, language set to Spanish, any of: Soccer". A language is
-// what people have SET their Facebook / Instagram to, so it is never said to be what they speak.
-function _metaPulledFor(data) {
-  const t = data && data.meta_targeting;
-  if (!t) return "";
-  const kind = { geo_market: "TV market", city: "city", region: "state / region", zip: "ZIP", country: "country" }[t.geo_type] || t.geo_type;
-  const age = t.age_min != null || t.age_max != null ? `ages ${t.age_min != null ? t.age_min : "18"}–${t.age_max != null ? t.age_max : "65+"}` : "";
-  const gender = t.gender === "male" ? "men" : (t.gender === "female" ? "women" : "");
-  const languages = _metaLangFamilies(t.languages).map(f => f.label);
-  const language = languages.length ? `language set to ${languages.join(" or ")}` : "";
-  const detailed = (t.detailed || []).length ? `any of: ${t.detailed.map(x => x.name).join(", ")}` : "";
-  return [`${t.geo_name || "Meta geography " + t.geo_key} (${kind})`, [gender, age].filter(Boolean).join(" "), language, detailed].filter(Boolean).join(", ");
-}
-
-// 1,234,567 -> "1.2M": an audience size is an estimate, so the short form reads better than seven digits.
-function _metaCompact(value) {
-  const n = Number(value);
-  if (!isFinite(n)) return "";
-  const a = Math.abs(n);
-  if (a < 1000) return String(Math.round(a));
-  const round = x => (x >= 10 ? Math.round(x) : Math.round(x * 10) / 10);
-  if (round(a / 1e3) < 1000) return round(a / 1e3) + "K";
-  if (round(a / 1e6) < 1000) return round(a / 1e6) + "M";
-  return round(a / 1e9) + "B";
-}
-
-function _metaSizeText(lower, upper) {
-  if (lower == null || !isFinite(Number(lower))) return "";
-  return upper != null && Number(upper) > Number(lower) ? `${_metaCompact(lower)} – ${_metaCompact(upper)}` : _metaCompact(lower);
-}
-
-// The text with the typed words in <mark>, everything escaped.
-function _metaHighlight(text, query) {
-  const t = String(text == null ? "" : text);
-  const words = String(query || "").toLowerCase().split(/\s+/).filter(Boolean);
-  const low = t.toLowerCase();
-  if (!words.length || low.length !== t.length) return escapeHtml(t);
-  const spans = [];
-  words.forEach(w => { for (let at = low.indexOf(w); at >= 0; at = low.indexOf(w, at + w.length)) spans.push([at, at + w.length]); });
-  spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  const merged = [];
-  spans.forEach(([start, end]) => {
-    const last = merged[merged.length - 1];
-    if (last && start <= last[1]) last[1] = Math.max(last[1], end); else merged.push([start, end]);
-  });
-  let out = "", pos = 0;
-  merged.forEach(([start, end]) => {
-    out += escapeHtml(t.slice(pos, start)) + "<mark>" + escapeHtml(t.slice(start, end)) + "</mark>";
-    pos = end;
-  });
-  return out + escapeHtml(t.slice(pos));
-}
-
-// The places named in the proposal's geography, as search words: "Phoenix, AZ and Los Angeles DMA" -> ["Phoenix", "Los Angeles"]. At most three;
-// a state code, "TBD" or "national" is no place to search for.
-function _metaGeoSuggestions(text) {
-  const seen = new Set();
-  const out = [];
-  String(text || "").split(/[,;\n|]+|\s+(?:and|&)\s+/i).forEach(raw => {
-    const q = raw.replace(/\([^)]*\)/g, " ").replace(/\b(?:dmas?|markets?|metro|area)\s*$/i, "").replace(/\s+/g, " ").trim();
-    if (q.length < 3 || q.length > 60 || seen.has(q.toLowerCase()) || /^(?:tbd|n\/?a|none|national|nationwide|usa)$/i.test(q)) return;
-    seen.add(q.toLowerCase());
-    out.push(q);
-  });
-  return out.slice(0, 3);
-}
-
-// "(no flight dates: ...)" when the line has no readable dates: the flight length is then a stand-in, not the flight's.
-function _metaFlightHint(li) {
-  const start = _mbParseDate(_effectiveStartDate(state.activeTierLabel));
-  const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
-  return start && end ? "" : "No flight dates on this option: the flight length is not known, so 1 month is assumed.";
-}
-
-// ---------------------------------------------------------------- the connection to Meta
-
-// null while unknown (not asked yet, or the check failed: the estimate then tells its own error), else whether the admin has set Meta up.
-function _metaConnected(st) {
-  return st && st.data && typeof st.data.configured === "boolean" ? st.data.configured : null;
-}
-
-function _metaOffReason(st) {
-  const names = ((st && st.data && st.data.missing) || []).map(x => String(x).split(/\s/)[0]).filter(Boolean);
-  return `Meta isn't connected yet: an admin needs to add ${names.length ? names.join(" and ") : "the Meta settings"} in the app's secrets.`;
-}
-
-// The banner under the panel's title: asking, connected (with the ad account's last four digits), not set up (naming what is missing), or unreachable.
-function _metaStatusHtml(st) {
-  if (!st || (!st.data && !st.error)) {
-    return `<div class="aud-notice aud-notice--info" role="status"><div class="aud-notice-body">Checking the connection to Meta…</div></div>`;
-  }
-  if (!st.data) {
-    return `<div class="aud-notice aud-notice--warn" role="status"><div class="aud-notice-body"><span class="aud-notice-title">Couldn’t check the Meta connection</span>${escapeHtml(st.error)}`
-      + `<button type="button" class="aud-notice-action" data-meta-act="recheck">Check again</button></div></div>`;
-  }
-  const d = st.data;
-  if (d.configured) {
-    return `<div class="aud-notice aud-notice--connected" role="status"><div class="aud-notice-body"><span class="aud-notice-title">Connected to Meta</span>`
-      + `${d.account ? `Ad account <code>${escapeHtml(d.account)}</code>` : "Ad account connected"}${d.version ? ` · API ${escapeHtml(d.version)}` : ""}</div></div>`;
-  }
-  const missing = (d.missing || []).map(item => {
-    const m = String(item).match(/^(\S+)([\s\S]*)$/);
-    return `<li><code>${escapeHtml(m ? m[1] : item)}</code>${m && m[2] ? escapeHtml(m[2]) : ""}</li>`;
-  }).join("");
-  return `<div class="aud-notice aud-notice--warn" role="status"><div class="aud-notice-body"><span class="aud-notice-title">Meta isn’t connected yet</span>`
-    + `An admin needs to add ${missing ? "these settings" : "the Meta settings"} in the app’s secrets before audiences can be pulled.${missing ? `<ul class="meta-missing">${missing}</ul>` : ""}`
-    + `${d.setup_hint ? `<details class="meta-more"><summary>How an admin sets this up</summary><p>${escapeHtml(d.setup_hint)}</p></details>` : ""}</div></div>`;
-}
-
-// Asks the server whether Meta is set up, at most once per META_STATUS_TTL_MS and never twice at once; every panel on the page then shows the answer.
-function _metaStatusEnsure(force) {
-  const cur = state.metaStatus;
-  if (cur && cur.pending) return cur.pending;
-  if (!force && cur && cur.at && Date.now() - cur.at < META_STATUS_TTL_MS) return Promise.resolve(cur);
-  const pending = fetch("/api/constanza/meta/status")
-    .then(async response => {
-      const data = await response.json();
-      if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-      state.metaStatus = { at: Date.now(), data, error: null, pending: null };
-    })
-    .catch(error => { state.metaStatus = { at: Date.now(), data: null, error: String((error && error.message) || error), pending: null }; })
-    .then(() => { _metaRenderStatus(); return state.metaStatus; });
-  state.metaStatus = Object.assign({}, cur || {}, { pending });
-  return pending;
-}
-
-function _metaRenderStatus() {
-  document.querySelectorAll(".meta-panel").forEach(panel => {
-    const slot = panel.querySelector("[data-meta-status]");
-    if (slot) slot.innerHTML = _metaStatusHtml(state.metaStatus);
-    _metaApplyStatus(panel);
-  });
-}
-
-// The language caveat in the server's own words (status.language_note, or the languages answer's note): a short first sentence, the rest on demand.
-function _metaLanguageNote() {
-  const st = state.metaStatus;
-  return (st && st.data && st.data.language_note) || state.metaLanguageNote || META_LANGUAGE_NOTE;
-}
-
-function _metaShortNote(note) {
-  const first = String(note || "").match(/^[\s\S]*?[.!?](?=\s|$)/);
-  return first ? first[0] : String(note || "");
-}
-
-function _metaBrowseOff() {
-  return window.SegmentBrowser ? "" : META_BROWSE_MISSING;
-}
-
-// What the connection state means for the controls: no connection = the estimate button off (with the reason beside it) and the controls that
-// ask Meta off too, since each would only answer with the same error.
-function _metaApplyStatus(panel) {
-  const rt = _metaRt(panel);
-  const off = _metaConnected(state.metaStatus) === false;
-  const btn = panel.querySelector('[data-meta-act="estimate"]');
-  const reason = panel.querySelector("[data-meta-reason]");
-  if (btn) btn.disabled = off || rt.busy;
-  if (reason) { reason.hidden = !off; reason.textContent = off ? _metaOffReason(state.metaStatus) : ""; }
-  const browseOff = _metaBrowseOff();
-  panel.querySelectorAll("[data-meta-needs-api]").forEach(el => { el.disabled = off || (!!browseOff && /^browse/.test(el.dataset.metaAct || "")); });
-  panel.querySelectorAll("[data-meta-browse-reason]").forEach(el => { el.hidden = !browseOff; el.textContent = browseOff; });
-  const note = _metaLanguageNote();
-  const short = panel.querySelector("[data-meta-langshort]");
-  const full = panel.querySelector("[data-meta-langfull]");
-  if (short) short.textContent = _metaShortNote(note);
-  if (full) full.textContent = note;
-}
-
-// ---------------------------------------------------------------- the result
-
-function _metaForecastSummaryHtml(data, li, p, forceStale) {
-  if (!data) return "";
-  const n = value => Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 });
-  const money = _metaMoney;
-  const audience = data.potential_audience;
-  const sc = data.scenarios;
-  const effectiveCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm;
-  const stale = !!forceStale
-    || Math.abs(Number(data.retail_budget) - _metaFullFlightRetailBudget(li)) > 0.01
-    || data.product_name !== li.product_name
-    || Number(data.months) !== _constanzaFlightMonths(li)
-    || data.proposal_geo !== _constanzaGeoFor(li.id)
-    || data.target_text !== _effectiveTargetText(li)
-    || Math.abs(Number(data.retail_cpm) - Number(effectiveCpm)) > 0.01
-    || _metaChoicesChanged(data, li.id);
-  let head = `<p class="meta-result-empty">Estimate an audience to see the scenarios.</p>`;
-  if (audience) {
-    const range = Number(audience.upper) > Number(audience.lower) ? `${n(audience.lower)} – ${n(audience.upper)}` : n(audience.lower);
-    const pulled = data.meta_targeting ? `<p class="meta-pulled"><strong>Pulled for</strong> ${escapeHtml(_metaPulledFor(data))}.</p>` : "";
-    const language = data.meta_targeting && (data.meta_targeting.languages || []).length
-      ? " The language is the one people have set on Facebook or Instagram, not who speaks it, so it can be fewer than all speakers." : "";
-    head = `<p class="meta-headline"><strong>${n(audience.lower)}</strong><span>accounts at the lower end of Meta’s audience</span></p>`
-      + `<p class="meta-range">Meta’s range (lower – upper end): <strong>${range}</strong> accounts ${audience.source === "meta_api" ? "(from Meta)" : "(entered manually)"}.</p>`
-      + pulled
-      + `<p class="meta-note">The scenarios use the <strong>lower end</strong>: it is the est. uniques the Avails step gets, so its frequency reads ${sc ? escapeHtml(String(sc.multipliers.mid)) : "5.5"}.${language}</p>`;
-  }
-  let cards = "";
-  if (sc) {
-    const m = sc.multipliers;
-    const cols = [["conservative", "Conservative"], ["mid", "Mid · default"], ["upper", "Upper"]];
-    cards = `<div class="meta-scen">${cols.map(([k, label]) => `<div class="meta-card${k === "mid" ? " meta-mid" : ""}">`
-      + `<p class="meta-card-name">${label} <small>× ${escapeHtml(String(m[k]))}</small></p>`
-      + `<p class="meta-card-big"><strong>${n(sc.monthly[k])}</strong> <span>imps / month</span></p>`
-      + `<dl class="meta-card-rows">${sc.months > 1 ? `<dt>Flight · ${n(sc.months)} mo</dt><dd>${n(sc.flight[k])}</dd>` : ""}`
-      + `<dt>Retail spend at the planning CPM</dt><dd>${money(sc.retail_spend_at_flight[k])}</dd></dl></div>`).join("")}</div>`;
-  }
-  return `<div class="meta-result${stale ? " is-stale" : ""}">
-    <p class="meta-result-title">Meta audience scenarios</p>
-    ${stale ? `<div class="aud-notice aud-notice--warn"><div class="aud-notice-body"><span class="aud-notice-title">Inputs changed — recalculate</span>Choose the audience above and press “Estimate audience” again. These numbers are for the earlier choices.</div></div>` : ""}
-    ${head}
-    ${cards}
-    <p class="meta-check"><strong>Budget cross-check:</strong> ${money(data.retail_budget)} retail → ${money(data.media_budget)} media at a ${money(data.retail_cpm)} retail CPM buys about ${n(data.budget_impressions)} impressions over the ${n(data.months)}-month flight. That is what the budget pays for, not avails.</p>
-    ${sc && !stale ? `<div class="meta-insert-row"><button type="button" class="btn-primary meta-insert-btn" data-meta-act="insert" data-lid="${escapeAttr(li.id)}">Insert the mid-case (${n(sc.monthly.mid)} / month) into Avails →</button></div>` : ""}
-    <small class="meta-foot">Planning scenarios, not a delivery forecast · ${escapeHtml(String(data.as_of || "").slice(0, 10))}</small>
-  </div>`;
-}
-
-// What a refused request says, in the planner's words. A plain message passes through; a refusal field by field (FastAPI's 422: detail is a list of
-// { loc, msg }) names the pick or setting it was about, read from the body that was sent, instead of a bare "String should have at most 20 characters".
-function _metaErrorText(data, fallback, body) {
-  const detail = data && data.detail;
-  if (!Array.isArray(detail) || !detail.length) return _constanzaErrorText(data, fallback);
-  const sent = body || {};
-  const lines = [];
-  detail.forEach(item => {
-    const loc = item && Array.isArray(item.loc) ? item.loc.filter(x => x !== "body") : [];
-    const msg = String((item && (item.msg || item.message)) || "").trim().replace(/\.$/, "");
-    const key = String(loc[0] == null ? "" : loc[0]);
-    const at = typeof loc[1] === "number" ? loc[1] : -1;
-    const pick = key === "meta_targeting" ? (sent.meta_targeting || [])[at] : null;
-    const language = key === "meta_languages" ? (sent.meta_languages || [])[at] : null;
-    let who = "";
-    if (pick) who = `“${pick.name}” (${_metaKindLabel(pick.type)})`;
-    else if (language) who = `the language “${language.name}”`;
-    else if (key) who = META_FIELD_WORDS[key] || key.replace(/_/g, " ");
-    const line = who ? `${who}: ${msg || "not accepted"}` : msg;
-    if (line && lines.indexOf(line) < 0) lines.push(line);
-  });
-  return lines.length ? `${lines.join("; ")}. Change that choice and estimate again.` : (fallback || "Request failed.");
-}
-
-// ---------------------------------------------------------------- the panel
-
-function _metaChipHtml(cls, label, meta, act, attrs, title) {
-  return `<li class="aud-chip ${cls}"${title ? ` title="${escapeHtml(title)}"` : ""}><span class="aud-chip-label">${escapeHtml(label)}</span>`
-    + `${meta ? `<span class="aud-chip-meta">${escapeHtml(meta)}</span>` : ""}`
-    + `<button type="button" class="aud-chip-x" data-meta-act="${act}" ${attrs} aria-label="Remove ${escapeHtml(label)}">×</button></li>`;
-}
-
-function _metaGeoChipsHtml(sel) {
-  const g = sel.geo;
-  return g ? _metaChipHtml("aud-chip--geo", g.name, [_metaTypeLabel(g.type), g.region].filter(Boolean).join(" · "), "remove-geo", "", g.label || "") : "";
-}
-
-function _metaLangChipsHtml(sel) {
-  return _metaLangFamilies(sel.languages).map(f => _metaChipHtml("aud-chip--lang", f.label, f.items.length > 1 ? `${f.items.length} versions` : "", "remove-lang",
-    `data-fam="${escapeHtml(f.key)}"`, f.items.length > 1 ? f.items.map(x => x.name).join(", ") : "")).join("");
-}
-
-function _metaDetailedChipsHtml(sel) {
-  return sel.detailed.map((x, i) => _metaChipHtml(x.type === "interests" || x.type === "behaviors" ? "aud-chip--interest" : "aud-chip--demo", x.name, _metaKindLabel(x.type),
-    "remove-detailed", `data-i="${i}"`, "")).join("");
-}
-
-function _metaSecHtml(key, title, clearLabel, lid, sums, body) {
-  const s = sums[key];
-  const id = escapeAttr(lid);
-  return `<section class="aud-sec${s.set ? " has-value" : ""}" data-meta-sec="${key}" aria-labelledby="meta-h-${key}-${id}">
-    <div class="aud-sec-head">
-      <span class="aud-step" aria-hidden="true"></span>
-      <div class="aud-sec-text"><h4 class="aud-sec-title" id="meta-h-${key}-${id}">${title}</h4><p class="aud-sec-sum${s.set ? " is-set" : ""}" data-meta-sum>${escapeHtml(s.text)}</p></div>
-      <span class="aud-count" data-meta-count${s.count ? "" : " hidden"}>${s.count}</span>
-      <button type="button" class="aud-clear" data-meta-act="clear" data-sec="${key}" aria-label="${clearLabel}"${s.set ? "" : " hidden"}>Clear</button>
-    </div>
-    <div class="aud-sec-body">${body}</div>
-  </section>`;
-}
-
-function _metaTypeaheadHtml(which, id, label, placeholder, aside, after) {
-  return `<div class="aud-field"><label class="aud-label" for="meta-${which}-q-${id}">${label}${aside ? `<span class="aud-label-aside">${aside}</span>` : ""}</label>
-    <div class="aud-ta" data-meta-ta="${which}"><input class="aud-input" id="meta-${which}-q-${id}" data-meta-input data-meta-ta-input="${which}" data-meta-needs-api type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="meta-${which}-l-${id}" autocomplete="off" maxlength="${META_SEARCH_MAX[which] || 100}" placeholder="${escapeHtml(placeholder)}" />
-      <div class="aud-ta-list" id="meta-${which}-l-${id}" role="listbox" aria-label="${escapeHtml(label)}" data-meta-ta-list="${which}" hidden></div></div>${after || ""}</div>`;
-}
-
-function _metaWhereBodyHtml(li, sel, id) {
-  const types = META_GEO_TYPES.map(([key, label]) => `<button type="button" data-meta-act="geotype" data-type="${key}" aria-pressed="${sel.geoType === key}">${label}</button>`).join("");
-  const places = _metaGeoSuggestions(_constanzaGeoFor(li.id));
-  const pills = places.length
-    ? `<div class="aud-quick meta-quick--plain" data-meta-geosuggest${sel.geo ? " hidden" : ""} role="group" aria-label="Places named in this proposal"><span class="aud-quick-label">In this proposal</span>`
-      + places.map(q => `<button type="button" data-meta-act="geo-suggest" data-meta-needs-api data-q="${escapeHtml(q)}">Search “${escapeHtml(q)}”</button>`).join("") + `</div>`
-    : "";
-  return `<div class="aud-field"><span class="aud-label" id="meta-gt-l-${id}">Kind of place</span>
-      <div class="aud-seg aud-seg--wrap" role="group" aria-labelledby="meta-gt-l-${id}">${types}</div>
-      <p class="aud-hint" data-meta-geohint>${sel.geoType === "geo_market" ? "Meta’s TV markets are Comscore markets, so they can differ a little from the Nielsen markets used elsewhere in this app." : ""}</p></div>
-    ${_metaTypeaheadHtml("geo", id, "Find the place", META_GEO_PLACEHOLDER[sel.geoType] || META_GEO_PLACEHOLDER.geo_market, "one place at a time", "")}
-    ${pills}
-    <ul class="aud-chips" data-meta-chips="geo" aria-label="Chosen place">${_metaGeoChipsHtml(sel)}</ul>`;
-}
-
-function _metaWhoBodyHtml(sel, id) {
-  const options = (from, to, current) => { let out = ""; for (let a = from; a <= to; a++) out += `<option value="${a}"${a === current ? " selected" : ""}>${a === META_AGE_MAX ? "65+" : a}</option>`; return out; };
-  const presets = META_AGE_PRESETS.map(([label, min, max]) => `<button type="button" data-meta-act="age-preset" data-min="${min}" data-max="${max}" aria-pressed="${sel.ageMin === min && sel.ageMax === max}">${label}</button>`).join("");
-  const genders = [["all", "All"], ["female", "Women"], ["male", "Men"]].map(([key, label]) => `<button type="button" data-meta-act="gender" data-gender="${key}" aria-pressed="${sel.gender === key}">${label}</button>`).join("");
-  return `<div class="aud-field"><span class="aud-label" id="meta-age-l-${id}">Age</span>
-      <div class="aud-range">
-        <div class="aud-range-selects"><select class="aud-select" data-meta-age="min" aria-label="Youngest age">${options(META_AGE_MIN, META_AGE_MAX, sel.ageMin)}</select><span class="aud-range-sep">to</span><select class="aud-select" data-meta-age="max" aria-label="Oldest age">${options(META_AGE_MIN, META_AGE_MAX, sel.ageMax)}</select></div>
-        <div class="aud-quick" role="group" aria-label="Age ranges">${presets}</div></div></div>
-    <div class="aud-field"><span class="aud-label" id="meta-gender-l-${id}">Gender</span>
-      <div class="aud-seg" role="group" aria-labelledby="meta-gender-l-${id}">${genders}</div></div>`;
-}
-
-function _metaLanguageBodyHtml(li, sel, id) {
-  const spanishOn = sel.languages.some(l => _metaLangStarts(l.name, "Spanish"));
-  const quick = META_LANG_QUICK.map(q => `<button type="button" data-meta-act="lang-quick" data-meta-needs-api data-key="${q.key}" aria-pressed="${q.words.every(w => sel.languages.some(l => _metaLangStarts(l.name, w)))}">${escapeHtml(q.label)}</button>`).join("");
-  const suggest = _targetsHispanic(li)
-    ? `<div class="aud-quick meta-suggest" data-meta-suggest${spanishOn ? " hidden" : ""}><button type="button" data-meta-act="lang-quick" data-meta-needs-api data-key="spanish">This line targets Hispanic audiences — add Spanish?</button></div>` : "";
-  const note = _metaLanguageNote();
-  return `${suggest}
-    <div class="aud-quick" role="group" aria-label="Quick language picks"><span class="aud-quick-label">Quick picks</span>${quick}</div>
-    <ul class="aud-chips" data-meta-chips="lang" aria-label="Chosen languages">${_metaLangChipsHtml(sel)}</ul>
-    ${_metaTypeaheadHtml("lang", id, "Another language", "Language, e.g. Portuguese", "", `<p class="aud-hint"><button type="button" class="aud-link" data-meta-act="browse-lang" data-meta-needs-api>Browse all languages</button></p><p class="aud-hint" data-meta-browse-reason hidden></p>`)}
-    <div class="aud-notice aud-notice--error" data-meta-msg="lang" role="alert" hidden><div class="aud-notice-body"></div></div>
-    <div class="meta-langnote"><p class="aud-hint" data-meta-langshort>${escapeHtml(_metaShortNote(note))}</p>
-      <details class="meta-more"><summary>Why this can be fewer than all Spanish speakers</summary><p class="aud-hint" data-meta-langfull>${escapeHtml(note)}</p></details></div>`;
-}
-
-function _metaAudienceBodyHtml(sel, id) {
-  return `${_metaTypeaheadHtml("aud", id, "Interests, behaviors and more", "e.g. soccer, new parents, travel", "optional", "")}
-    <ul class="aud-chips" data-meta-chips="aud" aria-label="Chosen interests, behaviors and more">${_metaDetailedChipsHtml(sel)}</ul>
-    <p class="aud-hint" data-meta-audhint>Meta’s own lists. Choose several and the audience gets wider: Meta counts people who match <strong>any</strong> of them. <span data-meta-none${sel.detailed.length ? " hidden" : ""}>None chosen yet: everyone in the place, age, gender and language above is counted.</span></p>
-    <button type="button" class="aud-browse" data-meta-act="browse" data-meta-needs-api><span class="aud-browse-label">Browse all interests, behaviors &amp; demographics</span><span class="aud-browse-count" data-meta-browsecount${sel.detailed.length ? "" : " hidden"}>${sel.detailed.length ? `${sel.detailed.length} chosen` : ""}</span></button>
-    <p class="aud-hint" data-meta-browse-reason hidden></p>`;
-}
-
-function _metaForecastPanelHtml(li, p, existing) {
-  const saved = existing.meta_forecast || null;
-  const mult = (state.catalog && state.catalog.audience_multipliers) || { conservative: 4.3, mid: 5.5, upper: 8.6 };
-  const sel = _metaSel(li.id);
-  const sums = _metaSummaries(sel);
-  const id = escapeAttr(li.id);
-  const effectiveCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm;
-  const budget = _metaFullFlightRetailBudget(li);
-  const months = _constanzaFlightMonths(li);
-  const rule = `${mult.conservative} / ${mult.mid} / ${mult.upper}`;
-  const flightHint = _metaFlightHint(li);
-  return `<div class="meta-panel" data-meta-lid="${id}">
-    <div class="meta-head">
-      <h4 class="meta-title">Meta audience scenarios</h4>
-      <ul class="meta-plan" aria-label="What the estimate is based on">
-        <li><span class="meta-plan-k">Retail budget</span><span class="meta-plan-v">${_metaMoney(budget)} <small>over ${months} month${months === 1 ? "" : "s"}</small></span></li>
-        <li><span class="meta-plan-k">Retail CPM</span><span class="meta-plan-v">${escapeHtml(_metaMoney(effectiveCpm))}</span></li>
-        <li title="Monthly impressions are the lower end of Meta’s audience × ${escapeHtml(String(mult.conservative))} (conservative), ${escapeHtml(String(mult.mid))} (mid, the default) or ${escapeHtml(String(mult.upper))} (upper)."><span class="meta-plan-k">Monthly impressions</span><span class="meta-plan-v">lower end × ${escapeHtml(rule)}</span></li>
-        <li><span class="meta-plan-k">Placements</span><span class="meta-plan-v">Meta’s defaults</span></li>
-      </ul>
-      <p class="aud-hint meta-plan-note">${flightHint ? `${escapeHtml(flightHint)} ` : ""}Monthly impressions are the <strong>lower end</strong> of Meta’s audience × ${escapeHtml(String(mult.conservative))} (conservative), ${escapeHtml(String(mult.mid))} (mid, the default) or ${escapeHtml(String(mult.upper))} (upper). Meta counts people on its default placements (Facebook, Instagram, Messenger, Audience Network), as Ads Manager’s estimated audience size does.</p>
-    </div>
-    <div class="meta-status" data-meta-status>${_metaStatusHtml(state.metaStatus)}</div>
-    <div class="aud-builder meta-builder">
-      ${_metaSecHtml("where", "Where", "Clear the place", li.id, sums, _metaWhereBodyHtml(li, sel, id))}
-      ${_metaSecHtml("who", "Who", "Clear age and gender", li.id, sums, _metaWhoBodyHtml(sel, id))}
-      ${_metaSecHtml("lang", "Language", "Clear languages", li.id, sums, _metaLanguageBodyHtml(li, sel, id))}
-      ${_metaSecHtml("aud", "Audience", "Clear interests and behaviors", li.id, sums, _metaAudienceBodyHtml(sel, id))}
-    </div>
-    <div class="meta-run">
-      <div class="aud-actions"><button type="button" class="btn-primary meta-estimate-btn" data-meta-act="estimate" aria-describedby="meta-reason-${id}">Estimate audience</button></div>
-      <p class="aud-hint meta-reason" id="meta-reason-${id}" data-meta-reason hidden></p>
-      <p class="aud-hint">Exclusions, placements and account restrictions are not part of the estimate: check them in Ads Manager.</p>
-    </div>
-    <div class="meta-error" data-meta-error role="alert"></div>
-    <div class="meta-feedback">${_metaForecastSummaryHtml(saved, li, p)}</div>
-    <div class="aud-sr" data-meta-live aria-live="polite"></div>
-  </div>`;
-}
-
-// ---------------------------------------------------------------- keeping the screen in step with the choices
-
-function _metaPanel(lid) {
-  return document.querySelector(`.meta-panel[data-meta-lid="${escapeAttr(lid)}"]`);
-}
-
-// What the panel remembers while it is on screen (it is rebuilt with the grid): the open lists, a search in flight, a request in flight.
-function _metaRt(panel) {
-  if (!panel._meta) {
-    const ta = () => ({ opts: [], rows: [], active: -1, seq: 0, timer: null });
-    panel._meta = { busy: false, ta: { geo: ta(), lang: ta(), aud: ta() } };
-  }
-  return panel._meta;
-}
-
-function _metaSay(panel, message) {
-  const el = panel && panel.querySelector("[data-meta-live]");
-  if (el) el.textContent = message;
-}
-
-// A problem with the request, shown above the last result (which stays: it is still saved with the proposal). "" clears it.
-function _metaFeedback(panel, message) {
-  const el = panel && panel.querySelector("[data-meta-error]");
-  if (!el) return;
-  el.innerHTML = message ? `<div class="aud-notice aud-notice--error"><div class="aud-notice-body">${escapeHtml(message)}</div></div>` : "";
-}
-
-function _metaLocalMessage(panel, sec, message) {
-  const el = panel && panel.querySelector(`[data-meta-msg="${sec}"]`);
-  if (!el) return;
-  el.hidden = !message;
-  el.querySelector(".aud-notice-body").textContent = message || "";
-}
-
-// Brings everything that shows a choice into line with state.metaSel: each section's summary, count and Clear, the chips, the pressed buttons,
-// the age menus (a "to" age below the "from" age cannot be picked). It never replaces an input, so typing and focus are not disturbed.
-function _metaSync(panel) {
-  const lid = panel.dataset.metaLid;
-  const sel = _metaSel(lid);
-  const sums = _metaSummaries(sel);
-  ["where", "who", "lang", "aud"].forEach(key => {
-    const sec = panel.querySelector(`[data-meta-sec="${key}"]`);
-    if (!sec) return;
-    const s = sums[key];
-    sec.classList.toggle("has-value", s.set);
-    const sum = sec.querySelector("[data-meta-sum]");
-    sum.textContent = s.text;
-    sum.classList.toggle("is-set", s.set);
-    const count = sec.querySelector("[data-meta-count]");
-    count.hidden = !s.count;
-    count.textContent = String(s.count);
-    sec.querySelector(".aud-clear").hidden = !s.set;
-  });
-  const chips = { geo: _metaGeoChipsHtml(sel), lang: _metaLangChipsHtml(sel), aud: _metaDetailedChipsHtml(sel) };
-  Object.keys(chips).forEach(key => { const el = panel.querySelector(`[data-meta-chips="${key}"]`); if (el && el.innerHTML !== chips[key]) el.innerHTML = chips[key]; });
-  const pressed = (selector, test) => panel.querySelectorAll(selector).forEach(b => b.setAttribute("aria-pressed", String(test(b))));
-  pressed('[data-meta-act="geotype"]', b => b.dataset.type === sel.geoType);
-  pressed('[data-meta-act="gender"]', b => b.dataset.gender === sel.gender);
-  pressed('[data-meta-act="age-preset"]', b => Number(b.dataset.min) === sel.ageMin && Number(b.dataset.max) === sel.ageMax);
-  pressed('.aud-quick:not([data-meta-suggest]) > [data-meta-act="lang-quick"]', b => {
-    const quick = META_LANG_QUICK.find(q => q.key === b.dataset.key);
-    return !!quick && quick.words.every(w => sel.languages.some(l => _metaLangStarts(l.name, w)));
-  });
-  const input = panel.querySelector('[data-meta-ta-input="geo"]');
-  if (input) input.placeholder = META_GEO_PLACEHOLDER[sel.geoType] || META_GEO_PLACEHOLDER.geo_market;
-  const hint = panel.querySelector("[data-meta-geohint]");
-  if (hint) hint.textContent = sel.geoType === "geo_market" ? "Meta’s TV markets are Comscore markets, so they can differ a little from the Nielsen markets used elsewhere in this app." : "";
-  const places = panel.querySelector("[data-meta-geosuggest]");
-  if (places) places.hidden = !!sel.geo;
-  const min = panel.querySelector('[data-meta-age="min"]');
-  const max = panel.querySelector('[data-meta-age="max"]');
-  if (min && max) {
-    min.value = String(sel.ageMin);
-    max.value = String(sel.ageMax);
-    Array.from(min.options).forEach(o => { o.disabled = Number(o.value) > sel.ageMax; });
-    Array.from(max.options).forEach(o => { o.disabled = Number(o.value) < sel.ageMin; });
-  }
-  const suggest = panel.querySelector("[data-meta-suggest]");
-  if (suggest) suggest.hidden = sel.languages.some(l => _metaLangStarts(l.name, "Spanish"));
-  const none = panel.querySelector("[data-meta-none]");
-  if (none) none.hidden = sel.detailed.length > 0;
-  const browse = panel.querySelector("[data-meta-browsecount]");
-  if (browse) { browse.hidden = !sel.detailed.length; browse.textContent = sel.detailed.length ? `${sel.detailed.length} chosen` : ""; }
-  _metaApplyStatus(panel);
-}
-
-// A choice that changes the estimate was changed: show it, and say whether the saved result still answers what is now asked (withdrawing Insert if not).
-function _metaChanged(panel) {
-  _metaSync(panel);
-  _metaMarkStale(panel);
-}
-
-// Re-draws the saved result against what is chosen now: stale (and without its Insert button) the moment the choices, the line's budget, product,
-// CPM, geography, flight length or target stop matching what was asked, current again if the choices are put back.
-function _metaMarkStale(panel) {
-  const lid = panel.dataset.metaLid;
-  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
-  const li = state.lineItems.find(x => x.id === lid);
-  if (!saved || !li) return;
-  const wasStale = !!panel.querySelector(".meta-result.is-stale");
-  panel.querySelector(".meta-feedback").innerHTML = _metaForecastSummaryHtml(saved, li, state.productIndex[li.product_name] || {});
-  // the result is redrawn on every choice, so it is not a live region itself: only a change of its state is said, once
-  const isStale = !!panel.querySelector(".meta-result.is-stale");
-  if (isStale !== wasStale) _metaSay(panel, isStale ? "The estimate below is out of date: your choices changed." : "The estimate below matches your choices again.");
-}
-
-// After a chip's remove button is gone, the keyboard goes to the next chip's remove button, else the one before it, else the section's own control.
-function _metaFocusChips(panel, which, index, fallbackSelector) {
-  const buttons = panel.querySelectorAll(`[data-meta-chips="${which}"] .aud-chip-x`);
-  const next = buttons[Math.min(index, buttons.length - 1)];
-  const target = next || panel.querySelector(fallbackSelector);
-  if (target) target.focus();
-}
-
-// ---------------------------------------------------------------- typeahead lists (Where, Language, Audience)
-
-function _metaTaInput(panel, which) {
-  return panel.querySelector(`[data-meta-ta-input="${which}"]`);
-}
-
-// rows: { group } a label | { note } a line of text | { foot: { act, label } } the "Browse all" row | an option { nameHtml, path, size, disabled, pick }.
-function _metaTaShow(panel, which, rows) {
-  const input = _metaTaInput(panel, which);
-  const list = panel.querySelector(`[data-meta-ta-list="${which}"]`);
-  if (!input || !list) return;
-  const t = _metaRt(panel).ta[which];
-  t.rows = rows;
-  t.opts = [];
-  t.active = -1;
-  let html = "";
-  rows.forEach(row => {
-    if (row.group) html += `<div class="aud-ta-group" role="presentation">${escapeHtml(row.group)}</div>`;
-    else if (row.note != null) html += `<div class="aud-ta-note" role="presentation">${escapeHtml(row.note)}</div>`;
-    else if (row.foot) {
-      const off = /^browse/.test(row.foot.act) ? _metaBrowseOff() : "";
-      html += `<div class="aud-ta-foot" role="presentation"><button type="button" class="aud-link" data-meta-act="${row.foot.act}"${off ? ` disabled title="${escapeHtml(off)}"` : ""}>${escapeHtml(row.foot.label)}</button></div>`;
-    }
-    else {
-      const k = t.opts.length;
-      t.opts.push(row);
-      html += `<div class="aud-ta-opt${row.disabled ? " is-disabled" : ""}" role="option" id="${list.id}-o${k}" aria-selected="false"${row.disabled ? ' aria-disabled="true"' : ""} data-k="${k}">`
-        + `<span class="aud-ta-text"><span class="aud-ta-name">${row.nameHtml}</span>${row.path ? `<span class="aud-ta-path">${escapeHtml(row.path)}</span>` : ""}</span>`
-        + `${row.size ? `<span class="aud-ta-size">${escapeHtml(row.size)}</span>` : ""}</div>`;
-    }
-  });
-  list.innerHTML = html;
-  list.hidden = false;
-  input.setAttribute("aria-expanded", "true");
-  input.removeAttribute("aria-activedescendant");
-}
-
-// Closes a list AND drops the search that was about to fill it (a debounce that has not fired, or an answer still on its way): otherwise it would
-// open the list again after Escape, or after the keyboard has left the box.
-function _metaTaClose(panel, which) {
-  const t = _metaRt(panel).ta[which];
-  clearTimeout(t.timer);
-  t.seq++;
-  const input = _metaTaInput(panel, which);
-  const list = panel.querySelector(`[data-meta-ta-list="${which}"]`);
-  if (list) list.hidden = true;
-  if (input) { input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); }
-}
-
-function _metaTaMove(panel, which, delta) {
-  const t = _metaRt(panel).ta[which];
-  const list = panel.querySelector(`[data-meta-ta-list="${which}"]`);
-  const input = _metaTaInput(panel, which);
-  const enabled = t.opts.map((o, k) => (o.disabled ? -1 : k)).filter(k => k >= 0);
-  if (!enabled.length || !list) return;
-  const at = enabled.indexOf(t.active);
-  const next = at < 0 ? (delta > 0 ? enabled[0] : enabled[enabled.length - 1]) : enabled[(at + delta + enabled.length) % enabled.length];
-  list.querySelectorAll(".aud-ta-opt").forEach(el => {
-    const on = Number(el.dataset.k) === next;
-    el.classList.toggle("is-active", on);
-    el.setAttribute("aria-selected", String(on));
-    if (on) { input.setAttribute("aria-activedescendant", el.id); el.scrollIntoView({ block: "nearest" }); }
-  });
-  t.active = next;
-}
-
-function _metaTaPick(panel, which, k) {
-  const opt = _metaRt(panel).ta[which].opts[k];
-  if (opt && !opt.disabled && typeof opt.pick === "function") opt.pick();
-}
-
-// The list of a typeahead is done with: close it, empty the box, put the keyboard back in the box for the next pick.
-function _metaTaDone(panel, which) {
-  const input = _metaTaInput(panel, which);
-  _metaRt(panel).ta[which].seq++;
-  _metaTaClose(panel, which);
-  if (input) { input.value = ""; input.focus(); }
-}
-
-// 1 Where: Meta's own geography search for the chosen kind of place.
-async function _metaGeoSearch(panel, query) {
-  const lid = panel.dataset.metaLid;
-  const sel = _metaSel(lid);
-  const t = _metaRt(panel).ta.geo;
-  const seq = ++t.seq;
-  _metaTaShow(panel, "geo", [{ note: "Searching Meta…" }]);
-  try {
-    const response = await fetch("/api/constanza/meta-geos", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, location_type: sel.geoType }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-    if (seq !== t.seq || !panel.isConnected) return;
-    const rows = (data.locations || []).map(loc => ({
-      nameHtml: _metaHighlight(loc.name, query), path: [loc.region, loc.country_code].filter(Boolean).join(" · "),
-      pick: () => {
-        const label = [loc.name, loc.region, loc.country_code].filter(Boolean).join(" · ");
-        sel.geo = { type: loc.type || sel.geoType, key: String(loc.key), name: loc.name, region: loc.region || "", country: loc.country_code || "", label };
-        _metaTaDone(panel, "geo");
-        _metaChanged(panel);
-        _metaSay(panel, `Place chosen: ${loc.name}`);
-      },
-    }));
-    _metaTaShow(panel, "geo", rows.length ? rows : [{ note: "Meta found no matching place. Try a city, ZIP, state, or the market name as Meta lists it (Meta’s markets are Comscore markets, which can differ from Nielsen DMAs)." }]);
-    _metaSay(panel, rows.length ? `${rows.length} places found` : "No places found");
-  } catch (error) {
-    if (seq === t.seq && panel.isConnected) _metaTaShow(panel, "geo", [{ note: String((error && error.message) || error) }]);
-  }
-}
-
-// 4 Audience: what Meta's keyword search finds, grouped by kind, with the audience size beside each.
-async function _metaAudSearch(panel, query) {
-  const lid = panel.dataset.metaLid;
-  const sel = _metaSel(lid);
-  const t = _metaRt(panel).ta.aud;
-  const seq = ++t.seq;
-  _metaTaShow(panel, "aud", [{ note: "Searching Meta…" }]);
-  try {
-    const response = await fetch(`/api/constanza/meta-targeting?q=${encodeURIComponent(query)}`);
-    const data = await response.json();
-    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-    if (seq !== t.seq || !panel.isConnected) return;
-    const have = new Set(sel.detailed.map(x => `${x.type}:${x.id}`));
-    const full = sel.detailed.length >= META_MAX_DETAILED;
-    const found = data.results || {};
-    let rows = [];
-    [["Interests", found.interests], ["Behaviors", found.behaviors], ["Demographics", found.demographics]].forEach(([label, items]) => {
-      if (!items || !items.length) return;
-      rows.push({ group: label });
-      items.slice(0, 40).forEach(it => {
-        const chosen = have.has(`${it.type}:${it.id}`);
-        rows.push({
-          nameHtml: _metaHighlight(it.name, query), path: (it.path || []).join(" › "), size: chosen ? "Added ✓" : _metaSizeText(it.audience_lower, it.audience_upper),
-          disabled: chosen || full, pick: () => _metaAddDetailed(panel, it),
-        });
-      });
-    });
-    if (!rows.length) rows = [{ note: `Nothing found for “${query}”. Try other words, or browse the full lists.` }];
-    if (full) rows.unshift({ note: `You have reached the limit of ${META_MAX_DETAILED} picks. Remove one to add another.` });
-    rows.push({ foot: { act: "browse", label: "Browse all interests, behaviors & demographics" } });
-    _metaTaShow(panel, "aud", rows);
-  } catch (error) {
-    if (seq === t.seq && panel.isConnected) _metaTaShow(panel, "aud", [{ note: String((error && error.message) || error) }]);
-  }
-}
-
-function _metaAddDetailed(panel, it) {
-  const sel = _metaSel(panel.dataset.metaLid);
-  if (sel.detailed.length >= META_MAX_DETAILED || sel.detailed.some(x => x.id === String(it.id) && x.type === it.type)) return;
-  sel.detailed.push({ id: String(it.id), name: it.name, type: it.type });
-  _metaTaDone(panel, "aud");
-  _metaChanged(panel);
-  _metaSay(panel, `Added ${it.name}`);
-}
-
-// 3 Language: Meta's whole list of languages, asked for once and then searched here. Only a list with something in it is kept: an empty answer (like an
-// error) is asked again the next time, as the server does, so a hiccup at Meta does not leave the picker empty until the page is reloaded.
-function _metaLanguageList() {
-  if (!state.metaLanguages) {
-    const asked = fetch("/api/constanza/meta-languages")
-      .then(async response => {
-        const data = await response.json();
-        if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-        if (data.note) state.metaLanguageNote = data.note;
-        return (data.items || []).map(x => ({ id: String(x.id), name: String(x.name) }));
-      })
-      .then(items => { if (!items.length && state.metaLanguages === asked) state.metaLanguages = null; return items; })
-      .catch(error => { if (state.metaLanguages === asked) state.metaLanguages = null; throw error; });
-    state.metaLanguages = asked;
-  }
-  return state.metaLanguages;
-}
-
-async function _metaLangSearch(panel, query) {
-  const lid = panel.dataset.metaLid;
-  const sel = _metaSel(lid);
-  const t = _metaRt(panel).ta.lang;
-  const seq = ++t.seq;
-  if (!query) { _metaTaClose(panel, "lang"); return; }
-  if (!state.metaLanguages) _metaTaShow(panel, "lang", [{ note: "Loading Meta’s languages…" }]);
-  try {
-    const all = await _metaLanguageList();
-    if (seq !== t.seq || !panel.isConnected) return;
-    if (!all.length) {
-      _metaTaShow(panel, "lang", [{ note: "Meta’s list of languages came back empty just now." }, { foot: { act: "lang-retry", label: "Try again" } }]);
-      return;
-    }
-    const words = _metaFold(query).split(/\s+/).filter(Boolean);
-    const have = new Set(sel.languages.map(x => x.id));
-    const hits = all.filter(it => words.every(w => _metaFold(it.name).includes(w)));
-    hits.sort((a, b) => Number(_metaFold(b.name).startsWith(words[0])) - Number(_metaFold(a.name).startsWith(words[0])));
-    const rows = hits.slice(0, 40).map(it => ({
-      nameHtml: _metaHighlight(it.name, query), path: "", size: have.has(it.id) ? "Added ✓" : "", disabled: have.has(it.id),
-      pick: () => {
-        const capped = _metaAddLanguages(sel, [it]);
-        _metaTaDone(panel, "lang");
-        _metaLocalMessage(panel, "lang", capped ? `You can choose at most ${META_MAX_LANGUAGES} languages.` : "");
-        _metaChanged(panel);
-        _metaSay(panel, `Added ${it.name}`);
-      },
-    }));
-    if (hits.length > 40) rows.push({ note: `${hits.length - 40} more: type more letters to narrow.` });
-    _metaTaShow(panel, "lang", rows.length ? rows : [{ note: `Meta lists no language matching “${query}”.` }]);
-  } catch (error) {
-    if (seq === t.seq && panel.isConnected) _metaTaShow(panel, "lang", [{ note: String((error && error.message) || error) }, { foot: { act: "lang-retry", label: "Try again" } }]);
-  }
-}
-
-// The locales Meta lists whose name starts with one word ("Spanish" -> Spanish, Spanish (Spain), ...). Remembered for the session once found.
-async function _metaResolveLanguages(word) {
-  state.metaLangQuick = state.metaLangQuick || {};
-  const key = _metaFold(word);
-  if (state.metaLangQuick[key]) return state.metaLangQuick[key];
-  const response = await fetch(`/api/constanza/meta-languages?q=${encodeURIComponent(word)}`);
-  const data = await response.json();
-  if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-  if (data.note) state.metaLanguageNote = data.note;
-  const found = (data.items || []).filter(it => _metaLangStarts(it.name, word)).map(it => ({ id: String(it.id), name: String(it.name) }));
-  if (found.length) state.metaLangQuick[key] = found;
-  return found;
-}
-
-// Adds the languages not yet chosen, up to Meta's limit here; true when some were left out for that.
-function _metaAddLanguages(sel, items) {
-  let capped = false;
-  items.forEach(it => {
-    if (sel.languages.some(x => x.id === it.id)) return;
-    if (sel.languages.length >= META_MAX_LANGUAGES) { capped = true; return; }
-    sel.languages.push({ id: it.id, name: it.name });
-  });
-  return capped;
-}
-
-// A language quick pick: pressed = every locale of those languages is in, so a press takes them out; otherwise they are looked up LIVE and added.
-async function _metaQuickLanguage(panel, key) {
-  const quick = META_LANG_QUICK.find(q => q.key === key);
-  if (!quick) return;
-  const lid = panel.dataset.metaLid;
-  const sel = _metaSel(lid);
-  _metaLocalMessage(panel, "lang", "");
-  if (quick.words.every(w => sel.languages.some(l => _metaLangStarts(l.name, w)))) {
-    sel.languages = sel.languages.filter(l => !quick.words.some(w => _metaLangStarts(l.name, w)));
-    _metaChanged(panel);
-    _metaSay(panel, `${quick.label} removed`);
-    return;
-  }
-  const buttons = Array.from(panel.querySelectorAll(`[data-meta-act="lang-quick"][data-key="${key}"]`));
-  buttons.forEach(b => { b.disabled = true; b.setAttribute("aria-busy", "true"); });
-  let message = "";
-  let found = [];
-  try {
-    for (const word of quick.words) {
-      const hits = await _metaResolveLanguages(word);
-      if (!hits.length) { message = `Meta lists no language called ${word} for this ad account.`; found = []; break; }
-      found = found.concat(hits);
-    }
-  } catch (error) {
-    message = String((error && error.message) || error);
-    found = [];
-  }
-  const live = _metaPanel(lid) || panel;
-  buttons.forEach(b => b.removeAttribute("aria-busy"));
-  if (message) { _metaLocalMessage(live, "lang", message); _metaApplyStatus(live); return; }
-  const capped = _metaAddLanguages(sel, found);
-  _metaLocalMessage(live, "lang", capped ? `You can choose at most ${META_MAX_LANGUAGES} languages: some were left out.` : "");
-  _metaChanged(live);                       // also hands the buttons back to the connection state (_metaApplyStatus)
-  _metaSay(live, `${quick.label} added`);
-}
-
-// ---------------------------------------------------------------- the whole lists in the pop-up
-
-// One list from Meta (interests, behaviors or demographics) as SegmentBrowser items; kept for the session once it has loaded with something in it. An
-// empty answer is not kept and is handed to the window as a message, which gives it a Retry that asks Meta again.
-function _metaLoadCatalog(tab) {
-  state.metaCatalog = state.metaCatalog || {};
-  if (!state.metaCatalog[tab]) {
-    const asked = fetch(`/api/constanza/meta-targeting?kind=${encodeURIComponent(tab)}`)
-      .then(async response => {
-        const data = await response.json();
-        if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-        return (data.items || []).map(it => ({
-          id: `${it.type}:${it.id}`, metaId: String(it.id), name: it.name, type: it.type, path: it.path || [],
-          size: it.audience_lower, sizeUpper: it.audience_upper, description: it.description || "",
-        }));
-      })
-      .then(items => {
-        if (items.length) return items;
-        if (state.metaCatalog[tab] === asked) state.metaCatalog[tab] = null;
-        return { error: `Meta sent back an empty list of ${META_CATALOG_WORDS[tab] || "options"} just now. Press Retry to ask again.` };
-      })
-      .catch(error => { if (state.metaCatalog[tab] === asked) state.metaCatalog[tab] = null; return { error: String((error && error.message) || error) }; });
-    state.metaCatalog[tab] = asked;
-  }
-  return state.metaCatalog[tab];
-}
-
-function _metaTabOf(type) {
-  return type === "interests" || type === "behaviors" ? type : "demographics";
-}
-
-function _metaBrowseAudience(panel) {
-  const lid = panel.dataset.metaLid;
-  if (!window.SegmentBrowser) { _metaFeedback(panel, "The browse window did not load. Reload the page and try again."); return; }
-  const sel = _metaSel(lid);
-  const opener = panel.querySelector(".aud-browse");
-  window.SegmentBrowser.open({
-    title: "Browse interests, behaviors & demographics",
-    subtitle: "Meta’s own lists for this ad account. Meta counts people who match any pick, so each one you add widens the audience.",
-    tabs: [{ key: "interests", label: "Interests" }, { key: "behaviors", label: "Behaviors" }, { key: "demographics", label: "Demographics" }],
-    activeTab: "interests",
-    load: tab => _metaLoadCatalog(tab),
-    columns: [{ key: "name", label: "Name" }, { key: "category", label: "Category", value: it => (it.path || []).join(" › ") }, { key: "size", label: "Audience size", numeric: true }],
-    isChosen: (tab, item) => sel.detailed.some(x => x.id === item.metaId && x.type === item.type),
-    max: META_MAX_DETAILED,
-    chosenCount: tab => sel.detailed.filter(x => _metaTabOf(x.type) === tab).length,
-    noun: "options", nounSingular: "option", applyLabel: "Add to audience",
-    returnFocus: opener,
-    onApply: ({ added, removed }) => {
-      removed.forEach(({ item }) => {
-        const at = sel.detailed.findIndex(x => x.id === item.metaId && x.type === item.type);
-        if (at >= 0) sel.detailed.splice(at, 1);
-      });
-      added.forEach(({ item }) => {
-        if (sel.detailed.length < META_MAX_DETAILED && !sel.detailed.some(x => x.id === item.metaId && x.type === item.type)) {
-          sel.detailed.push({ id: item.metaId, name: item.name, type: item.type });
-        }
-      });
-      const live = _metaPanel(lid);
-      if (live) { _metaChanged(live); _metaSay(live, `${sel.detailed.length} chosen`); }
-    },
-  });
-}
-
-function _metaBrowseLanguages(panel) {
-  const lid = panel.dataset.metaLid;
-  if (!window.SegmentBrowser) { _metaFeedback(panel, "The browse window did not load. Reload the page and try again."); return; }
-  const sel = _metaSel(lid);
-  window.SegmentBrowser.open({
-    title: "Browse languages",
-    subtitle: "Meta’s own list. A language here is the one people have set Facebook or Instagram to, not who speaks it.",
-    load: () => _metaLanguageList().then(
-      items => (items.length ? items.map(it => ({ id: it.id, name: it.name })) : { error: "Meta sent back an empty list of languages just now. Press Retry to ask again." }),
-      error => ({ error: String((error && error.message) || error) })),
-    columns: [{ key: "name", label: "Language" }],
-    searchPlaceholder: "Search languages",
-    isChosen: (tab, item) => sel.languages.some(x => x.id === item.id),
-    max: META_MAX_LANGUAGES, noun: "languages", nounSingular: "language", applyLabel: "Add languages",
-    returnFocus: panel.querySelector('[data-meta-act="browse-lang"]'),
-    onApply: ({ added, removed }) => {
-      removed.forEach(({ item }) => { sel.languages = sel.languages.filter(x => x.id !== item.id); });
-      _metaAddLanguages(sel, added.map(({ item }) => ({ id: item.id, name: item.name })));
-      const live = _metaPanel(lid);
-      if (live) { _metaChanged(live); _metaSay(live, `${sel.languages.length} languages chosen`); }
-    },
-  });
-}
-
-// ---------------------------------------------------------------- events (all delegated from the panel)
-
-function _metaClearSection(panel, sec) {
-  const sel = _metaSel(panel.dataset.metaLid);
-  if (sec === "where") sel.geo = null;
-  else if (sec === "who") { sel.ageMin = META_AGE_MIN; sel.ageMax = META_AGE_MAX; sel.gender = "all"; }
-  else if (sec === "lang") { sel.languages = []; _metaLocalMessage(panel, "lang", ""); }
-  else if (sec === "aud") sel.detailed = [];
-  _metaChanged(panel);
-  const first = panel.querySelector(`[data-meta-sec="${sec}"] [data-meta-ta-input], [data-meta-sec="${sec}"] [data-meta-act="gender"]`);
-  if (first) first.focus();
-}
-
-function onMetaPanelClick(panel, event) {
-  const option = event.target.closest(".aud-ta-opt");
-  if (option && panel.contains(option)) {
-    _metaTaPick(panel, option.closest("[data-meta-ta-list]").dataset.metaTaList, Number(option.dataset.k));
-    return;
-  }
-  const target = event.target.closest("[data-meta-act]");
-  if (!target || !panel.contains(target) || target.disabled) return;
-  const lid = panel.dataset.metaLid;
-  const sel = _metaSel(lid);
-  const d = target.dataset;
-  const chipIndex = () => Array.from(panel.querySelectorAll(`[data-meta-chips="${target.closest("[data-meta-chips]").dataset.metaChips}"] .aud-chip-x`)).indexOf(target);
-  switch (d.metaAct) {
-    case "geotype": {
-      sel.geoType = d.type;
-      _metaSync(panel);
-      const q = _metaTaInput(panel, "geo").value.trim();
-      if (q.length >= 2) _metaGeoSearch(panel, q); else _metaTaClose(panel, "geo");
-      break;
-    }
-    case "geo-suggest": {
-      const input = _metaTaInput(panel, "geo");
-      input.value = d.q;
-      input.focus();
-      _metaGeoSearch(panel, d.q);
-      break;
-    }
-    case "remove-geo":
-      sel.geo = null;
-      _metaChanged(panel);
-      _metaSay(panel, "Place removed");
-      _metaTaInput(panel, "geo").focus();
-      break;
-    case "age-preset":
-      sel.ageMin = Number(d.min);
-      sel.ageMax = Number(d.max);
-      _metaChanged(panel);
-      break;
-    case "gender":
-      sel.gender = d.gender;
-      _metaChanged(panel);
-      break;
-    case "lang-quick": _metaQuickLanguage(panel, d.key); break;
-    case "remove-lang": {
-      const at = chipIndex();
-      sel.languages = sel.languages.filter(l => _metaFold(_metaLangFamily(l.name)) !== d.fam);
-      _metaChanged(panel);
-      _metaFocusChips(panel, "lang", at, '[data-meta-ta-input="lang"]');
-      break;
-    }
-    case "remove-detailed": {
-      const at = chipIndex();
-      sel.detailed.splice(Number(d.i), 1);
-      _metaChanged(panel);
-      _metaFocusChips(panel, "aud", at, '[data-meta-ta-input="aud"]');
-      break;
-    }
-    case "browse": _metaTaClose(panel, "aud"); _metaBrowseAudience(panel); break;
-    case "browse-lang": _metaBrowseLanguages(panel); break;
-    case "lang-retry": {
-      const q = _metaTaInput(panel, "lang").value.trim();
-      if (q) _metaLangSearch(panel, q);
-      break;
-    }
-    case "clear": _metaClearSection(panel, d.sec); break;
-    case "estimate": onMetaForecast(lid); break;
-    case "insert": if (onMetaInsert(lid)) _metaAfterInsert(lid); break;
-    case "recheck": _metaStatusEnsure(true); break;
-    default: break;
-  }
-}
-
-function onMetaPanelInput(panel, event) {
-  const input = event.target.closest("[data-meta-ta-input]");
-  if (!input) return;
-  const which = input.dataset.metaTaInput;
-  const t = _metaRt(panel).ta[which];
-  clearTimeout(t.timer);
-  const query = input.value.trim();
-  if (which === "lang") { _metaLangSearch(panel, query); return; }
-  t.seq++;
-  if (query.length < 2) {
-    if (query) _metaTaShow(panel, which, [{ note: "Type at least two letters." }]); else _metaTaClose(panel, which);
-    return;
-  }
-  _metaTaShow(panel, which, [{ note: "Searching Meta…" }]);
-  t.timer = setTimeout(() => (which === "geo" ? _metaGeoSearch(panel, query) : _metaAudSearch(panel, query)), 300);
-}
-
-function onMetaPanelChange(panel, event) {
-  const age = event.target.closest("[data-meta-age]");
-  if (!age) return;
-  const sel = _metaSel(panel.dataset.metaLid);
-  if (age.dataset.metaAge === "min") sel.ageMin = Number(age.value); else sel.ageMax = Number(age.value);
-  _metaChanged(panel);
-}
-
-function onMetaPanelKeydown(panel, event) {
-  const input = event.target.closest("[data-meta-ta-input]");
-  if (!input) return;
-  const which = input.dataset.metaTaInput;
-  const t = _metaRt(panel).ta[which];
-  const list = panel.querySelector(`[data-meta-ta-list="${which}"]`);
-  const open = !!list && !list.hidden;
-  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-    event.preventDefault();
-    if (!open && t.rows.length) _metaTaShow(panel, which, t.rows);
-    _metaTaMove(panel, which, event.key === "ArrowDown" ? 1 : -1);
-  } else if (event.key === "Enter") {
-    event.preventDefault();
-    if (open) {
-      const first = t.active >= 0 ? t.active : t.opts.findIndex(o => !o.disabled);
-      if (first >= 0) _metaTaPick(panel, which, first);
-    } else if (which === "geo" && input.value.trim().length >= 2) {
-      _metaGeoSearch(panel, input.value.trim());
-    }
-  } else if (event.key === "Escape") {
-    if (open) { event.preventDefault(); event.stopPropagation(); _metaTaClose(panel, which); }
-    else if (input.value) { event.preventDefault(); event.stopPropagation(); input.value = ""; _metaTaClose(panel, which); }
-  }
-}
-
-function onMetaPanelFocusOut(panel, event) {
-  const ta = event.target.closest(".aud-ta");
-  if (ta && !ta.contains(event.relatedTarget)) _metaTaClose(panel, ta.dataset.metaTa);
-}
-
-// Wires one panel (the grid calls this for each, right after it builds the HTML), then shows the choices and asks about the connection.
-function _metaBind(panel) {
-  panel.addEventListener("click", e => onMetaPanelClick(panel, e));
-  panel.addEventListener("input", e => onMetaPanelInput(panel, e));
-  panel.addEventListener("change", e => onMetaPanelChange(panel, e));
-  panel.addEventListener("keydown", e => onMetaPanelKeydown(panel, e));
-  panel.addEventListener("focusout", e => onMetaPanelFocusOut(panel, e));
-  panel.addEventListener("mousedown", e => { if (e.target.closest(".aud-ta-list")) e.preventDefault(); });   // a click in a list must not take the keyboard out of its box
-  _metaAnnouncer();
-  _metaSync(panel);
-  _metaStatusEnsure();
-}
-
-// ---------------------------------------------------------------- the request
-
-// The body of POST /api/constanza/meta-forecast for what is chosen: always a live pull (the server still takes a manual audience, for old callers).
-// Age is sent only when it narrows (18 and 65+ are Meta's own limits); gender is all / male / female; languages are [{id, name}] from Meta's list.
-function _metaRequestBody(li, p, sel) {
-  return {
-    product_name: li.product_name, retail_budget: _metaFullFlightRetailBudget(li),
-    retail_cpm: _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm, months: _constanzaFlightMonths(li),
-    meta_geo_type: sel.geo.type, meta_geo_key: sel.geo.key, meta_geo_label: (sel.geo.label || sel.geo.name || "").slice(0, 160) || null,
-    age_min: sel.ageMin > META_AGE_MIN ? sel.ageMin : null, age_max: sel.ageMax < META_AGE_MAX ? sel.ageMax : null,
-    gender: sel.gender,
-    meta_targeting: sel.detailed.map(x => ({ id: x.id, name: x.name, type: x.type })),
-    meta_languages: sel.languages.map(x => ({ id: x.id, name: x.name })),
-  };
-}
-
-async function onMetaForecast(lid) {
-  const panel = _metaPanel(lid);
-  const li = state.lineItems.find(x => x.id === lid);
-  if (!panel || !li) return;
-  const p = state.productIndex[li.product_name] || {};
-  const sel = _metaSel(lid);
-  const retailBudget = _metaFullFlightRetailBudget(li);
-  const months = _constanzaFlightMonths(li);
-  const geoAtRequest = _constanzaGeoFor(lid);
-  const targetAtRequest = _effectiveTargetText(li);
-  _metaFeedback(panel, "");
-  if (!(retailBudget > 0)) { _metaFeedback(panel, "Set a positive retail budget for this line in Step 04 first."); return; }
-  if (!sel.geo) {
-    _metaFeedback(panel, "Choose where first: search for a place in step 1 and pick one from the list.");
-    const input = _metaTaInput(panel, "geo");
-    if (input) input.focus();
-    return;
-  }
-  if (_metaConnected(state.metaStatus) === false) { _metaFeedback(panel, _metaOffReason(state.metaStatus)); return; }
-  const rt = _metaRt(panel);
-  const btn = panel.querySelector('[data-meta-act="estimate"]');
-  rt.busy = true;
-  btn.disabled = true;
-  btn.setAttribute("aria-busy", "true");
-  btn.textContent = "Asking Meta…";
-  try {
-    const body = _metaRequestBody(li, p, sel);
-    const response = await fetch("/api/constanza/meta-forecast", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(_metaErrorText(data, response.statusText, body));
-    // Save the provenance with the proposal. A changed line/geo/length is shown as stale (and the insert button withdrawn).
-    const stillThere = state.lineItems.find(x => x.id === lid);
-    if (!stillThere || stillThere.product_name !== li.product_name ||
-        _metaFullFlightRetailBudget(stillThere) !== retailBudget || _constanzaFlightMonths(stillThere) !== months ||
-        _constanzaGeoFor(lid) !== geoAtRequest || _effectiveTargetText(stillThere) !== targetAtRequest) return;
-    data.proposal_geo = geoAtRequest;
-    data.target_text = targetAtRequest;
-    state.availsData[lid] = state.availsData[lid] || {};
-    state.availsData[lid].meta_forecast = data;
-    const live = _metaPanel(lid) || panel;
-    live.querySelector(".meta-feedback").innerHTML = _metaForecastSummaryHtml(data, li, p);
-    _metaFeedback(live, "");
-    _metaSay(live, "The estimate is ready.");
-  } catch (error) {
-    _metaFeedback(_metaPanel(lid) || panel, String((error && error.message) || error));
-  } finally {
-    rt.busy = false;
-    btn.removeAttribute("aria-busy");
-    btn.textContent = "Estimate audience";
-    _metaApplyStatus(panel);
-  }
-}
-
-// Writes the MID scenario (the default) into the line's Avails: monthly impressions, and the lower-end audience as est. uniques.
-function onMetaInsert(lid) {
-  const li = state.lineItems.find(x => x.id === lid);
-  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
-  if (!li || !saved || !saved.scenarios) return false;
-  const geo = saved.meta_targeting ? (saved.meta_targeting.geo_name || `Meta geography ${saved.meta_targeting.geo_key}`) : "entered audience";
-  return applyConstanzaEstimate(lid, saved.scenarios.monthly.mid, saved.scenarios.est_uniques,
-    { method: "meta_audience", dmas: [geo], unmatched_tokens: [], win_rate: null, hispanic_share: null });
-}
-
-// One polite live region on the page itself, not in a panel: the panels are rebuilt with the Avails grid and take their own messages with them.
-function _metaAnnouncer() {
-  let el = document.getElementById(META_LIVE_ID);
-  if (!el) {
-    el = document.createElement("div");
-    el.id = META_LIVE_ID;
-    el.className = "aud-sr";
-    el.setAttribute("role", "status");
-    el.setAttribute("aria-live", "polite");
-    el.setAttribute("aria-atomic", "true");
-    document.body.appendChild(el);
-  }
-  return el;
-}
-
-function _metaAnnounce(message) {
-  const el = _metaAnnouncer();
-  el.textContent = "";                                          // emptied first, so the same words said twice are read twice
-  setTimeout(() => { el.textContent = message; }, 50);
-}
-
-// Insert redraws the whole Avails grid, so the button that was pressed is gone and the keyboard would drop to the top of the page. It goes to the new
-// panel's Insert button (where the planner was working), and what was written into Avails is said.
-function _metaAfterInsert(lid) {
-  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
-  const panel = _metaPanel(lid);
-  const target = panel && (panel.querySelector(".meta-insert-btn") || panel.querySelector('[data-meta-act="estimate"]'));
-  if (target) target.focus();
-  const sc = saved && saved.scenarios;
-  if (sc) _metaAnnounce(`Inserted into Avails: ${_metaCount(sc.monthly.mid)} impressions a month and ${_metaCount(sc.est_uniques)} unique accounts.`);
-}
-// META PANEL: end
-
 function renderAvailsGrid() {
   renderAllTierTabStrips();
   const rt = (state.parsed.request_type || "").toLowerCase();
@@ -7826,17 +6552,7 @@ function renderAvailsGrid() {
         `}
       </div>
       <p class="sov-helper" id="sov-helper-${escapeAttr(li.id)}"></p>
-      ${!isFreeform && p.meta_retail_cpm != null ? _metaForecastPanelHtml(li, p, existing) : ""}
-      ${!isFreeform && _forecastEnabled(p) && p.meta_retail_cpm == null ? `
-      <div class="constanza-block">
-        ${window.Constanza ? Constanza.periodLineHtml(p.forecast && p.forecast.series) : ""}
-        <div class="cz-card-actions">
-          <button type="button" class="btn-secondary constanza-autocalc-btn" data-lid="${escapeAttr(li.id)}">${window.Constanza ? Constanza.iconHtml() : "🛰️"}Auto-calculate avails</button>
-          <button type="button" class="cz-link constanza-line-dock-btn" data-lid="${escapeAttr(li.id)}">Open in Constanza</button>
-        </div>
-        <div class="constanza-result" id="constanza-result-${escapeAttr(li.id)}" style="display:none;"></div>
-      </div>
-      ` : ""}
+      ${!isFreeform && _forecastEnabled(p) ? _constanzaBlockHtml(li, p, existing) : ""}
     `;
     grid.appendChild(card);
     // Naturally blanks itself for a free-form entry — computeSovPct() has no
@@ -7889,7 +6605,7 @@ function renderAvailsGrid() {
   // is meaningless, always "on" per the checkbox default) and the "_text"
   // free-form inputs above (running parseFormattedInput on "50 to 100"
   // would strip the letters and glue the digits together into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
     inp.addEventListener("focus", e => {
       const raw = parseFormattedInput(e.target.value);
       // Frequency is legitimately fractional (5.5) — rounding it here and
@@ -7927,7 +6643,7 @@ function renderAvailsGrid() {
   // both overwrite that with a numeric parse of the same text AND mangle
   // it in the process — parseFormattedInput("50 to 100") strips the
   // letters and glues what's left into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
     inp.addEventListener("blur", e => {
       const lid = e.target.dataset.lid;
       const key = e.target.dataset.key;
@@ -8048,22 +6764,27 @@ function renderAvailsGrid() {
     });
   });
 
-  grid.querySelectorAll(".constanza-autocalc-btn").forEach(btn => {
-    btn.addEventListener("click", () => onConstanzaAutoCalc(btn.dataset.lid));
-  });
-  grid.querySelectorAll(".constanza-line-dock-btn").forEach(btn => {
-    btn.addEventListener("click", () => openConstanzaForLine(btn.dataset.lid));
-  });
-  grid.querySelectorAll(".meta-panel").forEach(_metaBind);
+  _constanzaMountBlocks(grid);
   if (window.Constanza) Constanza.hintOnce();
 }
 
 // ----------------------------------------------------------------------
-// Constanza — DMA-weighted avails auto-calculator (app/services/
-// constanza_engine.py). A fast, confidence-ranged starting point for the
-// same number a planner would otherwise gather by hand from Roku Ads
-// Manager / Amazon DSP / The Trade Desk / Madhive — not a silent
+// CONSTANZA HOST: begin
+// Constanza — the avails hub (app/services/constanza_engine.py for platform
+// data, app/services/constanza_methods.py for the live methods). A fast,
+// confidence-ranged starting point for the same number a planner would
+// otherwise gather by hand from Roku Ads Manager / Amazon DSP / The Trade
+// Desk / Madhive / an ad platform's own audience tool — not a silent
 // replacement for checking the platform when precision matters.
+//
+// Step 05 draws ONE block per line, the same for every method: the buttons
+// constanza.js asks for (Constanza.blockButtons) and, under them, the card
+// of the line's last estimate. Nothing in this section names a method: what a
+// method is, which buttons it needs and how its result reads come from
+// constanza.js and the method's own script, reached only through
+// window.Constanza and window.constanzaHost (defined below: what constanza.js
+// needs from the proposal). A new method adds its script and a registry
+// entry; this file does not change.
 // ----------------------------------------------------------------------
 // Swap ONE item of a geo list for the planner's pick ("Springfield" -> "Springfield, MO"
 // inside "Springfield, 95814, Placer County, CA"), tolerant of spacing/case differences
@@ -8141,7 +6862,7 @@ function _targetsHispanic(li) {
 
 // Hispanic targeting for a line's avails: the planner's own switch on its card when they used it; else ON when the line's own or the proposal's
 // targeting names a Hispanic audience (most of our campaigns do); else null = the product's own default (the server decides). Only platform
-// data has avails to narrow: a population-share or TikTok estimate is never sent the flag.
+// data has avails to narrow: any other estimate is never sent the flag.
 function _constanzaHispanicFor(lid, li) {
   const prod = li && state.productIndex ? state.productIndex[li.product_name] : null;
   if (!prod || !prod.forecast || prod.forecast.method !== "platform") return null;
@@ -8159,13 +6880,261 @@ function _constanzaFlightDays() {
   return Math.min(Math.round((end - start) / 86400000) + 1, 3660);
 }
 
+// What this line's flight really is, for the methods that need to know: does the active option have dates we can read? Without them
+// _constanzaFlightMonths is a stand-in (the line's own count, or 1), not the flight's length.
+function _constanzaHasFlightDates() {
+  const start = _mbParseDate(_effectiveStartDate(state.activeTierLabel));
+  const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
+  return !!(start && end && _mbMonthsBetween(start, end).length > 0);
+}
+
+// The line's budget for the WHOLE flight, in dollars. Step 04's budget is per billing period and li.months is that period's count (1 for Full Flight),
+// so this is the real spend of the line, not a monthly equivalent.
+function _constanzaFullFlightBudget(li) {
+  return Math.max(0, Number(li.monthly_budget) || 0) * Math.max(1, Number(li.months) || 1);
+}
+
+function _constanzaLineOf(lid) {
+  return state.lineItems.find(x => x.id === lid) || null;
+}
+
+// The forecast method of a line's product: whatever Admin -> Forecast says, platform data when the catalog carries no config.
+function _constanzaMethodOf(li) {
+  const p = state.productIndex[li.product_name];
+  return (p && p.forecast && p.forecast.method) || "platform";
+}
+
+// What constanza.js says about a method, in one shape: { loaded, note, caps: {ownsGeography, persist, autoPull, lineMonths}, legacyKey }. `loaded` is
+// false for a method that is neither a built-in data method nor registered (its script did not load): its lines show `note` instead of some other estimate.
+function _constanzaMethodInfo(method) {
+  const info = { loaded: true, note: "", caps: { ownsGeography: false, persist: false, autoPull: "geo", lineMonths: false }, legacyKey: null };
+  const found = window.Constanza && Constanza.methodState ? Constanza.methodState(method) : null;
+  if (!found || typeof found !== "object") return info;
+  info.loaded = found.ok !== false;
+  info.note = typeof found.note === "string" ? found.note : "";
+  Object.assign(info.caps, found.caps || {});
+  // the key an older shape of the method's saved estimate was kept under (the method's own script says it)
+  info.legacyKey = typeof found.legacyKey === "string" ? found.legacyKey : null;
+  return info;
+}
+
+// What Step 04 knows about one line, in the shape constanza.js and the methods read it. Every field is always there.
+function _constanzaLineFacts(li, p) {
+  const eff = _effectiveProduct(li, p || {}) || {};
+  const cpm = eff.estimated_cpm_for_imps == null ? NaN : Number(eff.estimated_cpm_for_imps);
+  return {
+    id: li.id,
+    product_name: li.product_name,
+    method: _constanzaMethodOf(li),
+    label: window.Constanza ? Constanza.lineLabel(li) : li.product_name,
+    months: _constanzaFlightMonths(li),
+    flight_days: _constanzaFlightDays(),
+    has_dates: _constanzaHasFlightDates(),
+    geo_text: _constanzaGeoFor(li.id),
+    target_text: _effectiveTargetText(li),
+    budget: _constanzaFullFlightBudget(li),
+    cpm: Number.isFinite(cpm) ? cpm : null,
+    hispanic: _constanzaHispanicFor(li.id, li),
+  };
+}
+
+// ---- the saved estimate of a line -------------------------------------------------------------------------------------------------
+// The last estimate a method kept for a line lives in state.availsData[lid].forecast_snapshot: {v, method, saved_at, request, result, line}. A
+// snapshot is REPLACED, never changed in place (a copied option shares the object). An older shape a method still reads (Constanza.adoptLegacy) is
+// turned into a snapshot in memory only; it is written back when the planner estimates again.
+
+function _constanzaNativeSnapshot(entry, method) {
+  const s = entry && entry.forecast_snapshot;
+  return s && typeof s === "object" && !Array.isArray(s) && s.v === 1 && s.method === method ? s : null;
+}
+
+// The newer of what the line stored and what an older shape says; only an estimate of the line's CURRENT method (another method's stays in the
+// data, never drawn, never deleted).
+function _constanzaSnapshotFor(lid, entry) {
+  const li = _constanzaLineOf(lid);
+  const saved = entry || state.availsData[lid];
+  if (!li || !saved) return null;
+  const method = _constanzaMethodOf(li);
+  const native = _constanzaNativeSnapshot(saved, method);
+  let older = null;
+  if (window.Constanza && Constanza.adoptLegacy) {
+    try { older = Constanza.adoptLegacy(method, saved, _constanzaLineFacts(li, state.productIndex[li.product_name])) || null; }
+    catch (err) { console.error("[constanza] a saved estimate of an older shape could not be read", err); }
+  }
+  const when = s => { const t = Date.parse(s && s.saved_at); return Number.isNaN(t) ? -Infinity : t; };
+  return older && (!native || when(older) > when(native)) ? older : native;
+}
+
+// Drops the older shape of this line's saved estimate (what the method's own script says it is called), if the line has one. Only a field named like
+// the older shapes are (a name ending in _forecast: constanza.js refuses any other name when a method registers): never the snapshot, never one of the line's figures.
+function _constanzaDropOlderShape(li, entry) {
+  const key = _constanzaMethodInfo(_constanzaMethodOf(li)).legacyKey;
+  if (key && /^[a-z][a-z0-9_]*_forecast$/.test(key)) delete entry[key];
+}
+
+// null deletes the line's snapshot. false, with nothing written, when the line is not in the option on the screen (deleted, or another option
+// was opened since): an estimate that comes back late must not leave an entry for a line that is gone.
+function _constanzaSaveSnapshot(lid, snapshot) {
+  const li = _constanzaLineOf(lid);
+  if (!li) return false;
+  const entry = state.availsData[lid] = state.availsData[lid] || {};
+  if (snapshot) {
+    entry.forecast_snapshot = snapshot;
+    _constanzaDropOlderShape(li, entry);
+  } else {
+    delete entry.forecast_snapshot;
+  }
+  return true;
+}
+
+// What constanza.js reads from this page (it is defined before constanza.js loads, and read lazily: every member is optional there).
+window.constanzaHost = {
+  lineFacts: lid => { const li = _constanzaLineOf(lid); return li ? _constanzaLineFacts(li, state.productIndex[li.product_name]) : null; },
+  snapshot: lid => _constanzaSnapshotFor(lid),
+  saveSnapshot: (lid, snapshot) => { const ok = _constanzaSaveSnapshot(lid, snapshot); if (ok) _constanzaRefreshCard(lid); return ok; },
+  onDirty: lid => (lid == null ? _constanzaRefreshAllCards() : _constanzaRefreshCard(lid)),      // no line: something every card reads changed (a connection answer)
+};
+
+// ---- the block on a Step 05 line --------------------------------------------------------------------------------------------------
+// Every method gets the same block: the buttons constanza.js asks for, then a place for the card of the line's last estimate.
+
+function _constanzaClassicButtons(lid) {
+  return `<div class="cz-card-actions">
+          <button type="button" class="btn-secondary constanza-autocalc-btn" data-lid="${lid}">${window.Constanza ? Constanza.iconHtml() : "🛰️"}Auto-calculate avails</button>
+          <button type="button" class="cz-link constanza-line-dock-btn" data-lid="${lid}">Open in Constanza</button>
+        </div>`;
+}
+
+function _constanzaBlockInnerHtml(li, p, entry) {
+  const lid = escapeAttr(li.id);
+  let buttons = "";
+  try {
+    const method = _constanzaMethodOf(li);
+    if (window.Constanza && Constanza.blockButtons) {
+      buttons = _constanzaMethodInfo(method).loaded
+        ? Constanza.blockButtons(method, _constanzaLineFacts(li, p), _constanzaSnapshotFor(li.id, entry))
+        : "";
+      if (buttons && !buttons.includes("cz-card-actions")) buttons = `<div class="cz-card-actions">${buttons}</div>`;
+    } else {
+      buttons = _constanzaClassicButtons(lid);
+    }
+  } catch (err) {
+    console.error("[constanza] the buttons of a line could not be drawn", err);
+    buttons = _constanzaClassicButtons(lid);
+  }
+  return `
+        ${window.Constanza ? Constanza.periodLineHtml(p.forecast && p.forecast.series) : ""}
+        ${buttons}
+        <div class="constanza-result" id="constanza-result-${lid}" style="display:none;"></div>
+      `;
+}
+
+function _constanzaBlockHtml(li, p, entry) {
+  return `
+      <div class="constanza-block" data-lid="${escapeAttr(li.id)}" data-method="${escapeAttr(_constanzaMethodOf(li))}">${_constanzaBlockInnerHtml(li, p, entry)}</div>
+      `;
+}
+
+// Wires the buttons of every block and draws its card. One card never takes the rest of Step 05 with it: a saved estimate that cannot be drawn
+// (an old shape, a hand-edited file) shows a plain line in its place, and every other line is drawn as usual.
+function _constanzaMountBlocks(grid) {
+  grid.querySelectorAll(".constanza-block").forEach(_constanzaWireBlock);
+}
+
+function _constanzaWireBlock(block) {
+  const lid = block.dataset.lid;
+  block.querySelectorAll(".constanza-autocalc-btn").forEach(btn => btn.addEventListener("click", () => onConstanzaAutoCalc(lid)));
+  block.querySelectorAll(".constanza-line-dock-btn").forEach(btn => btn.addEventListener("click", () => openConstanzaForLine(lid)));
+  try {
+    _constanzaDrawCard(lid);
+  } catch (err) {
+    console.error("[constanza] the saved estimate of a line could not be drawn", err);
+    _constanzaShowUnreadable(lid);
+  }
+}
+
+// A saved estimate that cannot be drawn says so in plain words and keeps the way forward: the same button the card has when it has no estimate yet
+// (the line's own buttons may have been left out because an estimate is "there").
+function _constanzaShowUnreadable(lid) {
+  const el = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
+  if (!el) return;
+  el.style.display = "block";
+  el.innerHTML = `<p class="constanza-error">The saved estimate couldn’t be read — estimate again.</p>`
+    + `<div class="cz-card-actions"><button type="button" class="btn-primary cz-refine" data-lid="${escapeAttr(lid)}">Estimate in Constanza →</button></div>`;
+  el.querySelector(".cz-refine").addEventListener("click", () => openConstanzaForLine(lid));
+}
+
+// The card for what is saved on the line: the estimate with its warnings, or — for a method that keeps an estimate and has none yet — what to do first.
+function _constanzaDrawCard(lid) {
+  const li = _constanzaLineOf(lid);
+  const el = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
+  if (!li || !el || !window.Constanza) return;
+  const p = state.productIndex[li.product_name] || {};
+  const facts = _constanzaLineFacts(li, p);
+  const info = _constanzaMethodInfo(facts.method);
+  if (!info.loaded) {
+    el.style.display = "block";
+    el.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(info.note || "This product’s estimate didn’t load. Reload the page.")}</p>`;
+    return;
+  }
+  const snapshot = _constanzaSnapshotFor(lid);
+  if (snapshot && snapshot.result && typeof snapshot.result === "object") {
+    // an answer is drawn by the method that gave it: one that does not say which (an old shape, a hand-edited file) would be drawn as a generic estimate
+    if (snapshot.result.method !== snapshot.method) throw new Error(`the saved estimate of this line is not ${snapshot.method}'s answer`);
+    // ... and one with no monthly figure (a hand-edited file) has nothing to show or to insert
+    if (!Number.isFinite(Constanza.summarize(snapshot.result).month.mid)) throw new Error("the saved estimate of this line has no monthly figure");
+    renderConstanzaResult(lid, snapshot.result, snapshot);
+  } else {
+    Constanza.renderEmpty(el, facts.method, facts, snapshot);
+  }
+}
+
+// Draws one line's block again (its buttons depend on what is saved, its card on the line and the dock), keeping the keyboard where it was.
+function _constanzaRefreshCard(lid) {
+  const block = document.querySelector(`.constanza-block[data-lid="${escapeAttr(lid)}"]`);
+  const li = _constanzaLineOf(lid);
+  if (!block || !li) return;
+  const active = document.activeElement;
+  const hadFocus = active && block.contains(active) && active !== block;
+  const selector = hadFocus ? [...active.classList].filter(c => /^(cz|constanza)-/.test(c)).map(c => `.${c}`).join("") : "";
+  block.innerHTML = _constanzaBlockInnerHtml(li, state.productIndex[li.product_name] || {}, state.availsData[lid]);
+  _constanzaWireBlock(block);
+  if (hadFocus) {
+    const next = (selector && block.querySelector(selector)) || block.querySelector("button");
+    if (next) next.focus();
+  }
+}
+
+// Every block that reads what changed (a connection answer: Recalculate is held off while a method is not connected), drawn again, except
+//  - a line whose estimate is on its way (its card is showing the wait);
+//  - a block whose method pulls from the proposal's geography (data products, TikTok): its card reads neither a connection nor a saved estimate;
+//  - a block showing an estimate that is on the screen only (nothing saved behind it): drawing it again would find nothing to draw it from and lose it.
+function _constanzaRefreshAllCards() {
+  document.querySelectorAll(".constanza-block").forEach(block => {
+    const lid = block.dataset.lid;
+    if (_constanzaBusy[lid] || _constanzaMethodInfo(block.dataset.method).caps.autoPull === "geo") return;
+    if (block.querySelector(".constanza-range-table") && !_constanzaSnapshotFor(lid)) return;
+    _constanzaRefreshCard(lid);
+  });
+}
+
+const _constanzaBusy = {};        // line id -> an estimate is on its way: a second press does nothing
+
 async function onConstanzaAutoCalc(lid) {
   const li = state.lineItems.find(x => x.id === lid);
   const btn = document.querySelector(`.constanza-autocalc-btn[data-lid="${escapeAttr(lid)}"]`);
   const resultEl = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
-  if (!li || !btn || !resultEl) return;
+  if (!li || !resultEl || _constanzaBusy[lid]) return;
+  if (!window.Constanza) {
+    resultEl.style.display = "block";
+    resultEl.innerHTML = `<p class="constanza-error">⚠️ Constanza didn’t load. Reload the page and try again.</p>`;
+    return;
+  }
   const p = state.productIndex[li.product_name] || {};
 
+  // What the line says right now travels with the estimate, so a later change to the line (its budget, its dates, its target) shows on the card.
+  const facts = _constanzaLineFacts(li, p);
+  const snapshot = _constanzaSnapshotFor(lid);
   const geoText = _constanzaGeoFor(lid);
   const hispanic = _constanzaHispanicFor(lid, li);
 
@@ -8181,39 +7150,82 @@ async function onConstanzaAutoCalc(lid) {
     if (impsResult) nationalMonthlyImpsTotal = impsResult.value;
   }
 
-  const originalLabel = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '<span class="btn-inline-spinner"></span>Pulling…';
-  resultEl.style.display = "none";
-  if (window.Constanza) Constanza.setMood("thinking");
+  _constanzaBusy[lid] = true;
+  const originalLabel = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="btn-inline-spinner"></span>Pulling…';
+    resultEl.style.display = "none";
+  } else {
+    // a card that is already on the screen stays where it is (it is what the failure falls back to): the wait is said above it, and its Recalculate
+    // button is held off the way the dock's is (aria-disabled, not disabled: the keyboard stays on it)
+    resultEl.setAttribute("aria-busy", "true");
+    resultEl.insertAdjacentHTML("afterbegin", '<p class="cz-note cz-pulling" role="status"><span class="btn-inline-spinner"></span>Asking again…</p>');
+    const recalc = resultEl.querySelector(".cz-recalc");
+    if (recalc) recalc.setAttribute("aria-disabled", "true");
+  }
+  Constanza.setMood("thinking");
   try {
+    const body = {
+      product_name: li.product_name,
+      geo_text: geoText,
+      months: flightMonths,
+      flight_days: _constanzaFlightDays(),
+      national_monthly_total: nationalMonthlyImpsTotal,
+      ...(hispanic === null ? {} : { hispanic }),
+      ...Constanza.cardRequest(facts.method, lid, facts, snapshot),      // the method's own block, with the line's current facts; no geography text for a method that picks its places
+    };
     const res = await fetch("/api/constanza/estimate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        product_name: li.product_name,
-        geo_text: geoText,
-        months: flightMonths,
-        flight_days: _constanzaFlightDays(),
-        national_monthly_total: nationalMonthlyImpsTotal,
-        ...(hispanic === null ? {} : { hispanic }),
-      }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
     if (!res.ok) {
-      await _constanzaShowCardError(lid, resultEl, _constanzaErrorText(data, res.statusText), geoText);
+      await _constanzaShowCardError(lid, _constanzaErrorText(data, res.statusText), geoText);
       return;
     }
-    renderConstanzaResult(lid, data);
-    if (window.Constanza) Constanza.setMood("happy", 2600);
+    // A method that keeps an estimate files it under the line it was asked for, and only while that line still holds the product it was asked about
+    // (an answer that comes back for a line that was deleted, or whose product was swapped meanwhile, is dropped: it is not shown and not filed).
+    const still = _constanzaLineOf(lid);
+    const kept = Constanza.makeSnapshot(facts.method, body, data, facts);
+    let shown = false;
+    if (!kept) {
+      renderConstanzaResult(lid, data);
+      shown = !!still;
+    } else if (still && still.product_name === body.product_name && _constanzaSaveSnapshot(lid, kept)) {
+      _constanzaRefreshCard(lid);       // drawn from what is saved: what is on the screen is what a reopened proposal shows
+      shown = true;
+    } else if (still) {
+      _constanzaRefreshCard(lid);       // the card goes back to what the line really holds
+    }
+    if (shown) _constanzaAnnounce(_constanzaReadyMessage(li.product_name, data));      // (the card is redrawn: the pull button that was pressed is not there to say it)
+    Constanza.setMood("happy", 2600);
   } catch (err) {
-    resultEl.style.display = "block";
-    resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(String(err))}</p>`;
-    if (window.Constanza) Constanza.setMood("oops", 4000);
+    if (!_constanzaErrorOverCard(lid, String(err))) {
+      const el = document.getElementById(`constanza-result-${escapeAttr(lid)}`) || resultEl;
+      el.style.display = "block";
+      el.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(String(err))}</p>`;
+    }
+    Constanza.setMood("oops", 4000);
   } finally {
-    btn.disabled = false;
-    btn.innerHTML = originalLabel;
+    _constanzaBusy[lid] = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalLabel;
+    }
+    const live = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
+    if (live) {
+      live.removeAttribute("aria-busy");
+      live.querySelectorAll(".cz-pulling").forEach(x => x.remove());
+    }
   }
+}
+
+// What a screen reader is told when a card's estimate comes back (the dock says the same in its own status line).
+function _constanzaReadyMessage(productName, data) {
+  const mid = Constanza.summarize(data).month.mid;
+  return `The estimate for ${productName} is ready${Number.isFinite(mid) ? `: ${Math.round(mid).toLocaleString("en-US")} impressions a month` : ""}.`;
 }
 
 // A readable message from an error response: our own handlers send a string `detail`; framework validation errors send a list.
@@ -8224,26 +7236,50 @@ function _constanzaErrorText(data, fallback) {
   return fallback || "Request failed.";
 }
 
-// The error, plus — when the geography is the problem — the places it might have meant, to pick from right here.
-async function _constanzaShowCardError(lid, resultEl, message, geoText) {
-  let resolution = null;
+// A card that already shows a saved estimate keeps it: the error is said above it. False when there is no such card to put it on.
+function _constanzaErrorOverCard(lid, message) {
+  const resultEl = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
+  const saved = _constanzaSnapshotFor(lid);
+  if (!resultEl || !saved || !saved.result) return false;
   try {
-    const r = await fetch("/api/constanza/resolve", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ geo_text: geoText }),
-    });
-    if (r.ok) resolution = await r.json();
-  } catch (_) { /* the message alone is still useful */ }
-  if (window.Constanza) {
-    Constanza.renderCardError(resultEl, message, resolution, _constanzaCardOpts(lid));
-    Constanza.setMood("oops", 4000);
-  } else {
-    resultEl.style.display = "block";
-    resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(message)}</p>`;
+    _constanzaDrawCard(lid);
+    resultEl.insertAdjacentHTML("afterbegin", `<p class="constanza-error" role="alert">⚠️ ${escapeHtml(message)}</p>`);
+    return true;
+  } catch (err) {
+    console.error("[constanza] the saved estimate could not be drawn under the error", err);
+    return false;
   }
 }
 
-// What the shared Constanza card renderer (constanza.js) needs to act on this line.
-function _constanzaCardOpts(lid) {
+// The error, plus — when the geography is the problem — the places it might have meant, to pick from right here. A method that picks its own
+// places has no such help: the proposal's geography was never what it asked about.
+async function _constanzaShowCardError(lid, message, geoText) {
+  const li = _constanzaLineOf(lid);
+  const info = _constanzaMethodInfo(li ? _constanzaMethodOf(li) : "");
+  let resolution = null;
+  if (!info.caps.ownsGeography) {
+    try {
+      const r = await fetch("/api/constanza/resolve", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ geo_text: geoText }),
+      });
+      if (r.ok) resolution = await r.json();
+    } catch (_) { /* the message alone is still useful */ }
+  }
+  const resultEl = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
+  if (!resultEl) return;
+  if (!window.Constanza) {
+    resultEl.style.display = "block";
+    resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(message)}</p>`;
+    return;
+  }
+  if (!_constanzaErrorOverCard(lid, message)) Constanza.renderCardError(resultEl, message, resolution, _constanzaCardOpts(lid));
+  Constanza.setMood("oops", 4000);
+}
+
+// What the shared Constanza card renderer (constanza.js) needs to act on this line. `snapshot`: the saved estimate the card is drawn from, if any.
+function _constanzaCardOpts(lid, snapshot) {
+  const li = _constanzaLineOf(lid);
+  const facts = li ? _constanzaLineFacts(li, state.productIndex[li.product_name] || {}) : null;
   return {
     getText: () => _constanzaGeoFor(lid),
     onGeoText: (next) => {
@@ -8251,16 +7287,53 @@ function _constanzaCardOpts(lid) {
       state.constanzaGeoOverride[lid] = next;
       onConstanzaAutoCalc(lid);
     },
-    onApply: (monthlyMid, estUniques, geoInfo) => applyConstanzaEstimate(lid, monthlyMid, estUniques, geoInfo),
+    // Insert keeps the saved estimate it was made from on the line: it is the estimate behind these numbers. One read from an older shape is left as it
+    // was saved (null drops no older shape), so nothing is rewritten until the planner estimates again; a card with no saved estimate behind it
+    // (a data product, a method that keeps none) leaves none on the line.
+    onApply: (monthlyMid, estUniques, geoInfo) => {
+      const kept = snapshot ? (snapshot.legacy === true ? null : snapshot) : undefined;
+      if (applyConstanzaEstimate(lid, monthlyMid, estUniques, geoInfo, kept)) _constanzaAfterApply(lid, monthlyMid, estUniques);
+    },
     onRefine: () => openConstanzaForLine(lid),
+    onRecalc: () => onConstanzaAutoCalc(lid),
     onHispanic: (next) => {
       state.constanzaHispanic = state.constanzaHispanic || {};
       state.constanzaHispanic[lid] = next;
       onConstanzaAutoCalc(lid);
     },
     // the switch is on because the proposal's targeting names a Hispanic audience (not the planner's choice, not the product's default)
-    hispanicFromProposal: !(state.constanzaHispanic && lid in state.constanzaHispanic) && _targetsHispanic(state.lineItems.find(x => x.id === lid)),
+    hispanicFromProposal: !(state.constanzaHispanic && lid in state.constanzaHispanic) && _targetsHispanic(_constanzaLineOf(lid)),
+    line: facts,
+    snapshot: snapshot || null,
+    stale: snapshot && facts ? Constanza.snapshotStale(snapshot, facts) : [],
+    fromSnapshot: !!snapshot,
   };
+}
+
+// Insert redraws the whole Avails grid, so the button that was pressed is gone and the keyboard would drop to the top of the page. It goes to the
+// line's card again (where the planner was working), and what was written into Avails is said.
+function _constanzaAfterApply(lid, monthlyMid, estUniques) {
+  const block = document.querySelector(`.constanza-block[data-lid="${escapeAttr(lid)}"]`);
+  const target = block && (block.querySelector(".cz-apply") || block.querySelector("button"));
+  if (target) target.focus();
+  const n = x => Math.round(Number(x)).toLocaleString("en-US");
+  _constanzaAnnounce(`Inserted into Avails: ${n(monthlyMid)} impressions a month${estUniques != null ? ` and ${n(estUniques)} unique IDs` : ""}.`);
+}
+
+// One polite live region on the page itself, not in a card: the cards are rebuilt with the Avails grid and take their own messages with them.
+function _constanzaAnnounce(message) {
+  let el = document.getElementById("constanza-live-announce");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "constanza-live-announce";
+    el.className = "aud-sr";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    el.setAttribute("aria-atomic", "true");
+    document.body.appendChild(el);
+  }
+  el.textContent = "";                                          // emptied first, so the same words said twice are read twice
+  setTimeout(() => { el.textContent = message; }, 50);
 }
 
 function openConstanzaForLine(lid) {
@@ -8278,13 +7351,13 @@ function openConstanzaForLine(lid) {
   });
 }
 
-function renderConstanzaResult(lid, data) {
+function renderConstanzaResult(lid, data, snapshot) {
   const resultEl = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
   if (!resultEl) return;
   // The avails fields this writes into are explicitly MONTHLY ("Max Recommended Monthly Imps/Spend", paired with "Est.
   // Monthly Uniques") — the card shows the full-flight total separately and only ever applies the monthly figure
   // (feeding the total in would also inflate the imps/uniques frequency triangle by the number of months).
-  Constanza.renderCard(resultEl, data, _constanzaCardOpts(lid));
+  Constanza.renderCard(resultEl, data, _constanzaCardOpts(lid, snapshot));
   const picked = state.constanzaGeoOverride && state.constanzaGeoOverride[lid];
   if (picked) {
     resultEl.insertAdjacentHTML("afterbegin", `<p class="cz-note cz-using">Geography for this line: <strong>${escapeHtml(picked)}</strong> <button type="button" class="cz-link cz-reset-geo">Use the proposal’s geography</button></p>`);
@@ -8295,24 +7368,14 @@ function renderConstanzaResult(lid, data) {
   }
 }
 
-function _constanzaGeoInfo(data) {
-  // A TikTok estimate has no per-market rows (one audience for the whole place list): the places it sent to TikTok stand in for them.
-  const fromAreas = [...new Set((data.by_area || []).map(d => d.dma).filter(Boolean))];
-  const fromTikTok = data.tiktok ? [...new Set((data.tiktok.locations || []).map(l => l.source).filter(Boolean))] : [];
-  return {
-    method: data.geo_method,
-    dmas: fromAreas.length ? fromAreas : fromTikTok,
-    unmatched_tokens: data.unmatched_geo_tokens || [],
-    // the programmatic win rate that was applied to the figures this Apply writes (null when none): the Avails step says so beside them
-    win_rate: data.win_rate ? data.win_rate.mid : null,
-    // the Hispanic share the avails were narrowed to (null when not narrowed), so the share-of-voice helper can say it
-    hispanic_share: data.audience && data.audience.hispanic && data.audience.hispanic.mode === "cut" ? data.audience.hispanic.share : null,
-  };
-}
-
-function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
+// `snapshot` is the saved estimate behind these numbers: an object keeps it on the line (replacing what was there), null deletes it, and leaving it out
+// (an estimate with no saved copy for THIS line: the platform path, a dock Insert into another line) deletes it with any older shape of it, because
+// it no longer describes the numbers just written.
+function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo, snapshot) {
   const li = state.lineItems.find(x => x.id === lid);
   if (!li) return false;     // the line was removed (or the proposal changed) since the estimate was pulled: write nothing
+  // ... and nothing when there is no monthly figure to write: Math.round(null) is 0, which would replace what the line holds
+  if (typeof monthlyImpsMid !== "number" || !Number.isFinite(monthlyImpsMid) || monthlyImpsMid <= 0) return false;
   const p = state.productIndex[li.product_name] || {};
   state.availsData[lid] = state.availsData[lid] || {};
   const entry = state.availsData[lid];
@@ -8330,10 +7393,12 @@ function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
     delete entry.frequency;
   }
   if (geoInfo) entry.geo_resolution = geoInfo;
-  // Remember that these figures are expected DELIVERY (platform avails x the win rate), so the share-of-voice badge can say what it is
-  // measured against; a figure the planner types over later clears it (see the avails blur handler).
+  // Remember that these figures are expected DELIVERY (platform avails x the win rate), so the share-of-voice badge can say what it is measured
+  // against; a figure the planner types over later clears it (see the avails blur handler).
   if (geoInfo && geoInfo.win_rate) entry.win_rate = geoInfo.win_rate; else delete entry.win_rate;
   if (geoInfo && geoInfo.hispanic_share != null) entry.hispanic_share = geoInfo.hispanic_share; else delete entry.hispanic_share;
+  if (snapshot) entry.forecast_snapshot = snapshot; else delete entry.forecast_snapshot;
+  if (snapshot !== null && typeof _constanzaDropOlderShape === "function") _constanzaDropOlderShape(li, entry);
 
   const spendResult = calcMaxSpendFromImps(_effectiveProduct(li, p), entry.max_imps);
   if (spendResult !== null) {
@@ -8348,6 +7413,7 @@ function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
   renderAvailsGrid();
   return true;
 }
+// CONSTANZA HOST: end
 
 function syncAvailsFromGrid() {
   // No-op: state.availsData is kept in sync via the blur listeners above.

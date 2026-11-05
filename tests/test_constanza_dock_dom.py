@@ -840,6 +840,34 @@ def test_the_form_changed_banner_follows_the_cards_and_goes_when_the_change_is_p
     assert dock.locator("#cz-result .cz-stale").count() == 1
 
 
+def test_the_state_of_the_result_is_said_once_not_on_every_choice(dock):
+    """The banner is a plain paragraph, not a live region (the result is not read out in full): that the result went out of date, and that it matches the choices again,
+    are said in the status line once each - never on every choice made while it is already one or the other (the dock's own test, from before methods moved in)."""
+    status = lambda: (dock.text_content("#cz-status") or "").strip()                                # noqa: E731
+    geo(dock, "Los Angeles")
+    pull(dock)
+    assert status().startswith("Pulled ") and "impressions per month" in status()                    # the result is ready
+    open_who(dock)
+    dock.click('#cz-gender [data-g="female"]')
+    assert dock.locator("#cz-result .cz-stale").count() == 1
+    assert status() == text(dock, "#cz-result .cz-stale") == "The form has changed since this was pulled — pull again to update."
+    dock.evaluate("document.getElementById('cz-status').textContent = ''")
+    dock.click('#cz-gender [data-g="male"]')                                                         # still out of date: nothing new to say
+    dock.fill("#cz-age-min", "30")
+    assert status() == ""
+    dock.click('#cz-gender [data-g=""]')
+    dock.fill("#cz-age-min", "")
+    assert dock.locator("#cz-result .cz-stale").count() == 0
+    assert status() == "The result matches your choices again."
+    dock.evaluate("document.getElementById('cz-status').textContent = ''")
+    dock.click('#cz-gender [data-g=""]')                                                             # a choice that changes nothing: nothing to say
+    assert status() == ""
+    dock.click('#cz-gender [data-g="female"]')                                                       # out of date again: said again
+    assert status().startswith("The form has changed")
+    pull(dock)                                                                                       # a new pull is current again, and says its own words
+    assert status().startswith("Pulled ") and dock.locator("#cz-result .cz-stale").count() == 0
+
+
 def test_enter_in_the_geography_box_pulls_and_the_pull_button_keeps_the_focus_while_it_works(dock):
     geo(dock, "Los Angeles")
     dock.focus("#cz-go")
@@ -935,17 +963,25 @@ def test_a_forecast_methods_panel_replaces_who_language_and_audience_and_keeps_w
     shot(dock, "dock_method_panel")
 
 
+# the smallest plugin the dock accepts (every required member, nothing else): the probes below register this and add what a test is about
+MINIMAL_PLUGIN = """({ formHtml: () => "", bind: () => {}, requestPart: () => ({}), context: () => ({ summary: [] }), reset: () => {}, headlineHtml: () => "", bodyHtml: () => "",
+    aboutHtml: () => "", cardHtml: () => "", summaryLines: () => [] })"""
+
+
 def test_the_dock_only_hides_the_cards_it_replaces_and_hands_the_panel_the_same_context(dock):
-    keys = dock.evaluate("""() => { let got = null; Constanza.registerMethod("probe", (ctx) => { got = Object.keys(ctx).sort(); return { formHtml: () => "", bind: () => {} }; }); return got; }""")
+    keys = dock.evaluate("""() => { let got = null; Constanza.registerMethod("probe", (ctx) => { got = Object.keys(ctx).sort(); return %s; }); return got; }""" % MINIMAL_PLUGIN)
+    # the 14 of the first version (the dock answers "does this line target Hispanic audiences?" itself) and the four of contract v1: the line it is open for,
+    # that line's geography, its saved estimate, and a way to say the pull button's state changed
     assert keys == sorted(["S", "$", "esc", "num", "compact", "api", "markStale", "errorText", "setMood", "announce", "summarize", "productByName", "requestBody",
-                           "targetsHispanic"])                                                       # the dock answers "does this line target Hispanic audiences?" itself
+                           "targetsHispanic", "line", "proposalGeo", "snapshot", "refreshGo"])
+    assert keys == sorted(dock.evaluate("Constanza.CONTRACT.ctx"))                                   # ... and the contract says the same
 
 
 def test_the_dock_tells_a_panel_whether_its_line_targets_hispanic_audiences_each_time_it_is_asked(dock):
     dock.evaluate("""() => {
         window._targetsHispanic = (li) => /hispanic/i.test(li.target_override || "");                 // the page's own reading of a line (app.js), reduced to the test
         state.lineItems = [{ id: "L-HISP", target_override: "Hispanic adults 25-44" }, { id: "L-PLAIN", target_override: "Adults 18+" }];
-        Constanza.registerMethod("probe", (ctx) => { window.__ctx = ctx; return { formHtml: () => "", bind: () => {} }; }); }""")
+        Constanza.registerMethod("probe", (ctx) => { window.__ctx = ctx; return %s; }); }""" % MINIMAL_PLUGIN)
     ask = "window.__ctx.targetsHispanic()"
     assert dock.evaluate(ask) is False                                                               # a fresh dock, no line
     dock.evaluate("Constanza.open({ lineId: 'L-HISP' })")

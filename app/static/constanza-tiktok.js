@@ -165,7 +165,7 @@
     function formHtml() {
       return `
 <div class="cz-tt tt-panel" id="cz-tt">
-  <div id="cz-tt-status" class="aud-notice aud-notice--info" data-state="checking"></div>
+  <div id="cz-tt-status" class="aud-notice aud-notice--info" data-state="checking" role="status"></div>
   <div class="aud-builder">
 
     <section class="aud-sec" id="cz-tt-sec-who" aria-labelledby="cz-tt-who-title">
@@ -286,6 +286,9 @@
     }
 
     // ---------------------------------------------------------------- the connection banner
+    // The banner is a status region that stays put (formHtml draws it once; only its contents are replaced here), so a change of answer -
+    // checking, connected, not connected, couldn't check - is announced. It holds nothing to press, so drawing it again cannot take the keyboard
+    // away; a control added to it must keep the focus the way constanza-meta.js's renderStatus does.
     function renderStatus() {
       const el = $("cz-tt-status");
       if (!el) return;
@@ -1002,8 +1005,30 @@
       if (!T.status || !T.status.configured) loadStatus(true);    // an estimate came back, so TikTok IS connected: a banner that says otherwise is out of date
     }
 
+    // Where the dock shows TikTok in its lists and on a result (the dock reads these instead of naming TikTok), and what an Insert files under
+    // entry.geo_resolution: TikTok has no per-market rows, so the places it sent stand in for the markets.
+    function badgeHtml() {
+      return `<span class="cz-badge cz-reported" title="Asked of TikTok's own audience-size estimator just now">TikTok API · live</span>`;
+    }
+
+    function geoInfo(data) {
+      const fromAreas = [...new Set((data.by_area || []).map((d) => d.dma).filter(Boolean))];
+      const fromTikTok = [...new Set(((data.tiktok && data.tiktok.locations) || []).map((l) => l.source).filter(Boolean))];
+      return {
+        method: data.geo_method,
+        dmas: fromAreas.length ? fromAreas : fromTikTok,
+        unmatched_tokens: data.unmatched_geo_tokens || [],
+        win_rate: null,                                           // (TikTok has no win rate and no Census cut)
+        hispanic_share: null,
+      };
+    }
+
     return {
       goLabel: "Estimate audience →",
+      channelLabel: "TikTok · live audience estimate",
+      sourceLabel: "Live from TikTok",
+      caps: { autoPull: "geo" },                                  // Step 05 pulls it from the proposal's geography, as it always has
+      badgeHtml, geoInfo,
       formHtml, bind, reset, canPull, onError, onResult,
       // Shown: the connection is (re)checked and TikTok's language list is fetched now, so the quick picks are ready before anyone asks for them.
       // The dock sets which line it is open for just AFTER it selects the product, so the Hispanic suggestion is read once more a moment later.

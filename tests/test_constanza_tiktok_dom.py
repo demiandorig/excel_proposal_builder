@@ -40,7 +40,7 @@ HARNESS = """<!doctype html><html><head><meta charset="utf-8"><title>harness</ti
 </body></html>"""
 
 ESTIMATE = {
-    "product_name": "Tiktok Ads", "platform": "tiktok", "confidence": "live_api", "geo_method": "exact_dma", "geo_confidence": "high", "months": 1,
+    "method": "tiktok", "product_name": "Tiktok Ads", "platform": "tiktok", "confidence": "live_api", "geo_method": "exact_dma", "geo_confidence": "high", "months": 1,
     "imps_low": 928_800, "imps_mid": 1_188_000, "imps_high": 1_857_600, "est_uniques": 216_000, "reach_universe": None, "series": None, "weeks": None,
     "notes": [], "unmatched_geo_tokens": [], "unmatched_geo_details": [], "ambiguous": [], "geo_interpretations": [], "geo_suggestions": [], "by_area": [],
     "tiktok": {"audience": {"low": 216_000, "mid": 240_000, "high": 264_000}, "stage": 3, "stage_label": "Balanced", "stage_note": "20% to 80%",
@@ -71,9 +71,13 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+class _Server(http.server.ThreadingHTTPServer):
+    request_queue_size = 128                  # the default backlog of 5 resets a page's parallel script and style requests when the machine is busy
+
+
 @pytest.fixture(scope="module")
 def server():
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    httpd = _Server(("127.0.0.1", 0), _Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
     httpd.shutdown()
@@ -175,7 +179,10 @@ def open_dock(browser, server):
             page.route("**/segment-browser.js", lambda r: r.abort())
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))
-        page.goto(f"{server}/harness.html")
+        for _ in range(3):                                         # (a script the server dropped under load reads "Constanza is not defined": load the page again)
+            page.goto(f"{server}/harness.html")
+            if page.evaluate("typeof Constanza") == "object":
+                break
         page.evaluate("Constanza.open({})")
         page.click("#cz-product-btn")
         page.fill("#cz-picker-search", "tiktok")
@@ -247,6 +254,15 @@ def open_line(page, line_id):
 
 
 # --------------------------------------------------------------------------------------------- the panel is there and works
+
+def test_the_harness_server_has_room_in_its_listen_queue_for_a_page_that_asks_for_many_files_at_once():
+    """The harness page fetches the dock's scripts and styles in parallel. A bare ThreadingHTTPServer listens with a backlog of 5 and drops some of them when the
+    machine is busy ("Constanza is not defined" in a fixture); the other dock suites use a server with a deeper queue, and so does this one."""
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert issubclass(_Server, http.server.ThreadingHTTPServer) and _Server.request_queue_size >= 128
+    fixture = src[src.index("def server():"): src.index("def browser():")]                                   # (only the fixture: this test names the bare class too)
+    assert "httpd = _Server((" in fixture and "http.server.ThreadingHTTPServer(" not in fixture
+
 
 def test_the_tiktok_product_swaps_in_its_panel_and_hides_the_entravision_audience(dock):
     assert dock.is_visible("#cz-tt") and not dock.is_visible("#cz-aud")
@@ -421,6 +437,60 @@ def test_when_tiktok_is_not_connected_the_banner_says_so_and_the_quick_picks_poi
     assert page.is_disabled('#cz-tt-lang-quick [data-v="es"]')
     page.click('#cz-tt-gender [data-v="male"]')                                                        # the rest of the panel still works: the audience can be set up now
     assert asked(page)["gender"] == "male"
+
+
+BANNER_WORDS = {"checking": "Checking the TikTok connection", "error": "Couldn’t reach the app’s TikTok settings",
+                "off": "TikTok isn’t connected yet", "on": "Connected to TikTok"}
+
+
+def banner_states(page):
+    """Walks the connection banner through the four answers it can give - couldn't reach TikTok's settings (the dock opens on it), checking, connected, not
+    connected - and yields each state's name once it is on the screen, so a test can look at the banner in every one of them."""
+    world = page.world                                                                                  # type: ignore[attr-defined]
+    page.wait_for_selector('#cz-tt-status[data-state="error"]')
+    yield "error"
+    world.fail.clear()
+    world.hold.add("status")                                                                            # the asking is under way: the banner says so until the answer comes
+    page.evaluate("() => { const p = Constanza._plugin('tiktok'); p._pure.T.status = null; p.onSelect(); }")
+    page.wait_for_selector('#cz-tt-status[data-state="checking"]')
+    yield "checking"
+    for _ in range(100):                                                                                # (the route handler runs while the page is driven)
+        if world.pending:
+            break
+        page.wait_for_timeout(20)
+    world.hold.discard("status")
+    world.release("status")
+    page.wait_for_selector('#cz-tt-status[data-state="on"]')
+    yield "on"
+    world.configured = False                                                                            # the admin takes the secrets away; the next pull's refusal asks again
+    page.evaluate("Constanza._plugin('tiktok').onError(503)")
+    page.wait_for_selector('#cz-tt-status[data-state="off"]')
+    yield "off"
+
+
+def test_the_connection_banner_is_a_status_region_that_stays_put_while_its_words_change(open_dock):
+    page = open_dock(fail={"status": (503, {"detail": "The server is waking up."})})
+    assert page.get_attribute("#cz-tt-status", "role") == "status"
+    page.evaluate("window.__banner = document.getElementById('cz-tt-status')")
+    seen = []
+    for state in banner_states(page):
+        assert page.evaluate("window.__banner === document.getElementById('cz-tt-status')"), state          # not replaced: a screen reader announces what changed in it
+        assert page.get_attribute("#cz-tt-status", "role") == "status", state
+        assert page.get_by_role("status").filter(has_text=BANNER_WORDS[state]).count() == 1, state          # the words that changed are inside the region
+        assert BANNER_WORDS[state] in page.inner_text("#cz-tt-status"), state
+        seen.append(state)
+    assert seen == ["error", "checking", "on", "off"]
+    assert "The server is waking up." not in page.inner_text("#cz-tt-status")                                # (the last answer replaced the first one's words, it did not pile up)
+    assert page.locator("#cz-tt-status .aud-notice-body").count() == 1 and page.locator("#cz-tt-status").count() == 1
+
+
+def test_the_connection_banner_holds_nothing_to_press_so_drawing_it_again_cannot_take_the_keyboard_away(open_dock):
+    """The Meta banner has a "Check again" button, and the keyboard is put back on the new one when the banner is redrawn. This banner has no control in any of
+    its states, so there is nothing to lose. A control added to it must keep the focus too (see renderStatus in constanza-tiktok.js): this is where that is noticed."""
+    page = open_dock(fail={"status": (503, {"detail": "The server is waking up."})})
+    for state in banner_states(page):
+        controls = page.eval_on_selector_all("#cz-tt-status", "els => els.flatMap(e => Array.from(e.querySelectorAll('button, a[href], input, select, textarea, summary, [tabindex]')).map(x => x.outerHTML))")
+        assert controls == [], f"the {state} banner has a control; keep the keyboard on it when the banner is redrawn: {controls}"
 
 
 def test_a_line_that_targets_hispanic_audiences_is_offered_spanish_and_nothing_is_added_until_the_planner_says_so(dock):

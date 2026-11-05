@@ -1,0 +1,92 @@
+/* ========================================================================
+   The Meta panel of the Constanza dock (constanza-meta.js) and the Meta pieces of a Step 05 avails card. The numbered cards, their chips,
+   typeaheads, quick picks and notices are the shared audience kit (audience-kit.css, .aud-*) and the SegmentBrowser pop-up
+   (segment-browser.css); this file only holds what is the Meta plugin's own. Loaded after both.
+   Two groups of selectors: the panel's (.mt-panel, and .mt-where for the Where card the dock mounts apart from it) and the result's
+   (.mt-heads, .mt-scen, .mt-headline ... ), which draw in the dock's result pane and on the Step 05 card, outside the panel, so they
+   need no .mt-panel ancestor.
+   ======================================================================== */
+
+/* The kit's flex/grid rules set `display`, which would beat the [hidden] attribute of a panel element. */
+.mt-panel [hidden], .mt-where [hidden] { display: none !important; }
+
+.mt-panel { display: flex; flex-direction: column; gap: 12px; margin: 0 0 14px; }
+.mt-panel > .aud-notice { margin: 0; }
+.mt-panel .aud-link:disabled, .mt-where .aud-link:disabled { color: var(--aud-muted); text-decoration: none; cursor: not-allowed; }
+
+/* ------------------------------------------------------------------ connection banner */
+.mt-missing { margin: 6px 0 0; padding: 0 0 0 18px; }
+.mt-missing li { margin: 2px 0; }
+.mt-more { margin-top: 6px; }
+.mt-more > summary {
+  display: flex; align-items: center; min-height: 36px; cursor: pointer; font-weight: 600; text-decoration: underline; text-underline-offset: 2px;
+  list-style: none;
+}
+.mt-more > summary::-webkit-details-marker { display: none; }
+.mt-more > summary::before { content: "▸"; display: inline-block; width: 16px; flex: none; font-size: 14px; text-decoration: none; transition: transform 0.15s; }
+.mt-more[open] > summary::before { transform: rotate(90deg); }
+.mt-more > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.mt-more > p { margin: 0 0 6px; padding-left: 14px; }
+#cz-mt-status .mt-more { margin-top: 2px; margin-bottom: -6px; }
+#cz-mt-status .mt-more > p { font-size: 12.5px; line-height: 1.5; }
+/* The banner takes the keyboard when the "Check again" it replaced had it. */
+#cz-mt-status:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ------------------------------------------------------------------ the cards */
+/* A search suggestion is not an "add". */
+.mt-quick--plain > button::before { content: none; }
+.mt-suggest > button { border-style: dashed; text-align: left; line-height: 1.3; }
+.mt-suggest > button::before { content: "✦"; font-weight: 400; }
+/* A quick pick waiting for Meta is aria-disabled and aria-busy, not `disabled` (that would take the keyboard off it): it looks like it is waiting, and its focus ring stays visible. */
+.mt-panel .aud-quick > button[aria-busy="true"] { opacity: 0.6; cursor: progress; }
+/* The kit's hover for a wrapped pill (white background, accent text) outranks the pressed look's background: a pressed pill stays pressed under the mouse. */
+.mt-panel .aud-seg--wrap > button[aria-pressed="true"]:hover, .mt-where .aud-seg--wrap > button[aria-pressed="true"]:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+.mt-panel .aud-sec-body > .aud-chips, .mt-where .aud-sec-body > .aud-chips { margin-top: -2px; }
+.mt-panel .aud-chips:empty, .mt-where .aud-chips:empty { display: none; }
+.mt-langnote { display: flex; flex-direction: column; gap: 2px; padding-top: 10px; border-top: 1px dashed var(--rule); }
+.mt-langnote .aud-hint { margin: 0; }
+.mt-langnote .mt-more { margin-top: 0; }
+.mt-langnote .mt-more > summary { font-size: 12.5px; font-weight: 400; color: var(--accent); }
+/* The Budget cross-check folds: its whole head row opens it. */
+#cz-mt-sec-budget > summary .aud-sec-sum { max-width: 100%; }
+/* The sections stack in the ~380px dock and sit two to a row in a wide one; the folded budget card spans the row. */
+.mt-panel .aud-builder > #cz-mt-sec-budget { grid-column: 1 / -1; }
+
+/* ------------------------------------------------------------------ the result: the dock's headline */
+.mt-scen { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.mt-sc { min-width: 0; }
+.mt-sc .cz-mvalue { overflow-wrap: anywhere; }
+.mt-mult { white-space: nowrap; }
+.mt-sc.mt-mid { background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent); }
+.mt-sc.mt-mid .cz-mvalue { color: var(--accent); }
+.mt-sc-rows { display: grid; grid-template-columns: minmax(0, 1fr); margin: 6px 0 0; padding-top: 6px; border-top: 1px solid var(--rule-soft); font-size: 12px; }
+.mt-sc.mt-mid .mt-sc-rows { border-top-color: var(--aud-line); }
+.mt-sc-rows:empty { display: none; }
+.mt-sc-rows dt { margin-top: 4px; color: var(--ink-soft); line-height: 1.3; }
+.mt-sc-rows dt:first-child { margin-top: 0; }
+.mt-sc-rows dd { margin: 0; font-family: var(--font-mono); font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+@media (min-width: 521px) {
+  .constanza-dock.wide .mt-scen { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+/* ------------------------------------------------------------------ the result: the audience, what was asked, the cross-check (dock body and Step 05 card) */
+.mt-headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; margin: 4px 0 6px; }
+.mt-headline strong { font-family: var(--font-kicker); font-size: 26px; font-weight: 700; line-height: 1.1; letter-spacing: -0.01em; color: var(--accent); }
+.mt-headline span { font-size: 13.5px; color: var(--ink-soft); }
+.mt-range, .mt-pulled, .mt-note, .mt-spend { margin: 0 0 8px; font-size: 12.5px; line-height: 1.55; color: var(--ink-soft); }
+.mt-range strong, .mt-pulled strong, .mt-note strong, .mt-spend strong { color: var(--ink); }
+.mt-pulled { padding-left: 10px; border-left: 3px solid var(--aud-line); }
+.mt-note { font-size: 12px; color: var(--aud-muted); }
+.mt-spend strong { font-family: var(--font-mono); font-weight: 600; }
+.mt-check { margin: 0 0 8px; padding: 10px 12px; background: var(--paper-warm); border-radius: 8px; font-size: 12.5px; line-height: 1.5; color: var(--ink-soft); }
+.mt-check strong { color: var(--ink); }
+.mt-foot { display: block; margin: 0 0 4px; font-size: 11.5px; color: var(--aud-muted); }
+.mt-empty { margin: 4px 0 8px; font-size: 13px; line-height: 1.5; color: var(--aud-muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mt-more > summary::before { transition: none; }
+}
+@media (forced-colors: active) {
+  .mt-sc.mt-mid { forced-color-adjust: none; box-shadow: 0 0 0 1px Highlight; }
+  .mt-panel .aud-ta-list, .mt-where .aud-ta-list { border: 1px solid CanvasText; }
+}

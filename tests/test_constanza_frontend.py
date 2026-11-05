@@ -410,16 +410,16 @@ def test_the_flight_box_does_not_rewrite_itself_while_the_planner_types():
 
 
 def test_an_answer_that_arrives_after_reset_or_a_newer_pull_is_dropped():
-    pull = _between(CZ_JS, "async function pull()", "function clearRequestState()")
+    pull = _between(CZ_JS, "async function pull()", "function clearRequestState(")
     assert "const mine = ++S.pullSeq" in pull and pull.count("if (mine !== S.pullSeq) return;") >= 2
-    reset = _between(CZ_JS, "function resetForm()", "// ---- open / close")
+    reset = _between(CZ_JS, "function resetForm(", "// The saved estimate of the line the dock was just opened for")
     assert "S.pullSeq++" in reset and "S.resSeq++" in reset and "clearTimeout(resolveTimer)" in reset and "setBusy(false)" in reset
 
 
 def test_opening_the_dock_for_a_line_starts_that_lines_request_clean_and_a_new_proposal_clears_the_dock():
     open_fn = _between(CZ_JS, "  function open(opts) {", "  function close() {")
-    assert "if (opts.lineId || opts.geo != null) clearRequestState();" in open_fn
-    clear = _between(CZ_JS, "function clearRequestState()", "function onProposalReset()")
+    assert "if (opts.lineId || opts.geo != null) clearRequestState(prevLid, opts.lineId || null);" in open_fn
+    clear = _between(CZ_JS, "function clearRequestState(", "function leaveLine(")
     for field in ("geoType", "ageMin", "gender", "interests", "needTotal", "result"):
         assert field in clear, field
     assert "Constanza.onProposalReset()" in APP_JS and "state.constanzaGeoOverride = {}" in APP_JS
@@ -479,7 +479,7 @@ def _stale_run(steps: str):
         document.getElementById = function (id) { return id === 'cz-result' ? box : null; };
         var S = window.Constanza._state, markStale = P.markStale, requestBody = P.requestBody;
         S.product = 'P'; S.geo = 'Dallas'; S.flight = 3; S.unit = 'months'; S.result = { ok: true };
-        S.resultSig = JSON.stringify(requestBody());
+        S.resultSig = P.canonicalJson(requestBody());
         function shown() { return banner !== null; }
     """ + steps)
 
@@ -905,8 +905,9 @@ def test_the_ids_the_tiktok_panel_and_its_tests_rely_on_are_still_in_the_dock():
     for ident in ("cz-method-forms", "cz-result", "cz-go", "cz-reset", "cz-geo", "cz-product-btn", "cz-picker", "cz-picker-pop", "cz-picker-search", "cz-picker-list",
                   "cz-flight", "cz-flight-dec", "cz-flight-inc", "cz-flight-hint", "cz-unit", "cz-use-dates", "cz-aud", "cz-hispanic", "cz-status", "cz-body", "cz-form", "cz-sub"):
         assert f'id="{ident}"' in CZ_JS, ident
-    # ... and the object a forecast method's factory is given is the same one
-    assert "return { S, $, esc, num, compact, api, markStale, errorText, setMood, announce, summarize, productByName, requestBody: () => requestBody(), targetsHispanic };" in CZ_JS
+    # ... and the object a forecast method's factory is given is the same one (the 14 of the first version, then the four of contract v1)
+    assert ("return { S, $, esc, num, compact, api, markStale, errorText, setMood, announce, summarize, productByName, requestBody: () => requestBody(), targetsHispanic,\n"
+            "      line: () => lineFactsFor(S.lineId), proposalGeo: lineOrProposalGeo, snapshot: snapshotFor, refreshGo };") in CZ_JS
     assert '$("cz-aud").classList.toggle("hidden", !!plug);' in CZ_JS
 
 
@@ -942,7 +943,7 @@ def test_the_cards_css_leaves_the_kits_class_names_to_the_kit_and_covers_the_mod
 
 
 def test_the_dock_stylesheet_keeps_no_rules_for_classes_the_rebuilt_panels_no_longer_draw():
-    """The redesign moved the TikTok banner / pills onto the kit (.aud-notice, .aud-seg) and the Meta card onto meta-audience.css; their old rules stayed behind."""
+    """The redesign moved the TikTok banner / pills onto the kit (.aud-notice, .aud-seg) and the Meta panel into its own plugin (constanza-meta.js / .css); their old rules stayed behind."""
     statics = "\n".join(f.read_text(encoding="utf-8") for f in (ROOT / "app" / "static").iterdir() if f.suffix in (".js", ".html")) + (ROOT / "app" / "templates" / "index.html").read_text(encoding="utf-8")
     for cls in ("cz-tt-status", "cz-tt-on", "cz-tt-off", "cz-dot", "cz-seg", "meta-plan-block", "meta-plan-fields", "meta-plan-result", "meta-plan-feedback", "meta-live-details"):
         assert not re.search(rf"(?<![\w-]){cls}(?![\w-])", re.sub(r"/\*.*?\*/", "", CZ_CSS, flags=re.S)), f".{cls} is back in constanza.css"
@@ -1039,3 +1040,126 @@ def test_the_request_still_carries_what_the_cards_hold_in_the_fields_the_server_
         return JSON.stringify(P.requestBody());""")
     assert out["audience"] == {"age_min": 25, "age_max": 54, "gender": "female", "interest_terms": ["Sports Fans – Soccer"]}
     assert out["hispanic"] is True and out["months"] == 2 and out["geo_text"] == "Phoenix" and out["flight_days"] is None
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The plugin contract v1, in the engine (tests/test_constanza_host_contract_dom.py shows the same behaviours in a real dock)
+# ---------------------------------------------------------------------------------------------------------------------
+
+MINI = ("{ formHtml: function () { return ''; }, bind: function () {}, requestPart: function () { return {}; }, context: function () { return { summary: [] }; },"
+        " reset: function () {}, headlineHtml: function () { return ''; }, bodyHtml: function () { return ''; }, aboutHtml: function () { return ''; },"
+        " cardHtml: function () { return ''; }, summaryLines: function () { return []; } }")
+
+
+def test_registering_a_method_checks_it_against_the_contract_and_says_why_a_plugin_was_refused():
+    out = run("""
+        var errs = []; console.error = function (m) { errs.push(m); };
+        var mini = function () { return %s; };
+        var typo = function () { var p = mini(); p.formHTML = function () {}; return p; };
+        var missing = function () { var p = mini(); delete p.cardHtml; return p; };
+        var caps = function (c) { return function () { var p = mini(); p.caps = c; return p; }; };
+        var R = window.Constanza.registerMethod;
+        return JSON.stringify({
+          ok: R('good_one', mini), typo: R('typo_one', typo), missing: R('missing_one', missing), nothing: R('nothing_one', function () { return null; }), threw: R('threw_one', function () { throw new Error('boom'); }),
+          owns: R('owns_one', caps({ ownsGeography: true })), persist: R('persist_one', caps({ persist: true })), saved: R('saved_one', caps({ autoPull: 'saved' })), badcap: R('badcap_one', caps({ nope: 1 })),
+          builtin: R('platform', mini), generic: R('generic', mini), badkey: R('Bad Key', mini), notfn: R('notfn_one', 5),
+          there: [window.Constanza._plugin('good_one') !== null, window.Constanza._plugin('typo_one') !== null], errs: errs });""" % MINI)
+    assert out["ok"] is True
+    assert [out[k] for k in ("typo", "missing", "nothing", "threw", "owns", "persist", "saved", "badcap", "builtin", "generic", "badkey", "notfn")] == [False] * 12
+    assert out["there"] == [True, False]
+    said = " | ".join(out["errs"])
+    for fragment in ('"typo_one": unknown member "formHTML"', "missing cardHtml", "did not return an object", "the factory threw: boom", "caps.ownsGeography needs whereHtml",
+                     "caps.persist needs restore", 'caps.autoPull "saved" needs cardRequest', 'unknown cap "nope"', "not a usable method key"):
+        assert fragment in said, fragment
+
+
+def test_an_answer_belongs_to_the_method_it_names_and_a_method_that_never_registered_is_not_a_data_method():
+    out = run("""
+        window.Constanza.registerMethod('probe_one', function () { return %s; });
+        var F = P.pluginFor;
+        return JSON.stringify({ named: F({ method: 'probe_one' }) !== null, data: F({ method: 'platform' }), none: F({}), nul: F(null), ghost: F({ method: 'ghost' }), proto: F({ method: 'constructor' }),
+          tiktokKey: F({ tiktok: {} }), states: ['platform', 'generic', '', null, 'probe_one', 'ghost', 'constructor'].map(function (m) { return window.Constanza.methodState(m).kind; }) });""" % MINI)
+    assert out == {"named": True, "data": None, "none": None, "nul": None, "ghost": None, "proto": None, "tiktokKey": None,
+                   "states": ["data", "data", "data", "data", "plugin", "missing", "missing"]}
+
+
+def test_canonical_json_ignores_the_order_of_keys_everywhere():
+    out = run("""return JSON.stringify([P.canonicalJson({ b: 1, a: { d: [3, { y: 1, x: 2 }], c: null } }), P.canonicalJson({ a: { c: null, d: [3, { x: 2, y: 1 }] }, b: 1 }),
+        P.canonicalJson([2, 1]), P.canonicalJson('s'), P.canonicalJson(null)]);""")
+    assert out[0] == out[1] == '{"a":{"c":null,"d":[3,{"x":2,"y":1}]},"b":1}' and out[2:] == ["[2,1]", '"s"', "null"]
+
+
+def test_the_block_of_a_line_offers_the_buttons_its_method_needs():
+    out = run("""
+        var m = %s;
+        window.Constanza.registerMethod('probe_geo', function () { return m; });
+        var asks = JSON.parse(JSON.stringify(m)); 
+        window.Constanza.registerMethod('probe_saved', function () { var p = %s; p.caps = { autoPull: 'saved' }; p.cardRequest = function () { return {}; }; p.canAutoPull = function () { return { ok: true }; }; return p; });
+        window.Constanza.registerMethod('probe_none', function () { var p = %s; p.caps = { autoPull: 'none' }; return p; });
+        var B = P.blockButtons, line = { id: 'L1' };
+        function classes(html) { return (html.match(/class="([^"]+)"/g) || []).map(function (c) { return c.slice(7, -1); }); }
+        return JSON.stringify({ data: classes(B('platform', line, null)), geo: classes(B('probe_geo', line, { result: {} })), savedNone: classes(B('probe_saved', line, null)),
+          savedHas: B('probe_saved', line, { result: { a: 1 } }), noneNone: classes(B('probe_none', line, null)), missing: B('ghost', line, null), lid: B('probe_saved', { id: 'x"y' }, null).indexOf('data-lid="x_y"') > 0 });""" % (MINI, MINI, MINI))
+    assert out == {"data": ["btn-secondary constanza-autocalc-btn", "cz-btn-ico", "cz-link constanza-line-dock-btn"], "geo": ["btn-secondary constanza-autocalc-btn", "cz-btn-ico", "cz-link constanza-line-dock-btn"],
+                   "savedNone": ["btn-primary constanza-line-dock-btn"], "savedHas": "", "noneNone": ["btn-primary constanza-line-dock-btn"], "missing": "", "lid": True}
+
+
+def test_a_saved_estimate_is_stale_when_the_line_it_was_pulled_for_has_moved_on():
+    out = run("""
+        var snap = { v: 1, method: 'platform', line: { product_name: 'P', months: 2, geo_text: 'LA', target_text: 'T', budget: 100, cpm: 10 } };
+        var line = { id: 'L', product_name: 'P', months: 2, geo_text: 'LA', target_text: 'T', budget: 100, cpm: 10 };
+        function S(c) { return P.snapshotStale(snap, Object.assign({}, line, c)); }
+        return JSON.stringify({ same: S({}), product: S({ product_name: 'Q' }), months: S({ months: 3 }), geo: S({ geo_text: 'SF' }), target: S({ target_text: 'U' }), budget: S({ budget: 120 }),
+          penny: S({ budget: 100.005 }), cpm: S({ cpm: 11 }), cpmUnknown: S({ cpm: null }), junk: [P.snapshotStale(null, line), P.snapshotStale(snap, null)],
+          unrecorded: P.snapshotStale({ v: 1, method: 'platform' }, line).length });""")
+    assert out == {"same": [], "product": ["the product changed"], "months": ["the flight length changed"], "geo": ["the proposal’s geography changed"], "target": ["the line’s target changed"],
+                   "budget": ["the budget changed"], "penny": [], "cpm": ["the CPM changed"], "cpmUnknown": [], "junk": [[], []],
+                   "unrecorded": 5}                       # (a saved estimate that did not record its line cannot be called current: everything it cannot vouch for is said)
+
+
+def test_a_snapshot_is_made_only_for_a_method_that_saves_and_carries_the_length_it_was_computed_for():
+    out = run("""
+        window.Constanza.registerMethod('saver', function () { var p = %s; p.caps = { persist: true }; p.restore = function () {}; p.choicesChanged = function () { return false; };
+          p.snapshotLine = function (d) { return { budget: d.used, cpm: d.cpm }; }; return p; });
+        window.Constanza.registerMethod('keeper', function () { return %s; });
+        var body = { product_name: 'P', months: 3 }, data = { method: 'saver', used: 450, cpm: 9 };
+        var line = { product_name: 'P', months: 2, geo_text: 'LA', target_text: 'T', budget: 0, cpm: null };
+        var s = window.Constanza.makeSnapshot('saver', body, data, line);
+        var t = window.Constanza.makeSnapshot('saver', body, data, Object.assign({}, line, { budget: 100, cpm: 12 }));
+        return JSON.stringify({ line: s.line, keys: Object.keys(s).sort(), v: s.v, own: t.line, isoDate: /^\\d{4}-\\d\\d-\\d\\dT/.test(s.saved_at), same: s.request === body && s.result === data,
+          none: [window.Constanza.makeSnapshot('keeper', body, data, line), window.Constanza.makeSnapshot('platform', body, data, line), window.Constanza.makeSnapshot('ghost', body, data, line),
+                 window.Constanza.makeSnapshot('saver', null, data, line), window.Constanza.makeSnapshot('saver', body, null, line)] });""" % (MINI, MINI))
+    assert out["line"] == {"product_name": "P", "method": "saver", "months": 3, "geo_text": "LA", "target_text": "T", "budget": 450, "cpm": 9}          # months: the request's, not the line's
+    assert out["own"]["budget"] == 100 and out["own"]["cpm"] == 12                                                                                     # the line's own figures win over what the answer says it used
+    assert out["keys"] == ["line", "method", "request", "result", "saved_at", "v"]
+    assert out["v"] == 1 and out["isoDate"] is True and out["same"] is True and out["none"] == [None] * 5
+
+
+def test_what_an_insert_files_as_the_geography_is_the_methods_own_else_the_data_paths_and_a_card_request_names_no_geography_for_a_method_that_owns_it():
+    out = run("""
+        window.Constanza.registerMethod('placer', function () { var p = %s; p.caps = { ownsGeography: true, autoPull: 'none' }; p.whereHtml = function () { return ''; };
+          p.geoInfo = function (d) { return { method: 'own', dmas: [d.place], unmatched_tokens: [], win_rate: null, hispanic_share: null }; };
+          p.cardRequest = function (lid, line) { return { place: 'X', budget: line.budget }; }; return p; });
+        window.Constanza.registerMethod('asker', function () { return %s; });
+        var G = window.Constanza.geoInfo;
+        return JSON.stringify({ own: G({ method: 'placer', place: 'Nice' }), data: G({ method: 'platform', geo_method: 'exact_dma', by_area: [{ dma: 'A' }, { dma: 'A' }, { dma: 'B' }], unmatched_geo_tokens: ['x'],
+            win_rate: { mid: 0.2 }, audience: { hispanic: { mode: 'cut', share: 0.3 } } }),
+          req: [window.Constanza.cardRequest('placer', 'L', { budget: 5 }, null), window.Constanza.cardRequest('asker', 'L', {}, null), window.Constanza.cardRequest('platform', 'L', {}, null), window.Constanza.cardRequest('ghost', 'L', {}, null)] });""" % (MINI, MINI))
+    assert out["own"] == {"method": "own", "dmas": ["Nice"], "unmatched_tokens": [], "win_rate": None, "hispanic_share": None}
+    assert out["data"] == {"method": "exact_dma", "dmas": ["A", "B"], "unmatched_tokens": ["x"], "win_rate": 0.2, "hispanic_share": 0.3}
+    assert out["req"] == [{"placer": {"place": "X", "budget": 5}, "geo_text": "", "geo_type_hint": None}, {}, {}, {}]
+
+
+def test_a_saved_shape_a_method_still_reads_is_adopted_in_memory_by_that_method_alone():
+    out = run("""
+        window.Constanza.registerMethod('reader', function () { var p = %s; p.legacy = { key: 'old_reader_forecast', adopt: function (saved, line) {
+          if (saved.boom) throw new Error('bad shape'); return saved.skip ? null : { v: 1, method: saved.method || 'reader', saved_at: saved.at, request: null, result: null, line: line }; } }; return p; });
+        window.Constanza.registerMethod('other', function () { return %s; });
+        var errs = []; console.error = function (m) { errs.push(m); };
+        var A = window.Constanza.adoptLegacy, line = { id: 'L' };
+        var entry = { old_reader_forecast: { at: 't' } };
+        return JSON.stringify({ ok: A('reader', entry, line), kept: entry, no: [A('reader', {}, line), A('reader', null, line), A('other', entry, line), A('ghost', entry, line), A('reader', { old_reader_forecast: { skip: 1 } }, line)],
+          thrown: A('reader', { old_reader_forecast: { boom: 1 } }, line), wrong: A('reader', { old_reader_forecast: { method: 'other' } }, line), errs: errs });""" % (MINI, MINI))
+    assert out["ok"] == {"v": 1, "method": "reader", "saved_at": "t", "request": None, "result": None, "line": {"id": "L"}, "legacy": True}
+    assert out["kept"] == {"old_reader_forecast": {"at": "t"}} and out["no"] == [None] * 5 and out["thrown"] is None and out["wrong"] is None
+    assert any("bad shape" in e for e in out["errs"]) and any("not a reader snapshot" in e for e in out["errs"])

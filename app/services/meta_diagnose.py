@@ -18,23 +18,11 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import dataclass
 from typing import Callable, Optional
 
 from app.services import constanza_meta as meta
 from app.services import platform_scenarios
-
-
-@dataclass
-class Check:
-    name: str
-    ok: bool
-    detail: str
-    warn: bool = False
-    seconds: float = 0.0
-
-    def to_public(self) -> dict:
-        return {"name": self.name, "ok": self.ok, "warn": self.warn and self.ok, "detail": self.detail, "seconds": round(self.seconds, 2)}
+from app.services.constanza_methods import Check            # one type for every method's connection test (re-exported here)
 
 
 # A language only narrows an estimate, so the figure for Spanish must come out clearly below the plain U.S. figure of the same run. Meta answers the
@@ -43,17 +31,20 @@ LANGUAGE_NARROWS_BELOW = 0.9
 
 
 def _timed(name: str, fn: Callable[[], tuple[str, bool]]) -> Check:
+    """Run one check. Every line it returns passes through `meta.redact`: what Meta says (an ad account is often NAMED with its own id) must not
+    carry the token, the app secret, the proof or the whole ad account to the Admin page."""
     started = time.monotonic()
     try:
         detail, warn = fn()
-        return Check(name, True, detail, warn=warn, seconds=time.monotonic() - started)
+        return Check(name, True, meta.redact(detail), warn=warn, seconds=time.monotonic() - started)
     except meta.MetaAPIError as exc:
-        return Check(name, False, str(exc), seconds=time.monotonic() - started)
+        return Check(name, False, meta.redact(exc), seconds=time.monotonic() - started)
     except ValueError as exc:
-        return Check(name, False, f"this app could not form the request: {exc}", seconds=time.monotonic() - started)
+        return Check(name, False, meta.redact(f"this app could not form the request: {exc}"), seconds=time.monotonic() - started)
 
 
 def run_checks() -> list[Check]:
+    meta.reset_cache()           # the web process remembers estimates for ten minutes and the lists for hours: a test must ask Meta, as the TikTok one does
     checks: list[Check] = []
 
     def add(check: Check) -> Check:

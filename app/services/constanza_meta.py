@@ -25,6 +25,11 @@ Setup (the app runs fine without it - every caller checks `is_configured()`):
 Read-only: a reach estimate and the targeting lists; nothing is ever created in the ad account. The token is only sent in the Authorization
 header and is removed from every message this module raises.
 
+Meta is also a registered Constanza METHOD (constanza_methods.py): `estimate_response` below is what POST /api/constanza/estimate answers for a
+Meta product - the standard estimate plus a `meta` block - and the geography is Meta's own (the planner picks the place from Meta's search, so
+`owns_geography` is true and Constanza's Nielsen geography is not resolved for it). `model_auction` is the one place the scenarios and the budget
+cross-check are computed; the older POST /api/constanza/meta-forecast uses it too, so both give the same numbers.
+
 Two things the figure is NOT: it counts people active on Meta's DEFAULT placements (Facebook, Instagram, Messenger, Audience Network, ...), the
 same as Ads Manager's "Estimated audience size", not only Facebook and Instagram; and `geo_market` is Meta's Comscore Markets (Meta moved off
 Nielsen DMAs on 2026-06-22), so its footprint can differ from the Nielsen markets the rest of Constanza uses.
@@ -39,13 +44,15 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
 import requests
 
 from app import catalog
-from app.services import platform_scenarios
+from app.services import constanza_methods, platform_scenarios
+from app.services.constanza_methods import MethodRequest, MethodSpec
 
 log = logging.getLogger(__name__)
 
@@ -112,24 +119,45 @@ def product_cpm(product_name: str) -> Optional[float]:
     return RETAIL_CPMS[next(iter(matches))] if len(matches) == 1 else None
 
 
+BUDGET_MESSAGE = "Retail budget must be between $0 and $1 billion for the full flight."
+CPM_MESSAGE = "Retail CPM must be a positive number."
+
+
+def _check_retail_budget(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 < value <= 1e9) or value != value:
+        raise ValueError(BUDGET_MESSAGE)
+    return value
+
+
+def _check_retail_cpm(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 < value <= 1e5) or value != value:
+        raise ValueError(CPM_MESSAGE)
+    return value
+
+
 def model_auction(
-    *, product_name: str, retail_budget: float, audience_lower: Optional[int] = None,
+    *, product_name: str, retail_budget: Optional[float], audience_lower: Optional[int] = None,
     audience_upper: Optional[int] = None, months: int = 1, audience_source: str = "manual",
-    retail_cpm: Optional[float] = None,
+    retail_cpm: Optional[float] = None, strict_product: bool = True,
 ) -> dict:
     """The planning numbers for one Meta line: three impression scenarios from the lower-end audience, and the budget cross-check.
 
     `audience_lower` is the LOWER end of the platform's range (what the scenarios multiply); `audience_upper` is context (a caller may give only the
     lower end). `audience_source` says where the range came from: "meta_api" for a live pull, "manual" for bounds a caller supplied itself (the panel
-    never does; snapshots saved before it pulled everything from Meta carry it). Without an audience there are no scenarios, only the budget figure."""
+    never does; snapshots saved before it pulled everything from Meta carry it). Without an audience there are no scenarios, only the budget figure.
+
+    `retail_budget` None means "no cross-check": the budget fields come back null (an explicit 0 or a negative number is still refused). With
+    `strict_product` (the default, what POST /meta-forecast uses) the product must be one of the three paid SKUs; the estimate route passes
+    False because an admin may map the Meta method to another product, which then has no planning CPM of its own: the CPM is the one the caller
+    gives, or none, and without a CPM there is no spend figure and no budget cross-check."""
     default_cpm = product_cpm(product_name)
-    if default_cpm is None:
+    if default_cpm is None and strict_product:
         raise ValueError("Choose one of the three paid Facebook & Instagram Ads products.")
     cpm = default_cpm if retail_cpm is None else retail_cpm
-    if not isinstance(retail_budget, (int, float)) or not (0 < retail_budget <= 1e9) or retail_budget != retail_budget:
-        raise ValueError("Retail budget must be between $0 and $1 billion for the full flight.")
-    if not isinstance(cpm, (int, float)) or not (0 < cpm <= 1e5) or cpm != cpm:
-        raise ValueError("Retail CPM must be a positive number.")
+    if retail_budget is not None:
+        _check_retail_budget(retail_budget)
+    if cpm is not None:
+        _check_retail_cpm(cpm)
     if not isinstance(months, int) or isinstance(months, bool) or not 1 <= months <= 120:
         raise ValueError("Months must be a whole number from 1 to 120.")
     if audience_upper is not None and audience_lower is None:
@@ -142,9 +170,9 @@ def model_auction(
     if audience_source not in ("manual", "meta_api"):
         raise ValueError("Audience source must be manual or meta_api.")
 
-    media_budget = retail_budget / RETAIL_TO_MEDIA
-    media_cpm = cpm / RETAIL_TO_MEDIA
-    budget_imps = round(media_budget * 1000 / media_cpm)
+    media_budget = None if retail_budget is None else retail_budget / RETAIL_TO_MEDIA
+    media_cpm = None if cpm is None else cpm / RETAIL_TO_MEDIA
+    budget_imps = None if media_budget is None or media_cpm is None else round(media_budget * 1000 / media_cpm)
     scenarios = None
     if audience_lower is not None:
         public = platform_scenarios.to_public(audience_lower)
@@ -153,24 +181,29 @@ def model_auction(
         scenarios = {
             **public, "monthly": monthly, "months": months, "flight": flight,
             # what each scenario's flight total would cost at the planning CPM: a reality check against the line's budget, not a quote
-            "retail_spend_at_flight": {k: round(v * cpm / 1000, 2) for k, v in flight.items()},
-            "media_spend_at_flight": {k: round(v * media_cpm / 1000, 2) for k, v in flight.items()},
+            "retail_spend_at_flight": None if cpm is None else {k: round(v * cpm / 1000, 2) for k, v in flight.items()},
+            "media_spend_at_flight": None if media_cpm is None else {k: round(v * media_cpm / 1000, 2) for k, v in flight.items()},
             "est_uniques": audience_lower,
         }
+    notes = [
+        "Meta's audience size counts eligible accounts; it is not delivered reach and not a delivery forecast.",
+        f"Monthly impressions are {platform_scenarios.describe()}; mid is the default and the figure the Avails step takes. A flight is the "
+        "monthly figure times its months.",
+    ]
+    if budget_imps is not None:
+        notes.append("Budget impressions (what the retail budget buys at the planning CPM, 2x retail/media) are a cross-check, not avails.")
     return {
         "metric_type": "meta_audience_scenarios", "product_name": product_name, "as_of": datetime.now(timezone.utc).isoformat(),
-        "retail_budget": round(retail_budget, 2), "media_budget": round(media_budget, 2),
-        "retail_cpm": round(cpm, 2), "media_cpm_assumed": round(media_cpm, 2), "retail_to_media_multiplier": RETAIL_TO_MEDIA,
+        "retail_budget": None if retail_budget is None else round(retail_budget, 2),
+        "media_budget": None if media_budget is None else round(media_budget, 2),
+        "retail_cpm": None if cpm is None else round(cpm, 2),
+        "media_cpm_assumed": None if media_cpm is None else round(media_cpm, 2),
+        "retail_to_media_multiplier": RETAIL_TO_MEDIA,
         "months": months, "budget_impressions": budget_imps,
         "potential_audience": ({"lower": audience_lower, "upper": audience_upper, "source": audience_source}
                                if audience_lower is not None else None),
         "scenarios": scenarios,
-        "notes": [
-            "Meta's audience size counts eligible accounts; it is not delivered reach and not a delivery forecast.",
-            f"Monthly impressions are {platform_scenarios.describe()}; mid is the default and the figure the Avails step takes. A flight is the "
-            "monthly figure times its months.",
-            "Budget impressions (what the retail budget buys at the planning CPM, 2x retail/media) are a cross-check, not avails.",
-        ],
+        "notes": notes,
     }
 
 
@@ -221,7 +254,9 @@ def graph_version() -> str:
 
 
 def status() -> dict:
-    """Whether the Meta connection is set up - which settings are missing, never their values - and the planning multipliers."""
+    """Whether the Meta connection is set up - which settings are missing (the setting's name first, then what to do), never their values - the
+    ad account as its last four digits, and the planning multipliers. The standard status shape of constanza_methods.validate_status plus
+    Meta's own extras."""
     missing = missing_config()
     return {"configured": not missing, "missing": missing, "account": account_hint(), "version": (os.environ.get("META_GRAPH_API_VERSION") or DEFAULT_GRAPH_VERSION).strip(),
             "scenarios": platform_scenarios.to_public(), "setup_hint": SETUP_HINT, "language_note": LANGUAGE_NOTE}
@@ -234,19 +269,27 @@ SETUP_HINT = ("Add META_ACCESS_TOKEN (a token with the ads_read permission for t
 
 # ----------------------------------------------------------------------------------------------------------------- the Graph API
 
-def _scrub(text: str) -> str:
-    """A Meta message with the token and the ad account removed (it must never reach a log, an exception or the browser)."""
+def redact(text) -> str:
+    """`text` with the access token, the app secret, the `appsecret_proof` made from them and the ad account taken out (the account is left as its
+    last four digits, wherever its digits stand: a message, or the ad account's own name). Not shortened: the lines of a connection test use it too."""
     out = str(text or "")
     token = (os.environ.get("META_ACCESS_TOKEN") or "").strip()
+    secret = (os.environ.get("META_APP_SECRET") or "").strip()
+    if token and secret:
+        out = out.replace(hmac.new(secret.encode(), token.encode(), hashlib.sha256).hexdigest(), "[proof]")
     if token:
         out = out.replace(token, "[token]")
-    secret = (os.environ.get("META_APP_SECRET") or "").strip()
     if secret:
         out = out.replace(secret, "[secret]")
     account = (os.environ.get("META_AD_ACCOUNT_ID") or "").strip().removeprefix("act_")
-    if account:
+    if len(account) > 4:                                        # (up to four digits there is nothing to hide, and replacing them would garble numbers)
         out = out.replace(account, "…" + account[-4:])
-    return out[:300]
+    return out
+
+
+def _scrub(text: str) -> str:
+    """A Meta message with the token and the ad account removed (it must never reach a log, an exception or the browser), cut to a sentence or two."""
+    return redact(text)[:300]
 
 
 def _classify(error: dict, http_status: int) -> MetaAPIError:
@@ -270,7 +313,9 @@ def _classify(error: dict, http_status: int) -> MetaAPIError:
     if code == 2635 or "deprecated version" in message.lower():
         return MetaAPIError("Meta has retired the Marketing API version this app asks for. Set META_GRAPH_API_VERSION to a current version (v26.0).",
                             "not_configured", 503)
-    if sub == 33 or "missing permissions" in message.lower() or "does not exist" in message.lower():
+    # Meta's own signal for an ad account it cannot show is subcode 33 (and its wording "missing permissions"). "does not exist" alone is read as the
+    # account only when Meta is not saying "invalid parameter" (code 100): there it can be a place or an interest that was withdrawn, which is a 422 about the settings.
+    if sub == 33 or "missing permissions" in message.lower() or (code != 100 and "does not exist" in message.lower()):
         return MetaAPIError("Meta says this ad account does not exist or the token cannot see it: check META_AD_ACCOUNT_ID, and in Business Settings assign "
                             "the ad account to the token's (system) user with ads_read.", "permission", 503)
     if code == 100 or http_status == 400:
@@ -588,3 +633,123 @@ def fetch_reach_estimate(*, geo_type: str, geo_key: str, age_min: Optional[int] 
             raise MetaAPIError("Meta returned invalid audience bounds for that targeting.", "meta", 502)
         return lower, upper
     return _cached(f"reach:{graph_version()}:{account}:{body}", _ESTIMATE_TTL, fetch)
+
+
+# ----------------------------------------------------------------------------------------------------------------- the method
+
+@dataclass(frozen=True)
+class MetaArgs:
+    """What the planner set up for a Meta estimate, validated: the `meta` block of POST /api/constanza/estimate."""
+    geo_type: str
+    geo_key: str
+    geo_label: str
+    age_min: Optional[int]
+    age_max: Optional[int]
+    gender: str                                   # "all" | "male" | "female"
+    languages: tuple                              # ({id, name}, ...) picked from search_locales
+    targeting: tuple                              # ({id, name, type}, ...) picked from the interest / behavior lists
+    retail_budget: Optional[float]                # the whole flight at retail, dollars; None = no budget cross-check
+    retail_cpm: Optional[float]                   # None = the product's own planning CPM
+
+    @classmethod
+    def from_dict(cls, raw: Optional[dict]) -> "MetaArgs":
+        """ValueError in planner words for anything Meta would refuse or that could not be asked of it - before a single call is spent."""
+        raw = raw or {}
+        if not isinstance(raw, dict):
+            raise ValueError("The Meta settings must be an object.")
+        geo = raw.get("geo")
+        if not isinstance(geo, dict) or not geo:
+            raise ValueError("Choose where first: pick a place from Meta's list.")
+        geo_type, geo_key = str(geo.get("type") or ""), str(geo.get("key") or "")
+        if geo_type not in _GEO_FIELDS or not re.fullmatch(r"[A-Za-z0-9_:-]{1,40}", geo_key):
+            raise ValueError("Select a valid Meta geography from the search results.")
+        budget, cpm = raw.get("retail_budget"), raw.get("retail_cpm")
+        if budget is not None:
+            _check_retail_budget(budget)
+        if cpm is not None:
+            _check_retail_cpm(cpm)
+        gender = raw.get("gender") or "all"
+        languages, targeting = clean_locales(raw.get("languages")), _clean_targeting(raw.get("targeting"))
+        # the same checks as the request that is sent (ages, gender, the shape of the place): a refused choice is said now, before any call
+        build_targeting_spec(geo_type=geo_type, geo_key=geo_key, age_min=raw.get("age_min"), age_max=raw.get("age_max"), gender=gender,
+                             targeting=targeting, locales=languages)
+        return cls(
+            geo_type=geo_type, geo_key=geo_key, geo_label=str(geo.get("label") or "").strip()[:160],
+            age_min=raw.get("age_min"), age_max=raw.get("age_max"), gender=gender,
+            languages=tuple(languages), targeting=tuple(targeting),
+            retail_budget=None if budget is None else float(budget), retail_cpm=None if cpm is None else float(cpm),
+        )
+
+
+_PLACEMENTS_NOTE = ("Meta counts people on its default placements (Facebook, Instagram, Messenger, Audience Network), as Ads Manager's Estimated "
+                    "audience size does.")
+_COMSCORE_NOTE = ("Meta's TV markets are Comscore markets, so a market's footprint can differ from the Nielsen markets used elsewhere in this app.")
+_HISPANIC_NOTE = "Hispanic targeting isn't applied to a Meta audience estimate: use a language (Spanish) and Meta's own interests."
+# A lower end of 0 is not "no audience": it is Meta saying the audience is under its reporting floor. The numbers stay (they are what the rule gives), the note says what they mean.
+_TOO_NARROW_NOTE = ("Meta reports fewer than 1,000 accounts for these settings, so the audience is too narrow to plan on and the impressions come out as 0. "
+                    "Widen the place, the age range or the interests.")
+
+
+def estimate_response(req: MethodRequest) -> dict:
+    """The estimate of a product forecast by Meta's reach estimate: the standard estimate plus a `meta` block (the audience range, the three
+    monthly scenarios, what was asked, the budget cross-check when there is a budget, the language caveat when languages were chosen).
+
+    The scenarios and the cross-check come from `model_auction`, the same rule POST /meta-forecast applies, so both routes give the same numbers.
+    The flight is the monthly figure times `req.months`; `est_uniques` is the lower end, so the Avails step's frequency is the mid multiplier.
+    ValueError (planner words) for a request Meta could not be asked; MetaAPIError for anything Meta-side."""
+    args = MetaArgs.from_dict(req.args)
+    lower, upper = fetch_reach_estimate(geo_type=args.geo_type, geo_key=args.geo_key, age_min=args.age_min, age_max=args.age_max,
+                                        gender=args.gender, targeting=list(args.targeting), locales=list(args.languages))
+    result = model_auction(product_name=req.product_name, retail_budget=args.retail_budget, audience_lower=lower, audience_upper=upper,
+                           months=req.months, audience_source="meta_api", retail_cpm=args.retail_cpm, strict_product=False)
+    scenarios = result["scenarios"]
+    flight = scenarios["flight"]
+    budget_check = None
+    if result["retail_budget"] is not None and result["retail_cpm"] is not None:
+        budget_check = {k: result[k] for k in ("retail_budget", "media_budget", "retail_cpm", "media_cpm_assumed", "retail_to_media_multiplier",
+                                               "months", "budget_impressions")}
+    block = {
+        "audience": {"low": lower, "high": upper, "source": "meta_api"},
+        "monthly": {platform_scenarios.SLOT[name]: scenarios["monthly"][name] for name in platform_scenarios.SCENARIOS},
+        "scenarios": scenarios,
+        "targeting": {
+            "geo": {"type": args.geo_type, "key": args.geo_key, "label": args.geo_label or None},
+            "age_min": args.age_min, "age_max": args.age_max, "gender": args.gender,
+            "languages": [dict(item) for item in args.languages], "detailed": [dict(item) for item in args.targeting],
+        },
+        "budget_check": budget_check,
+        "language_note": LANGUAGE_NOTE if args.languages else None,
+        "as_of": result["as_of"],
+    }
+    notes = list(result["notes"]) + [_PLACEMENTS_NOTE]
+    if lower == 0:
+        notes.insert(0, _TOO_NARROW_NOTE)                      # first: the dock shows only the first few notes
+    if args.geo_type == "geo_market":
+        notes.append(_COMSCORE_NOTE)
+    if req.hispanic_asked:
+        notes.append(_HISPANIC_NOTE)
+    return constanza_methods.standard_estimate(
+        SPEC, product_name=req.product_name, months=req.months,
+        imps={"low": flight["conservative"], "mid": flight["mid"], "high": flight["upper"]},
+        est_uniques=lower, notes=notes, block=block,
+    )
+
+
+def _http_error(exc: Exception) -> tuple:
+    return exc.status_code, str(exc)
+
+
+def _product_info(product_name: str) -> dict:
+    return {"retail_cpm": product_cpm(product_name)}
+
+
+# The three paid SKUs are Meta's by default; the two branded-Pages SKUs ("... on Noticias Ya", "... on EVC Radio Pages") run on Entravision's own
+# pages, which an ad-account audience estimate does not describe, so they are not listed (and an admin who maps one to Meta is warned).
+SPEC = constanza_methods.register(MethodSpec(
+    key="meta", label="Meta API (live)", short_label="Meta",
+    description="A live audience-size estimate from Meta's own ad account (Facebook and Instagram), with the place, age, language and interests picked from Meta's lists.",
+    kind="api", default_products=tuple(RETAIL_CPMS), owns_geography=True, request_field="meta",
+    secrets=("META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID"),
+    estimate=estimate_response, status=status, diagnose="app.services.meta_diagnose:run_checks",
+    errors=(MetaAPIError,), to_http=_http_error, product_info=_product_info,
+))

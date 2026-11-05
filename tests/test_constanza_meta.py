@@ -15,10 +15,7 @@ from fastapi import HTTPException
 
 import app.main as main
 from app.services import constanza_meta as meta
-
-AWARENESS = "Facebook & Instagram Ads | Awareness"
-TOKEN = "EAAB-test-private-token-0123456789"
-ACCOUNT = "act_7000000000012345"
+from tests.meta_support import ACCOUNT, AWARENESS, TOKEN, FakeGraph, Resp  # noqa: F401  (Resp is re-exported for the older browser tests)
 
 
 @pytest.fixture(autouse=True)
@@ -29,90 +26,6 @@ def clean(monkeypatch):
     meta.reset_cache()
     yield
     meta.reset_cache()
-
-
-class FakeGraph:
-    """A Graph API shaped like Meta's reference: /search (adgeolocation, adinterest, adTargetingCategory, adlocale) and act_<id>/reachestimate."""
-
-    def __init__(self):
-        self.calls: list[dict] = []
-        self.reach = (900, 1100)
-        self.error: dict | None = None
-        self.http_status = 200
-        self.estimate_ready = True
-        self.empty = False             # the lists answer with no rows (a transient empty answer must not stick)
-        self.narrow_by_language = True   # a language narrows the reach estimate (False: the fake "ignores" locales, like a Meta that did not apply them)
-        self.refuse_locales = False      # reachestimate refuses a spec that carries locales (Meta's "Invalid parameter")
-        self.language_jitter = 0         # a spec with locales answers this much BELOW the same spec without them (0 = no change; use with narrow_by_language=False)
-        self.plain_us_failures = 0       # the next N asks for the plain U.S. estimate (a country alone) fail with a transient error
-        self.extra_demographics: list[dict] = []     # more rows in the demographics list (e.g. a long type or name)
-        self.shape = "object"          # how reachestimate wraps its node: Meta's reference says "a single node" = one object ("list", "bare" also read)
-        # adlocale rows: Meta's reference shows `key` (a number) and `name`; invented ids
-        self.locales = [{"key": 6, "name": "English (US)"}, {"key": 24, "name": "English (UK)"}, {"key": 1001, "name": "Spanish"},
-                        {"key": 1002, "name": "Spanish (Mexico)"}, {"key": 1003, "name": "Spanish (Spain)"}, {"key": 1004, "name": "Portuguese (Brazil)"}]
-
-    def get(self, url, params=None, headers=None, timeout=None):
-        self.calls.append({"url": url, "params": dict(params or {}), "headers": dict(headers or {}), "timeout": timeout})
-        if self.error is not None:
-            return Resp({"error": self.error}, self.http_status)
-        path = url.split("graph.facebook.com/", 1)[1]
-        version, rest = path.split("/", 1)
-        params = params or {}
-        if rest == "search":
-            kind = params.get("type")
-            if kind == "adgeolocation":
-                return Resp({"data": [{"key": "803", "name": "Los Angeles", "type": "geo_market", "country_code": "US", "region": "California"},
-                                      {"key": "804", "name": "Los Angeles-Long Beach", "type": "geo_market", "country_code": "US"}]})
-            if kind == "adinterest":
-                return Resp({"data": [{"id": "6003107902433", "name": "Soccer", "audience_size_lower_bound": 100_000_000, "audience_size_upper_bound": 120_000_000,
-                                       "path": ["Interests", "Sports and outdoors", "Soccer"]},
-                                      {"id": "6003012345678", "name": "Soccer balls", "audience_size": 4_000_000}]})
-            if kind == "adlocale":
-                q = (params.get("q") or "").lower()
-                rows = [r for r in self.locales if not isinstance(r, dict) or str(r.get("name") or "").lower().startswith(q)]       # autocomplete: a prefix
-                return Resp({"data": [] if self.empty else rows[:int(params.get("limit", 8))]})                                      # Meta's default limit is 8
-            if kind == "adTargetingCategory" and self.empty:
-                return Resp({"data": []})
-            if kind == "adTargetingCategory":
-                cls = params.get("class")
-                rows = {"behaviors": [{"id": "6002714895372", "name": "Frequent travelers", "type": "behaviors", "audience_size_lower_bound": 2_000_000, "audience_size_upper_bound": 2_400_000,
-                                       "path": ["Behaviors", "Travel", "Frequent travelers"]},
-                                      {"id": "6004386044572", "name": "Small business owners", "type": "behaviors", "path": ["Behaviors", "Business", "Small business owners"]}],
-                        "interests": [{"id": "6003107902433", "name": "Soccer", "type": "interests"}, {"id": "6003020834693", "name": "Cooking", "type": "interests"}],
-                        "demographics": [{"id": "6002714398172", "name": "Newlyweds (1 year)", "type": "life_events", "path": ["Demographics", "Life events", "Newlywed"]},
-                                         {"id": "6015559470583", "name": "Likely to engage with political content (US)", "type": "politics", "path": ["Demographics", "Politics"]},
-                                         {"id": "6004854404172", "name": "iPhone 15", "type": "user_device", "path": ["Demographics", "Mobile Device User", "iPhone"]},
-                                         {"id": "6006", "name": "No type at all"}]}[cls]
-                return Resp({"data": rows + (self.extra_demographics if cls == "demographics" else [])})
-        if rest.endswith("/reachestimate"):
-            lo, hi = self.reach
-            spec = json.loads(params["targeting_spec"])
-            if spec == {"geo_locations": {"countries": ["US"]}} and self.plain_us_failures > 0:
-                self.plain_us_failures -= 1
-                return Resp({"error": {"message": "transient", "code": 1}}, 500)
-            if spec.get("locales"):
-                if self.refuse_locales:
-                    return Resp({"error": {"message": "Invalid parameter", "code": 100}}, 400)
-                if self.narrow_by_language:                                        # a language only narrows the audience
-                    lo, hi = lo // 3, hi // 3
-                lo, hi = lo - self.language_jitter, hi - self.language_jitter
-            node = {"users_lower_bound": lo, "users_upper_bound": hi, "estimate_ready": self.estimate_ready}
-            return Resp({"data": node if self.shape == "object" else ([node] if self.shape == "list" else None)} if self.shape != "bare" else node)
-        if rest.startswith("act_") and "/" not in rest:
-            return Resp({"name": "Entravision Test Account", "account_status": 1, "currency": "USD"})
-        return Resp({"error": {"message": f"Unknown path {rest}", "code": 100}}, 400)
-
-
-class Resp:
-    def __init__(self, body, status=200):
-        self._body, self.status_code = body, status
-
-    @property
-    def ok(self):
-        return self.status_code < 400
-
-    def json(self):
-        return self._body
 
 
 @pytest.fixture
@@ -317,6 +230,8 @@ def test_geography_search_returns_choices_and_never_guesses(graph):
 
 @pytest.mark.parametrize("error,status,kind,http,words", [
     ({"message": "Invalid OAuth access token.", "code": 190}, 400, "token", 503, "new long-lived token"),
+    ({"message": "Unauthorized"}, 401, "token", 503, "new long-lived token"),                                     # a 401 says it all, with or without Meta's code
+    ({}, 401, "token", 503, "META_ACCESS_TOKEN"),
     ({"message": "The access token is expired", "code": 190, "error_subcode": 463}, 400, "token", 503, "META_ACCESS_TOKEN"),
     ({"message": "(#200) Requires ads_read", "code": 200}, 403, "permission", 503, "ads_read"),
     ({"message": "(#10) Application does not have permission", "code": 10}, 403, "permission", 503, "ads_read"),
@@ -341,13 +256,26 @@ def test_no_error_message_carries_the_token_or_the_ad_account(graph):
     assert TOKEN not in text and "7000000000012345" not in text and "[token]" in text and "…2345" in text
 
 
-def test_a_timeout_or_a_non_json_answer_is_a_clean_failure(monkeypatch, graph):
-    def boom(*a, **k):
-        raise meta.requests.Timeout("slow")
-    monkeypatch.setattr(meta.requests, "get", boom)
-    with pytest.raises(meta.MetaAPIError) as err:
-        meta.fetch_reach_estimate(geo_type="country", geo_key="US")
-    assert err.value.kind == "unreachable" and err.value.status_code == 502 and TOKEN not in str(err.value)
+def test_a_timeout_or_a_failed_connection_is_a_clean_failure_that_carries_nothing_the_library_put_in_its_message(monkeypatch, graph):
+    """`requests` writes the whole request into a ConnectionError's text: the path with the ad account and the query with the appsecret_proof (and a
+    proxy or a wrapper may add more). None of it may reach the planner, so the message is this app's own words and never the exception's."""
+    import hashlib, hmac
+    monkeypatch.setenv("META_APP_SECRET", "s3cr3t-app-secret")
+    proof = hmac.new(b"s3cr3t-app-secret", TOKEN.encode(), hashlib.sha256).hexdigest()
+    leaky = (f"HTTPSConnectionPool(host='graph.facebook.com', port=443): Max retries exceeded with url: /v26.0/{ACCOUNT}/reachestimate"
+             f"?targeting_spec=%7B%22geo_locations%22%3A%7B%7D%7D&appsecret_proof={proof} (Caused by NewConnectionError('Failed to establish a new "
+             f"connection: [Errno 8]')) Authorization: Bearer {TOKEN} s3cr3t-app-secret")
+    for failure in (meta.requests.ConnectionError(leaky), meta.requests.Timeout(leaky), meta.requests.Timeout("slow")):
+        def boom(*a, _failure=failure, **k):
+            raise _failure
+        monkeypatch.setattr(meta.requests, "get", boom)
+        meta.reset_cache()
+        with pytest.raises(meta.MetaAPIError) as err:
+            meta.fetch_reach_estimate(geo_type="country", geo_key="US")
+        assert err.value.kind == "unreachable" and err.value.status_code == 502
+        assert str(err.value) == "Meta did not answer in time. Try again in a moment."
+        for secret in (TOKEN, "7000000000012345", proof, "s3cr3t-app-secret", "appsecret_proof", "graph.facebook.com"):
+            assert secret not in str(err.value), secret
 
     class Html:
         status_code, ok = 200, True
@@ -568,6 +496,7 @@ def test_a_reach_answer_whose_data_is_empty_is_a_clean_failure_not_a_crash(graph
 @pytest.mark.parametrize("error,kind,http,words", [
     ({"message": "Unsupported get request. Object with ID 'act_7000000000012345' does not exist, cannot be loaded due to missing permissions, or does not support this operation",
       "code": 100, "error_subcode": 33}, "permission", 503, "assign"),
+    ({"message": "Object with ID 'act_7000000000012345' does not exist", "code": 803}, "permission", 503, "assign"),             # the account, without Meta's subcode
     ({"message": "Calls to this api have exceeded the rate limit", "code": 80014}, "rate_limit", 429, "few minutes"),
     ({"message": "(#2635) You are calling a deprecated version of the Ads API. Please update to the latest version", "code": 2635}, "not_configured", 503, "META_GRAPH_API_VERSION"),
     ({"message": "Invalid appsecret_proof provided in the API argument", "code": 100}, "not_configured", 503, "META_APP_SECRET"),
@@ -577,6 +506,18 @@ def test_meta_config_problems_are_told_as_config_problems_not_as_a_targeting_mis
     with pytest.raises(meta.MetaAPIError) as err:
         meta.fetch_reach_estimate(geo_type="country", geo_key="US")
     assert err.value.kind == kind and err.value.status_code == http and words in str(err.value) and "geography" not in str(err.value)
+
+
+@pytest.mark.parametrize("message", [
+    "Param targeting_spec[geo_locations][geo_markets][0][key] 999 does not exist",                    # a withdrawn place or interest is a problem with the settings,
+    "Invalid parameter: the interest with id 6003107902433 does not exist",                           # not with the ad account
+])
+def test_a_code_100_that_says_a_place_or_an_interest_does_not_exist_is_a_422_about_the_settings_not_a_bad_ad_account(graph, message):
+    graph.error, graph.http_status = {"message": message, "code": 100}, 400
+    with pytest.raises(meta.MetaAPIError) as err:
+        meta.fetch_reach_estimate(geo_type="country", geo_key="US")
+    assert err.value.kind == "settings" and err.value.status_code == 422
+    assert str(err.value).startswith("Meta refused these settings: ") and "does not exist" in str(err.value) and "META_AD_ACCOUNT_ID" not in str(err.value)
 
 
 def test_an_app_with_require_app_secret_gets_the_proof_and_the_secret_is_never_shown(monkeypatch, graph):
@@ -1047,6 +988,51 @@ def test_a_plain_us_estimate_that_failed_once_is_asked_again_for_the_language_ch
     assert checks[LANGUAGE].ok and not checks[LANGUAGE].warn and "against 900 – 1,100 for the whole U.S." in checks[LANGUAGE].detail
 
 
+def test_the_connection_test_asks_meta_everything_again_and_is_never_answered_from_what_the_web_process_remembers(graph):
+    """The Admin button runs inside the long-lived web process, where an estimate is remembered for ten minutes and the lists for twelve hours:
+    a line that is green from memory is no proof that Meta still answers it (the TikTok test clears its own memory first, and so does this)."""
+    from app.services import meta_diagnose
+    meta_diagnose.run_checks()
+    asked = len(graph.calls)
+    graph.calls.clear()
+    meta_diagnose.run_checks()
+    assert len(graph.calls) == asked                                                              # the second run went to Meta for every line, as the first did
+    graph.reach, graph.empty = (50_000, 60_000), True                                             # now Meta's answers change: new figures, empty lists
+    result = main.admin_constanza_test("meta")
+    checks = {c["name"]: c for c in result["checks"]}
+    assert result["ok"] is False
+    assert "50,000 – 60,000" in checks["Reach estimate · United States"]["detail"]                # the new figure, not the one from ten minutes ago
+    for name in ("Targeting list · interests", "Targeting list · behaviors", "Targeting list · demographics", "Language list"):
+        assert checks[name]["ok"] is False, name                                                  # an empty list is a failure now, not last hour's list
+
+
+def test_the_ad_accounts_own_name_cannot_carry_the_token_the_secret_the_proof_or_the_whole_account_into_the_connection_test(monkeypatch, graph):
+    """Meta's own `name` of the account goes into a line of the test, and agencies name an account with its id: every line is redacted, the account
+    down to its last four digits, and the markup of a name is left for the page to show as text."""
+    import hashlib, hmac
+    monkeypatch.setenv("META_APP_SECRET", "s3cr3t-app-secret")
+    proof = hmac.new(b"s3cr3t-app-secret", TOKEN.encode(), hashlib.sha256).hexdigest()
+    graph.account_name = f"Entravision 7000000000012345 ({ACCOUNT}) {TOKEN} s3cr3t-app-secret {proof} <b>x</b>"
+    checks = _checks()
+    detail = checks["Token and ad account (ads_read)"].detail
+    assert checks["Token and ad account (ads_read)"].ok and "Entravision …2345" in detail and "act_…2345" in detail and "<b>x</b>" in detail
+    assert "[token]" in detail and "[secret]" in detail and "[proof]" in detail
+    everything = json.dumps([c.to_public() for c in checks.values()], ensure_ascii=False)
+    for secret in (TOKEN, "7000000000012345", "s3cr3t-app-secret", proof):
+        assert secret not in everything, secret
+
+
+def test_every_line_of_a_failed_test_is_redacted_too_and_redact_is_not_shortened_the_way_an_error_message_is(monkeypatch, graph):
+    from app.services import meta_diagnose
+    monkeypatch.setattr(meta, "search_locales", lambda q="": (_ for _ in ()).throw(ValueError(f"cannot ask about {ACCOUNT} with {TOKEN}")))
+    checks = {c.name: c for c in meta_diagnose.run_checks()}
+    failed = checks["Language search"]
+    assert not failed.ok and "7000000000012345" not in failed.detail and TOKEN not in failed.detail and "act_…2345" in failed.detail and "[token]" in failed.detail
+    long_text = "word " * 100 + f"{ACCOUNT} {TOKEN}"
+    assert len(meta._scrub(long_text)) == 300 and len(meta.redact(long_text)) > 500
+    assert "7000000000012345" not in meta.redact(long_text) and TOKEN not in meta.redact(long_text)
+
+
 def test_the_english_line_reports_what_meta_did_next_to_the_plain_us_figure(graph):
     checks = _checks()
     names = list(checks)
@@ -1102,9 +1088,247 @@ def test_the_route_and_the_env_example_no_longer_invite_a_typed_audience():
 
 def test_the_docs_say_languages_are_ored_without_also_saying_a_language_can_only_shrink_the_audience():
     from pathlib import Path
-    docs = (Path(__file__).resolve().parents[1] / "docs" / "forecast_data_platform.md").read_text(encoding="utf-8")
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "meta_forecasting.md").read_text(encoding="utf-8")
     assert "adding a language can only make the audience smaller" not in docs
     assert "the first language narrows the audience compared with none, and each further language widens it again" in docs.replace("\n", " ")
     assert "can only narrow the audience\n    compared with none" not in meta.build_targeting_spec.__doc__ and "each further one widens it again" in meta.build_targeting_spec.__doc__.replace("\n", " ")
     # the unverified qualifier from Meta's own reference is written down next to the check that answers it
     assert "differs from the common" in docs and "Reach estimate · English, a common language" in docs
+
+
+# ---------------------------------------------------------------------------------------------------------------- Meta as a Constanza method (POST /api/constanza/estimate)
+# The registry, the generic dispatch, Admin and the saved-estimate field are pinned in test_constanza_methods.py; here is what is Meta's own.
+
+from app.services import constanza_methods as methods  # noqa: E402
+
+
+def _block(**changes) -> dict:
+    block = {"geo": {"type": "geo_market", "key": "803", "label": "Los Angeles · California · US"}, "age_min": 25, "age_max": 44, "gender": "female",
+             "languages": [{"id": "1001", "name": "Spanish"}], "targeting": [{"id": "6003107902433", "name": "Soccer", "type": "interests"}],
+             "retail_budget": 2000.0}
+    block.update(changes)
+    return block
+
+
+def _estimate(months=3, product=AWARENESS, **changes) -> dict:
+    return main.constanza_estimate(main.ConstanzaEstimateRequest(product_name=product, months=months, meta=main.MetaEstimateModel(**_block(**changes))))
+
+
+def _method_request(args, months=2, product=AWARENESS, hispanic=False) -> methods.MethodRequest:
+    return methods.MethodRequest(product_name=product, months=months, flight_days=None, args=args, resolution=None, geo_notes=[], hispanic_asked=hispanic)
+
+
+def test_the_estimate_asks_meta_for_exactly_the_places_ages_languages_and_interests_that_were_picked(graph):
+    out = _estimate()
+    assert len(graph.calls) == 1 and graph.calls[0]["url"].endswith("/act_7000000000012345/reachestimate")
+    assert _spec_sent(graph) == {"geo_locations": {"geo_markets": [{"key": "803"}]}, "age_min": 25, "age_max": 44, "genders": [2], "locales": [1001],
+                                 "flexible_spec": [{"interests": [{"id": "6003107902433", "name": "Soccer"}]}]}
+    block = out["meta"]
+    assert block["audience"] == {"low": 300, "high": 366, "source": "meta_api"}                     # the fake narrows a language to a third
+    assert block["targeting"] == {"geo": {"type": "geo_market", "key": "803", "label": "Los Angeles · California · US"}, "age_min": 25, "age_max": 44,
+                                  "gender": "female", "languages": [{"id": "1001", "name": "Spanish"}],
+                                  "detailed": [{"id": "6003107902433", "name": "Soccer", "type": "interests"}]}
+
+
+def test_the_scenarios_are_the_lower_end_times_the_multipliers_and_the_flight_is_the_monthly_figure_times_the_months(graph):
+    graph.reach = (1_000_000, 1_200_000)
+    out = _estimate(months=3, languages=[], targeting=[])
+    block = out["meta"]
+    assert block["monthly"] == {"low": 4_300_000, "mid": 5_500_000, "high": 8_600_000}
+    assert block["scenarios"]["flight"] == {"conservative": 12_900_000, "mid": 16_500_000, "upper": 25_800_000} and block["scenarios"]["months"] == 3
+    assert (out["imps_low"], out["imps_mid"], out["imps_high"], out["est_uniques"], out["months"]) == (12_900_000, 16_500_000, 25_800_000, 1_000_000, 3)
+    assert block["scenarios"]["retail_spend_at_flight"] == {"conservative": 154_800.0, "mid": 198_000.0, "upper": 309_600.0}
+    assert block["budget_check"] == {"retail_budget": 2000.0, "media_budget": 1000.0, "retail_cpm": 12.0, "media_cpm_assumed": 6.0,
+                                     "retail_to_media_multiplier": 2.0, "months": 3, "budget_impressions": 166667}
+    assert block["language_note"] is None and block["audience"] == {"low": 1_000_000, "high": 1_200_000, "source": "meta_api"}
+
+
+def test_the_multipliers_follow_the_shared_settings_here_too(graph, monkeypatch):
+    graph.reach = (1_000_000, 1_000_000)
+    monkeypatch.setenv("CONSTANZA_AUDIENCE_X_CONSERVATIVE", "3")
+    monkeypatch.setenv("CONSTANZA_AUDIENCE_X_MID", "4")
+    monkeypatch.setenv("CONSTANZA_AUDIENCE_X_UPPER", "6")
+    out = _estimate(months=1, languages=[], targeting=[])
+    assert out["meta"]["monthly"] == {"low": 3_000_000, "mid": 4_000_000, "high": 6_000_000} and out["imps_mid"] == 4_000_000
+    assert "3 (conservative) / 4 (mid) / 6 (upper)" in out["notes"][1]
+
+
+def test_the_budget_cross_check_exists_only_when_a_budget_was_sent_and_the_card_never_needs_one(graph):
+    without = _estimate(retail_budget=None)
+    assert without["meta"]["budget_check"] is None and not any("Budget impressions" in n for n in without["notes"])
+    assert without["meta"]["scenarios"]["retail_spend_at_flight"] is not None             # the spend each scenario implies at the product's CPM stays
+    with_budget = _estimate(retail_budget=2000.0)
+    assert with_budget["meta"]["budget_check"]["budget_impressions"] == 166667 and any("Budget impressions" in n for n in with_budget["notes"])
+    assert (without["imps_mid"], without["est_uniques"]) == (with_budget["imps_mid"], with_budget["est_uniques"])    # the avails never depend on a budget
+    assert _estimate(retail_budget=3000.0, retail_cpm=20.0)["meta"]["budget_check"]["retail_cpm"] == 20.0
+
+
+@pytest.mark.parametrize("product,cpm", [(AWARENESS, 12.0), (TRAFFIC := "Facebook & Instagram Ads | Traffic / Conversion", 18.0),
+                                         ("Facebook & Instagram Ads | Lead Gen / Calls", 35.0)])
+def test_each_paid_sku_uses_its_own_confirmed_cpm_when_the_request_gives_none(product, cpm, graph):
+    out = _estimate(product=product, retail_budget=700.0)
+    assert out["meta"]["budget_check"]["retail_cpm"] == cpm and out["product_name"] == product
+    assert out["meta"]["budget_check"]["budget_impressions"] == round(350 * 1000 / (cpm / 2))
+
+
+def test_the_estimate_and_the_older_forecast_route_give_the_same_numbers_for_the_same_inputs(graph):
+    new = _estimate(months=2)
+    old = main.constanza_meta_forecast(main.MetaAuctionForecastRequest(
+        product_name=AWARENESS, retail_budget=2000, months=2, meta_geo_type="geo_market", meta_geo_key="803", meta_geo_label="Los Angeles · California · US",
+        age_min=25, age_max=44, gender="female", meta_targeting=[{"id": "6003107902433", "name": "Soccer", "type": "interests"}],
+        meta_languages=[{"id": "1001", "name": "Spanish"}]))
+    assert new["meta"]["scenarios"] == old["scenarios"]
+    assert new["meta"]["audience"] == {"low": old["potential_audience"]["lower"], "high": old["potential_audience"]["upper"], "source": "meta_api"}
+    assert new["meta"]["budget_check"] == {k: old[k] for k in ("retail_budget", "media_budget", "retail_cpm", "media_cpm_assumed", "retail_to_media_multiplier",
+                                                                 "months", "budget_impressions")}
+    assert new["notes"][:3] == old["notes"] and new["est_uniques"] == old["scenarios"]["est_uniques"]
+    assert new["imps_mid"] == old["scenarios"]["flight"]["mid"]
+    assert len(graph.calls) == 1                                                                 # the second asker was answered from memory: one question to Meta
+
+
+def test_the_older_route_keeps_its_answer_and_says_it_is_deprecated():
+    assert "DEPRECATED" in main.constanza_meta_forecast.__doc__ and "/api/constanza/estimate" in main.constanza_meta_forecast.__doc__
+
+
+def test_an_estimate_with_no_budget_is_not_refused_but_a_budget_of_zero_still_is(graph):
+    assert _estimate(retail_budget=None)["method"] == "meta"
+    graph.calls.clear()                                                                          # that estimate cost its one question; the refusals below must cost none
+    for bad in (0, -5):
+        with pytest.raises(HTTPException) as err:
+            _estimate(retail_budget=bad)
+        assert err.value.status_code == 422 and err.value.detail == "Retail budget must be between $0 and $1 billion for the full flight."
+    with pytest.raises(HTTPException) as err:
+        _estimate(retail_budget=2e9)
+    assert err.value.status_code == 422 and "between $0 and $1 billion" in err.value.detail
+    with pytest.raises(HTTPException) as err:
+        _estimate(retail_cpm=0)
+    assert err.value.status_code == 422 and err.value.detail == "Retail CPM must be a positive number."
+    assert graph.calls == []                                                                     # a refused budget or CPM never costs a call to Meta
+
+
+@pytest.mark.parametrize("args,message", [
+    ({}, "Choose where first: pick a place from Meta's list."),
+    ({"geo": None}, "Choose where first"),
+    ({"geo": {}}, "Choose where first"),
+    ("not an object", "must be an object"),
+    ({"geo": {"type": "planet", "key": "1"}}, "Select a valid Meta geography"),
+    ({"geo": {"type": "city", "key": ""}}, "Select a valid Meta geography"),
+    ({"geo": {"type": "city", "key": "a b"}}, "Select a valid Meta geography"),
+    ({"geo": {"type": "city", "key": "1"}, "age_min": 17}, "minimum age must be 18"),
+    ({"geo": {"type": "city", "key": "1"}, "age_max": 66}, "maximum age must be 18"),
+    ({"geo": {"type": "city", "key": "1"}, "age_min": 40, "age_max": 30}, "Minimum age cannot exceed maximum age"),
+    ({"geo": {"type": "city", "key": "1"}, "gender": "x"}, "Gender must be all, male, or female"),
+    ({"geo": {"type": "city", "key": "1"}, "languages": [{"id": str(i), "name": "n"} for i in range(1, 27)]}, "Choose at most 25 languages"),
+    ({"geo": {"type": "city", "key": "1"}, "languages": [{"id": "abc", "name": "n"}]}, "numeric Meta locale id"),
+    ({"geo": {"type": "city", "key": "1"}, "targeting": [{"id": "1", "name": "x", "type": "ethnic_affinity"}]}, "known type"),
+    ({"geo": {"type": "city", "key": "1"}, "targeting": [{"id": "x", "name": "x", "type": "interests"}]}, "numeric Meta id"),
+    ({"geo": {"type": "city", "key": "1"}, "retail_budget": "lots"}, "Retail budget must be between"),
+    ({"geo": {"type": "city", "key": "1"}, "retail_budget": float("nan")}, "Retail budget must be between"),
+    ({"geo": {"type": "city", "key": "1"}, "retail_budget": True}, "Retail budget must be between"),
+    ({"geo": {"type": "city", "key": "1"}, "retail_cpm": -1}, "Retail CPM must be a positive number"),
+])
+def test_a_request_meta_could_not_be_asked_is_refused_in_planner_words_before_any_call(args, message, graph):
+    with pytest.raises(ValueError, match=message):
+        meta.estimate_response(_method_request(args))
+    assert graph.calls == []
+
+
+def test_the_place_is_echoed_trimmed_and_a_blank_name_is_none_and_gender_defaults_to_all(graph):
+    args = meta.MetaArgs.from_dict({"geo": {"type": "city", "key": "2418956", "label": "   Austin, Texas   "}})
+    assert (args.geo_label, args.gender, args.age_min, args.age_max, args.languages, args.targeting) == ("Austin, Texas", "all", None, None, (), ())
+    assert meta.MetaArgs.from_dict({"geo": {"type": "zip", "key": "US:90210", "label": "  "}}).geo_label == ""
+    out = _estimate(geo={"type": "zip", "key": "US:90210"}, age_min=None, age_max=None, gender=None, languages=[], targeting=[])
+    assert out["meta"]["targeting"]["geo"] == {"type": "zip", "key": "US:90210", "label": None} and out["meta"]["targeting"]["gender"] == "all"
+    assert _spec_sent(graph) == {"geo_locations": {"zips": [{"key": "US:90210"}]}}                   # no age, no gender, no languages: nothing narrowed
+
+
+def test_a_country_is_sent_the_way_meta_documents_and_a_market_is_marked_as_comscore(graph):
+    out = _estimate(geo={"type": "country", "key": "US", "label": "United States"}, languages=[], targeting=[])
+    assert _spec_sent(graph)["geo_locations"] == {"countries": ["US"]}
+    assert not any("Comscore" in n for n in out["notes"])
+    market = _estimate(geo={"type": "geo_market", "key": "803", "label": "Los Angeles"}, languages=[], targeting=[])
+    assert any("Meta's TV markets are Comscore markets" in n for n in market["notes"])
+    assert any("default placements" in n for n in out["notes"]) and any("default placements" in n for n in market["notes"])
+
+
+def test_an_audience_meta_puts_at_zero_keeps_its_numbers_and_says_in_words_that_it_is_too_narrow_to_plan_on(graph):
+    """A lower end of 0 (under Meta's reporting floor) is not 'no audience': the numbers stay what the lower-end rule gives, but the card must not show
+    0 impressions with nothing to say what it means."""
+    graph.reach, graph.narrow_by_language = (0, 1000), False
+    out = _estimate(months=2)
+    assert (out["imps_low"], out["imps_mid"], out["imps_high"], out["est_uniques"]) == (0, 0, 0, 0)
+    assert out["meta"]["audience"] == {"low": 0, "high": 1000, "source": "meta_api"} and out["meta"]["budget_check"]["budget_impressions"] == 166667
+    assert out["notes"][0] == meta._TOO_NARROW_NOTE and "fewer than 1,000 accounts" in out["notes"][0] and "too narrow to plan on" in out["notes"][0]
+    methods.validate_standard(methods.get("meta"), out)
+    meta.reset_cache()
+    graph.reach = (1, 1000)                                                                           # one account is a figure, not the floor
+    assert meta._TOO_NARROW_NOTE not in _estimate(months=2)["notes"]
+    meta.reset_cache()
+    graph.reach = (1000, 1200)
+    assert meta._TOO_NARROW_NOTE not in _estimate(months=2)["notes"]
+
+
+def test_the_language_caveat_travels_only_with_a_language_and_two_identical_estimates_are_one_question_to_meta(graph):
+    assert _estimate(languages=[])["meta"]["language_note"] is None
+    assert _estimate()["meta"]["language_note"] == meta.LANGUAGE_NOTE
+    graph.calls.clear()
+    meta.reset_cache()
+    _estimate()
+    _estimate()
+    assert len(graph.calls) == 1
+
+
+def test_meta_failures_reach_the_planner_with_the_status_and_words_of_the_other_meta_routes(graph, monkeypatch):
+    for error, status, words in (({"message": "Too many calls", "code": 17}, 429, "rate-limiting"), ({"message": "Invalid", "code": 190}, 503, "access token"),
+                                 ({"message": "Bad targeting", "code": 100}, 422, "Meta refused these settings")):
+        graph.error, graph.http_status = error, 400
+        meta.reset_cache()
+        with pytest.raises(HTTPException) as err:
+            _estimate()
+        assert err.value.status_code == status and words in err.value.detail and TOKEN not in err.value.detail, error
+    graph.error = None
+    for name in ("META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID"):
+        monkeypatch.delenv(name)
+    with pytest.raises(HTTPException) as err:
+        _estimate()
+    assert err.value.status_code == 503 and "META_ACCESS_TOKEN and META_AD_ACCOUNT_ID" in err.value.detail and "Replit" in err.value.detail
+
+
+def test_an_estimate_asks_for_the_flight_the_dock_asked_and_a_month_count_out_of_range_is_the_routes_422(graph):
+    for months in (0, 121):
+        with pytest.raises(HTTPException) as err:
+            _estimate(months=months)
+        assert err.value.status_code == 422 and "Months must be between 1 and 120" in err.value.detail
+    assert _estimate(months=120)["meta"]["scenarios"]["months"] == 120 and _estimate(months=1)["months"] == 1
+
+
+def test_model_auction_without_a_budget_has_the_scenarios_and_null_budget_fields():
+    out = meta.model_auction(product_name=AWARENESS, retail_budget=None, audience_lower=1_000_000, audience_upper=1_200_000, months=3, audience_source="meta_api")
+    assert out["scenarios"]["flight"]["mid"] == 16_500_000 and out["scenarios"]["retail_spend_at_flight"]["mid"] == 198_000.0
+    assert (out["retail_budget"], out["media_budget"], out["budget_impressions"]) == (None, None, None) and out["retail_cpm"] == 12.0
+    assert len(out["notes"]) == 2 and not any("Budget impressions" in n for n in out["notes"])
+    assert meta.model_auction(product_name=AWARENESS, retail_budget=2000, audience_lower=10)["notes"][2].startswith("Budget impressions")      # with one: as before
+    for bad in (0, -1, float("nan"), True):
+        with pytest.raises(ValueError, match="Retail budget must be between"):
+            meta.model_auction(product_name=AWARENESS, retail_budget=bad, audience_lower=10)
+
+
+def test_model_auction_only_accepts_another_product_when_it_is_told_the_product_may_have_no_cpm_of_its_own():
+    with pytest.raises(ValueError, match="Choose one of the three paid"):
+        meta.model_auction(product_name="Search - SEM", retail_budget=1000, audience_lower=1000)
+    out = meta.model_auction(product_name="Search - SEM", retail_budget=1000, audience_lower=1000, months=2, strict_product=False)
+    assert (out["retail_cpm"], out["media_cpm_assumed"], out["budget_impressions"]) == (None, None, None)
+    assert out["scenarios"]["retail_spend_at_flight"] is None and out["scenarios"]["media_spend_at_flight"] is None and out["scenarios"]["flight"]["mid"] == 11_000
+    out = meta.model_auction(product_name="Search - SEM", retail_budget=1000, audience_lower=1000, retail_cpm=20, strict_product=False)
+    assert out["budget_impressions"] == 50_000 and out["scenarios"]["retail_spend_at_flight"]["mid"] == 110.0       # $1,000 retail = $500 media at a $10 media CPM; 5,500 imps x $20 / 1000
+    out = meta.model_auction(product_name="Search - SEM", retail_budget=None, audience_lower=1000, strict_product=False)
+    assert out["scenarios"]["flight"]["mid"] == 5_500 and out["retail_budget"] is None
+
+
+def test_the_meta_status_is_the_standard_one_and_the_spec_describes_the_method(graph):
+    assert methods.validate_status(meta.SPEC, meta.status())["account"] == "…2345"
+    spec = methods.get("meta")
+    assert spec is meta.SPEC and spec.owns_geography and spec.request_field == "meta" and spec.errors == (meta.MetaAPIError,)
+    assert spec.secrets == ("META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID") and spec.default_products == tuple(meta.RETAIL_CPMS)
+    assert spec.product_info(AWARENESS) == {"retail_cpm": 12.0} and spec.product_info("Search - SEM") == {"retail_cpm": None}
+    assert spec.http_error(meta.MetaAPIError("rate limited", "rate_limit", 429)) == (429, "rate limited")

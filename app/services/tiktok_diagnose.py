@@ -17,26 +17,16 @@ import json
 import re
 import sys
 import time
-from dataclasses import dataclass
 from typing import Callable, Optional
 
 from app.data.constanza import load_dma_reference
 from app.services import constanza_tiktok as ct
 from app.services import tiktok_client, tiktok_geo
 from app.services.constanza_geo import GeoResolution, ResolvedArea
+from app.services.constanza_methods import Check            # one type for every method's connection test (re-exported here)
 from app.services.tiktok_client import TikTokAPIError, TikTokClient
 
 SAMPLE_SIZE = 40                    # markets tried when only a sample is asked for
-@dataclass
-class Check:
-    name: str
-    ok: bool
-    detail: str
-    warn: bool = False                # worked, but something deserves a look
-    seconds: float = 0.0
-
-    def to_public(self) -> dict:
-        return {"name": self.name, "ok": self.ok, "warn": self.warn and self.ok, "detail": self.detail, "seconds": round(self.seconds, 2)}
 
 
 def _area(dma) -> ResolvedArea:

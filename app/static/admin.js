@@ -30,7 +30,8 @@ const adminState = {
   disclaimersLoaded: false,
   disclaimerEditingId: null,
   restrictions: null,
-  forecast: null,     // Admin -> Forecast: {products, coverage, platforms, families, summary} from /api/admin/forecast-map
+  forecast: null,     // Admin -> Forecast: {products, methods, coverage, platforms, families, summary} from /api/admin/forecast-map
+  methods: null,      // Admin -> Forecast: the methods the server knows (GET /api/admin/constanza/methods: the registry, no product table), what the connection cards are drawn from
   forecastLoaded: false,
   faq: [],            // the Process FAQs rows: [{id, section, services, question, link_title, link_url}]
   faqLoaded: false,
@@ -1802,43 +1803,128 @@ function wireForecast() {
   document.getElementById("fc-search").addEventListener("input", renderForecastRows);
   document.getElementById("fc-family-filter").addEventListener("change", renderForecastRows);
   document.getElementById("fc-only-on").addEventListener("change", renderForecastRows);
-  document.getElementById("fc-tt-test").addEventListener("click", testTikTokConnection);
+  // The connection cards are drawn (and redrawn) from the method list, so one listener on their container serves every card.
+  document.getElementById("fc-connections").addEventListener("click", e => {
+    const btn = e.target.closest("[data-conn-test]");
+    if (btn) testConnection(btn.dataset.connTest);
+  });
 }
 
-// ---- TikTok connection (Admin -> Forecast): is it set up, and a one-click end-to-end check. No secret is ever shown. ----------
-let _ttTesting = false;                    // a test is running: the button stays off until it ends, whatever else refreshes the status
+// ---- Connections (Admin -> Forecast): one card per live-API method, drawn from the method list the server keeps (GET /api/admin/
+// constanza/methods: the registry, no product table, no database). Each says whether it is set up and has a one-click end-to-end check.
+// No secret is ever shown: the names of the settings that are missing, never a value. ------------------------------------------------
+const _connTesting = {};                   // method key -> a test is running: its button stays off until it ends, whatever else refreshes the status
+const _CONN_PATH = /^\/api\/[a-z0-9_\/-]+$/;      // the status / test addresses come from the server's list, but only an app address is ever fetched
 
-async function loadTikTokStatus() {
-  const state = document.getElementById("fc-tt-state");
-  const btn = document.getElementById("fc-tt-test");
+function _apiMethods() {
+  return (adminState.methods || []).filter(m => m && m.kind === "api");
+}
+
+function _connMethod(key) {
+  return _apiMethods().find(m => m.key === key);
+}
+
+function _connPath(m, field, fallback) {
+  return typeof m[field] === "string" && _CONN_PATH.test(m[field]) ? m[field] : fallback;
+}
+
+function _connIds(key) {
+  return { head: `fc-conn-${key}-head`, state: `fc-conn-${key}-state`, test: `fc-conn-${key}-test`, note: `fc-conn-${key}-note`, checks: `fc-conn-${key}-checks` };
+}
+
+// A secret that is missing is "NAME"; one that is set but cannot be right is "NAME (what is wrong with it)": the name goes in <code>.
+function _connMissingHtml(missing) {
+  return (missing || []).map(entry => {
+    const text = String(entry);
+    const cut = text.search(/\s/);
+    const name = cut === -1 ? text : text.slice(0, cut);
+    const why = cut === -1 ? "" : text.slice(cut).trim();
+    return `${why ? "fix" : "add"} <code>${escapeHtml(name)}</code>${why ? ` ${escapeHtml(why)}` : ""}`;
+  }).join(" and ");
+}
+
+// Several cards sit on the page, so each names itself to a screen reader: the section is labelled by its heading, the button says which connection it
+// tests (beginning with its visible words), and the state and the outcome of a test are status regions, so a failed test (429, 500, no network) is read out.
+function _connCardHtml(m) {
+  const ids = _connIds(m.key);
+  const secrets = (m.secrets || []).map(x => `<code>${escapeHtml(x)}</code>`).join(" and ");
+  return `
+      <section class="fc-conn-card" data-conn="${escapeAttr(m.key)}" aria-labelledby="${ids.head}">
+        <h2 class="fc-subhead" id="${ids.head}">${escapeHtml(m.short_label || m.label || m.key)} connection</h2>
+        <p class="rs-hint">${escapeHtml(m.description || "")}${secrets ? ` It needs ${(m.secrets || []).length === 1 ? "this secret" : "these secrets"} in the app's environment (Replit &rarr; Secrets): ${secrets}.` : ""} Nothing is ever written to ${escapeHtml(m.short_label || m.label || m.key)}.</p>
+        <div class="fc-conn">
+          <span class="fc-conn-state" id="${ids.state}" role="status">Checking…</span>
+          <button type="button" class="btn-secondary" id="${ids.test}" data-conn-test="${escapeAttr(m.key)}" aria-label="Test the connection to ${escapeAttr(m.short_label || m.label || m.key)}" disabled>Test the connection</button>
+          <span class="fc-saved" id="${ids.note}" role="status"></span>
+        </div>
+        <ul class="fc-conn-checks" id="${ids.checks}" aria-live="polite"></ul>
+      </section>`;
+}
+
+// Draws the cards for the methods that do not have one yet (a card already on the screen is left alone: it may be showing a test's checks), then asks each for its status.
+function renderConnectionCards() {
+  const host = document.getElementById("fc-connections");
+  if (!host) return;
+  _apiMethods().forEach(m => {
+    if (!host.querySelector(`[data-conn="${CSS.escape(m.key)}"]`)) host.insertAdjacentHTML("beforeend", _connCardHtml(m));
+  });
+  _apiMethods().forEach(m => loadConnectionStatus(m.key));
+}
+
+async function loadConnections() {
+  const host = document.getElementById("fc-connections");
   try {
-    const res = await fetch("/api/constanza/tiktok/status");
-    const s = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(s.detail, res.statusText));
-    if (s.configured) {
-      state.innerHTML = `<span class="fc-badge fc-custom">Connected</span> ad account ${escapeHtml(s.advertiser || "")} · impressions = lower-end audience × ${escapeHtml(((s.scenarios && s.scenarios.multipliers) ? [s.scenarios.multipliers.conservative, s.scenarios.multipliers.mid, s.scenarios.multipliers.upper] : [s.impressions_per_person]).join(" / "))}`;
-    } else {
-      state.innerHTML = `<span class="fc-badge fc-default">Not connected</span> add <code>${s.missing.map(escapeHtml).join("</code> and <code>")}</code> to the app's secrets`;
-    }
-    btn.disabled = !s.configured;                  // (a running test holds the button off with aria-disabled instead: see testTikTokConnection)
-    btn.title = s.configured ? "" : "Add the TikTok secrets first";
+    const res = await fetch("/api/admin/constanza/methods");
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    adminState.methods = Array.isArray(data) ? data : (data.methods || []);
+    if (host) { const err = host.querySelector("[data-conn-error]"); if (err) err.remove(); }
+    renderConnectionCards();
   } catch (e) {
-    state.textContent = `Couldn't read the TikTok status: ${e.message}`;
+    if (host && !host.querySelector("[data-conn]")) host.innerHTML = `<p class="rs-hint fc-err" data-conn-error>Couldn't read the connections: ${escapeHtml(e.message)}</p>`;
   }
 }
 
-async function testTikTokConnection() {
-  const btn = document.getElementById("fc-tt-test");
-  const list = document.getElementById("fc-tt-checks");
-  const note = document.getElementById("fc-tt-note");
-  if (_ttTesting) return;
-  _ttTesting = true;
+async function loadConnectionStatus(key) {
+  const m = _connMethod(key);
+  const ids = _connIds(key);
+  const state = document.getElementById(ids.state);
+  const btn = document.getElementById(ids.test);
+  if (!m || !state || !btn) return;
+  const word = m.short_label || m.label || key;
+  try {
+    const res = await fetch(_connPath(m, "status_url", `/api/constanza/${key}/status`));
+    const s = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(detailText(s.detail, res.statusText));
+    if (s.configured) {
+      const mult = s.scenarios && s.scenarios.multipliers;
+      const times = mult ? [mult.conservative, mult.mid, mult.upper] : (s.impressions_per_person != null ? [s.impressions_per_person] : []);
+      const account = s.account || s.advertiser;
+      state.innerHTML = `<span class="fc-badge fc-custom">Connected</span>${account ? ` ad account ${escapeHtml(account)}` : ""}${times.length ? ` · impressions = lower-end audience × ${escapeHtml(times.join(" / "))}` : ""}`;
+    } else {
+      state.innerHTML = `<span class="fc-badge fc-default">Not connected</span> ${_connMissingHtml(s.missing)} in the app's secrets`;
+    }
+    btn.disabled = !s.configured;                  // (a running test holds the button off with aria-disabled instead: see testConnection)
+    btn.title = s.configured ? "" : `Set up the ${word} secrets first`;
+  } catch (e) {
+    state.textContent = `Couldn't read the ${word} status: ${e.message}`;
+  }
+}
+
+async function testConnection(key) {
+  const m = _connMethod(key);
+  const ids = _connIds(key);
+  const btn = document.getElementById(ids.test);
+  const list = document.getElementById(ids.checks);
+  const note = document.getElementById(ids.note);
+  if (!m || !btn || !list || !note || _connTesting[key]) return;
+  _connTesting[key] = true;
   btn.setAttribute("aria-disabled", "true");     // not `disabled`: that would drop the keyboard focus of the person who just pressed it
   note.classList.remove("fc-err");
-  note.textContent = "Checking with TikTok… (about 10–20 seconds)";
+  note.textContent = `Checking with ${m.short_label || m.label || key}… (about 10–20 seconds)`;
   list.innerHTML = "";
   try {
-    const res = await fetch("/api/admin/tiktok/test", { method: "POST" });
+    const res = await fetch(_connPath(m, "test_url", `/api/admin/constanza/${key}/test`), { method: "POST" });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
     list.innerHTML = (data.checks || []).map(c => {
@@ -1853,14 +1939,14 @@ async function testTikTokConnection() {
     note.textContent = e.message;
     note.classList.add("fc-err");
   } finally {
-    _ttTesting = false;
+    _connTesting[key] = false;
     btn.removeAttribute("aria-disabled");
-    loadTikTokStatus();
+    loadConnectionStatus(key);
   }
 }
 
 async function loadForecast() {
-  loadTikTokStatus();                      // the connection card does not wait for the product table (or depend on it): it says what it can at once
+  loadConnections();                       // the connection cards do not wait for the product table (or depend on it): they say what they can at once
   try {
     const res = await fetch("/api/admin/forecast-map");
     const data = await res.json().catch(() => ({}));
@@ -1909,13 +1995,30 @@ function renderForecastWinRateNote() {
     + `(<code>CONSTANZA_WIN_RATE_LOW / _MID / _HIGH</code>${prime != null ? ", <code>CONSTANZA_WIN_RATE_PRIME</code>" : ""}). Auto skips Roku Ads (bought directly in Roku’s Ads Manager); the <em>Win rate</em> column corrects any product${chosen ? ` — ${chosen} set by hand` : ""}.`;
 }
 
+// The counts the server keeps per method: summary[<key>], except that platform data kept its older name.
+const _FORECAST_SUMMARY_KEY = { platform: "platform_modeled" };
+
+// The methods an admin can choose: the forecast map's own list, else the light one the connection cards were drawn from.
+function _forecastMethods() {
+  return (adminState.forecast && adminState.forecast.methods) || adminState.methods || [];
+}
+
+function _forecastMethodByKey(key) {
+  return _forecastMethods().find(m => m.key === key);
+}
+
 function renderForecastSummary() {
   const sm = adminState.forecast.summary;
+  // an API method with no product on it yet says nothing (the connection card above is where it is set up)
+  const methodCards = _forecastMethods().map(m => {
+    const count = sm[_FORECAST_SUMMARY_KEY[m.key] || m.key] || 0;
+    if (m.kind === "api" && !count) return "";
+    const title = m.kind === "api" && !/\bAPI\b/i.test(m.short_label || "") ? `${m.short_label || m.label} API` : (m.short_label || m.label || m.key);
+    return _analyticsStatCard(title, count, m.summary_text || "");
+  }).join("");
   document.getElementById("fc-summary").innerHTML =
     _analyticsStatCard("Products with the button", sm.enabled, `of ${sm.total} in the catalog`) +
-    _analyticsStatCard("Platform data", sm.platform_modeled, "modeled from the DMA avails data") +
-    _analyticsStatCard("Population share", sm.generic, "the line's budget, spread by population") +
-    (sm.tiktok ? _analyticsStatCard("TikTok API", sm.tiktok, "a live audience-size estimate from TikTok") : "") +
+    methodCards +
     _analyticsStatCard("Customized", sm.customized, "differ from the built-in default");
 }
 
@@ -1947,7 +2050,7 @@ function renderForecastCoverage() {
 }
 
 // The win-rate cell: Auto (what the built-in rule gives this product, said in words), Apply, or Don't apply. Not for a product
-// that is not forecast from platform data (a population-share estimate spreads the planner's own total; TikTok has its own API).
+// that is not forecast from platform data (a population-share estimate spreads the planner's own total; a live API method has its own audience).
 function _forecastWinRateHtml(p, isPlatform) {
   if (!isPlatform) return `<span class="fc-na" title="Only platform data has avails to win">—</span>`;
   const choice = p.win_rate_override === true ? "apply" : (p.win_rate_override === false ? "skip" : "auto");
@@ -1966,20 +2069,22 @@ function _forecastRowHtml(p) {
     `<option value="${escapeAttr(pl.key)}" ${p.platform === pl.key ? "selected" : ""}>${escapeHtml(pl.label)}</option>`).join("");
   const isPlatform = p.method === "platform";
   const def = p.default || {};
-  const defaultText = def.enabled
-    ? `On · ${def.method === "platform" ? "platform data" : (def.method === "tiktok" ? "TikTok API (live)" : "population share")}`
-    : "Off";
+  const defaultMethod = _forecastMethodByKey(def.method);
+  const defaultText = def.enabled ? `On · ${defaultMethod ? defaultMethod.label : def.method}` : "Off";
+  const chosen = _forecastMethodByKey(p.method);
+  // A live-audience method describes the ad platform's own account: say so when a product that is not one of its defaults is switched to it.
+  const mappingHint = chosen && chosen.kind === "api" && def.method !== chosen.key
+    ? `<div class="fc-hint">This estimate describes ${escapeHtml(chosen.short_label || chosen.label)}'s own ad account audience; use it only for a product bought there.</div>` : "";
+  const methodOptions = _forecastMethods().map(m =>
+    `<option value="${escapeAttr(m.key)}" ${p.method === m.key ? "selected" : ""}>${escapeHtml(m.label)}</option>`).join("");
   return `
     <tr class="fc-row ${p.enabled ? "fc-on" : "fc-off"}" data-fc-product="${escapeAttr(p.name)}">
       <td class="wrap">${escapeHtml(p.name)}</td>
       <td>${escapeHtml(p.family)}</td>
       <td><label class="fc-toggle"><input type="checkbox" data-fc="enabled" ${p.enabled ? "checked" : ""} /> <span>${p.enabled ? "On" : "Off"}</span></label></td>
       <td>
-        <select data-fc="method" aria-label="What it computes">
-          <option value="platform" ${isPlatform ? "selected" : ""}>Platform data</option>
-          <option value="generic" ${p.method === "generic" ? "selected" : ""}>Population share</option>
-          <option value="tiktok" ${p.method === "tiktok" ? "selected" : ""}>TikTok API (live)</option>
-        </select>
+        <select data-fc="method" aria-label="What it computes">${methodOptions}</select>
+        ${mappingHint}
       </td>
       <td>
         <select data-fc="platform" aria-label="Platform data" ${isPlatform ? "" : "disabled"}>

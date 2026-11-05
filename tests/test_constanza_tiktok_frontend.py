@@ -74,7 +74,7 @@ def run_factory(snippet: str):
 
 
 DATA = {
-    "product_name": "Tiktok Ads", "platform": "tiktok", "confidence": "live_api", "geo_method": "exact_dma", "geo_confidence": "high",
+    "method": "tiktok", "product_name": "Tiktok Ads", "platform": "tiktok", "confidence": "live_api", "geo_method": "exact_dma", "geo_confidence": "high",
     "months": 2, "imps_low": 1_857_600, "imps_mid": 2_376_000, "imps_high": 3_715_200, "est_uniques": 216_000, "reach_universe": None,
     "series": None, "weeks": None, "notes": ["TikTok note."], "unmatched_geo_tokens": [], "unmatched_geo_details": [], "ambiguous": [],
     "geo_interpretations": [], "geo_suggestions": [], "by_area": [],
@@ -116,7 +116,9 @@ def test_the_styles_for_the_panel_and_the_verdict_exist():
 
 
 def test_the_host_has_the_slot_and_the_hooks_the_panel_relies_on():
-    for hook in ('id="cz-method-forms"', "registerMethod", "activePlugin()", "plug.requestPart()", "plug.canPull", "plug.headlineHtml", "plug.cardHtml", "applyMethodUI"):
+    # (the host calls a method through its guards, so what it relies on is the member's name handed to guard() / pluginHtml())
+    for hook in ('id="cz-method-forms"', "registerMethod", "activePlugin()", 'guard(plug, "requestPart"', 'guard(plug, "canPull"', 'pluginHtml(plug, "headlineHtml"',
+                 'pluginHtml(plug, "cardHtml"', "applyMethodUI"):
         assert hook in CZ_JS, hook
 
 
@@ -303,6 +305,22 @@ def test_the_badge_says_the_numbers_are_live_from_tiktok_and_not_a_population_sh
     assert "TikTok API · live" in out and "Population-share" not in out and "High geo confidence" in out
 
 
+def test_the_panel_tells_the_dock_what_the_dock_used_to_know_about_tiktok_itself():
+    """The dock names no method any more: the group in the picker, the note under the product, the badge and what an Insert files as the geography are the
+    panel's own words, and `caps.autoPull: "geo"` says Step 05 pulls it from the proposal's geography as it always has. The markup is the dock's old one, byte for byte."""
+    out = run(f"""
+        var d = {json.dumps(DATA)};
+        return JSON.stringify({{ label: TT.channelLabel, source: TT.sourceLabel, caps: TT.caps, badge: TT.badgeHtml(d), info: TT.geoInfo(d), viaHost: window.Constanza.geoInfo(d),
+          state: window.Constanza.methodState('tiktok'), badges: P.badgesHtml(d) }});""")
+    assert out["label"] == "TikTok · live audience estimate" and out["source"] == "Live from TikTok" and out["caps"] == {"autoPull": "geo"}
+    assert out["badge"] == '<span class="cz-badge cz-reported" title="Asked of TikTok\'s own audience-size estimator just now">TikTok API · live</span>'
+    assert out["badges"].startswith(out["badge"]) and "High geo confidence" in out["badges"]
+    assert out["info"] == {"method": "exact_dma", "dmas": ["Los Angeles"], "unmatched_tokens": [], "win_rate": None, "hispanic_share": None}
+    assert out["viaHost"] == out["info"]                                                         # the dock hands an Insert the panel's answer, and it is what the data path would say
+    assert out["state"]["kind"] == "plugin" and out["state"]["caps"] == {"ownsGeography": False, "persist": False, "autoPull": "geo", "lineMonths": False}
+    assert out["state"]["legacyKey"] is None and out["state"]["label"] == "Live from TikTok"
+
+
 def test_the_step_05_card_shows_the_audience_and_says_it_is_the_geography_alone():
     out = run(f"""
         var el = {{ style: {{}}, innerHTML: '', querySelector: function () {{ return {{ addEventListener: function () {{}}, innerHTML: '' }}; }} }};
@@ -314,8 +332,17 @@ def test_the_step_05_card_shows_the_audience_and_says_it_is_the_geography_alone(
 
 
 def test_a_tiktok_product_has_its_own_group_in_the_picker_and_no_budget_to_spread():
-    assert 'tiktok: "TikTok · live audience estimate"' in CZ_JS and '"tiktok", "_generic"' in CZ_JS
+    # the group, its heading and the note under the product come from the panel (the dock names no method), the group key is "m:<channel>"
+    assert 'channelLabel: "TikTok · live audience estimate"' in TT_JS and 'sourceLabel: "Live from TikTok"' in TT_JS
+    assert 'const groupOf = (plug) => "m:" + (plug.channel || keyOf(plug));' in CZ_JS and "CHANNEL_ORDER.concat(groupKeys" in CZ_JS
     assert "!pluginOf(p) && !!((p && p.method === \"generic\")" in CZ_JS
+    out = run("""
+        state.catalog = { families: ['Social', 'Entravision Plus'], products_by_family: {
+          'Social': [{ name: 'Tiktok Ads', family: 'Social', forecast: { enabled: true, method: 'tiktok' } }],
+          'Entravision Plus': [{ name: 'Roku', family: 'Entravision Plus', forecast: { enabled: true, method: 'platform', series: { key: 'roku', channel: 'platform_model' } } }] } };
+        var list = P.loadProducts().map(function (p) { return [p.name, p.channel]; });
+        return JSON.stringify({ list: list, note: P.seriesMeta(null, 'tiktok') });""")
+    assert out == {"list": [["Tiktok Ads", "m:tiktok"], ["Roku", "platform_model"]], "note": "Live from TikTok"}
 
 
 def test_the_panel_updates_its_buttons_in_place_and_only_rebuilds_them_when_the_menus_change():
@@ -336,7 +363,7 @@ def test_browsing_every_category_is_the_shared_pop_up_and_not_a_dump_of_chips():
 
 
 def test_the_page_tells_the_panel_when_a_pull_failed_so_a_stale_connection_banner_refreshes():
-    assert "plug.onError(r.status)" in CZ_JS and "onError" in TT_JS and "loadStatus(true)" in TT_JS
+    assert 'guard(plug, "onError", [r.status])' in CZ_JS and "onError" in TT_JS and "loadStatus(true)" in TT_JS
 
 
 def test_the_chip_button_style_does_not_reset_the_chip_font_size():
@@ -355,6 +382,14 @@ def test_the_panel_markup_is_a_banner_then_four_sections_in_order_and_never_asks
     assert html.count('class="aud-sec"') == 4 and '<details class="aud-sec" id="cz-tt-more">' in html      # "More targeting" folds, the others do not
     assert "cz-geo" not in html and ">Where<" not in html                                                   # the geography is the dock's own box
     assert "18+ · TikTok leaves out under-18s" in html and "language people have set in their TikTok app" in html
+
+
+def test_the_connection_banner_is_drawn_once_as_a_status_region_with_nothing_in_it_yet():
+    import re
+    html = run("return JSON.stringify(TT._pure.formHtml());")
+    banner = re.search(r'<div id="cz-tt-status"[^>]*>(.*?)</div>', html, re.S)
+    assert banner and 'role="status"' in banner.group(0).split(">", 1)[0]                   # announced when its words change (checking, connected, not connected, couldn't check)
+    assert banner.group(1) == "" and html.count('id="cz-tt-status"') == 1                    # the words come from renderStatus, which replaces only the contents of this one element
 
 
 def test_each_clear_button_has_a_name_that_says_what_it_clears_and_none_sits_inside_the_folding_summary():
