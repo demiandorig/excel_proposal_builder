@@ -1,0 +1,26 @@
+name: Deployment preflight
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Conflict markers and Python compilation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check for unresolved conflict markers
+        run: python scripts/check_conflict_markers.py
+
+      - name: Compile application Python sources
+        run: python -m compileall -q app
