@@ -2,9 +2,9 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 psycopg[binary]>=3.2
 psycopg-pool>=3.2   # app/db.py: the small bounded connection pool (falls back to one connection per call if missing)
-python-multipart>=0.0.9
+python-multipart>=0.0.32
 openpyxl>=3.1
-Pillow>=10.0
+Pillow>=13.0.0
 pydantic>=2.0
 openai>=1.50   # needs the Responses API (client.responses) for Step 05's web_search_preview tool
 python-docx>=1.1
@@ -12,10 +12,18 @@ python-pptx>=1.0   # the Net/Gross signature-ready PowerPoint export (Step 07)
 python-dotenv>=1.0   # loads .env at startup (OPENAI_API_KEY, DRIVE_* creds, etc.)
 requests>=2.31   # app/services/notion_client.py (Step 01 "search Notion requests") and gamma_client.py ("Create in Gamma")
 
+# Security floors for transitive dependencies: keep fresh builds and existing
+# environments above the patched releases, even when a parent permits older ones.
+certifi>=2026.10.18
+httpx2>=2.12.0,<3   # OpenAI's HTTP client (also used by Starlette's test client)
+httpcore2>=2.12.0   # HTTPX2's transport
+protobuf>=6.33.5,<8   # Google API client dependency; includes the JSON recursion fix
+
 # Optional — only needed if you want the /api/drive/upload endpoint to
 # actually upload to Google Drive. Without these installed (or without the
 # env vars set), Drive upload returns a graceful "not configured" stub.
 google-api-python-client>=2.100
+google-api-core>=2.34.0   # patched protobuf support; older parents can cap protobuf below the security floor
 google-auth>=2.20
 google-auth-httplib2>=0.2
 google-auth-oauthlib>=1.0
