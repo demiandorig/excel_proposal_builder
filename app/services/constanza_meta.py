@@ -12,7 +12,9 @@ What the planner can set, all from Meta itself (nothing is typed from memory):
   * geography: Meta's own geography search (DMA "geo markets", cities, regions, ZIPs, countries) - the planner picks the exact key, nothing is guessed;
   * age (18-65) and gender;
   * interests and behaviors (and the other "detailed targeting" lists): searched or browsed from Meta's `search` endpoint, then sent in the
-    targeting spec as ONE `flexible_spec` group, so the audience is "people who match ANY of the chosen interests / behaviors".
+    targeting spec as ONE `flexible_spec` group, so the audience is "people who match ANY of the chosen interests / behaviors";
+  * languages (most Entravision campaigns target Spanish speakers): Meta's own list of locales (`search?type=adlocale`), sent as the spec's
+    `locales`. See `build_targeting_spec` for how they combine with the rest and LANGUAGE_NOTE for what a "language" is to Meta.
 
 Setup (the app runs fine without it - every caller checks `is_configured()`):
     META_ACCESS_TOKEN     a long-lived token (a system user's is best) that can READ the ad account: the `ads_read` permission
@@ -22,6 +24,11 @@ Setup (the app runs fine without it - every caller checks `is_configured()`):
     META_APP_SECRET          only if the Meta app has "Require App Secret" switched on: every call then carries an `appsecret_proof`
 Read-only: a reach estimate and the targeting lists; nothing is ever created in the ad account. The token is only sent in the Authorization
 header and is removed from every message this module raises.
+
+Meta is also a registered Constanza METHOD (constanza_methods.py): `estimate_response` below is what POST /api/constanza/estimate answers for a
+Meta product - the standard estimate plus a `meta` block - and the geography is Meta's own (the planner picks the place from Meta's search, so
+`owns_geography` is true and Constanza's Nielsen geography is not resolved for it). `model_auction` is the one place the scenarios and the budget
+cross-check are computed; the older POST /api/constanza/meta-forecast uses it too, so both give the same numbers.
 
 Two things the figure is NOT: it counts people active on Meta's DEFAULT placements (Facebook, Instagram, Messenger, Audience Network, ...), the
 same as Ads Manager's "Estimated audience size", not only Facebook and Instagram; and `geo_market` is Meta's Comscore Markets (Meta moved off
@@ -37,13 +44,15 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
 import requests
 
 from app import catalog
-from app.services import platform_scenarios
+from app.services import constanza_methods, platform_scenarios
+from app.services.constanza_methods import MethodRequest, MethodSpec
 
 log = logging.getLogger(__name__)
 
@@ -63,10 +72,29 @@ _GEO_FIELDS = {"country": "countries", "region": "regions", "city": "cities", "z
 TARGETING_KEYS = ("interests", "behaviors", "life_events", "industries", "income", "family_statuses", "politics", "generation",
                   "home_ownership", "home_type", "home_value", "household_composition", "net_worth", "office_type", "moms")
 MAX_TARGETING_ITEMS = 50
+# What a chosen option may carry. One place for the lists (_item), the check of a pick (_clean_targeting) and the request model in main.py, so a row
+# the lists offer is always one a request can carry: the model's limit for `type` is the longest key above, never a number typed in separately.
+MAX_TARGETING_ID_LENGTH = 30
+MAX_NAME_LENGTH = 120
+MAX_TARGETING_TYPE_LENGTH = max(len(key) for key in TARGETING_KEYS)
+_TARGETING_ID_RE = re.compile(rf"[0-9]{{1,{MAX_TARGETING_ID_LENGTH}}}")
+# Meta documents a limit of 50 locales in a targeting spec; a planner never needs close to that many, so the app stops at half.
+MAX_LOCALES = 25
+_LOCALE_ID_RE = re.compile(r"[1-9][0-9]{0,9}")           # a locale id is a positive whole number (Meta's reference: `key`, e.g. 6 = English (US))
+_LOCALE_LIST_LIMIT = 1000                                 # Meta's own advice for "all of them": a blank `q` with limit=1000
+_LOCALE_SEARCH_LIMIT = 50                                 # a keyword search (Meta's default of 8 would hide the regional variants)
+_LANGUAGE_TTL = 12 * 3600
 # kind -> the `class` Meta's adTargetingCategory browse takes (interests are also searchable by keyword: type=adinterest)
 CATALOG_CLASSES = {"interests": "interests", "behaviors": "behaviors", "demographics": "demographics"}
 _CATALOG_TTL = 12 * 3600
 _ESTIMATE_TTL = 600
+
+# What Meta's "language" is, in the words the panel shows next to the language picker (and returns from the status and languages routes).
+LANGUAGE_NOTE = (
+    "Meta's languages are the language people have set Facebook or Instagram to, not a count of who speaks it. A Spanish speaker whose app is "
+    "set to English is not included, so a Spanish audience can come out smaller than the Spanish-speaking population. Leave languages empty to "
+    "count everyone in the geography, whatever language they use."
+)
 
 
 class MetaAPIError(Exception):
@@ -91,23 +119,45 @@ def product_cpm(product_name: str) -> Optional[float]:
     return RETAIL_CPMS[next(iter(matches))] if len(matches) == 1 else None
 
 
+BUDGET_MESSAGE = "Retail budget must be between $0 and $1 billion for the full flight."
+CPM_MESSAGE = "Retail CPM must be a positive number."
+
+
+def _check_retail_budget(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 < value <= 1e9) or value != value:
+        raise ValueError(BUDGET_MESSAGE)
+    return value
+
+
+def _check_retail_cpm(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 < value <= 1e5) or value != value:
+        raise ValueError(CPM_MESSAGE)
+    return value
+
+
 def model_auction(
-    *, product_name: str, retail_budget: float, audience_lower: Optional[int] = None,
+    *, product_name: str, retail_budget: Optional[float], audience_lower: Optional[int] = None,
     audience_upper: Optional[int] = None, months: int = 1, audience_source: str = "manual",
-    retail_cpm: Optional[float] = None,
+    retail_cpm: Optional[float] = None, strict_product: bool = True,
 ) -> dict:
     """The planning numbers for one Meta line: three impression scenarios from the lower-end audience, and the budget cross-check.
 
-    `audience_lower` is the LOWER end of the platform's range (what the scenarios multiply); `audience_upper` is context (a manual entry may
-    give only the lower end). Without an audience there are no scenarios, only the budget figure."""
+    `audience_lower` is the LOWER end of the platform's range (what the scenarios multiply); `audience_upper` is context (a caller may give only the
+    lower end). `audience_source` says where the range came from: "meta_api" for a live pull, "manual" for bounds a caller supplied itself (the panel
+    never does; snapshots saved before it pulled everything from Meta carry it). Without an audience there are no scenarios, only the budget figure.
+
+    `retail_budget` None means "no cross-check": the budget fields come back null (an explicit 0 or a negative number is still refused). With
+    `strict_product` (the default, what POST /meta-forecast uses) the product must be one of the three paid SKUs; the estimate route passes
+    False because an admin may map the Meta method to another product, which then has no planning CPM of its own: the CPM is the one the caller
+    gives, or none, and without a CPM there is no spend figure and no budget cross-check."""
     default_cpm = product_cpm(product_name)
-    if default_cpm is None:
+    if default_cpm is None and strict_product:
         raise ValueError("Choose one of the three paid Facebook & Instagram Ads products.")
     cpm = default_cpm if retail_cpm is None else retail_cpm
-    if not isinstance(retail_budget, (int, float)) or not (0 < retail_budget <= 1e9) or retail_budget != retail_budget:
-        raise ValueError("Retail budget must be between $0 and $1 billion for the full flight.")
-    if not isinstance(cpm, (int, float)) or not (0 < cpm <= 1e5) or cpm != cpm:
-        raise ValueError("Retail CPM must be a positive number.")
+    if retail_budget is not None:
+        _check_retail_budget(retail_budget)
+    if cpm is not None:
+        _check_retail_cpm(cpm)
     if not isinstance(months, int) or isinstance(months, bool) or not 1 <= months <= 120:
         raise ValueError("Months must be a whole number from 1 to 120.")
     if audience_upper is not None and audience_lower is None:
@@ -120,9 +170,9 @@ def model_auction(
     if audience_source not in ("manual", "meta_api"):
         raise ValueError("Audience source must be manual or meta_api.")
 
-    media_budget = retail_budget / RETAIL_TO_MEDIA
-    media_cpm = cpm / RETAIL_TO_MEDIA
-    budget_imps = round(media_budget * 1000 / media_cpm)
+    media_budget = None if retail_budget is None else retail_budget / RETAIL_TO_MEDIA
+    media_cpm = None if cpm is None else cpm / RETAIL_TO_MEDIA
+    budget_imps = None if media_budget is None or media_cpm is None else round(media_budget * 1000 / media_cpm)
     scenarios = None
     if audience_lower is not None:
         public = platform_scenarios.to_public(audience_lower)
@@ -131,24 +181,29 @@ def model_auction(
         scenarios = {
             **public, "monthly": monthly, "months": months, "flight": flight,
             # what each scenario's flight total would cost at the planning CPM: a reality check against the line's budget, not a quote
-            "retail_spend_at_flight": {k: round(v * cpm / 1000, 2) for k, v in flight.items()},
-            "media_spend_at_flight": {k: round(v * media_cpm / 1000, 2) for k, v in flight.items()},
+            "retail_spend_at_flight": None if cpm is None else {k: round(v * cpm / 1000, 2) for k, v in flight.items()},
+            "media_spend_at_flight": None if media_cpm is None else {k: round(v * media_cpm / 1000, 2) for k, v in flight.items()},
             "est_uniques": audience_lower,
         }
+    notes = [
+        "Meta's audience size counts eligible accounts; it is not delivered reach and not a delivery forecast.",
+        f"Monthly impressions are {platform_scenarios.describe()}; mid is the default and the figure the Avails step takes. A flight is the "
+        "monthly figure times its months.",
+    ]
+    if budget_imps is not None:
+        notes.append("Budget impressions (what the retail budget buys at the planning CPM, 2x retail/media) are a cross-check, not avails.")
     return {
         "metric_type": "meta_audience_scenarios", "product_name": product_name, "as_of": datetime.now(timezone.utc).isoformat(),
-        "retail_budget": round(retail_budget, 2), "media_budget": round(media_budget, 2),
-        "retail_cpm": round(cpm, 2), "media_cpm_assumed": round(media_cpm, 2), "retail_to_media_multiplier": RETAIL_TO_MEDIA,
+        "retail_budget": None if retail_budget is None else round(retail_budget, 2),
+        "media_budget": None if media_budget is None else round(media_budget, 2),
+        "retail_cpm": None if cpm is None else round(cpm, 2),
+        "media_cpm_assumed": None if media_cpm is None else round(media_cpm, 2),
+        "retail_to_media_multiplier": RETAIL_TO_MEDIA,
         "months": months, "budget_impressions": budget_imps,
         "potential_audience": ({"lower": audience_lower, "upper": audience_upper, "source": audience_source}
                                if audience_lower is not None else None),
         "scenarios": scenarios,
-        "notes": [
-            "Meta's audience size counts eligible accounts; it is not delivered reach and not a delivery forecast.",
-            f"Monthly impressions are {platform_scenarios.describe()}; mid is the default and the figure the Avails step takes. A flight is the "
-            "monthly figure times its months.",
-            "Budget impressions (what the retail budget buys at the planning CPM, 2x retail/media) are a cross-check, not avails.",
-        ],
+        "notes": notes,
     }
 
 
@@ -199,10 +254,12 @@ def graph_version() -> str:
 
 
 def status() -> dict:
-    """Whether the Meta connection is set up - which settings are missing, never their values - and the planning multipliers."""
+    """Whether the Meta connection is set up - which settings are missing (the setting's name first, then what to do), never their values - the
+    ad account as its last four digits, and the planning multipliers. The standard status shape of constanza_methods.validate_status plus
+    Meta's own extras."""
     missing = missing_config()
     return {"configured": not missing, "missing": missing, "account": account_hint(), "version": (os.environ.get("META_GRAPH_API_VERSION") or DEFAULT_GRAPH_VERSION).strip(),
-            "scenarios": platform_scenarios.to_public(), "setup_hint": SETUP_HINT}
+            "scenarios": platform_scenarios.to_public(), "setup_hint": SETUP_HINT, "language_note": LANGUAGE_NOTE}
 
 
 SETUP_HINT = ("Add META_ACCESS_TOKEN (a token with the ads_read permission for the ad account) and META_AD_ACCOUNT_ID in the app's secrets "
@@ -212,19 +269,27 @@ SETUP_HINT = ("Add META_ACCESS_TOKEN (a token with the ads_read permission for t
 
 # ----------------------------------------------------------------------------------------------------------------- the Graph API
 
-def _scrub(text: str) -> str:
-    """A Meta message with the token and the ad account removed (it must never reach a log, an exception or the browser)."""
+def redact(text) -> str:
+    """`text` with the access token, the app secret, the `appsecret_proof` made from them and the ad account taken out (the account is left as its
+    last four digits, wherever its digits stand: a message, or the ad account's own name). Not shortened: the lines of a connection test use it too."""
     out = str(text or "")
     token = (os.environ.get("META_ACCESS_TOKEN") or "").strip()
+    secret = (os.environ.get("META_APP_SECRET") or "").strip()
+    if token and secret:
+        out = out.replace(hmac.new(secret.encode(), token.encode(), hashlib.sha256).hexdigest(), "[proof]")
     if token:
         out = out.replace(token, "[token]")
-    secret = (os.environ.get("META_APP_SECRET") or "").strip()
     if secret:
         out = out.replace(secret, "[secret]")
     account = (os.environ.get("META_AD_ACCOUNT_ID") or "").strip().removeprefix("act_")
-    if account:
+    if len(account) > 4:                                        # (up to four digits there is nothing to hide, and replacing them would garble numbers)
         out = out.replace(account, "…" + account[-4:])
-    return out[:300]
+    return out
+
+
+def _scrub(text: str) -> str:
+    """A Meta message with the token and the ad account removed (it must never reach a log, an exception or the browser), cut to a sentence or two."""
+    return redact(text)[:300]
 
 
 def _classify(error: dict, http_status: int) -> MetaAPIError:
@@ -248,7 +313,9 @@ def _classify(error: dict, http_status: int) -> MetaAPIError:
     if code == 2635 or "deprecated version" in message.lower():
         return MetaAPIError("Meta has retired the Marketing API version this app asks for. Set META_GRAPH_API_VERSION to a current version (v26.0).",
                             "not_configured", 503)
-    if sub == 33 or "missing permissions" in message.lower() or "does not exist" in message.lower():
+    # Meta's own signal for an ad account it cannot show is subcode 33 (and its wording "missing permissions"). "does not exist" alone is read as the
+    # account only when Meta is not saying "invalid parameter" (code 100): there it can be a place or an interest that was withdrawn, which is a 422 about the settings.
+    if sub == 33 or "missing permissions" in message.lower() or (code != 100 and "does not exist" in message.lower()):
         return MetaAPIError("Meta says this ad account does not exist or the token cannot see it: check META_AD_ACCOUNT_ID, and in Business Settings assign "
                             "the ad account to the token's (system) user with ads_read.", "permission", 503)
     if code == 100 or http_status == 400:
@@ -311,6 +378,19 @@ def reset_cache() -> None:
         _cache.clear()
 
 
+def _remembered_list(key: str, ttl: float, fetch) -> list:
+    """A list Meta is asked for once per `ttl` seconds. Only a non-empty list is remembered: an empty answer is asked again."""
+    with _lock:
+        hit = _cache.get(key)
+        if hit and time.monotonic() - hit[0] < ttl:
+            return list(hit[1])
+    items = fetch()
+    if items:
+        with _lock:
+            _cache[key] = (time.monotonic(), items)
+    return list(items)
+
+
 def search_geography(query: str, location_type: str) -> list[dict]:
     """Candidate geographies for explicit planner selection; never guess a DMA."""
     if location_type not in _GEO_FIELDS:
@@ -338,15 +418,19 @@ def _size(row: dict, side: str) -> Optional[int]:
 
 
 def _item(row: dict, kind: Optional[str]) -> Optional[dict]:
-    """One detailed-targeting option as the panel shows it; None for a row without an id or a name, or whose type this app cannot put in a
-    targeting spec (a row keeps its OWN type: it is never relabelled to the list it was browsed from)."""
+    """One detailed-targeting option as the panel shows it; None for a row without a numeric id or a name, or whose type this app cannot put in a
+    targeting spec (a row keeps its OWN type: it is never relabelled to the list it was browsed from). A name longer than a pick can carry is
+    shortened, as `_locale` does, so every row offered can be chosen."""
     if not isinstance(row, dict) or row.get("id") is None or not str(row.get("name") or "").strip():
+        return None
+    item_id = str(row["id"]).strip()
+    if not _TARGETING_ID_RE.fullmatch(item_id):
         return None
     item_type = str(row.get("type") or kind or "")
     if item_type not in TARGETING_KEYS:
         return None
     path = row.get("path")
-    return {"id": str(row["id"]), "name": str(row["name"]).strip(), "type": item_type,
+    return {"id": item_id, "name": str(row["name"]).strip()[:MAX_NAME_LENGTH], "type": item_type,
             "path": [str(p) for p in path] if isinstance(path, list) else [],
             "audience_lower": _size(row, "lower"), "audience_upper": _size(row, "upper"),
             "description": str(row.get("description") or "")[:240]}
@@ -365,16 +449,7 @@ def targeting_catalog(kind: str) -> list[dict]:
         return sorted(items, key=lambda i: i["name"].lower())
     if not is_configured():
         return fetch()                                        # raises the "not configured" message
-    key = f"catalog:{graph_version()}:{_account()}:{kind}"
-    with _lock:
-        hit = _cache.get(key)
-        if hit and time.monotonic() - hit[0] < _CATALOG_TTL:
-            return list(hit[1])
-    items = fetch()
-    if items:                                                  # only a non-empty list is remembered for hours: an empty answer is asked again
-        with _lock:
-            _cache[key] = (time.monotonic(), items)
-    return list(items)
+    return _remembered_list(f"catalog:{graph_version()}:{_account()}:{kind}", _CATALOG_TTL, fetch)
 
 
 def search_targeting(q: str) -> dict[str, list[dict]]:
@@ -412,7 +487,7 @@ def _clean_targeting(items) -> list[dict]:
         if not isinstance(raw, dict):
             raise ValueError("Each interest or behavior needs an id, a name and a type.")
         item_id, name, kind = str(raw.get("id") or ""), str(raw.get("name") or "").strip(), str(raw.get("type") or "")
-        if not re.fullmatch(r"[0-9]{1,30}", item_id) or not 1 <= len(name) <= 120 or kind not in TARGETING_KEYS:
+        if not _TARGETING_ID_RE.fullmatch(item_id) or not 1 <= len(name) <= MAX_NAME_LENGTH or kind not in TARGETING_KEYS:
             raise ValueError("Each interest or behavior needs a numeric Meta id, a name and a known type; pick it from Meta's list.")
         if (kind, item_id) not in seen:
             seen.add((kind, item_id))
@@ -420,10 +495,78 @@ def _clean_targeting(items) -> list[dict]:
     return out
 
 
+def _locale(row) -> Optional[dict]:
+    """One language as the picker shows it. Meta's reference puts the number under `key` (`id` is read too, in case the shape moves); None for
+    a row without a whole-number id or a name."""
+    if not isinstance(row, dict):
+        return None
+    raw = row.get("key") if row.get("key") is not None else row.get("id")
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        return None
+    locale_id, name = str(raw).strip(), str(row.get("name") or "").strip()
+    if not _LOCALE_ID_RE.fullmatch(locale_id) or not name:
+        return None
+    return {"id": locale_id, "name": name[:MAX_NAME_LENGTH]}
+
+
+def search_locales(q: str = "") -> list[dict]:
+    """The languages Meta can target, as [{id, name}] sorted by name (the id is a string; `build_targeting_spec` sends it as a number).
+
+    Without `q`: the whole list. Meta's targeting search documents this (`type=adlocale`, a blank `q`, `limit=1000`), so no curated list is
+    needed; it is cached for hours, and an empty answer is asked again. With `q` (2-60 characters): the locales Meta's search finds for those
+    letters, e.g. "Spanish" (regional variants such as "Spanish (Spain)" are separate locales). A language is whatever Meta lists: this app
+    never carries a locale id of its own."""
+    q = (q or "").strip()
+    if q and not 2 <= len(q) <= 60:
+        raise ValueError("Search text must be 2–60 characters.")
+
+    def fetch():
+        result = _graph_get("search", {"type": "adlocale", "q": q, "limit": _LOCALE_SEARCH_LIMIT if q else _LOCALE_LIST_LIMIT})
+        rows = result.get("data")
+        found: dict[str, dict] = {}
+        for row in rows if isinstance(rows, list) else []:
+            item = _locale(row)
+            if item and item["id"] not in found:
+                found[item["id"]] = item
+        return sorted(found.values(), key=lambda i: (i["name"].lower(), int(i["id"])))
+    if q or not is_configured():
+        return fetch()                                        # a keyword search is asked fresh; unconfigured raises the "not configured" message
+    return _remembered_list(f"locales:{graph_version()}", _LANGUAGE_TTL, fetch)
+
+
+def clean_locales(items) -> list[dict]:
+    """The planner's chosen languages ([{id, name}] picked from search_locales), validated to what a targeting spec takes: at most MAX_LOCALES,
+    each with a whole-number Meta locale id and a name. A language chosen twice counts once."""
+    if items is None:
+        return []
+    if not isinstance(items, (list, tuple)) or len(items) > MAX_LOCALES:
+        raise ValueError(f"Choose at most {MAX_LOCALES} languages.")
+    out, seen = [], set()
+    for raw in items:
+        if not isinstance(raw, dict):
+            raise ValueError("Each language needs a Meta locale id and a name; pick it from Meta's language list.")
+        raw_id = raw.get("id")
+        item_id = "" if isinstance(raw_id, bool) or not isinstance(raw_id, (int, str)) else str(raw_id).strip()
+        name = str(raw.get("name") or "").strip()
+        if not _LOCALE_ID_RE.fullmatch(item_id) or not 1 <= len(name) <= MAX_NAME_LENGTH:
+            raise ValueError("Each language needs a numeric Meta locale id and a name; pick it from Meta's language list.")
+        if item_id not in seen:
+            seen.add(item_id)
+            out.append({"id": item_id, "name": name})
+    return out
+
+
 def build_targeting_spec(*, geo_type: str, geo_key: str, age_min: Optional[int] = None, age_max: Optional[int] = None,
-                         gender: Optional[str] = None, targeting=None) -> dict:
-    """The targeting_spec sent to Meta for explicitly selected geography, age, gender and interests / behaviors. ValueError for a choice Meta
-    would refuse. Chosen options form ONE flexible_spec group: the audience is people who match ANY of them."""
+                         gender: Optional[str] = None, targeting=None, locales=None) -> dict:
+    """The targeting_spec sent to Meta for explicitly selected geography, age, gender, interests / behaviors and languages. ValueError for a
+    choice Meta would refuse.
+
+    How the choices combine (Meta's Ads Manager rule): different kinds of choice are ANDed - geography AND age AND gender AND the interests /
+    behaviors AND the languages. Inside a kind they are ORed: the chosen interests / behaviors form ONE flexible_spec group (people who match
+    ANY of them), and several languages are ANY of them too (`locales` is a plain list of locale ids; Meta's reference documents up to 50).
+    So "Spanish + English" in Los Angeles is people there whose app is set to either: the first language narrows the audience compared with none,
+    and each further one widens it again. The names that came with the chosen languages stay with the snapshot for display; the spec carries the
+    ids only."""
     if geo_type not in _GEO_FIELDS or not re.fullmatch(r"[A-Za-z0-9_:-]{1,40}", geo_key or ""):
         raise ValueError("Select a valid Meta geography from the search results.")
     if age_min is not None and not 18 <= age_min <= 65:
@@ -448,13 +591,18 @@ def build_targeting_spec(*, geo_type: str, geo_key: str, age_min: Optional[int] 
         for it in chosen:
             group.setdefault(it["type"], []).append({"id": it["id"], "name": it["name"]})
         spec["flexible_spec"] = [group]
+    languages = clean_locales(locales)
+    if languages:
+        spec["locales"] = sorted(int(language["id"]) for language in languages)      # a stable order: the same languages share one cached estimate
     return spec
 
 
 def fetch_reach_estimate(*, geo_type: str, geo_key: str, age_min: Optional[int] = None, age_max: Optional[int] = None,
-                         gender: Optional[str] = None, targeting=None) -> tuple[int, int]:
-    """Meta's potential audience (lower, upper) for explicitly selected targeting - the account-scoped `reachestimate`."""
-    spec = build_targeting_spec(geo_type=geo_type, geo_key=geo_key, age_min=age_min, age_max=age_max, gender=gender, targeting=targeting)
+                         gender: Optional[str] = None, targeting=None, locales=None) -> tuple[int, int]:
+    """Meta's potential audience (lower, upper) for explicitly selected targeting - the account-scoped `reachestimate`. The estimate is
+    remembered for ten minutes under the whole targeting spec, languages included, so a Spanish estimate never answers an English one."""
+    spec = build_targeting_spec(geo_type=geo_type, geo_key=geo_key, age_min=age_min, age_max=age_max, gender=gender, targeting=targeting,
+                                locales=locales)
     missing = missing_config()
     if missing:
         raise MetaAPIError(f"Meta is not configured: add {' and '.join(missing)} in the app's secrets (Replit -> Secrets).", "not_configured", 503)
@@ -485,3 +633,123 @@ def fetch_reach_estimate(*, geo_type: str, geo_key: str, age_min: Optional[int] 
             raise MetaAPIError("Meta returned invalid audience bounds for that targeting.", "meta", 502)
         return lower, upper
     return _cached(f"reach:{graph_version()}:{account}:{body}", _ESTIMATE_TTL, fetch)
+
+
+# ----------------------------------------------------------------------------------------------------------------- the method
+
+@dataclass(frozen=True)
+class MetaArgs:
+    """What the planner set up for a Meta estimate, validated: the `meta` block of POST /api/constanza/estimate."""
+    geo_type: str
+    geo_key: str
+    geo_label: str
+    age_min: Optional[int]
+    age_max: Optional[int]
+    gender: str                                   # "all" | "male" | "female"
+    languages: tuple                              # ({id, name}, ...) picked from search_locales
+    targeting: tuple                              # ({id, name, type}, ...) picked from the interest / behavior lists
+    retail_budget: Optional[float]                # the whole flight at retail, dollars; None = no budget cross-check
+    retail_cpm: Optional[float]                   # None = the product's own planning CPM
+
+    @classmethod
+    def from_dict(cls, raw: Optional[dict]) -> "MetaArgs":
+        """ValueError in planner words for anything Meta would refuse or that could not be asked of it - before a single call is spent."""
+        raw = raw or {}
+        if not isinstance(raw, dict):
+            raise ValueError("The Meta settings must be an object.")
+        geo = raw.get("geo")
+        if not isinstance(geo, dict) or not geo:
+            raise ValueError("Choose where first: pick a place from Meta's list.")
+        geo_type, geo_key = str(geo.get("type") or ""), str(geo.get("key") or "")
+        if geo_type not in _GEO_FIELDS or not re.fullmatch(r"[A-Za-z0-9_:-]{1,40}", geo_key):
+            raise ValueError("Select a valid Meta geography from the search results.")
+        budget, cpm = raw.get("retail_budget"), raw.get("retail_cpm")
+        if budget is not None:
+            _check_retail_budget(budget)
+        if cpm is not None:
+            _check_retail_cpm(cpm)
+        gender = raw.get("gender") or "all"
+        languages, targeting = clean_locales(raw.get("languages")), _clean_targeting(raw.get("targeting"))
+        # the same checks as the request that is sent (ages, gender, the shape of the place): a refused choice is said now, before any call
+        build_targeting_spec(geo_type=geo_type, geo_key=geo_key, age_min=raw.get("age_min"), age_max=raw.get("age_max"), gender=gender,
+                             targeting=targeting, locales=languages)
+        return cls(
+            geo_type=geo_type, geo_key=geo_key, geo_label=str(geo.get("label") or "").strip()[:160],
+            age_min=raw.get("age_min"), age_max=raw.get("age_max"), gender=gender,
+            languages=tuple(languages), targeting=tuple(targeting),
+            retail_budget=None if budget is None else float(budget), retail_cpm=None if cpm is None else float(cpm),
+        )
+
+
+_PLACEMENTS_NOTE = ("Meta counts people on its default placements (Facebook, Instagram, Messenger, Audience Network), as Ads Manager's Estimated "
+                    "audience size does.")
+_COMSCORE_NOTE = ("Meta's TV markets are Comscore markets, so a market's footprint can differ from the Nielsen markets used elsewhere in this app.")
+_HISPANIC_NOTE = "Hispanic targeting isn't applied to a Meta audience estimate: use a language (Spanish) and Meta's own interests."
+# A lower end of 0 is not "no audience": it is Meta saying the audience is under its reporting floor. The numbers stay (they are what the rule gives), the note says what they mean.
+_TOO_NARROW_NOTE = ("Meta reports fewer than 1,000 accounts for these settings, so the audience is too narrow to plan on and the impressions come out as 0. "
+                    "Widen the place, the age range or the interests.")
+
+
+def estimate_response(req: MethodRequest) -> dict:
+    """The estimate of a product forecast by Meta's reach estimate: the standard estimate plus a `meta` block (the audience range, the three
+    monthly scenarios, what was asked, the budget cross-check when there is a budget, the language caveat when languages were chosen).
+
+    The scenarios and the cross-check come from `model_auction`, the same rule POST /meta-forecast applies, so both routes give the same numbers.
+    The flight is the monthly figure times `req.months`; `est_uniques` is the lower end, so the Avails step's frequency is the mid multiplier.
+    ValueError (planner words) for a request Meta could not be asked; MetaAPIError for anything Meta-side."""
+    args = MetaArgs.from_dict(req.args)
+    lower, upper = fetch_reach_estimate(geo_type=args.geo_type, geo_key=args.geo_key, age_min=args.age_min, age_max=args.age_max,
+                                        gender=args.gender, targeting=list(args.targeting), locales=list(args.languages))
+    result = model_auction(product_name=req.product_name, retail_budget=args.retail_budget, audience_lower=lower, audience_upper=upper,
+                           months=req.months, audience_source="meta_api", retail_cpm=args.retail_cpm, strict_product=False)
+    scenarios = result["scenarios"]
+    flight = scenarios["flight"]
+    budget_check = None
+    if result["retail_budget"] is not None and result["retail_cpm"] is not None:
+        budget_check = {k: result[k] for k in ("retail_budget", "media_budget", "retail_cpm", "media_cpm_assumed", "retail_to_media_multiplier",
+                                               "months", "budget_impressions")}
+    block = {
+        "audience": {"low": lower, "high": upper, "source": "meta_api"},
+        "monthly": {platform_scenarios.SLOT[name]: scenarios["monthly"][name] for name in platform_scenarios.SCENARIOS},
+        "scenarios": scenarios,
+        "targeting": {
+            "geo": {"type": args.geo_type, "key": args.geo_key, "label": args.geo_label or None},
+            "age_min": args.age_min, "age_max": args.age_max, "gender": args.gender,
+            "languages": [dict(item) for item in args.languages], "detailed": [dict(item) for item in args.targeting],
+        },
+        "budget_check": budget_check,
+        "language_note": LANGUAGE_NOTE if args.languages else None,
+        "as_of": result["as_of"],
+    }
+    notes = list(result["notes"]) + [_PLACEMENTS_NOTE]
+    if lower == 0:
+        notes.insert(0, _TOO_NARROW_NOTE)                      # first: the dock shows only the first few notes
+    if args.geo_type == "geo_market":
+        notes.append(_COMSCORE_NOTE)
+    if req.hispanic_asked:
+        notes.append(_HISPANIC_NOTE)
+    return constanza_methods.standard_estimate(
+        SPEC, product_name=req.product_name, months=req.months,
+        imps={"low": flight["conservative"], "mid": flight["mid"], "high": flight["upper"]},
+        est_uniques=lower, notes=notes, block=block,
+    )
+
+
+def _http_error(exc: Exception) -> tuple:
+    return exc.status_code, str(exc)
+
+
+def _product_info(product_name: str) -> dict:
+    return {"retail_cpm": product_cpm(product_name)}
+
+
+# The three paid SKUs are Meta's by default; the two branded-Pages SKUs ("... on Noticias Ya", "... on EVC Radio Pages") run on Entravision's own
+# pages, which an ad-account audience estimate does not describe, so they are not listed (and an admin who maps one to Meta is warned).
+SPEC = constanza_methods.register(MethodSpec(
+    key="meta", label="Meta API (live)", short_label="Meta",
+    description="A live audience-size estimate from Meta's own ad account (Facebook and Instagram), with the place, age, language and interests picked from Meta's lists.",
+    kind="api", default_products=tuple(RETAIL_CPMS), owns_geography=True, request_field="meta",
+    secrets=("META_ACCESS_TOKEN", "META_AD_ACCOUNT_ID"),
+    estimate=estimate_response, status=status, diagnose="app.services.meta_diagnose:run_checks",
+    errors=(MetaAPIError,), to_http=_http_error, product_info=_product_info,
+))

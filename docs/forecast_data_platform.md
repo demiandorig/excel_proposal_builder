@@ -25,9 +25,8 @@ before anything is published, and tests for all of it.
 
 Nothing is edited in place. A refresh is a new version; a bad import is a rollback, not a repair.
 
-A product can also be forecast by a **live API** instead of loaded data (the forecast *method* `tiktok`: the Tiktok Ads product is
-asked TikTok's own audience-size estimator). Nothing in this document's data path applies to it; see
-[tiktok_forecasting.md](tiktok_forecasting.md).
+A product can also be forecast by a **live API** instead of loaded data (a registered forecast *method*: `tiktok`, `meta`, and whatever is added next). Nothing in this document's data path applies to it;
+see [constanza_methods.md](constanza_methods.md) (the registry, the contract and how to add one), [tiktok_forecasting.md](tiktok_forecasting.md) and [meta_forecasting.md](meta_forecasting.md).
 
 ## Tables
 
@@ -183,67 +182,12 @@ Then × months (or weeks), with the planning range from the row (legacy series) 
 its series, version, data basis, unit and period, and notes in plain language. For the seven original model series the
 database path reproduces the old bundled-workbook numbers **exactly** (a test compares them across 14 geographies).
 
-### Meta (Facebook & Instagram) audience scenarios (Step 05)
+### Meta (Facebook & Instagram) audience estimates
 
-The three paid Facebook & Instagram Ads SKUs (Awareness, Traffic / Conversion, Lead Gen / Calls; the branded-content / Page SKUs are excluded)
-have a Meta panel on Step 05 in place of the platform-data button. Like TikTok, Meta answers with an **audience size, not avails**: its
-account-scoped `reachestimate` returns the range of accounts (`users_lower_bound` – `users_upper_bound`) that match a targeting, not what a flight
-can deliver. Entravision's planning rule turns the **lower end** of that range into impressions in three scenarios
-(`app/services/platform_scenarios.py`, shared with TikTok):
-
-| Scenario | Monthly impressions | |
-|---|---|---|
-| Conservative | lower-end audience × **4.3** | the Low |
-| **Mid** | lower-end audience × **5.5** | **the default**: what *Insert into Avails* writes |
-| Upper | lower-end audience × **8.6** | the High |
-
-A flight of *N* months is *N* times the monthly figure. The lower end is the base on purpose; the upper end of Meta's range is shown as context and
-is never a base. *Insert the mid-case into Avails* writes the monthly mid impressions and the **lower-end audience as est. uniques**, so the Avails
-step's frequency reads 5.5. Change the multipliers (they must stay in order) with `CONSTANZA_AUDIENCE_X_CONSERVATIVE` / `_MID` / `_UPPER`.
-
-Beside the scenarios the panel shows a **budget cross-check**, kept apart from avails: the retail budget ÷ the retail CPM × 1,000 (Awareness **$12**,
-Traffic / Conversion **$18**, Lead Gen / Calls **$35**; retail spend is **2× platform media spend**), and the retail spend each scenario's flight
-would imply at that CPM. The snapshot (audience, scenarios, what was asked) is saved with the proposal as `avails_data[line_id].meta_forecast`; a
-changed budget, product, CPM, geography, flight length or targeting label marks it stale and withdraws the Insert button. The Awareness catalog seed
-and migration `0003` change the old $13 default to $12 while preserving any admin-edited CPM (see "Deploying" below: a data migration does not run
-in a published deployment, so set the rate in Admin if it still reads $13).
-
-**Two ways to give it the audience.** *Manual*: type the lower end (and optionally the upper end) of the "Estimated audience size" Ads Manager shows.
-*Live*: put `META_ACCESS_TOKEN` and `META_AD_ACCOUNT_ID` in the app's secrets (below), search Meta's own geographies (DMA "geo markets", cities,
-regions, ZIPs, countries; the planner picks the exact key, nothing is guessed), optionally set age (18–65) and gender, and choose **interests and
-behaviors from Meta's own lists** (below). Everything chosen goes to Meta as the targeting spec; the chosen interests / behaviors form **one
-`flexible_spec` group, so the audience is people who match ANY of them**. Nothing else about a real campaign (exclusions, account restrictions) is
-represented, so check those in Ads Manager. Two things the figure is not: it counts people active on Meta's **default placements** (Facebook, Instagram,
-Messenger, Audience Network…), the same as Ads Manager's "Estimated audience size", not only Facebook and Instagram; and Meta's **TV markets are Comscore
-Markets** (Meta moved off Nielsen DMAs on 2026-06-22), so a market's footprint can differ from the Nielsen DMA the rest of Constanza uses.
-
-**The interest and behavior lists come from Meta.** `GET /api/constanza/meta-targeting?kind=interests|behaviors|demographics` returns a whole list
-(Meta's `search?type=adTargetingCategory&class=…`, cached for 12 hours; demographics are life events, industries, income, family status);
-`?q=soccer` returns the interests Meta's keyword search finds (`type=adinterest`) plus the behaviors and demographics whose name or path contains
-the words. Meta does not return every option to every ad account and retires options over time, so what is listed is what this account can use today
-(and demographic options depend on the token's home country).
-
-**Setting it up (an admin, once)** — both are read-only; nothing is ever created in the ad account:
-
-| Secret | What |
-|---|---|
-| `META_ACCESS_TOKEN` | a long-lived token (a business **system user's** is best) with the **`ads_read`** permission on the ad account |
-| `META_AD_ACCOUNT_ID` | the numeric ad account ID the estimates are asked through, with or without `act_` |
-| `META_APP_SECRET` | optional: only if the Meta app has **Require App Secret** switched on (every call then carries an `appsecret_proof`); otherwise leave it out |
-| `META_GRAPH_API_VERSION` | optional, default **v26.0** (the current Marketing API version; a pinned older one stops working when Meta retires it) |
-
-The steps on Meta's side: in **Business Settings → Users → System users** create a system user, give it the ad account (*View performance* is enough),
-**Generate new token** for a Meta app that has the **`ads_read`** permission, and copy the ad account's numeric ID from Ads Manager. The app that issued the token needs **Ads Management Standard Access** (Meta's naming moved to *Limited Access* in May 2026) with business
-verification when it reads accounts beyond your own business's; a token for an app still in development works only for people with a role on the
-app. Then run `python -m app.services.meta_diagnose` (`--json` for a machine-readable answer): it checks the token and ad account, geography search,
-reach estimates (a country; a TV market with age and gender; an interest), and the three lists, and each failing line says what to fix. Errors are
-told in plain words with the right status (token → 503, permission → 503, rate limit → 429, refused settings → 422); no secret appears in any answer.
-`GET /api/constanza/meta/status` says whether it is connected (which settings are missing, never their values). The Meta response of `reachestimate` is
-read whether Meta sends one object (its documented shape) or a list.
-
-**Not verified against a real account** (none existed when this was written; the request and response shapes are Meta's published reference): that
-`geo_markets` alone satisfies `reachestimate` (Meta's page lists `countries` as required in a targeting spec), that the token can read the lists, and
-which options each account sees. The diagnostics are the first thing to run after the secrets are in.
+The three paid Facebook & Instagram Ads SKUs are forecast by a **live API method**, like TikTok: Meta's own `reachestimate` answers with an audience size (not avails) and Entravision's planning rule turns its lower end into
+impressions (x 4.3 / 5.5 / 8.6 a month, shared with TikTok in `app/services/platform_scenarios.py`). Meta is a registered Constanza method that lives in the dock and on Step 05 through the same generic block as every other product;
+everything about it - the dock panel, the Step 05 card states, the saved estimate (`forecast_snapshot`), the request and response, language targeting (with what is still unverified), the budget cross-check, the deprecation of
+`POST /api/constanza/meta-forecast`, and the post-merge steps - is in [meta_forecasting.md](meta_forecasting.md). How a method like it is added (or a new one) is in [constanza_methods.md](constanza_methods.md).
 
 ### The win rate (MadHive / The Trade Desk products)
 
@@ -537,8 +481,61 @@ export makes a new Netflix version instead of leaving it "unchanged".
   only qualifies the place (a state, a state and ZIP, "D.C.", the country). The "form has changed since this was pulled"
   banner compares the form with the request the result was pulled with, so reopening the dock, or changing a field and putting
   it back, shows nothing.
-* **Step 05 cards** keep the per-line "Auto-calculate avails" button (still in `app.js`, because it needs the plan's state) and
-  render through the same `Constanza.renderCard`, so both places read alike. A geography the planner picks for a line lives
+* **The form is a Product card and five numbered cards**, built from the shared audience kit (`audience-kit.css`, `.aud-*`) like the
+  Meta and TikTok panels: **1 Where**, **2 When**, **3 Who**, **4 Language & heritage**, **5 Audience**. Each card's head says in one
+  line what it holds ("1 area · about 13M people", "3 months", "Women · 25–54", "Hispanic targeting on · default", "Sports Fans –
+  Soccer +1") and carries a Clear link where there is something to clear; the badge fills once a card holds a choice. Where and When
+  are always open; Who, Language & heritage and Audience fold (Language & heritage starts open, because most campaigns need it; which
+  cards the planner leaves open is remembered per browser in `localStorage`, `constanza.v2` → `sections`). A folding card's Clear / Turn off
+  link is **not inside its `<summary>`** (a button in the toggle is a control inside a control: axe's *nested-interactive*, and a screen
+  reader cannot tell the two apart): it is the `<details>`' sibling, in a `.cz-fold` wrapper, drawn over the head just left of the arrow and
+  placed *before* the card in the DOM, so the keyboard meets Clear, then the toggle, then the body. The head keeps room for it with an
+  invisible twin of the link (`.cz-fold-twin`, the same class and words, so the same width at any zoom), shown only while the link is;
+  `tests/test_constanza_dock_dom.py` checks that the link lies exactly on its twin at laptop and phone width.
+  * *Where*: the geography box, one-click picks under it (a few examples while it is empty; "Use the proposal's geography" while the
+    box says something else), what it matched as chips (kind of place and people), the disambiguation / did-you-mean help, and the
+    "treat what I typed as" control (six choices in a fixed three-by-two grid, so a phone never shows five and an orphan). Its summary reads "Matching what you typed…" from the first keystroke, so an old answer is never
+    shown as current; an emptied box clears at once.
+  * *When*: the flight stepper and unit, "Use the proposal's dates" (shows as chosen once the flight is those days) and, only for a
+    product with no avails data or a place outside the U.S., the impressions to spread.
+  * *Who*: age (two boxes that still take any age 0-120, plus presets 18+, 18–34, 18–49, 25–54, 35–54, 55+; pressing the chosen preset
+    lets go of it; a backwards range is flagged where it is typed) and gender. Sends `audience.age_min / age_max / gender`.
+  * *Language & heritage*: the Hispanic targeting switch, described as the way **Spanish-speaking audiences are modelled for
+    Entravision's own products**. The avails data has no language field, so there is no language picker here and the request has no
+    language field: the card says so in plain words and explains that each area's avails are weighted by its real Hispanic share
+    (Census ACS). The notes that were there before stay (the share and mode, the "already built from Hispanic audiences" case, which
+    disables the switch). "Turn off" in the head flips the switch. Sends `hispanic` only when the planner's choice differs from the
+    product's default (null = the server decides). (Language *is* a first-class section in the TikTok and Meta panels, where the
+    platforms have the field.)
+  * *Audience*: the interests typeahead (rate and group under each match, the typed words marked, Up/Down wrap, Enter picks, Escape
+    closes the popup alone even when it only says nothing matches; the whole list, whatever it says - answer, nothing matches or an error - is
+    scrolled into view, so a field at the bottom edge never leaves it under the action bar) and **Browse all audiences**, which opens the shared
+    `SegmentBrowser` pop-up over the whole taxonomy: Name · Group · Incidence rate, sortable (a rate column starts with the biggest;
+    an audience with no sourced rate stays in the list, says "No public rate" and sorts last either way, and can still be picked for
+    reference exactly as in the typeahead), searchable (the keywords and company names are searched but not drawn), multi-select, and
+    capped at the server's 10 in total with what the typeahead already holds counted. Only the changes come back (`added` /
+    `removed`), so the typeahead's picks stay. The chips send `audience.interest_terms` (their labels), as before. The dock fetches
+    the taxonomy quietly when it opens (for the count on the button and the group names), never on a page view; a failed fetch is not
+    remembered and the window shows the message with Retry. Without `window.SegmentBrowser` the button hides and the typeahead stays.
+  * A forecast method with its own panel (TikTok, Meta; the contract for the next one is [constanza_methods.md](constanza_methods.md)) hides cards 3-5 (they are one element, `#cz-aud`) and mounts in
+    `#cz-method-forms`; its own cards keep counting on (3, 4, 5, ...) because the dock sets `counter-reset: none` on a builder nested
+    in a method panel. Every element id the panel touches is unchanged. The `ctx` the dock hands a method's factory is documented in
+    `constanza.js` (above `registerMethod`) and pinned by `test_the_dock_only_hides_the_cards_it_replaces_and_hands_the_panel_the_same_context`:
+    `S, $, esc, num, compact, api, markStale, errorText, setMood, announce, summarize, productByName, requestBody, targetsHispanic`,
+    `line`, `proposalGeo`, `snapshot` and `refreshGo` (the last four were added for Meta; `Constanza.CONTRACT.ctx` lists all eighteen). `targetsHispanic()` answers *does the line (or product) the dock is open for target Hispanic audiences?* - lazily, on every call, from
+    the dock's own switch (`S.hispanic`) or the page's reading of the line's targeting text. It is a hint: a panel may suggest from it, never
+    apply it by itself. (The TikTok panel keeps its old guarded reach for the page's globals only as a fallback for a dock without the function.)
+  * The welcome state, the action bar (Reset · Pull avails), the product picker and the wide layout (form column 420px, the action
+    bar under it) share the same look; the result card itself - numbers, notes, badges - is untouched. Every control is at least 36px
+    tall with a visible focus ring, nothing animates under `prefers-reduced-motion`, and no text reaches the page as markup (the
+    typeahead marks matches by escaping each piece).
+  * The dock's CSS names no `.aud-*` class (the kit's names belong to `audience-kit.css`): the markup carries a companion class
+    (`cz-sec-head`, `cz-hintline`, `cz-areachip` ...) and the rules hook on that. `tests/test_constanza_dock_dom.py` drives all of
+    this in headless Chromium (set `TEST_SHOTS=<dir>` to also write screenshots of the layouts).
+* **Step 05 cards**: every product whose Admin → Forecast setting is on gets one **generic Constanza block** under its Avails line (`app.js`, between its `CONSTANZA HOST` markers: it names no method). The
+  block is whatever `Constanza.blockButtons(...)` says for the product's method - "Auto-calculate avails" and "Open in Constanza" for the platform data and TikTok, "Estimate in Constanza" for Meta, whose card then
+  carries Insert, Recalculate and Change in Constanza - and the card renders through the same `Constanza.renderCard`, so both places read alike. A method that saves its estimates keeps the last one in
+  `availsData[line].forecast_snapshot` ([constanza_methods.md](constanza_methods.md), "What is saved"). A geography the planner picks for a line lives
   only in the session (`state.constanzaGeoOverride`), never in the saved proposal.
 * **Live-sports period** is listed on the Step 04 row, the Step 05 card and in the dock; the flight dates are never checked
   against it (the estimate says so).
@@ -567,16 +564,19 @@ export makes a new Netflix version instead of leaving it "unchanged".
 ### Deploying (Replit Publish)
 
 * **A published deployment skips the startup migrations** (`REPLIT_DEPLOYMENT=1`, `forecast_import.service._apply_startup_migrations`): its schema
-  comes from **Publish's schema diff** of the development database, plus the idempotent statements `schema.sql` runs at every start. So run the app
-  once in the workspace first (that applies `migrations/*.sql` and `schema.sql` to the dev database) and then Publish: the diff carries the new column
-  `forecast_product_map.win_rate` (migration `0005`) and the wider method CHECK (`0004`, which lets a product's method be `tiktok`). Neither has a foreign
-  key. Until the schema is published, the app keeps working: an admin's win-rate choice is simply not stored (`UndefinedColumn` fallback) and the TikTok
-  default needs no row.
+  comes from **Publish's schema diff** of the development database, plus the idempotent statements `schema.sql` runs at every start. So **run the app
+  once in the workspace first** (that applies `migrations/*.sql` and `schema.sql` to the dev database) **and then Publish**, so the diff carries the new column
+  `forecast_product_map.win_rate` (migration `0005`) and the method CHECK, which migration `0006` replaces by a key-format check (`method ~ '^[a-z][a-z0-9_]{1,31}$'`, so a
+  product's method may be any registered method key and **adding a method never needs SQL again**; `0004` had widened the old list to `tiktok`). None of them has a foreign
+  key. Until the schema is published, the app keeps working: an admin's win-rate choice is simply not stored (`UndefinedColumn` fallback), the TikTok and Meta defaults
+  need no row, and only an admin override that names `meta` (including the "On" box of a Meta SKU in Admin → Forecast) fails with "Couldn't save the forecast mapping".
+  Duplicating a Meta SKU in Product Catalog still creates the copy, but **without the mapping** (the copy is then a plain population-share estimate until an admin maps it): the
+  failed write is only logged ("couldn't copy the forecast mapping to ..."), the answer carries no warning.
 * **Data is not schema.** Publish does not run data statements, so these need doing against the production database by hand: the Awareness CPM
   correction ($13 → $12, migration `0003`: set the rate in Admin → Catalog if it still reads $13), and loading the recalibrated **Prime Video**
   series (`python -m app.services.forecast_import import` in the deployment's shell: it also re-versions the other six bundled series with identical
   numbers).
-* Migration numbers: `0003` Meta CPM (from the Meta branch), `0004` TikTok method, `0005` win rate. `python -m app.services.migrations status` lists
+* Migration numbers: `0003` Meta CPM (from the Meta branch), `0004` TikTok method, `0005` win rate, `0006` the method CHECK as a key format (no method list). `python -m app.services.migrations status` lists
   which of them a database has recorded (a changed checksum on an already-applied file only warns).
 * **Secrets** are set in the deployment's own Secrets, not only the workspace's: `TIKTOK_ACCESS_TOKEN` / `TIKTOK_ADVERTISER_ID`,
   `META_ACCESS_TOKEN` / `META_AD_ACCOUNT_ID` (and `META_APP_SECRET` if needed), `CENSUS_API_KEY` only to rebuild the Hispanic data offline.

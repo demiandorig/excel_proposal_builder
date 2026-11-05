@@ -7,9 +7,9 @@ Two layers, so nothing changes until an admin chooses to change it:
   DEFAULT (a product with no row in `forecast_product_map`) — exactly what Phase 1 hard-coded:
       * enabled   : the product is in the "Entravision Plus" family
       * method    : "platform" for the ten products in DEFAULT_PLATFORM_PRODUCTS (the Roku / Prime / Hulu / Peacock /
-                    Other-FAST / vMVPD pools and the four blended Madhive CTV/OTT products), "tiktok" for the products in
-                    DEFAULT_API_PRODUCTS (a live audience-size estimate from TikTok's own API, tiktok_client.py), else
-                    "generic" (the planner's own budget apportioned by population share — VIX 360, Netflix, OLV Blend, ...)
+                    Other-FAST / vMVPD pools and the four blended Madhive CTV/OTT products), the key of a REGISTERED method for
+                    the products that method claims (constanza_methods.py: TikTok's and Meta's live audience-size estimates),
+                    else "generic" (the planner's own budget apportioned by population share — VIX 360, Netflix, OLV Blend, ...)
       * hispanic  : DEFAULT_HISPANIC_PRODUCTS (Hispanic targeting on by default: avails narrowed to each area's real Hispanic share)
   OVERRIDE (a row) — the admin's explicit choice for that one product. Rows are keyed by the product's NAME and looked up
       through catalog.name_variants, so renaming a product (or splitting it) never orphans its row — the same convention as
@@ -17,9 +17,15 @@ Two layers, so nothing changes until an admin chooses to change it:
 
 Reading is fail-open: if the table can't be read (no database, not created yet) every product simply keeps its default,
 which is how the app behaved before this existed. The table is created at startup by schema_bootstrap from schema.sql.
+
+The methods a product can be mapped to are the two built-in ones plus whatever constanza_methods has registered, so adding a source
+never touches this module or the database (the method column only has a key-format CHECK, migration 0006). That registry is read
+lazily - never at import time - because the modules that register (constanza_tiktok -> constanza_audience -> constanza_engine) import
+this one: `METHODS` and `DEFAULT_API_PRODUCTS`, which older callers read as attributes, are answered by `__getattr__` below.
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -31,7 +37,7 @@ import psycopg
 from app import catalog
 from app.data.constanza import load_platform_dma
 from app.db import get_connection
-from app.services import constanza_hispanic, constanza_win_rate, forecast_store
+from app.services import constanza_hispanic, constanza_methods, constanza_win_rate, forecast_store
 
 log = logging.getLogger(__name__)
 
@@ -72,14 +78,20 @@ DEFAULT_PLATFORM_PRODUCTS: dict[str, str] = {
 # set it for any other product; a product forecast from a series that is already Hispanic-targeted has it on regardless.
 DEFAULT_HISPANIC_PRODUCTS = frozenset({"Entravision Plus - Hispanics CTV/OTT"})
 
-# Products forecast by a LIVE API instead of loaded data: catalog product name -> the provider's method name. TikTok's
-# audience-size estimator answers for the TikTok ads product (the "on Entravision News and Radio Pages" product runs on
-# Entravision's own TikTok accounts, which an ad-account audience estimate does not describe, so it is not listed).
-DEFAULT_API_PRODUCTS: dict[str, str] = {
-    "Tiktok Ads": "tiktok",
-}
+# Products forecast by a LIVE API instead of loaded data: catalog product name -> the provider's method name. They are the
+# `default_products` of the registered methods (constanza_methods.py): TikTok's audience-size estimator answers for the TikTok ads
+# product, Meta's for the three paid Facebook & Instagram SKUs (the "on Entravision News and Radio Pages" / "on Noticias Ya" SKUs run on
+# Entravision's own accounts, which an ad-account audience estimate does not describe, so they are not listed).
+# `DEFAULT_API_PRODUCTS` and `METHODS` are not module constants any more: see __getattr__ below.
 
-METHODS = ("platform", "generic", "tiktok")
+
+def __getattr__(name: str):
+    """PEP 562: the two names callers still read as attributes, answered from the registry when they are read (never at import time)."""
+    if name == "METHODS":
+        return constanza_methods.method_keys()
+    if name == "DEFAULT_API_PRODUCTS":
+        return constanza_methods.default_products()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Series bought DIRECTLY on the inventory owner's own platform — Roku Ads in Roku's Ads Manager — so their reported avails are
 # not bid opportunities Entravision wins a share of. EVERY OTHER series forecast from data gets a win rate on its avails
@@ -128,7 +140,7 @@ def win_rate_applies(product_name: str, family: Optional[str], method: str, plat
 @dataclass(frozen=True)
 class ForecastConfig:
     enabled: bool                  # does the avails card show the button
-    method: str                    # "platform" | "generic" | "tiktok"
+    method: str                    # "platform" | "generic" | a registered method's key (constanza_methods: "tiktok", "meta", ...)
     platform: Optional[str]        # a platform key when method == "platform"
     hispanic_weighted: bool        # only meaningful for method == "platform"
     source: str                    # "default" | "admin"
@@ -210,7 +222,7 @@ def default_config(product_name: str, family: Optional[str] = None, variants: Op
                               hispanic_weighted=hispanic and linked.series_key == platform, source="default", relation=linked.relation,
                               link_note=linked.link_note,
                               win_rate=win_rate_applies(product_name, family, "platform", linked.series_key, variants))
-    api = DEFAULT_API_PRODUCTS.get(product_name) or next((DEFAULT_API_PRODUCTS[v] for v in sorted(variants) if v in DEFAULT_API_PRODUCTS), None)
+    api = constanza_methods.default_for(product_name, variants)
     if api is not None:
         return ForecastConfig(enabled=True, method=api, platform=None, hispanic_weighted=False, source="default")
     return ForecastConfig(
@@ -264,16 +276,17 @@ def _read_rows() -> Optional[list[dict]]:
 
 
 def _valid_row(row: dict) -> bool:
-    if row.get("method") not in METHODS:
+    if row.get("method") not in constanza_methods.method_keys():       # a name no method owns (a retired one, a typo): the row is ignored
         return False
     if row["method"] == "platform":
         return bool(row.get("platform")) and row["platform"] in platform_keys()
-    return True            # "generic" and "tiktok" carry no platform
+    return True            # "generic" and the registered methods carry no platform
 
 
 def load_overrides() -> dict[str, dict]:
     """{product name: row} of the explicit admin choices. {} when there are none or the table can't be read. A row that
     names a platform the data no longer has is ignored (with a warning) rather than breaking the estimate."""
+    constanza_methods.ensure_loaded()      # before the lock: _valid_row below reads the registry while holding it
     now = time.monotonic()
     with _lock:
         rows, at, retry_at = _cache["rows"], _cache["at"], _cache["retry_at"]
@@ -332,8 +345,29 @@ def forecast_for_products(products: Iterable) -> dict[str, dict]:
         # Hispanic targeting is on for this product unless the planner turns it off (constanza_hispanic.py): configured as Hispanic-targeted,
         # or forecast from a series that is already built from Hispanic audiences
         public["hispanic_default"] = hispanic_default(cfg)
+        # a method's own facts about this product (Meta: the planning retail CPM), for the card and the dock to read without a second call
+        spec = constanza_methods.get(cfg.method)
+        if spec is not None and spec.product_info is not None:
+            info = _method_info(spec, p.name)
+            if info is not None:
+                public["info"] = info
         out[p.name] = public
     return out
+
+
+def _method_info(spec, product_name: str) -> Optional[dict]:
+    """What a method's `product_info` says about one product, or None. This runs inside the catalog payload every planner session loads, so a hook
+    that raises or answers something the page cannot carry (not an object, or not JSON) costs that one product its `info` - the same fail-open
+    rule as reading the mapping - and is logged, never a 500 on the product list."""
+    try:
+        info = spec.product_info(product_name)
+        if not isinstance(info, dict):
+            raise TypeError(f"it answered {type(info).__name__}, not an object")
+        json.dumps(info, allow_nan=False)
+    except Exception as exc:
+        log.warning("method %r gave no product info for %r: %s", spec.key, product_name, exc)
+        return None
+    return info
 
 
 def live_platform_products() -> dict[str, str]:
@@ -356,8 +390,9 @@ def clean_config(payload: dict) -> dict:
     """An admin submission -> {enabled, method, platform, hispanic_weighted}. ValueError carries a planner-readable
     message. A generic estimate has no platform and no Hispanic weighting, so those are cleared rather than kept."""
     method = payload.get("method")
-    if method not in METHODS:
-        raise ValueError("Choose what the button computes: platform data, a population-share estimate, or TikTok's live audience estimate.")
+    if method not in constanza_methods.method_keys():
+        choices = ["platform data", "a population-share estimate"] + [spec.label for spec in constanza_methods.all()]
+        raise ValueError("Choose what the button computes: " + ", ".join(choices[:-1]) + " or " + choices[-1] + ".")
     platform = (payload.get("platform") or "").strip() or None
     hispanic = bool(payload.get("hispanic_weighted"))
     if method == "platform":
@@ -508,6 +543,32 @@ def add_missing_platform_product(product_name: str) -> dict:
 # The admin page's payload
 # ---------------------------------------------------------------------------
 
+BUILTIN_METHOD_INFO = (
+    {"key": "platform", "label": "Platform data", "short_label": "Platform data",
+     "description": "Avails loaded from a platform's own data, spread over the geography by DMA.",
+     "summary_text": "modeled from the DMA avails data"},
+    {"key": "generic", "label": "Population share", "short_label": "Population share",
+     "description": "The line's own impression total spread across the geography by population.",
+     "summary_text": "the line's budget, spread by population"},
+)
+
+
+def methods_payload() -> list[dict]:
+    """The methods an admin can choose, built-ins first, then every registered one - what Admin -> Forecast draws its "What it computes"
+    list, its summary cards and its connection cards from. Registry only: no catalog and no database read (the connection cards must
+    say their status without waiting for the product table). A built-in has no status or test route."""
+    out: list[dict] = []
+    for info in BUILTIN_METHOD_INFO:
+        out.append({**info, "kind": "data", "builtin": True, "secrets": [], "owns_geography": False, "status_url": None, "test_url": None,
+                    "default_products": list(DEFAULT_PLATFORM_PRODUCTS) if info["key"] == "platform" else []})
+    for spec in constanza_methods.all():
+        out.append({"key": spec.key, "label": spec.label, "short_label": spec.short_label, "kind": spec.kind, "builtin": False,
+                    "description": spec.description, "secrets": list(spec.secrets), "owns_geography": spec.owns_geography,
+                    "status_url": spec.status_url, "test_url": spec.test_url if spec.diagnose else None,
+                    "default_products": list(spec.default_products), "summary_text": constanza_methods.summary_text(spec)})
+    return out
+
+
 def admin_payload() -> dict:
     """Every live catalog product with its effective forecast config, the platform coverage, and the totals."""
     overrides = load_overrides()
@@ -554,18 +615,21 @@ def admin_payload() -> dict:
         coverage.append(entry)
         platforms.append(pub)
     enabled = [r for r in rows if r["enabled"]]
+    summary = {
+        "total": len(rows), "enabled": len(enabled),
+        "platform_modeled": sum(1 for r in enabled if r["method"] == "platform"),
+        "generic": sum(1 for r in enabled if r["method"] == "generic"),
+        "customized": sum(1 for r in rows if r["customized"]),
+    }
+    for spec in constanza_methods.all():          # one count per registered method ("tiktok", "meta", ...)
+        summary[spec.key] = sum(1 for r in enabled if r["method"] == spec.key)
     return {
         "products": rows,
+        "methods": methods_payload(),
         "win_rate": constanza_win_rate.configured().to_public(),       # the rates in force (the defaults, or the environment's)
         "win_rate_series": {k: constanza_win_rate.for_series(k).mid for k in constanza_win_rate.SERIES_RATES},   # series with a rate of their own (Prime)
         "families": sorted({r["family"] for r in rows}),
         "platforms": platforms,
         "coverage": coverage,
-        "summary": {
-            "total": len(rows), "enabled": len(enabled),
-            "platform_modeled": sum(1 for r in enabled if r["method"] == "platform"),
-            "generic": sum(1 for r in enabled if r["method"] == "generic"),
-            "tiktok": sum(1 for r in enabled if r["method"] == "tiktok"),
-            "customized": sum(1 for r in rows if r["customized"]),
-        },
+        "summary": summary,
     }

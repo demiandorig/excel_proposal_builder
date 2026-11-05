@@ -545,13 +545,17 @@
 #fc-table td:nth-child(2) { white-space: nowrap; }
 #fc-table th:nth-child(6), #fc-table td:nth-child(6) { text-align: center; }
 
-/* ---- Forecast tab: the TikTok connection ---- */
-.fc-tt { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 8px 0 4px; font-size: 13px; color: var(--ink-soft); }
-.fc-tt code, .rs-hint code { font-family: var(--font-mono); font-size: 12px; background: var(--paper-warm); padding: 1px 5px; border-radius: 4px; }
-.fc-tt-checks { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; max-width: 880px; }
-.fc-tt-checks li { padding: 8px 12px; border: 1px solid var(--rule); border-left-width: 3px; border-radius: var(--radius); background: var(--paper-card); font-size: 12.5px; }
-.fc-tt-checks li div { margin-top: 3px; color: var(--ink-soft); overflow-wrap: anywhere; }
-.fc-tt-checks .mono { margin-left: 8px; color: var(--ink-faint); font-size: 11px; }
+/* ---- Forecast tab: the connection cards (one per live-API method) ---- */
+.fc-conn { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 8px 0 4px; font-size: 13px; color: var(--ink-soft); }
+.fc-conn code, .rs-hint code { font-family: var(--font-mono); font-size: 12px; background: var(--paper-warm); padding: 1px 5px; border-radius: 4px; }
+.fc-conn-checks { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; max-width: 880px; }
+.fc-conn-checks li { padding: 8px 12px; border: 1px solid var(--rule); border-left-width: 3px; border-radius: var(--radius); background: var(--paper-card); font-size: 12.5px; }
+.fc-conn-checks li div { margin-top: 3px; color: var(--ink-soft); overflow-wrap: anywhere; }
+.fc-conn-checks .mono { margin-left: 8px; color: var(--ink-soft); font-size: 11px; }
+.fc-conn-card .rs-hint { color: var(--ink-soft); }                /* text a person has to act on (the secrets to add): 4.5:1 or better, which --ink-faint is not */
+.fc-conn .fc-default { color: var(--ink-soft); }
+.rs-hint.fc-err { color: var(--red); }
+.fc-hint { margin-top: 4px; max-width: 230px; font-size: 11.5px; line-height: 1.35; color: var(--ink-soft); white-space: normal; }
 .fc-chk-ok { border-left-color: var(--green); }
 .fc-chk-warn { border-left-color: var(--accent); }
 .fc-chk-bad { border-left-color: var(--red); }

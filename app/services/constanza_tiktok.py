@@ -10,9 +10,10 @@ Entravision's planning rule turns the audience into impressions in three scenari
 A flight of N months is N times that; est. uniques is the lower-end audience (so the Avails step's frequency lands on exactly the mid
 multiplier).
 
-This module owns three things: the validated form of a targeting request (`Targeting`), the request TikTok's estimator takes
-(`build_estimate_body`), and the answer as the estimate card shows it (`estimate`). The HTTP calls live in tiktok_client.py and the
-mapping of Constanza's geography to TikTok location IDs in tiktok_geo.py.
+This module owns four things: the validated form of a targeting request (`Targeting`), the request TikTok's estimator takes
+(`build_estimate_body`), the answer as the estimate card shows it (`estimate`) and the response POST /api/constanza/estimate gives for a
+TikTok product (`estimate_response`, registered with constanza_methods as the "tiktok" method). The HTTP calls live in tiktok_client.py and
+the mapping of Constanza's geography to TikTok location IDs in tiktok_geo.py.
 """
 from __future__ import annotations
 
@@ -20,9 +21,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from app.services import platform_scenarios, tiktok_client
+from app.services import constanza_methods, platform_scenarios, tiktok_client
 from app.services.constanza_audience import normalize_gender
 from app.services.constanza_geo import GeoResolution
+from app.services.constanza_methods import MethodRequest, MethodSpec
 from app.services.tiktok_client import STAGE_LABELS, STAGE_NOTES, AudienceSize, TikTokAPIError, TikTokClient
 from app.services.tiktok_geo import Mapping, map_resolution
 
@@ -353,6 +355,8 @@ def status() -> dict:
     missing = tiktok_client.missing_config()
     return {
         "configured": not missing, "missing": missing, "advertiser": tiktok_client.advertiser_hint(),
+        # the standard status shape (constanza_methods.validate_status): every method names its account `account`; `advertiser` stays for the panel's own banner
+        "account": tiktok_client.advertiser_hint() or None,
         "impressions_per_person": platform_scenarios.multipliers()["mid"], "scenarios": platform_scenarios.to_public(),
         "setup_hint": tiktok_client.SETUP_HINT,
         "options": static_options(),
@@ -399,3 +403,63 @@ def search(q: str, client: Optional[TikTokClient] = None) -> dict[str, list[dict
         return {}
     found = (client or tiktok_client.get_client()).targeting_search(q)
     return {kind: with_paths(items)[:25] for kind, items in found.items() if items}
+
+
+# ------------------------------------------------------------------------------------------------------------- the method
+
+def estimate_response(req: MethodRequest) -> dict:
+    """The estimate of a product forecast by TikTok's audience-size API. Shaped like every other estimate (impressions low / mid / high over the
+    flight, est. uniques, notes, what could not be matched) so the dock and the Step 05 card read it the same way, plus a `tiktok` block with the
+    audience range, TikTok's own verdict, the locations that were sent and the three impression scenarios. Raises TikTokAPIError / ValueError."""
+    if req.resolution is None:
+        raise ValueError("TikTok needs the geography resolved first.")
+    resolution = req.resolution
+    targeting = Targeting.from_dict(req.args or None)
+    result = estimate(resolution, targeting, req.months)
+    size, monthly, total = result.size, result.monthly, result.total
+    unmapped = result.mapping.unmapped
+    notes = list(req.geo_notes) + result.mapping.notes + result.notes()
+    if req.hispanic_asked:
+        notes.append("Hispanic targeting isn't applied to a TikTok audience estimate: it describes the whole geography's audience. Use TikTok's own "
+                     "language / interest targeting for Spanish speakers.")
+    if unmapped:
+        dropped = "; ".join(f"{u['input']!r} ({u['reason']})" for u in unmapped)
+        notes.insert(0, f"NOT INCLUDED in this estimate — couldn't be placed in TikTok: {dropped}")
+    block = {
+        "audience": {"low": size.lower, "mid": size.mid, "high": size.upper},
+        "stage": size.stage,
+        "stage_label": tiktok_client.STAGE_LABELS.get(size.stage),
+        "stage_note": tiktok_client.STAGE_NOTES.get(size.stage),
+        "impressions_per_person": result.factor,
+        # the three scenarios (conservative / mid / upper = lower-end audience x 4.3 / 5.5 / 8.6): monthly and flight totals, and the rule
+        "scenarios": {**platform_scenarios.to_public(size.lower), "by_scenario": result.scenarios},
+        "monthly": monthly,
+        "locations": [loc.to_public() for loc in result.mapping.locations],
+        "unmapped": unmapped,
+        "objective": OBJECTIVES[result.targeting.objective]["label"],
+        "placements": list(result.targeting.placements),
+        "request_id": size.request_id,
+        "cached": size.cached,
+    }
+    return constanza_methods.standard_estimate(
+        SPEC, product_name=req.product_name, months=result.months, imps={"low": total["low"], "mid": total["mid"], "high": total["high"]},
+        # est. uniques is TikTok's LOWER-end audience (a head count, not cumulative; the base of the three scenarios), so the Avails step's
+        # frequency is the mid multiplier
+        est_uniques=size.lower, notes=notes, block=block, resolution=resolution,
+        unmatched=[{"input": u["input"], "reason": u["reason"]} for u in unmapped],
+    )
+
+
+def _http_error(exc: Exception) -> tuple:
+    return exc.status_code, exc.public_message()
+
+
+SPEC = constanza_methods.register(MethodSpec(
+    key=PRODUCT_KEY, label="TikTok API (live)", short_label="TikTok",
+    description="A live audience-size estimate from TikTok's own ad account, with the targeting set up as in TikTok Ads Manager.",
+    kind="api", default_products=("Tiktok Ads",), owns_geography=False, request_field=PRODUCT_KEY,
+    secrets=("TIKTOK_ACCESS_TOKEN", "TIKTOK_ADVERTISER_ID"),
+    estimate=estimate_response, status=status, diagnose="app.services.tiktok_diagnose:run_checks",
+    errors=(TikTokAPIError,), to_http=_http_error,
+))
+
