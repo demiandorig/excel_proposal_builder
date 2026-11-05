@@ -53,13 +53,17 @@ def test_checker_ignores_non_source_files_and_builds_clean_source(tmp_path: Path
 
 
 def run_deploy_build(
-    tmp_path: Path, main_source: str
+    tmp_path: Path,
+    main_source: str,
+    browser_source: str = "const value = 1;\n",
+    browser_filename: str = "app.js",
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     scripts = tmp_path / "scripts"
     app = tmp_path / "app"
+    static = app / "static"
     fake_bin = tmp_path / "bin"
     scripts.mkdir()
-    app.mkdir()
+    static.mkdir(parents=True)
     fake_bin.mkdir()
     (scripts / "deploy-build.sh").write_text(
         BUILD_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8"
@@ -68,6 +72,7 @@ def run_deploy_build(
         CHECKER.read_text(encoding="utf-8"), encoding="utf-8"
     )
     (app / "main.py").write_text(main_source, encoding="utf-8")
+    (static / browser_filename).write_text(browser_source, encoding="utf-8")
     python_calls = tmp_path / "python-calls"
     fake_python = fake_bin / "python"
     fake_python.write_text(
@@ -112,4 +117,29 @@ def test_deploy_build_stops_before_installing_on_python_syntax_error(
 
     assert result.returncode != 0
     assert "SyntaxError" in result.stdout + result.stderr
+    assert not python_calls.exists()
+
+
+def test_deploy_build_accepts_valid_browser_javascript(tmp_path: Path) -> None:
+    result, python_calls = run_deploy_build(
+        tmp_path, "value = 1\n", "const value = 1;\n"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert python_calls.exists()
+    assert "pip install" in python_calls.read_text(encoding="utf-8")
+
+
+def test_deploy_build_reports_invalid_browser_javascript_before_installing(
+    tmp_path: Path,
+) -> None:
+    result, python_calls = run_deploy_build(
+        tmp_path,
+        "value = 1\n",
+        "const value = 1;\nfunction (\n",
+        "broken.js",
+    )
+
+    assert result.returncode != 0
+    assert "app/static/broken.js:2" in result.stderr
     assert not python_calls.exists()
