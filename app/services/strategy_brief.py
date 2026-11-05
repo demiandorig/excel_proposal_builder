@@ -98,6 +98,7 @@ General: Entravision's deep expertise in creating culturally relevant, bilingual
 # through to the fallback) and then break the fallback too.
 _SEARCH_MODEL = "gpt-5.1"
 _FALLBACK_MODEL = "gpt-5.1"
+_STRATEGY_OPENAI_TIMEOUT_SECONDS = 8.0
 # Reasoning + visible tokens share this cap; a full brief has run ~12k chars (~3k tokens) and
 # an old 3,000 cap truncated it mid-object. llm_utils retries once at double this if still cut off.
 _MAX_OUTPUT_TOKENS = 16000
@@ -167,7 +168,7 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
     stage_started = time.perf_counter()
     client = _OpenAI(
         api_key=api_key,
-        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        timeout=_STRATEGY_OPENAI_TIMEOUT_SECONDS,
         max_retries=llm_utils.OPENAI_MAX_RETRIES,
     )
     prompt = _build_prompt(request, reprompt, ad_intel=ad_intel, allowed_families=allowed_families,

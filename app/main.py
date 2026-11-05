@@ -114,7 +114,7 @@ constanza_methods.ensure_loaded()
 
 _ROADBLOCKS_TOTAL_TIMEOUT_SECONDS = 30.0
 _GENERATE_ENRICHMENT_TIMEOUT_SECONDS = 10.0
-_STRATEGY_REQUEST_TIMEOUT_SECONDS = 15.0
+_STRATEGY_REQUEST_TIMEOUT_SECONDS = 10.0
 _roadblocks_tasks: set[asyncio.Task] = set()
 _generate_enrichment_tasks: set[asyncio.Task] = set()
 

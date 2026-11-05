@@ -8,6 +8,7 @@ them the kind of text a model returns, and the model call itself by stubbing llm
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -444,6 +445,27 @@ def test_the_strategy_brief_prompt_carries_the_no_wikipedia_rule():
     prompt = sb._build_prompt(_request(), None)
     _assert_has_no_wikipedia_rule(prompt)
     assert "never Wikipedia" in prompt                                 # also on the citation-field instruction
+
+
+def test_strategy_generation_uses_a_short_provider_deadline(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
+    monkeypatch.setattr(sb, "_HAS_OPENAI", True)
+    client_options = {}
+
+    def fake_openai(api_key=None, **kwargs):
+        client_options.update(kwargs)
+        return object()
+
+    def timed_out(*args, **kwargs):
+        raise TimeoutError("provider timeout")
+
+    monkeypatch.setattr(sb, "_OpenAI", fake_openai)
+    monkeypatch.setattr(llm_utils, "responses_text", timed_out)
+    result = asyncio.run(sb.generate_brief(_request()))
+
+    assert client_options["timeout"] == 8.0
+    assert client_options["max_retries"] == 0
+    assert "timed out" in result["error"].lower()
 
 
 def test_the_roadblocks_prompt_carries_the_no_wikipedia_rule():
