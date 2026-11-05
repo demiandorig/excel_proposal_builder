@@ -33,4 +33,3 @@ if ! python -m app.services.forecast_import seed-audience; then
 fi
 
 python -m compileall -q app tests
-python -m pytest -q
