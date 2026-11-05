@@ -6442,126 +6442,6 @@ function _jumpToCurateField(field, lineId) {
   }, 80);
 }
 
-function _metaFullFlightRetailBudget(li) {
-  // Step 04's line budget is per selected billing period; li.months is
-  // that period's count (1 for full-flight), so this is the actual retail
-  // spend for the whole line, not a monthly-equivalent approximation.
-  return Math.max(0, Number(li.monthly_budget) || 0) * Math.max(1, Number(li.months) || 1);
-}
-
-// The interests / behaviors / demographics a planner picked from Meta's own lists for a line (kept for the session; a saved snapshot restores them).
-function _metaSelected(lid) {
-  state.metaTargeting = state.metaTargeting || {};
-  if (!state.metaTargeting[lid]) {
-    const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
-    state.metaTargeting[lid] = ((saved && saved.meta_targeting && saved.meta_targeting.detailed) || []).map(x => ({ id: x.id, name: x.name, type: x.type }));
-  }
-  return state.metaTargeting[lid];
-}
-
-function _metaChipsHtml(lid) {
-  const chosen = _metaSelected(lid);
-  if (!chosen.length) return `<span class="cz-note">None chosen: the audience is everyone Meta counts on its default placements (Facebook, Instagram, Messenger, Audience Network) in the geography.</span>`;
-  return chosen.map((x, i) => `<span class="cz-chip cz-ok">${escapeHtml(x.name)} <small>${escapeHtml(x.type.replace("_", " "))}</small>`
-    + `<button type="button" class="cz-x" data-meta-act="remove" data-i="${i}" aria-label="Remove ${escapeHtml(x.name)}">×</button></span>`).join("");
-}
-
-// What a live pull was for, in words: "Los Angeles (TV market), women 25–44, any of: Soccer".
-function _metaPulledFor(data) {
-  const t = data && data.meta_targeting;
-  if (!t) return "";
-  const kind = { geo_market: "TV market", city: "city", region: "state / region", zip: "ZIP", country: "country" }[t.geo_type] || t.geo_type;
-  const age = t.age_min != null || t.age_max != null ? `ages ${t.age_min != null ? t.age_min : "18"}–${t.age_max != null ? t.age_max : "65+"}` : "";
-  const gender = t.gender === "male" ? "men" : (t.gender === "female" ? "women" : "");
-  const detailed = (t.detailed || []).length ? `any of: ${t.detailed.map(x => x.name).join(", ")}` : "";
-  return [`${t.geo_name || "Meta geography " + t.geo_key} (${kind})`, [gender, age].filter(Boolean).join(" "), detailed].filter(Boolean).join(", ");
-}
-
-function _metaForecastSummaryHtml(data, li, p, forceStale) {
-  if (!data) return "";
-  const n = value => Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 });
-  const money = value => "$" + Number(value).toLocaleString("en-US", { maximumFractionDigits: 2 });
-  const audience = data.potential_audience;
-  const sc = data.scenarios;
-  const effectiveCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm;
-  const stale = !!forceStale
-    || Math.abs(Number(data.retail_budget) - _metaFullFlightRetailBudget(li)) > 0.01
-    || data.product_name !== li.product_name
-    || Number(data.months) !== _constanzaFlightMonths(li)
-    || data.proposal_geo !== _constanzaGeoFor(li.id)
-    || data.target_text !== _effectiveTargetText(li)
-    || Math.abs(Number(data.retail_cpm) - Number(effectiveCpm)) > 0.01;
-  let table = "";
-  if (sc) {
-    const m = sc.multipliers;
-    const cols = [["conservative", "Conservative"], ["mid", "Mid · default"], ["upper", "Upper"]];
-    table = `<table class="constanza-range-table meta-scenarios"><tr><th></th>${cols.map(([k, label]) => `<th>${label} <small>× ${escapeHtml(String(m[k]))}</small></th>`).join("")}</tr>
-      <tr><td>Imps / month</td>${cols.map(([k]) => `<td${k === "mid" ? " class=\"meta-mid\"" : ""}>${n(sc.monthly[k])}</td>`).join("")}</tr>
-      ${sc.months > 1 ? `<tr><td>Flight · ${n(sc.months)} mo</td>${cols.map(([k]) => `<td>${n(sc.flight[k])}</td>`).join("")}</tr>` : ""}
-      <tr><td>Retail spend at the planning CPM</td>${cols.map(([k]) => `<td>${money(sc.retail_spend_at_flight[k])}</td>`).join("")}</tr></table>`;
-  }
-  return `<div class="meta-plan-result">
-    <strong>${stale ? "⚠ Inputs changed — recalculate" : "Meta audience scenarios"}</strong>
-    ${audience ? `<p>Meta audience (lower – upper end): <strong>${n(audience.lower)}</strong> – ${n(audience.upper)} accounts ${audience.source === "meta_api" ? "(from Meta)" : "(entered manually)"}.${data.meta_targeting ? ` Pulled for ${escapeHtml(_metaPulledFor(data))}.` : ""} The scenarios use the <strong>lower end</strong>: it is the est. uniques the Avails step gets, so its frequency reads ${sc ? escapeHtml(String(sc.multipliers.mid)) : "5.5"}.</p>` : `<p>Enter or pull an audience to see the scenarios.</p>`}
-    ${table}
-    <p>Budget cross-check: ${money(data.retail_budget)} retail → ${money(data.media_budget)} media at a ${money(data.retail_cpm)} retail CPM buys about ${n(data.budget_impressions)} impressions over the ${n(data.months)}-month flight. That is what the budget pays for, not avails.</p>
-    ${sc && !stale ? `<button type="button" class="btn-secondary meta-insert-btn" data-meta-act="insert" data-lid="${escapeAttr(li.id)}">Insert the mid-case (${n(sc.monthly.mid)} / month) into Avails →</button>` : ""}
-    <small>Planning scenarios, not a delivery forecast · ${escapeHtml(String(data.as_of || "").slice(0, 10))}</small>
-  </div>`;
-}
-
-// "(no flight dates: 1 month assumed)" when the line has no readable dates: the flight length is then a stand-in, not the flight's.
-function _metaFlightHint(li) {
-  const start = _mbParseDate(_effectiveStartDate(state.activeTierLabel));
-  const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
-  return start && end ? "" : " (no flight dates: the flight length is not known, so 1 month is assumed)";
-}
-
-function _metaForecastPanelHtml(li, p, existing) {
-  const saved = existing.meta_forecast || null;
-  const mult = (state.catalog && state.catalog.audience_multipliers) || { conservative: 4.3, mid: 5.5, upper: 8.6 };
-  const was = (saved && saved.meta_targeting) || {};
-  const manualLower = saved && saved.potential_audience && saved.potential_audience.source === "manual" ? saved.potential_audience.lower : "";
-  const manualUpper = saved && saved.potential_audience && saved.potential_audience.source === "manual" && saved.potential_audience.upper !== saved.potential_audience.lower
-    ? saved.potential_audience.upper : "";
-  const geo = _constanzaGeoFor(li.id);
-  const effectiveCpm = _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm;
-  return `<div class="meta-plan-block" data-meta-lid="${escapeAttr(li.id)}">
-    <strong>Meta audience scenarios</strong>
-    <p>Retail budget ${_metaFullFlightRetailBudget(li).toLocaleString("en-US", { style: "currency", currency: "USD" })} over ${_constanzaFlightMonths(li)} month(s)${_metaFlightHint(li)}; retail CPM $${escapeHtml(effectiveCpm)}. Monthly impressions are the <strong>lower end</strong> of Meta's audience × ${escapeHtml(String(mult.conservative))} (conservative), ${escapeHtml(String(mult.mid))} (mid, the default) or ${escapeHtml(String(mult.upper))} (upper). Meta counts people on its default placements (Facebook, Instagram, Messenger, Audience Network), as Ads Manager's estimated audience size does.</p>
-    <div class="meta-plan-fields">
-      <label>Audience size, lower end <input data-meta-input class="meta-audience" type="number" min="0" max="1000000000" placeholder="From Ads Manager" value="${escapeHtml(manualLower)}" /></label>
-      <label>Upper end (optional) <input data-meta-input class="meta-audience-upper" type="number" min="0" max="1000000000" placeholder="Same as lower" value="${escapeHtml(manualUpper)}" /></label>
-    </div>
-    <button type="button" class="btn-secondary meta-model-btn" data-lid="${escapeAttr(li.id)}">Calculate scenarios</button>
-    <details class="meta-live-details"><summary>Pull the audience from Meta (API)</summary>
-      <p>Choose the exact Meta geography; age, gender and interests are optional (any of the chosen interests / behaviors). Anything else about the campaign (exclusions, placements, account restrictions) must be checked in Ads Manager.</p>
-      <div class="meta-plan-fields">
-        <label>Meta geography type <select class="meta-geo-type"><option value="geo_market">TV market (Meta's Comscore markets)</option><option value="city">City</option><option value="region">State / region</option><option value="zip">ZIP</option><option value="country">Country</option></select></label>
-        <label>Search <input data-meta-input class="meta-geo-query" type="text" maxlength="100" value="${escapeHtml(geo)}" /></label>
-        <button type="button" class="btn-secondary meta-search-btn" data-lid="${escapeAttr(li.id)}">Find Meta geographies</button>
-        <label>Matched geography <select class="meta-geo-choice"><option value="">Search and choose an exact match</option></select></label>
-        <label>Minimum age <input data-meta-input class="meta-age-min" type="number" min="18" max="65" placeholder="All" value="${escapeHtml(was.age_min != null ? was.age_min : "")}" /></label>
-        <label>Maximum age <input data-meta-input class="meta-age-max" type="number" min="18" max="65" placeholder="All" value="${escapeHtml(was.age_max != null ? was.age_max : "")}" /></label>
-        <label>Gender <select class="meta-gender"><option value="all">All</option><option value="male"${was.gender === "male" ? " selected" : ""}>Male</option><option value="female"${was.gender === "female" ? " selected" : ""}>Female</option></select></label>
-      </div>
-      <div class="meta-targeting">
-        <strong>Interests &amp; behaviors</strong> <small>(Meta's own lists)</small>
-        <div class="meta-plan-fields">
-          <label>Search <input data-meta-input class="meta-target-query" type="search" maxlength="80" placeholder="soccer, new parents, small business…" /></label>
-          <button type="button" class="btn-secondary" data-meta-act="search" data-lid="${escapeAttr(li.id)}">Search Meta</button>
-          <label>Or browse a whole list (A–Z; type above to narrow it) <select class="meta-browse-kind"><option value="interests">Interests</option><option value="behaviors">Behaviors</option><option value="demographics">Demographics (life events, income, …)</option></select></label>
-          <button type="button" class="btn-secondary" data-meta-act="browse" data-lid="${escapeAttr(li.id)}">Browse</button>
-        </div>
-        <div class="meta-target-results" aria-live="polite"></div>
-        <div class="cz-chips meta-target-chips">${_metaChipsHtml(li.id)}</div>
-      </div>
-      <button type="button" class="btn-secondary meta-pull-btn" data-lid="${escapeAttr(li.id)}">Pull audience and calculate</button>
-    </details>
-    <div class="meta-plan-feedback" aria-live="polite">${_metaForecastSummaryHtml(saved, li, p)}</div>
-  </div>`;
-}
-
 function renderAvailsGrid() {
   renderAllTierTabStrips();
   const rt = (state.parsed.request_type || "").toLowerCase();
@@ -6672,17 +6552,7 @@ function renderAvailsGrid() {
         `}
       </div>
       <p class="sov-helper" id="sov-helper-${escapeAttr(li.id)}"></p>
-      ${!isFreeform && p.meta_retail_cpm != null ? _metaForecastPanelHtml(li, p, existing) : ""}
-      ${!isFreeform && _forecastEnabled(p) && p.meta_retail_cpm == null ? `
-      <div class="constanza-block">
-        ${window.Constanza ? Constanza.periodLineHtml(p.forecast && p.forecast.series) : ""}
-        <div class="cz-card-actions">
-          <button type="button" class="btn-secondary constanza-autocalc-btn" data-lid="${escapeAttr(li.id)}">${window.Constanza ? Constanza.iconHtml() : "🛰️"}Auto-calculate avails</button>
-          <button type="button" class="cz-link constanza-line-dock-btn" data-lid="${escapeAttr(li.id)}">Open in Constanza</button>
-        </div>
-        <div class="constanza-result" id="constanza-result-${escapeAttr(li.id)}" style="display:none;"></div>
-      </div>
-      ` : ""}
+      ${!isFreeform && _forecastEnabled(p) ? _constanzaBlockHtml(li, p, existing) : ""}
     `;
     grid.appendChild(card);
     // Naturally blanks itself for a free-form entry — computeSovPct() has no
@@ -6735,7 +6605,7 @@ function renderAvailsGrid() {
   // is meaningless, always "on" per the checkbox default) and the "_text"
   // free-form inputs above (running parseFormattedInput on "50 to 100"
   // would strip the letters and glue the digits together into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
     inp.addEventListener("focus", e => {
       const raw = parseFormattedInput(e.target.value);
       // Frequency is legitimately fractional (5.5) — rounding it here and
@@ -6773,7 +6643,7 @@ function renderAvailsGrid() {
   // both overwrite that with a numeric parse of the same text AND mangle
   // it in the process — parseFormattedInput("50 to 100") strips the
   // letters and glues what's left into "50100").
-  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"]):not([data-meta-input])').forEach(inp => {
+  grid.querySelectorAll('input:not([data-freeform-toggle]):not([data-key$="_text"]):not([data-key="sov_pct_freeform"])').forEach(inp => {
     inp.addEventListener("blur", e => {
       const lid = e.target.dataset.lid;
       const key = e.target.dataset.key;
@@ -6894,45 +6764,27 @@ function renderAvailsGrid() {
     });
   });
 
-  grid.querySelectorAll(".constanza-autocalc-btn").forEach(btn => {
-    btn.addEventListener("click", () => onConstanzaAutoCalc(btn.dataset.lid));
-  });
-  grid.querySelectorAll(".constanza-line-dock-btn").forEach(btn => {
-    btn.addEventListener("click", () => openConstanzaForLine(btn.dataset.lid));
-  });
-  grid.querySelectorAll(".meta-plan-block").forEach(panel => {
-    panel.addEventListener("click", e => onMetaPanelClick(panel, e));
-    const q = panel.querySelector(".meta-target-query");
-    if (q) q.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); onMetaTargetLookup(panel.dataset.metaLid, false); } });
-    panel.querySelectorAll(".meta-audience, .meta-audience-upper, .meta-geo-choice, .meta-age-min, .meta-age-max, .meta-gender").forEach(el => {
-      el.addEventListener("input", () => _metaMarkStale(panel));
-      el.addEventListener("change", () => _metaMarkStale(panel));
-    });
-  });
-  grid.querySelectorAll(".meta-model-btn").forEach(btn => {
-    btn.addEventListener("click", () => onMetaForecast(btn.dataset.lid, false));
-  });
-  grid.querySelectorAll(".meta-pull-btn").forEach(btn => {
-    btn.addEventListener("click", () => onMetaForecast(btn.dataset.lid, true));
-  });
-  grid.querySelectorAll(".meta-search-btn").forEach(btn => {
-    btn.addEventListener("click", () => onMetaGeoSearch(btn.dataset.lid));
-  });
-  grid.querySelectorAll(".meta-geo-type, .meta-geo-query").forEach(input => {
-    input.addEventListener("input", () => {
-      const choice = input.closest(".meta-plan-block").querySelector(".meta-geo-choice");
-      choice.innerHTML = '<option value="">Search and choose an exact match</option>';
-    });
-  });
+  _constanzaMountBlocks(grid);
   if (window.Constanza) Constanza.hintOnce();
 }
 
 // ----------------------------------------------------------------------
-// Constanza — DMA-weighted avails auto-calculator (app/services/
-// constanza_engine.py). A fast, confidence-ranged starting point for the
-// same number a planner would otherwise gather by hand from Roku Ads
-// Manager / Amazon DSP / The Trade Desk / Madhive — not a silent
+// CONSTANZA HOST: begin
+// Constanza — the avails hub (app/services/constanza_engine.py for platform
+// data, app/services/constanza_methods.py for the live methods). A fast,
+// confidence-ranged starting point for the same number a planner would
+// otherwise gather by hand from Roku Ads Manager / Amazon DSP / The Trade
+// Desk / Madhive / an ad platform's own audience tool — not a silent
 // replacement for checking the platform when precision matters.
+//
+// Step 05 draws ONE block per line, the same for every method: the buttons
+// constanza.js asks for (Constanza.blockButtons) and, under them, the card
+// of the line's last estimate. Nothing in this section names a method: what a
+// method is, which buttons it needs and how its result reads come from
+// constanza.js and the method's own script, reached only through
+// window.Constanza and window.constanzaHost (defined below: what constanza.js
+// needs from the proposal). A new method adds its script and a registry
+// entry; this file does not change.
 // ----------------------------------------------------------------------
 // Swap ONE item of a geo list for the planner's pick ("Springfield" -> "Springfield, MO"
 // inside "Springfield, 95814, Placer County, CA"), tolerant of spacing/case differences
@@ -7010,7 +6862,7 @@ function _targetsHispanic(li) {
 
 // Hispanic targeting for a line's avails: the planner's own switch on its card when they used it; else ON when the line's own or the proposal's
 // targeting names a Hispanic audience (most of our campaigns do); else null = the product's own default (the server decides). Only platform
-// data has avails to narrow: a population-share or TikTok estimate is never sent the flag.
+// data has avails to narrow: any other estimate is never sent the flag.
 function _constanzaHispanicFor(lid, li) {
   const prod = li && state.productIndex ? state.productIndex[li.product_name] : null;
   if (!prod || !prod.forecast || prod.forecast.method !== "platform") return null;
@@ -7028,188 +6880,261 @@ function _constanzaFlightDays() {
   return Math.min(Math.round((end - start) / 86400000) + 1, 3660);
 }
 
-function _metaPanel(lid) {
-  return document.querySelector(`.meta-plan-block[data-meta-lid="${escapeAttr(lid)}"]`);
+// What this line's flight really is, for the methods that need to know: does the active option have dates we can read? Without them
+// _constanzaFlightMonths is a stand-in (the line's own count, or 1), not the flight's length.
+function _constanzaHasFlightDates() {
+  const start = _mbParseDate(_effectiveStartDate(state.activeTierLabel));
+  const end = _mbParseDate(_effectiveEndDate(state.activeTierLabel));
+  return !!(start && end && _mbMonthsBetween(start, end).length > 0);
 }
 
-function _metaFeedback(panel, message) {
-  const el = panel && panel.querySelector(".meta-plan-feedback");
-  if (el) el.innerHTML = `<p class="constanza-error">${escapeHtml(message)}</p>`;
+// The line's budget for the WHOLE flight, in dollars. Step 04's budget is per billing period and li.months is that period's count (1 for Full Flight),
+// so this is the real spend of the line, not a monthly equivalent.
+function _constanzaFullFlightBudget(li) {
+  return Math.max(0, Number(li.monthly_budget) || 0) * Math.max(1, Number(li.months) || 1);
 }
 
-async function onMetaGeoSearch(lid) {
-  const panel = _metaPanel(lid);
-  if (!panel) return;
-  const query = panel.querySelector(".meta-geo-query").value.trim();
-  const locationType = panel.querySelector(".meta-geo-type").value;
-  const btn = panel.querySelector(".meta-search-btn");
-  const choice = panel.querySelector(".meta-geo-choice");
-  if (!query) { _metaFeedback(panel, "Enter a Meta geography to search."); return; }
-  btn.disabled = true;
-  choice.innerHTML = '<option value="">Searching…</option>';
-  try {
-    const response = await fetch("/api/constanza/meta-geos", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, location_type: locationType }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-    choice.innerHTML = '<option value="">Choose an exact Meta match</option>' +
-      (data.locations || []).map(loc => `<option value="${escapeHtml(loc.key)}">${escapeHtml(loc.name)}${loc.region ? " · " + escapeHtml(loc.region) : ""}${loc.country_code ? " · " + escapeHtml(loc.country_code) : ""}</option>`).join("");
-    if (!data.locations || !data.locations.length) _metaFeedback(panel, "Meta found no matching geography. Try a city, ZIP, state, or the market name as Meta lists it (Meta's markets are Comscore markets, which can differ from Nielsen DMAs).");
-  } catch (error) {
-    choice.innerHTML = '<option value="">Search and choose an exact match</option>';
-    _metaFeedback(panel, String(error.message || error));
-  } finally {
-    btn.disabled = false;
+function _constanzaLineOf(lid) {
+  return state.lineItems.find(x => x.id === lid) || null;
+}
+
+// The forecast method of a line's product: whatever Admin -> Forecast says, platform data when the catalog carries no config.
+function _constanzaMethodOf(li) {
+  const p = state.productIndex[li.product_name];
+  return (p && p.forecast && p.forecast.method) || "platform";
+}
+
+// What constanza.js says about a method, in one shape: { loaded, note, caps: {ownsGeography, persist, autoPull, lineMonths}, legacyKey }. `loaded` is
+// false for a method that is neither a built-in data method nor registered (its script did not load): its lines show `note` instead of some other estimate.
+function _constanzaMethodInfo(method) {
+  const info = { loaded: true, note: "", caps: { ownsGeography: false, persist: false, autoPull: "geo", lineMonths: false }, legacyKey: null };
+  const found = window.Constanza && Constanza.methodState ? Constanza.methodState(method) : null;
+  if (!found || typeof found !== "object") return info;
+  info.loaded = found.ok !== false;
+  info.note = typeof found.note === "string" ? found.note : "";
+  Object.assign(info.caps, found.caps || {});
+  // the key an older shape of the method's saved estimate was kept under (the method's own script says it)
+  info.legacyKey = typeof found.legacyKey === "string" ? found.legacyKey : null;
+  return info;
+}
+
+// What Step 04 knows about one line, in the shape constanza.js and the methods read it. Every field is always there.
+function _constanzaLineFacts(li, p) {
+  const eff = _effectiveProduct(li, p || {}) || {};
+  const cpm = eff.estimated_cpm_for_imps == null ? NaN : Number(eff.estimated_cpm_for_imps);
+  return {
+    id: li.id,
+    product_name: li.product_name,
+    method: _constanzaMethodOf(li),
+    label: window.Constanza ? Constanza.lineLabel(li) : li.product_name,
+    months: _constanzaFlightMonths(li),
+    flight_days: _constanzaFlightDays(),
+    has_dates: _constanzaHasFlightDates(),
+    geo_text: _constanzaGeoFor(li.id),
+    target_text: _effectiveTargetText(li),
+    budget: _constanzaFullFlightBudget(li),
+    cpm: Number.isFinite(cpm) ? cpm : null,
+    hispanic: _constanzaHispanicFor(li.id, li),
+  };
+}
+
+// ---- the saved estimate of a line -------------------------------------------------------------------------------------------------
+// The last estimate a method kept for a line lives in state.availsData[lid].forecast_snapshot: {v, method, saved_at, request, result, line}. A
+// snapshot is REPLACED, never changed in place (a copied option shares the object). An older shape a method still reads (Constanza.adoptLegacy) is
+// turned into a snapshot in memory only; it is written back when the planner estimates again.
+
+function _constanzaNativeSnapshot(entry, method) {
+  const s = entry && entry.forecast_snapshot;
+  return s && typeof s === "object" && !Array.isArray(s) && s.v === 1 && s.method === method ? s : null;
+}
+
+// The newer of what the line stored and what an older shape says; only an estimate of the line's CURRENT method (another method's stays in the
+// data, never drawn, never deleted).
+function _constanzaSnapshotFor(lid, entry) {
+  const li = _constanzaLineOf(lid);
+  const saved = entry || state.availsData[lid];
+  if (!li || !saved) return null;
+  const method = _constanzaMethodOf(li);
+  const native = _constanzaNativeSnapshot(saved, method);
+  let older = null;
+  if (window.Constanza && Constanza.adoptLegacy) {
+    try { older = Constanza.adoptLegacy(method, saved, _constanzaLineFacts(li, state.productIndex[li.product_name])) || null; }
+    catch (err) { console.error("[constanza] a saved estimate of an older shape could not be read", err); }
   }
+  const when = s => { const t = Date.parse(s && s.saved_at); return Number.isNaN(t) ? -Infinity : t; };
+  return older && (!native || when(older) > when(native)) ? older : native;
 }
 
-// What a keyword (or a whole list) finds in Meta's interests / behaviors / demographics, as buttons a planner clicks to choose.
-function _metaTargetResultsHtml(groups, chosen) {
-  const have = new Set(chosen.map(x => `${x.type}:${x.id}`));
-  const sections = groups.filter(([, items]) => items.length).map(([label, items]) =>
-    `<div class="meta-target-group"><span class="cz-note">${escapeHtml(label)}</span><div class="cz-chips">${items.slice(0, 60).map(it =>
-      `<button type="button" class="cz-chip ${have.has(`${it.type}:${it.id}`) ? "cz-ok" : ""}" data-meta-act="add" data-id="${escapeHtml(it.id)}" data-type="${escapeHtml(it.type)}" data-name="${escapeHtml(it.name)}"` +
-      `${it.path && it.path.length ? ` title="${escapeHtml(it.path.join(" › "))}"` : ""}>${escapeHtml(it.name)}${it.audience_lower != null ? ` <small>${Number(it.audience_lower).toLocaleString("en-US")}+</small>` : ""}</button>`).join("")}</div>${items.length > 60 ? `<span class="cz-note">${items.length - 60} more: search to narrow.</span>` : ""}</div>`);
-  return sections.length ? sections.join("") : `<span class="cz-note">Nothing found: try other words, or browse the list.</span>`;
+// Drops the older shape of this line's saved estimate (what the method's own script says it is called), if the line has one. Only a field named like
+// the older shapes are (a name ending in _forecast: constanza.js refuses any other name when a method registers): never the snapshot, never one of the line's figures.
+function _constanzaDropOlderShape(li, entry) {
+  const key = _constanzaMethodInfo(_constanzaMethodOf(li)).legacyKey;
+  if (key && /^[a-z][a-z0-9_]*_forecast$/.test(key)) delete entry[key];
 }
 
-async function onMetaTargetLookup(lid, browse) {
-  const panel = _metaPanel(lid);
-  if (!panel) return;
-  const box = panel.querySelector(".meta-target-results");
-  const query = panel.querySelector(".meta-target-query").value.trim();
-  const kind = panel.querySelector(".meta-browse-kind").value;
-  if (!browse && query.length < 2) { box.innerHTML = '<span class="cz-note">Type at least two letters to search.</span>'; return; }
-  box.innerHTML = '<span class="cz-note">Asking Meta…</span>';
-  try {
-    const response = await fetch(browse ? `/api/constanza/meta-targeting?kind=${encodeURIComponent(kind)}` : `/api/constanza/meta-targeting?q=${encodeURIComponent(query)}`);
-    const data = await response.json();
-    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
-    const narrowed = (data.items || []).filter(it => words.every(w => (it.name + " " + (it.path || []).join(" ")).toLowerCase().includes(w)));
-    const groups = browse ? [[kind, narrowed]]
-      : [["Interests", data.results.interests || []], ["Behaviors", data.results.behaviors || []], ["Demographics", data.results.demographics || []]];
-    box.innerHTML = _metaTargetResultsHtml(groups, _metaSelected(lid));
-  } catch (error) {
-    box.innerHTML = `<p class="constanza-error">${escapeHtml(String(error.message || error))}</p>`;
+// null deletes the line's snapshot. false, with nothing written, when the line is not in the option on the screen (deleted, or another option
+// was opened since): an estimate that comes back late must not leave an entry for a line that is gone.
+function _constanzaSaveSnapshot(lid, snapshot) {
+  const li = _constanzaLineOf(lid);
+  if (!li) return false;
+  const entry = state.availsData[lid] = state.availsData[lid] || {};
+  if (snapshot) {
+    entry.forecast_snapshot = snapshot;
+    _constanzaDropOlderShape(li, entry);
+  } else {
+    delete entry.forecast_snapshot;
   }
+  return true;
 }
 
-// Clicks inside a Meta panel: choose / remove an interest, search or browse Meta's lists, insert the mid scenario into Avails.
-function onMetaPanelClick(panel, event) {
-  const target = event.target.closest("[data-meta-act]");
-  if (!target || !panel.contains(target)) return;
-  const lid = panel.dataset.metaLid;
-  const act = target.dataset.metaAct;
-  if (act === "search") onMetaTargetLookup(lid, false);
-  else if (act === "browse") onMetaTargetLookup(lid, true);
-  else if (act === "insert") onMetaInsert(lid);
-  else if (act === "add" || act === "remove") {
-    const chosen = _metaSelected(lid);
-    if (act === "add") {
-      const item = { id: target.dataset.id, name: target.dataset.name, type: target.dataset.type };
-      if (!chosen.some(x => x.id === item.id && x.type === item.type)) chosen.push(item);
-      target.classList.add("cz-ok");
+// What constanza.js reads from this page (it is defined before constanza.js loads, and read lazily: every member is optional there).
+window.constanzaHost = {
+  lineFacts: lid => { const li = _constanzaLineOf(lid); return li ? _constanzaLineFacts(li, state.productIndex[li.product_name]) : null; },
+  snapshot: lid => _constanzaSnapshotFor(lid),
+  saveSnapshot: (lid, snapshot) => { const ok = _constanzaSaveSnapshot(lid, snapshot); if (ok) _constanzaRefreshCard(lid); return ok; },
+  onDirty: lid => (lid == null ? _constanzaRefreshAllCards() : _constanzaRefreshCard(lid)),      // no line: something every card reads changed (a connection answer)
+};
+
+// ---- the block on a Step 05 line --------------------------------------------------------------------------------------------------
+// Every method gets the same block: the buttons constanza.js asks for, then a place for the card of the line's last estimate.
+
+function _constanzaClassicButtons(lid) {
+  return `<div class="cz-card-actions">
+          <button type="button" class="btn-secondary constanza-autocalc-btn" data-lid="${lid}">${window.Constanza ? Constanza.iconHtml() : "🛰️"}Auto-calculate avails</button>
+          <button type="button" class="cz-link constanza-line-dock-btn" data-lid="${lid}">Open in Constanza</button>
+        </div>`;
+}
+
+function _constanzaBlockInnerHtml(li, p, entry) {
+  const lid = escapeAttr(li.id);
+  let buttons = "";
+  try {
+    const method = _constanzaMethodOf(li);
+    if (window.Constanza && Constanza.blockButtons) {
+      buttons = _constanzaMethodInfo(method).loaded
+        ? Constanza.blockButtons(method, _constanzaLineFacts(li, p), _constanzaSnapshotFor(li.id, entry))
+        : "";
+      if (buttons && !buttons.includes("cz-card-actions")) buttons = `<div class="cz-card-actions">${buttons}</div>`;
     } else {
-      chosen.splice(Number(target.dataset.i), 1);
+      buttons = _constanzaClassicButtons(lid);
     }
-    panel.querySelector(".meta-target-chips").innerHTML = _metaChipsHtml(lid);
-    _metaMarkStale(panel);
+  } catch (err) {
+    console.error("[constanza] the buttons of a line could not be drawn", err);
+    buttons = _constanzaClassicButtons(lid);
+  }
+  return `
+        ${window.Constanza ? Constanza.periodLineHtml(p.forecast && p.forecast.series) : ""}
+        ${buttons}
+        <div class="constanza-result" id="constanza-result-${lid}" style="display:none;"></div>
+      `;
+}
+
+function _constanzaBlockHtml(li, p, entry) {
+  return `
+      <div class="constanza-block" data-lid="${escapeAttr(li.id)}" data-method="${escapeAttr(_constanzaMethodOf(li))}">${_constanzaBlockInnerHtml(li, p, entry)}</div>
+      `;
+}
+
+// Wires the buttons of every block and draws its card. One card never takes the rest of Step 05 with it: a saved estimate that cannot be drawn
+// (an old shape, a hand-edited file) shows a plain line in its place, and every other line is drawn as usual.
+function _constanzaMountBlocks(grid) {
+  grid.querySelectorAll(".constanza-block").forEach(_constanzaWireBlock);
+}
+
+function _constanzaWireBlock(block) {
+  const lid = block.dataset.lid;
+  block.querySelectorAll(".constanza-autocalc-btn").forEach(btn => btn.addEventListener("click", () => onConstanzaAutoCalc(lid)));
+  block.querySelectorAll(".constanza-line-dock-btn").forEach(btn => btn.addEventListener("click", () => openConstanzaForLine(lid)));
+  try {
+    _constanzaDrawCard(lid);
+  } catch (err) {
+    console.error("[constanza] the saved estimate of a line could not be drawn", err);
+    _constanzaShowUnreadable(lid);
   }
 }
 
-// A control that changes the number was changed after a calculation: say the saved snapshot no longer matches what is on screen.
-function _metaMarkStale(panel) {
-  const lid = panel.dataset.metaLid;
-  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
-  const li = state.lineItems.find(x => x.id === lid);
-  if (!saved || !li) return;
-  panel.querySelector(".meta-plan-feedback").innerHTML = _metaForecastSummaryHtml(saved, li, state.productIndex[li.product_name] || {}, true);
+// A saved estimate that cannot be drawn says so in plain words and keeps the way forward: the same button the card has when it has no estimate yet
+// (the line's own buttons may have been left out because an estimate is "there").
+function _constanzaShowUnreadable(lid) {
+  const el = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
+  if (!el) return;
+  el.style.display = "block";
+  el.innerHTML = `<p class="constanza-error">The saved estimate couldn’t be read — estimate again.</p>`
+    + `<div class="cz-card-actions"><button type="button" class="btn-primary cz-refine" data-lid="${escapeAttr(lid)}">Estimate in Constanza →</button></div>`;
+  el.querySelector(".cz-refine").addEventListener("click", () => openConstanzaForLine(lid));
 }
 
-async function onMetaForecast(lid, liveAudience) {
-  const panel = _metaPanel(lid);
-  const li = state.lineItems.find(x => x.id === lid);
-  if (!panel || !li) return;
+// The card for what is saved on the line: the estimate with its warnings, or — for a method that keeps an estimate and has none yet — what to do first.
+function _constanzaDrawCard(lid) {
+  const li = _constanzaLineOf(lid);
+  const el = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
+  if (!li || !el || !window.Constanza) return;
   const p = state.productIndex[li.product_name] || {};
-  const retailBudget = _metaFullFlightRetailBudget(li);
-  const months = _constanzaFlightMonths(li);
-  const geoAtRequest = _constanzaGeoFor(lid);
-  const targetAtRequest = _effectiveTargetText(li);
-  if (!(retailBudget > 0)) { _metaFeedback(panel, "Set a positive retail budget for this line in Step 04 first."); return; }
-  const lowerText = panel.querySelector(".meta-audience").value.trim();
-  const upperText = panel.querySelector(".meta-audience-upper").value.trim();
-  const lower = lowerText ? Number(lowerText) : null;
-  const upper = upperText ? Number(upperText) : null;
-  if (!liveAudience && (lower === null || !Number.isSafeInteger(lower) || lower < 0 || (upper !== null && (!Number.isSafeInteger(upper) || upper < lower)))) {
-    _metaFeedback(panel, "Enter the lower end of Meta's audience size (a whole number), and, if you give one, an upper end that is not below it.");
+  const facts = _constanzaLineFacts(li, p);
+  const info = _constanzaMethodInfo(facts.method);
+  if (!info.loaded) {
+    el.style.display = "block";
+    el.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(info.note || "This product’s estimate didn’t load. Reload the page.")}</p>`;
     return;
   }
-  const body = {
-    product_name: li.product_name, retail_budget: retailBudget,
-    retail_cpm: _effectiveProduct(li, p).estimated_cpm_for_imps ?? p.meta_retail_cpm, months,
-  };
-  if (liveAudience) {
-    const key = panel.querySelector(".meta-geo-choice").value;
-    if (!key) { _metaFeedback(panel, "Search and choose the exact Meta geography first."); return; }
-    body.meta_geo_type = panel.querySelector(".meta-geo-type").value;
-    body.meta_geo_key = key;
-    const picked = panel.querySelector(".meta-geo-choice");
-    body.meta_geo_label = picked.options[picked.selectedIndex] ? picked.options[picked.selectedIndex].text.slice(0, 160) : null;
-    const min = panel.querySelector(".meta-age-min").value.trim();
-    const max = panel.querySelector(".meta-age-max").value.trim();
-    body.age_min = min ? Number(min) : null;
-    body.age_max = max ? Number(max) : null;
-    body.gender = panel.querySelector(".meta-gender").value;
-    body.meta_targeting = _metaSelected(lid).map(x => ({ id: x.id, name: x.name, type: x.type }));
+  const snapshot = _constanzaSnapshotFor(lid);
+  if (snapshot && snapshot.result && typeof snapshot.result === "object") {
+    // an answer is drawn by the method that gave it: one that does not say which (an old shape, a hand-edited file) would be drawn as a generic estimate
+    if (snapshot.result.method !== snapshot.method) throw new Error(`the saved estimate of this line is not ${snapshot.method}'s answer`);
+    // ... and one with no monthly figure (a hand-edited file) has nothing to show or to insert
+    if (!Number.isFinite(Constanza.summarize(snapshot.result).month.mid)) throw new Error("the saved estimate of this line has no monthly figure");
+    renderConstanzaResult(lid, snapshot.result, snapshot);
   } else {
-    body.audience_lower = lower;
-    body.audience_upper = upper === null ? lower : upper;
-  }
-  const btn = panel.querySelector(liveAudience ? ".meta-pull-btn" : ".meta-model-btn");
-  btn.disabled = true;
-  try {
-    const response = await fetch("/api/constanza/meta-forecast", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(_constanzaErrorText(data, response.statusText));
-    // Save the provenance with the proposal. A changed line/geo/length is shown as stale (and the insert button withdrawn).
-    const stillThere = state.lineItems.find(x => x.id === lid);
-    if (!stillThere || stillThere.product_name !== li.product_name ||
-        _metaFullFlightRetailBudget(stillThere) !== retailBudget || _constanzaFlightMonths(stillThere) !== months ||
-        _constanzaGeoFor(lid) !== geoAtRequest || _effectiveTargetText(stillThere) !== targetAtRequest) return;
-    data.proposal_geo = geoAtRequest;
-    data.target_text = targetAtRequest;
-    state.availsData[lid] = state.availsData[lid] || {};
-    state.availsData[lid].meta_forecast = data;
-    panel.querySelector(".meta-plan-feedback").innerHTML = _metaForecastSummaryHtml(data, li, p);
-  } catch (error) {
-    _metaFeedback(panel, String(error.message || error));
-  } finally {
-    btn.disabled = false;
+    Constanza.renderEmpty(el, facts.method, facts, snapshot);
   }
 }
 
-// Writes the MID scenario (the default) into the line's Avails: monthly impressions, and the lower-end audience as est. uniques.
-function onMetaInsert(lid) {
-  const li = state.lineItems.find(x => x.id === lid);
-  const saved = ((state.availsData || {})[lid] || {}).meta_forecast;
-  if (!li || !saved || !saved.scenarios) return false;
-  const geo = saved.meta_targeting ? (saved.meta_targeting.geo_name || `Meta geography ${saved.meta_targeting.geo_key}`) : "entered audience";
-  return applyConstanzaEstimate(lid, saved.scenarios.monthly.mid, saved.scenarios.est_uniques,
-    { method: "meta_audience", dmas: [geo], unmatched_tokens: [], win_rate: null, hispanic_share: null });
+// Draws one line's block again (its buttons depend on what is saved, its card on the line and the dock), keeping the keyboard where it was.
+function _constanzaRefreshCard(lid) {
+  const block = document.querySelector(`.constanza-block[data-lid="${escapeAttr(lid)}"]`);
+  const li = _constanzaLineOf(lid);
+  if (!block || !li) return;
+  const active = document.activeElement;
+  const hadFocus = active && block.contains(active) && active !== block;
+  const selector = hadFocus ? [...active.classList].filter(c => /^(cz|constanza)-/.test(c)).map(c => `.${c}`).join("") : "";
+  block.innerHTML = _constanzaBlockInnerHtml(li, state.productIndex[li.product_name] || {}, state.availsData[lid]);
+  _constanzaWireBlock(block);
+  if (hadFocus) {
+    const next = (selector && block.querySelector(selector)) || block.querySelector("button");
+    if (next) next.focus();
+  }
 }
+
+// Every block that reads what changed (a connection answer: Recalculate is held off while a method is not connected), drawn again, except
+//  - a line whose estimate is on its way (its card is showing the wait);
+//  - a block whose method pulls from the proposal's geography (data products, TikTok): its card reads neither a connection nor a saved estimate;
+//  - a block showing an estimate that is on the screen only (nothing saved behind it): drawing it again would find nothing to draw it from and lose it.
+function _constanzaRefreshAllCards() {
+  document.querySelectorAll(".constanza-block").forEach(block => {
+    const lid = block.dataset.lid;
+    if (_constanzaBusy[lid] || _constanzaMethodInfo(block.dataset.method).caps.autoPull === "geo") return;
+    if (block.querySelector(".constanza-range-table") && !_constanzaSnapshotFor(lid)) return;
+    _constanzaRefreshCard(lid);
+  });
+}
+
+const _constanzaBusy = {};        // line id -> an estimate is on its way: a second press does nothing
 
 async function onConstanzaAutoCalc(lid) {
   const li = state.lineItems.find(x => x.id === lid);
   const btn = document.querySelector(`.constanza-autocalc-btn[data-lid="${escapeAttr(lid)}"]`);
   const resultEl = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
-  if (!li || !btn || !resultEl) return;
+  if (!li || !resultEl || _constanzaBusy[lid]) return;
+  if (!window.Constanza) {
+    resultEl.style.display = "block";
+    resultEl.innerHTML = `<p class="constanza-error">⚠️ Constanza didn’t load. Reload the page and try again.</p>`;
+    return;
+  }
   const p = state.productIndex[li.product_name] || {};
 
+  // What the line says right now travels with the estimate, so a later change to the line (its budget, its dates, its target) shows on the card.
+  const facts = _constanzaLineFacts(li, p);
+  const snapshot = _constanzaSnapshotFor(lid);
   const geoText = _constanzaGeoFor(lid);
   const hispanic = _constanzaHispanicFor(lid, li);
 
@@ -7225,39 +7150,82 @@ async function onConstanzaAutoCalc(lid) {
     if (impsResult) nationalMonthlyImpsTotal = impsResult.value;
   }
 
-  const originalLabel = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '<span class="btn-inline-spinner"></span>Pulling…';
-  resultEl.style.display = "none";
-  if (window.Constanza) Constanza.setMood("thinking");
+  _constanzaBusy[lid] = true;
+  const originalLabel = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="btn-inline-spinner"></span>Pulling…';
+    resultEl.style.display = "none";
+  } else {
+    // a card that is already on the screen stays where it is (it is what the failure falls back to): the wait is said above it, and its Recalculate
+    // button is held off the way the dock's is (aria-disabled, not disabled: the keyboard stays on it)
+    resultEl.setAttribute("aria-busy", "true");
+    resultEl.insertAdjacentHTML("afterbegin", '<p class="cz-note cz-pulling" role="status"><span class="btn-inline-spinner"></span>Asking again…</p>');
+    const recalc = resultEl.querySelector(".cz-recalc");
+    if (recalc) recalc.setAttribute("aria-disabled", "true");
+  }
+  Constanza.setMood("thinking");
   try {
+    const body = {
+      product_name: li.product_name,
+      geo_text: geoText,
+      months: flightMonths,
+      flight_days: _constanzaFlightDays(),
+      national_monthly_total: nationalMonthlyImpsTotal,
+      ...(hispanic === null ? {} : { hispanic }),
+      ...Constanza.cardRequest(facts.method, lid, facts, snapshot),      // the method's own block, with the line's current facts; no geography text for a method that picks its places
+    };
     const res = await fetch("/api/constanza/estimate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        product_name: li.product_name,
-        geo_text: geoText,
-        months: flightMonths,
-        flight_days: _constanzaFlightDays(),
-        national_monthly_total: nationalMonthlyImpsTotal,
-        ...(hispanic === null ? {} : { hispanic }),
-      }),
+      body: JSON.stringify(body),
     });
     const data = await res.json();
     if (!res.ok) {
-      await _constanzaShowCardError(lid, resultEl, _constanzaErrorText(data, res.statusText), geoText);
+      await _constanzaShowCardError(lid, _constanzaErrorText(data, res.statusText), geoText);
       return;
     }
-    renderConstanzaResult(lid, data);
-    if (window.Constanza) Constanza.setMood("happy", 2600);
+    // A method that keeps an estimate files it under the line it was asked for, and only while that line still holds the product it was asked about
+    // (an answer that comes back for a line that was deleted, or whose product was swapped meanwhile, is dropped: it is not shown and not filed).
+    const still = _constanzaLineOf(lid);
+    const kept = Constanza.makeSnapshot(facts.method, body, data, facts);
+    let shown = false;
+    if (!kept) {
+      renderConstanzaResult(lid, data);
+      shown = !!still;
+    } else if (still && still.product_name === body.product_name && _constanzaSaveSnapshot(lid, kept)) {
+      _constanzaRefreshCard(lid);       // drawn from what is saved: what is on the screen is what a reopened proposal shows
+      shown = true;
+    } else if (still) {
+      _constanzaRefreshCard(lid);       // the card goes back to what the line really holds
+    }
+    if (shown) _constanzaAnnounce(_constanzaReadyMessage(li.product_name, data));      // (the card is redrawn: the pull button that was pressed is not there to say it)
+    Constanza.setMood("happy", 2600);
   } catch (err) {
-    resultEl.style.display = "block";
-    resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(String(err))}</p>`;
-    if (window.Constanza) Constanza.setMood("oops", 4000);
+    if (!_constanzaErrorOverCard(lid, String(err))) {
+      const el = document.getElementById(`constanza-result-${escapeAttr(lid)}`) || resultEl;
+      el.style.display = "block";
+      el.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(String(err))}</p>`;
+    }
+    Constanza.setMood("oops", 4000);
   } finally {
-    btn.disabled = false;
-    btn.innerHTML = originalLabel;
+    _constanzaBusy[lid] = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalLabel;
+    }
+    const live = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
+    if (live) {
+      live.removeAttribute("aria-busy");
+      live.querySelectorAll(".cz-pulling").forEach(x => x.remove());
+    }
   }
+}
+
+// What a screen reader is told when a card's estimate comes back (the dock says the same in its own status line).
+function _constanzaReadyMessage(productName, data) {
+  const mid = Constanza.summarize(data).month.mid;
+  return `The estimate for ${productName} is ready${Number.isFinite(mid) ? `: ${Math.round(mid).toLocaleString("en-US")} impressions a month` : ""}.`;
 }
 
 // A readable message from an error response: our own handlers send a string `detail`; framework validation errors send a list.
@@ -7268,26 +7236,50 @@ function _constanzaErrorText(data, fallback) {
   return fallback || "Request failed.";
 }
 
-// The error, plus — when the geography is the problem — the places it might have meant, to pick from right here.
-async function _constanzaShowCardError(lid, resultEl, message, geoText) {
-  let resolution = null;
+// A card that already shows a saved estimate keeps it: the error is said above it. False when there is no such card to put it on.
+function _constanzaErrorOverCard(lid, message) {
+  const resultEl = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
+  const saved = _constanzaSnapshotFor(lid);
+  if (!resultEl || !saved || !saved.result) return false;
   try {
-    const r = await fetch("/api/constanza/resolve", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ geo_text: geoText }),
-    });
-    if (r.ok) resolution = await r.json();
-  } catch (_) { /* the message alone is still useful */ }
-  if (window.Constanza) {
-    Constanza.renderCardError(resultEl, message, resolution, _constanzaCardOpts(lid));
-    Constanza.setMood("oops", 4000);
-  } else {
-    resultEl.style.display = "block";
-    resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(message)}</p>`;
+    _constanzaDrawCard(lid);
+    resultEl.insertAdjacentHTML("afterbegin", `<p class="constanza-error" role="alert">⚠️ ${escapeHtml(message)}</p>`);
+    return true;
+  } catch (err) {
+    console.error("[constanza] the saved estimate could not be drawn under the error", err);
+    return false;
   }
 }
 
-// What the shared Constanza card renderer (constanza.js) needs to act on this line.
-function _constanzaCardOpts(lid) {
+// The error, plus — when the geography is the problem — the places it might have meant, to pick from right here. A method that picks its own
+// places has no such help: the proposal's geography was never what it asked about.
+async function _constanzaShowCardError(lid, message, geoText) {
+  const li = _constanzaLineOf(lid);
+  const info = _constanzaMethodInfo(li ? _constanzaMethodOf(li) : "");
+  let resolution = null;
+  if (!info.caps.ownsGeography) {
+    try {
+      const r = await fetch("/api/constanza/resolve", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ geo_text: geoText }),
+      });
+      if (r.ok) resolution = await r.json();
+    } catch (_) { /* the message alone is still useful */ }
+  }
+  const resultEl = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
+  if (!resultEl) return;
+  if (!window.Constanza) {
+    resultEl.style.display = "block";
+    resultEl.innerHTML = `<p class="constanza-error">⚠️ ${escapeHtml(message)}</p>`;
+    return;
+  }
+  if (!_constanzaErrorOverCard(lid, message)) Constanza.renderCardError(resultEl, message, resolution, _constanzaCardOpts(lid));
+  Constanza.setMood("oops", 4000);
+}
+
+// What the shared Constanza card renderer (constanza.js) needs to act on this line. `snapshot`: the saved estimate the card is drawn from, if any.
+function _constanzaCardOpts(lid, snapshot) {
+  const li = _constanzaLineOf(lid);
+  const facts = li ? _constanzaLineFacts(li, state.productIndex[li.product_name] || {}) : null;
   return {
     getText: () => _constanzaGeoFor(lid),
     onGeoText: (next) => {
@@ -7295,16 +7287,53 @@ function _constanzaCardOpts(lid) {
       state.constanzaGeoOverride[lid] = next;
       onConstanzaAutoCalc(lid);
     },
-    onApply: (monthlyMid, estUniques, geoInfo) => applyConstanzaEstimate(lid, monthlyMid, estUniques, geoInfo),
+    // Insert keeps the saved estimate it was made from on the line: it is the estimate behind these numbers. One read from an older shape is left as it
+    // was saved (null drops no older shape), so nothing is rewritten until the planner estimates again; a card with no saved estimate behind it
+    // (a data product, a method that keeps none) leaves none on the line.
+    onApply: (monthlyMid, estUniques, geoInfo) => {
+      const kept = snapshot ? (snapshot.legacy === true ? null : snapshot) : undefined;
+      if (applyConstanzaEstimate(lid, monthlyMid, estUniques, geoInfo, kept)) _constanzaAfterApply(lid, monthlyMid, estUniques);
+    },
     onRefine: () => openConstanzaForLine(lid),
+    onRecalc: () => onConstanzaAutoCalc(lid),
     onHispanic: (next) => {
       state.constanzaHispanic = state.constanzaHispanic || {};
       state.constanzaHispanic[lid] = next;
       onConstanzaAutoCalc(lid);
     },
     // the switch is on because the proposal's targeting names a Hispanic audience (not the planner's choice, not the product's default)
-    hispanicFromProposal: !(state.constanzaHispanic && lid in state.constanzaHispanic) && _targetsHispanic(state.lineItems.find(x => x.id === lid)),
+    hispanicFromProposal: !(state.constanzaHispanic && lid in state.constanzaHispanic) && _targetsHispanic(_constanzaLineOf(lid)),
+    line: facts,
+    snapshot: snapshot || null,
+    stale: snapshot && facts ? Constanza.snapshotStale(snapshot, facts) : [],
+    fromSnapshot: !!snapshot,
   };
+}
+
+// Insert redraws the whole Avails grid, so the button that was pressed is gone and the keyboard would drop to the top of the page. It goes to the
+// line's card again (where the planner was working), and what was written into Avails is said.
+function _constanzaAfterApply(lid, monthlyMid, estUniques) {
+  const block = document.querySelector(`.constanza-block[data-lid="${escapeAttr(lid)}"]`);
+  const target = block && (block.querySelector(".cz-apply") || block.querySelector("button"));
+  if (target) target.focus();
+  const n = x => Math.round(Number(x)).toLocaleString("en-US");
+  _constanzaAnnounce(`Inserted into Avails: ${n(monthlyMid)} impressions a month${estUniques != null ? ` and ${n(estUniques)} unique IDs` : ""}.`);
+}
+
+// One polite live region on the page itself, not in a card: the cards are rebuilt with the Avails grid and take their own messages with them.
+function _constanzaAnnounce(message) {
+  let el = document.getElementById("constanza-live-announce");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "constanza-live-announce";
+    el.className = "aud-sr";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    el.setAttribute("aria-atomic", "true");
+    document.body.appendChild(el);
+  }
+  el.textContent = "";                                          // emptied first, so the same words said twice are read twice
+  setTimeout(() => { el.textContent = message; }, 50);
 }
 
 function openConstanzaForLine(lid) {
@@ -7322,13 +7351,13 @@ function openConstanzaForLine(lid) {
   });
 }
 
-function renderConstanzaResult(lid, data) {
+function renderConstanzaResult(lid, data, snapshot) {
   const resultEl = document.getElementById(`constanza-result-${escapeAttr(lid)}`);
   if (!resultEl) return;
   // The avails fields this writes into are explicitly MONTHLY ("Max Recommended Monthly Imps/Spend", paired with "Est.
   // Monthly Uniques") — the card shows the full-flight total separately and only ever applies the monthly figure
   // (feeding the total in would also inflate the imps/uniques frequency triangle by the number of months).
-  Constanza.renderCard(resultEl, data, _constanzaCardOpts(lid));
+  Constanza.renderCard(resultEl, data, _constanzaCardOpts(lid, snapshot));
   const picked = state.constanzaGeoOverride && state.constanzaGeoOverride[lid];
   if (picked) {
     resultEl.insertAdjacentHTML("afterbegin", `<p class="cz-note cz-using">Geography for this line: <strong>${escapeHtml(picked)}</strong> <button type="button" class="cz-link cz-reset-geo">Use the proposal’s geography</button></p>`);
@@ -7339,24 +7368,14 @@ function renderConstanzaResult(lid, data) {
   }
 }
 
-function _constanzaGeoInfo(data) {
-  // A TikTok estimate has no per-market rows (one audience for the whole place list): the places it sent to TikTok stand in for them.
-  const fromAreas = [...new Set((data.by_area || []).map(d => d.dma).filter(Boolean))];
-  const fromTikTok = data.tiktok ? [...new Set((data.tiktok.locations || []).map(l => l.source).filter(Boolean))] : [];
-  return {
-    method: data.geo_method,
-    dmas: fromAreas.length ? fromAreas : fromTikTok,
-    unmatched_tokens: data.unmatched_geo_tokens || [],
-    // the programmatic win rate that was applied to the figures this Apply writes (null when none): the Avails step says so beside them
-    win_rate: data.win_rate ? data.win_rate.mid : null,
-    // the Hispanic share the avails were narrowed to (null when not narrowed), so the share-of-voice helper can say it
-    hispanic_share: data.audience && data.audience.hispanic && data.audience.hispanic.mode === "cut" ? data.audience.hispanic.share : null,
-  };
-}
-
-function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
+// `snapshot` is the saved estimate behind these numbers: an object keeps it on the line (replacing what was there), null deletes it, and leaving it out
+// (an estimate with no saved copy for THIS line: the platform path, a dock Insert into another line) deletes it with any older shape of it, because
+// it no longer describes the numbers just written.
+function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo, snapshot) {
   const li = state.lineItems.find(x => x.id === lid);
   if (!li) return false;     // the line was removed (or the proposal changed) since the estimate was pulled: write nothing
+  // ... and nothing when there is no monthly figure to write: Math.round(null) is 0, which would replace what the line holds
+  if (typeof monthlyImpsMid !== "number" || !Number.isFinite(monthlyImpsMid) || monthlyImpsMid <= 0) return false;
   const p = state.productIndex[li.product_name] || {};
   state.availsData[lid] = state.availsData[lid] || {};
   const entry = state.availsData[lid];
@@ -7374,10 +7393,12 @@ function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
     delete entry.frequency;
   }
   if (geoInfo) entry.geo_resolution = geoInfo;
-  // Remember that these figures are expected DELIVERY (platform avails x the win rate), so the share-of-voice badge can say what it is
-  // measured against; a figure the planner types over later clears it (see the avails blur handler).
+  // Remember that these figures are expected DELIVERY (platform avails x the win rate), so the share-of-voice badge can say what it is measured
+  // against; a figure the planner types over later clears it (see the avails blur handler).
   if (geoInfo && geoInfo.win_rate) entry.win_rate = geoInfo.win_rate; else delete entry.win_rate;
   if (geoInfo && geoInfo.hispanic_share != null) entry.hispanic_share = geoInfo.hispanic_share; else delete entry.hispanic_share;
+  if (snapshot) entry.forecast_snapshot = snapshot; else delete entry.forecast_snapshot;
+  if (snapshot !== null && typeof _constanzaDropOlderShape === "function") _constanzaDropOlderShape(li, entry);
 
   const spendResult = calcMaxSpendFromImps(_effectiveProduct(li, p), entry.max_imps);
   if (spendResult !== null) {
@@ -7392,6 +7413,7 @@ function applyConstanzaEstimate(lid, monthlyImpsMid, estUniques, geoInfo) {
   renderAvailsGrid();
   return true;
 }
+// CONSTANZA HOST: end
 
 function syncAvailsFromGrid() {
   // No-op: state.availsData is kept in sync via the blur listeners above.

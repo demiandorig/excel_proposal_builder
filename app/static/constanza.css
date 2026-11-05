@@ -92,7 +92,7 @@
   animation: cz-dock-in 0.18s ease-out;
 }
 .constanza-dock.hidden { display: none; }
-.constanza-dock.wide { width: min(960px, calc(100vw - 24px)); }
+.constanza-dock.wide { width: min(980px, calc(100vw - 24px)); }
 @keyframes cz-dock-in { from { transform: scale(0.94) translateY(10px); opacity: 0; } to { transform: scale(1) translateY(0); opacity: 1; } }
 
 .cz-head {
@@ -104,76 +104,78 @@
 .cz-sub { margin: 2px 0 0; font-size: 12.5px; color: var(--ink-soft); line-height: 1.35; }
 .cz-head-actions { display: flex; gap: 6px; }
 .cz-icon-btn {
-  width: 32px; height: 32px; display: grid; place-items: center; border: 1px solid var(--rule); background: var(--paper-card);
+  width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--rule); background: var(--paper-card);
   border-radius: var(--radius-sm); cursor: pointer; color: var(--ink-soft); font-size: 15px; line-height: 1;
 }
 .cz-icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+.cz-icon-btn:focus-visible, .cz-foot button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .cz-body { display: block; overflow-y: auto; overscroll-behavior: contain; flex: 1; position: relative; }
-.constanza-dock.wide .cz-body { display: grid; grid-template-columns: 390px minmax(0, 1fr); overflow: hidden; }
+.constanza-dock.wide .cz-body { display: grid; grid-template-columns: 420px minmax(0, 1fr); overflow: hidden; }
 .constanza-dock.wide .cz-form { overflow-y: auto; border-right: 1px solid var(--rule); max-height: calc(100vh - 220px); }
 .constanza-dock.wide .cz-result { overflow-y: auto; max-height: calc(100vh - 220px); }
 
-.cz-form { padding: 14px 16px 6px; }
-.cz-field { margin: 0 0 14px; }
-.cz-label {
-  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
-  font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-soft);
-  margin: 0 0 6px;
-}
-.cz-label .cz-hint { text-transform: none; letter-spacing: 0; font-family: var(--font-body); font-size: 11.5px; color: var(--ink-faint); }
-.cz-input, .cz-select {
-  width: 100%; padding: 9px 11px; font: inherit; font-size: 14px; color: var(--ink);
+.cz-form { padding: 14px 16px 18px; }
+.cz-input {
+  width: 100%; min-height: 40px; padding: 9px 11px; font: inherit; font-size: 14px; color: var(--ink);
   border: 1px solid var(--rule); border-radius: 8px; background: var(--paper-card);
 }
-.cz-input:focus, .cz-select:focus { outline: none; border-color: var(--accent); }
-.cz-row { display: flex; gap: 10px; align-items: flex-end; }
-.cz-row > * { min-width: 0; }
-.cz-grow { flex: 1; }
-
-/* segmented control (geography type, gender) */
-.cz-seg { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
-.cz-seg button {
-  border: 1px solid var(--rule); background: var(--paper-card); color: var(--ink-soft);
-  padding: 5px 10px; border-radius: 999px; font-size: 12px; cursor: pointer; font-family: inherit;
-}
-.cz-seg button:hover { border-color: var(--accent); color: var(--accent); }
-.cz-seg button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.cz-input:focus { outline: none; border-color: var(--accent); }
 
 /* months stepper */
-.cz-stepper { display: inline-flex; align-items: stretch; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; background: var(--paper-card); }
-.cz-stepper button { width: 32px; border: 0; background: var(--paper-warm); cursor: pointer; font-size: 16px; color: var(--ink-soft); }
+.cz-stepper { display: inline-flex; align-items: stretch; height: 42px; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; background: var(--paper-card); }
+.cz-stepper:focus-within { border-color: var(--accent); }
+.cz-stepper button { width: 42px; border: 0; background: var(--paper-warm); cursor: pointer; font-size: 18px; color: var(--ink-soft); }
 .cz-stepper button:hover { background: var(--accent-soft); color: var(--accent); }
-.cz-stepper input { width: 52px; text-align: center; border: 0; padding: 8px 4px; font: inherit; font-size: 14px; background: transparent; }
-.cz-stepper input:focus { outline: none; }
+.cz-stepper input { width: 64px; text-align: center; border: 0; padding: 0 4px; font: inherit; font-size: 15px; font-weight: 600; background: transparent; -moz-appearance: textfield; appearance: textfield; }
+.cz-stepper input::-webkit-inner-spin-button, .cz-stepper input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.cz-stepper input:focus { outline: none; box-shadow: none; }
+.cz-stepper button:focus-visible { outline-offset: -3px; }
 
-/* the product picker */
+/* the product picker: a tinted card (the one choice everything else follows), a 52px button, a listbox with the product's channel under each name */
+.cz-prod { padding: 12px 14px 14px; background: var(--accent-soft); border: 1px solid var(--aud-line, #e3c5e5); border-radius: var(--radius); }
+.cz-prod-label {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 8px;
+  font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-soft);
+}
+.cz-prod-label .cz-hint { text-transform: none; letter-spacing: 0; font-family: var(--font-body); font-size: 12px; color: var(--aud-muted, #6b665c); }
+.cz-prod .cz-note { margin: 10px 0 0; }
+.cz-prod .cz-note.cz-warn { padding: 8px 10px; border-radius: 8px; background: var(--amber-soft); border: 1px solid #f5cba7; }
+.cz-prod .cz-hint { font-size: 12px; color: var(--aud-muted, #6b665c); }
 .cz-picker { position: relative; }
 .cz-picker-btn {
-  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; text-align: left;
-  padding: 9px 11px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper-card); cursor: pointer; font: inherit; font-size: 14px;
+  width: 100%; min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 10px; text-align: left;
+  padding: 8px 14px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper-card); cursor: pointer; font: inherit; font-size: 14px; color: var(--ink);
 }
 .cz-picker-btn:hover, .cz-picker-btn[aria-expanded="true"] { border-color: var(--accent); }
-.cz-picker-btn .cz-pname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cz-picker-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cz-ptext { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.cz-pname { font-weight: 600; font-size: 14.5px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cz-pmeta { font-size: 12px; line-height: 1.3; color: var(--aud-muted, #6b665c); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cz-pmeta:empty { display: none; }
+.cz-pcaret { flex: none; width: 8px; height: 8px; margin: 0 4px 3px 2px; border-right: 2px solid var(--ink-soft); border-bottom: 2px solid var(--ink-soft); transform: rotate(45deg); transition: transform 0.15s; }
+.cz-picker-btn[aria-expanded="true"] .cz-pcaret { transform: rotate(-135deg); margin-bottom: -3px; }
 .cz-picker-pop {
-  position: absolute; z-index: 5; left: 0; right: 0; top: calc(100% + 4px);
-  background: var(--paper-card); border: 1px solid var(--rule); border-radius: 10px; max-height: 340px; display: flex; flex-direction: column;
+  position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 4px);
+  background: var(--paper-card); border: 1px solid var(--rule); border-radius: 10px; max-height: 360px; display: flex; flex-direction: column;
   box-shadow: 0 2px 0 rgba(26, 24, 21, 0.14), 0 0 0 1px rgba(26, 24, 21, 0.1);
 }
 .cz-picker-pop.hidden { display: none; }
-.cz-picker-search { margin: 8px; width: calc(100% - 16px); }
+.cz-picker-search { margin: 8px; width: calc(100% - 16px); flex: none; }
 .cz-picker-list { overflow-y: auto; padding: 0 6px 8px; }
 .cz-group-label {
-  font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-faint);
+  font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--aud-muted, #6b665c);
   padding: 10px 8px 4px;
 }
 .cz-option {
-  display: flex; flex-direction: column; gap: 2px; padding: 7px 8px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  position: relative; display: flex; flex-direction: column; gap: 2px; min-height: 44px; justify-content: center; padding: 7px 34px 7px 10px; border-radius: 8px; cursor: pointer; font-size: 13.5px;
 }
 .cz-option:hover, .cz-option[aria-selected="true"], .cz-option.cz-active { background: var(--accent-soft); }
+.cz-option[aria-selected="true"]::after { content: "✓"; position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: var(--accent); font-weight: 700; }
+.cz-option[aria-selected="true"] .cz-option-name { font-weight: 600; }
 .cz-option-name { line-height: 1.3; }
-.cz-option-meta { font-size: 11.5px; color: var(--ink-faint); }
-.cz-empty { padding: 12px 10px; color: var(--ink-faint); font-size: 13px; }
+.cz-option-meta { font-size: 12px; color: var(--aud-muted, #6b665c); }
+.cz-empty { padding: 12px 10px; color: var(--aud-muted, #6b665c); font-size: 13px; }
 
 /* chips */
 .cz-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
@@ -187,50 +189,48 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 .cz-chip.cz-ok { background: var(--green-soft); border-color: #cfe5d3; color: #25562f; }
 .cz-chip.cz-sugg { background: var(--paper-card); border-color: var(--accent); color: var(--accent); }
 .cz-chip.cz-warn { background: var(--amber-soft); border-color: #f5cba7; color: #8a3b00; }
-.cz-chip .cz-x {
-  border: 0; background: transparent; padding: 0; cursor: pointer; color: inherit; font-size: 14px; line-height: 1; opacity: 0.7;
-  flex: none; display: inline-flex; align-items: center; justify-content: center; min-width: 24px; min-height: 24px; margin: -5px -9px -5px -6px; border-radius: 999px;
-}
-.cz-chip .cz-x:hover { opacity: 1; }
 .cz-chip small { opacity: 0.7; }
 .cz-note { margin: 8px 0 0; font-size: 12px; color: var(--ink-soft); line-height: 1.4; }
 .cz-note.cz-warn { color: #8a3b00; }
 .cz-help-title { margin: 10px 0 0; font-size: 12px; font-weight: 600; color: var(--ink-soft); }
 
-/* audience section */
+/* the result's "About this data" fold */
 .cz-details { border: 1px solid var(--rule); border-radius: 10px; padding: 0 12px; margin: 0 0 14px; background: var(--paper-card); }
 .cz-details > summary { cursor: pointer; font-weight: 600; font-size: 13.5px; padding: 11px 0; list-style: none; display: flex; align-items: center; gap: 8px; }
 .cz-details > summary::-webkit-details-marker { display: none; }
 .cz-details > summary::after { content: "▾"; margin-left: auto; color: var(--ink-faint); transition: transform 0.15s; }
 .cz-details[open] > summary::after { transform: rotate(180deg); }
 .cz-details[open] { padding-bottom: 12px; }
-.cz-count { background: var(--accent); color: #fff; border-radius: 999px; font-size: 11px; padding: 1px 8px; font-weight: 700; }
-.cz-interest-results { border: 1px solid var(--rule); border-radius: 10px; margin-top: 6px; max-height: 240px; overflow-y: auto; background: var(--paper-card); }
-.cz-interest-results.hidden { display: none; }
-.cz-interest-results.cz-pending { opacity: 0.55; }                      /* an answer for older text: being replaced */
-.cz-interest-results .cz-more { padding: 8px 10px; font-size: 12px; border-top: 1px solid var(--rule-soft); }
-.cz-interest-item { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 8px 10px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--rule-soft); }
-.cz-interest-item:last-child { border-bottom: 0; }
-.cz-interest-item:hover, .cz-interest-item.cz-active { background: var(--accent-soft); }
-.cz-interest-item .cz-grp { color: var(--ink-faint); font-size: 11.5px; }
-.cz-rate { font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft); white-space: nowrap; }
-.cz-interest-item.cz-norate { opacity: 0.6; }
-.cz-browse { margin-top: 8px; }
-.cz-browse summary { cursor: pointer; font-size: 12.5px; color: var(--accent); padding: 4px 0; }
-.cz-browse-group { margin: 8px 0; }
-.cz-browse-group h4 { margin: 0 0 4px; font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-faint); font-weight: 400; }
 
-/* footer */
-.cz-foot { display: flex; gap: 10px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--rule); background: var(--paper-warm); }
-.cz-foot .btn-primary { flex: 1; }
-.cz-foot .cz-reset { background: transparent; border: 0; color: var(--ink-soft); cursor: pointer; font: inherit; font-size: 12.5px; text-decoration: underline; }
+/* the action bar: Reset on the left, the one primary action fills the rest */
+.cz-foot { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 12px 16px; border-top: 1px solid var(--rule); background: var(--paper-warm); }
+.cz-foot .btn-primary { flex: 1; min-height: 44px; padding-top: 10px; padding-bottom: 10px; font-size: 14.5px; }
+.constanza-dock[aria-busy="true"] .cz-foot .btn-primary[aria-disabled="true"] { cursor: progress; }       /* (a method that is not ready keeps the plain not-allowed cursor) */
+/* why the button is off (a method that is not connected yet): a line of its own above the buttons, in the amber the dock uses for "needs attention" */
+.cz-foot .cz-go-reason { flex: 1 0 100%; margin: 0; padding: 7px 10px; border-radius: 8px; font-size: 12.5px; line-height: 1.4; background: var(--amber-soft); border: 1px solid #f5cba7; color: #8a3b00; }
+.cz-foot .cz-go-reason[hidden] { display: none; }
+.cz-foot .cz-reset {
+  flex: none; display: inline-flex; align-items: center; gap: 7px; min-height: 44px; padding: 0 16px; border: 1px solid var(--rule); border-radius: var(--radius);
+  background: var(--paper-card); color: var(--ink-soft); cursor: pointer; font: inherit; font-size: 14px; font-weight: 600;
+}
+.cz-foot .cz-reset::before {
+  content: ""; flex: none; width: 15px; height: 15px; background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12a9 9 0 1 0 3-6.7L3 8'/%3E%3Cpath d='M3 3v5h5'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 12a9 9 0 1 0 3-6.7L3 8'/%3E%3Cpath d='M3 3v5h5'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+.cz-foot .cz-reset:hover { border-color: var(--ink-soft); color: var(--ink); background: var(--paper-card); }
 
 /* ------------------------------------------------------------------ results */
 .cz-result { padding: 14px 16px 18px; }
 .constanza-dock:not(.wide) .cz-result { border-top: 1px solid var(--rule); }
 .cz-result:empty { display: none; }
 .constanza-dock.wide .cz-result:empty { display: block; }
-.cz-welcome { color: var(--ink-faint); font-size: 13px; text-align: center; padding: 40px 16px; }
+.cz-welcome { padding: 26px 20px; border: 1px dashed var(--rule); border-radius: var(--radius); color: var(--aud-muted, #6b665c); font-size: 13px; line-height: 1.45; text-align: center; }
+.cz-welcome p { margin: 0; }
+.cz-welcome-ico { display: inline-grid; place-items: center; width: 44px; height: 44px; margin-bottom: 10px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); }
+.cz-welcome-ico svg { width: 22px; height: 22px; }
+.cz-welcome-lead { margin-bottom: 4px; font-size: 14px; color: var(--ink); }
+.constanza-dock.wide .cz-welcome { margin-top: 24px; padding-top: 44px; padding-bottom: 44px; }
 .cz-card-head { margin-bottom: 10px; }
 .cz-card-title { font-weight: 700; font-size: 15px; line-height: 1.3; }
 .cz-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
@@ -248,9 +248,10 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 .cz-metric:not(.main) .cz-mvalue { font-size: 19px; }
 .cz-metric .cz-mrange { display: block; font-size: 12px; color: var(--ink-soft); margin-top: 2px; font-family: var(--font-mono); }
 .cz-conf { font-size: 12.5px; margin: 4px 0 10px; display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--ink-soft); }
-.cz-section-title { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink-faint); margin: 14px 0 6px; }
+.cz-section-title { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--aud-muted, #6b665c); margin: 14px 0 6px; }
+/* (table headers use the kit's secondary-text colour: 4.8:1 on the card's paper; --ink-faint is 3.1:1 there and is for decoration only) */
 .cz-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.cz-table th { text-align: right; font-weight: 600; font-size: 11px; color: var(--ink-faint); padding: 4px 6px; border-bottom: 1px solid var(--rule); }
+.cz-table th { text-align: right; font-weight: 600; font-size: 11px; color: var(--aud-muted, #6b665c); padding: 4px 6px; border-bottom: 1px solid var(--rule); }
 .cz-table td { text-align: right; padding: 5px 6px; border-bottom: 1px solid var(--rule-soft); font-family: var(--font-mono); font-size: 12px; }
 .cz-table th:first-child, .cz-table td:first-child { text-align: left; font-family: var(--font-body); }
 .cz-table .cz-dma { color: var(--ink-faint); }
@@ -275,6 +276,9 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 .constanza-result .cz-help { margin-top: 8px; }
 
 /* ------------------------------------------------------------------ small screens */
+@media (min-width: 1001px) {
+  .constanza-dock.wide .cz-foot { padding-right: calc(100% - 420px + 16px); }       /* the action bar sits under the form column, not under the result */
+}
 @media (max-width: 1000px) {
   .constanza-dock.wide { width: min(560px, calc(100vw - 24px)); }
   .constanza-dock.wide .cz-body { display: block; overflow-y: auto; }
@@ -293,7 +297,8 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 @media print { .constanza-bubble, .constanza-dock { display: none !important; } }
 
 @media (prefers-reduced-motion: reduce) {
-  .cz-char *, .cz-bubble-tip, .constanza-bubble, .constanza-dock, .cz-details > summary::after, .cz-spinner { animation: none !important; transition: none !important; }
+  .cz-char *, .cz-bubble-tip, .constanza-bubble, .constanza-dock, .cz-details > summary::after, .cz-spinner,
+  .cz-pcaret, .cz-switch input, .cz-switch input::after { animation: none !important; transition: none !important; }
   .cz-signal path { opacity: 0.7; }
 }
 
@@ -324,35 +329,17 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 .constanza-result .cz-badges { margin: 0 0 8px; }
 .constanza-error { color: var(--red); font-weight: 600; margin: 0 0 6px; }
 .constanza-range-table { width: 100%; border-collapse: collapse; margin: 6px 0 8px; font-family: var(--font-mono); font-size: 11.5px; }
-.constanza-range-table th { text-align: right; font-weight: 600; font-size: 10.5px; color: var(--ink-faint); padding: 3px 6px; border-bottom: 1px solid var(--rule); }
+.constanza-range-table th { text-align: right; font-weight: 600; font-size: 10.5px; color: var(--aud-muted, #6b665c); padding: 3px 6px; border-bottom: 1px solid var(--rule); }
 .constanza-range-table td { text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--rule-soft); }
 .constanza-range-table th:first-child, .constanza-range-table td:first-child { text-align: left; font-family: var(--font-body); }
 .constanza-uniques { margin: 4px 0 8px; }
 .constanza-result .cz-card-actions { margin-top: 10px; align-items: center; }
+.constanza-result .cz-stale { margin-bottom: 8px; }
+.constanza-result .cz-stale strong { color: inherit; }
+.constanza-result .cz-recalc-why { margin: 6px 0 0; }
+.constanza-result .cz-pulling { margin: 0 0 8px; display: flex; align-items: center; gap: 6px; }
 .constanza-result .cz-audience-box { background: var(--paper-card); }
 .constanza-result .cz-using { margin: 0 0 8px; }
-
-/* Paid Meta auction model on a Step 05 card. These full-flight planning
-   metrics deliberately sit apart from the monthly inventory/SOV fields. */
-.meta-plan-block {
-  margin-top: 14px; padding: 14px; border: 1px solid var(--rule);
-  border-radius: var(--radius); background: var(--paper-card);
-}
-.meta-plan-block > strong { display: block; color: var(--ink); margin-bottom: 6px; }
-.meta-plan-block p { margin: 6px 0 10px; line-height: 1.45; }
-.meta-plan-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 12px; margin: 10px 0; }
-.meta-plan-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; }
-.meta-plan-fields input, .meta-plan-fields select {
-  box-sizing: border-box; width: 100%; min-width: 0; padding: 8px;
-  border: 1px solid var(--rule); border-radius: 6px; background: var(--paper-card); color: var(--ink);
-}
-.meta-plan-block button { margin: 4px 8px 4px 0; }
-.meta-live-details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule); }
-.meta-live-details summary { cursor: pointer; font-weight: 600; }
-.meta-plan-result { margin-top: 12px; padding: 10px; border-left: 3px solid var(--accent); background: var(--paper-warm); }
-.meta-plan-result p { margin: 7px 0; }
-.meta-plan-result small { color: var(--ink-faint); }
-.meta-plan-feedback .constanza-error { margin-top: 10px; }
 
 /* ------------------------------------------------------------------ status for screen readers, stale banner */
 .cz-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
@@ -362,15 +349,103 @@ button.cz-chip:hover { border-color: var(--accent); color: var(--accent); }
 }
 .cz-card-geo { font-size: 12px; color: var(--ink-soft); margin-top: 2px; overflow-wrap: anywhere; }
 
+/* ------------------------------------------------------------------ the form: numbered cards from the audience kit (audience-kit.css)
+   The kit draws the cards, their heads, the chips, the typeahead and the pills; this block only sets how they sit in the dock: one column,
+   the Hispanic switch, the stepper row, the geography help in the kit's pill style. The kit's own class names belong to audience-kit.css, so
+   the markup carries a companion class for each thing styled here (cz-sec-head, cz-hintline, cz-areachip ...) and the rules hook on that. */
+.cz-builder { gap: 12px; }
+.cz-builder > * { min-width: 0; }
+.cz-builder [hidden] { display: none !important; }                  /* the kit's flex rows would otherwise beat the [hidden] attribute */
+.cz-aud { display: flex; flex-direction: column; gap: 12px; }
+#cz-method-forms:not(:has(.cz-method-panel:not(.hidden))) { display: none; }      /* no panel on show: no empty grid row either */
+#cz-method-where:not(:has(.cz-method-where-panel:not(.hidden))) { display: none; }  /* ... and no empty row where a method's own Where card would sit */
+.cz-method-where-panel.hidden { display: none; }
+/* a panel a forecast method mounts (TikTok) keeps counting on from the cards above (Where = 1, When = 2, its own = 3, 4, ...) */
+.cz-method-panel [class~="aud-builder"], .cz-method-where-panel [class~="aud-builder"] { counter-reset: none; }       /* (an attribute selector: that panel's markup is not ours to add a class to) */
+.cz-hintline:empty, #cz-geo-chips:empty, #cz-geo-help:empty { display: none; }
+.cz-sum { margin-top: 2px; }
+.cz-sec-head:hover { background: var(--paper); border-radius: var(--radius); }
+details[open] > .cz-sec-head:hover { border-radius: var(--radius) var(--radius) 0 0; }
+
+/* A card that folds is a <details>, and its head a <summary>: no button may sit inside it (a control inside the toggle, which a screen reader
+   cannot tell apart from it), and a closed <details> shows nothing but its summary, so the card's Clear / Turn off link cannot sit next to the
+   summary inside it either. It is the <details>' sibling in this wrapper (before it in the DOM: the keyboard meets Clear, then the toggle, then the
+   body) and is drawn over the right end of the head, just left of the arrow. The head keeps room for it with .cz-fold-twin, an invisible copy of
+   the link (same class, same words, so the same width in any font or zoom), present only while the link is. Where the link ends up depends on the
+   kit's head (audience-kit.css: 56px tall, 14px side padding, 12px under 480px, the arrow at the end): tests/test_constanza_dock_dom.py
+   checks that the link lies exactly on its twin. */
+.cz-fold { position: relative; min-width: 0; }
+.cz-fold > .cz-fold-clear { position: absolute; z-index: 1; top: 11px; right: 35px; margin: 0; }
+.cz-fold-twin { display: none; visibility: hidden; pointer-events: none; }
+.cz-fold:has(> .cz-fold-clear:not([hidden])) .cz-fold-twin { display: block; }
+@media (max-width: 480px) { .cz-fold > .cz-fold-clear { right: 33px; } }
+.cz-sec-title { font-size: 14.5px; }
+
+/* Where: the matched places, then what could not be matched or is ambiguous, in the kit's pill style */
+.cz-builder .cz-tick { margin-right: 5px; font-weight: 700; }
+.cz-areachip { padding-right: 12px; }
+#cz-geo-help { display: flex; flex-direction: column; gap: 8px; }
+#cz-geo-help .cz-help { margin: 0; padding: 10px 12px; border: 1px solid var(--rule-soft); border-radius: 8px; background: var(--paper-warm); }
+#cz-geo-help .cz-help-title { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+#cz-geo-help .cz-chips { margin-top: 0; gap: 6px 8px; }
+#cz-geo-help .cz-chip.cz-sugg {
+  min-height: 36px; padding: 4px 14px; border-color: var(--accent); background: var(--paper-card); color: var(--accent); font-size: 13px; font-weight: 600; line-height: 1.25;
+}
+#cz-geo-help .cz-chip.cz-sugg:hover { background: var(--accent-soft); }
+#cz-geo-help .cz-chip.cz-sugg small { font-weight: 400; }
+#cz-geo-help .cz-chip.cz-sugg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#cz-geo-help .cz-note { margin: 0; padding: 9px 12px; border-radius: 8px; font-size: 12.5px; line-height: 1.45; }
+#cz-geo-help .cz-note.cz-read { background: #e4f3fc; border: 1px solid #bfe2f5; color: #0a4f73; }
+#cz-geo-help .cz-note.cz-read small { color: inherit; opacity: 0.85; }
+#cz-geo-help .cz-note.cz-warn { background: var(--amber-soft); border: 1px solid #f5cba7; color: #8a3b00; }
+#cz-geo-help .cz-list { margin: 0; padding-left: 18px; }
+
+/* When: the stepper and the unit side by side, wrapping on a narrow phone */
+.cz-flight-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+#cz-unit { flex: 1 1 160px; }
+#cz-geo-quick > button, #cz-dates-quick > button { text-align: left; }
+#cz-age-presets > button { padding-left: 11px; padding-right: 11px; }       /* six presets share one row */
+
+/* Who: the two age boxes take any age; the spin arrows are hidden (the presets and the keyboard do that job) */
+.cz-builder #cz-age-min, .cz-builder #cz-age-max { flex: 1 1 96px; width: auto; -moz-appearance: textfield; appearance: textfield; }
+#cz-age-min::-webkit-inner-spin-button, #cz-age-min::-webkit-outer-spin-button, #cz-age-max::-webkit-inner-spin-button, #cz-age-max::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+/* "Treat what I typed as": six choices in one framed control. A wrapping row left the sixth alone on a full-width second line on a phone (and at
+   the dock's usual width): a fixed three-by-two grid reads the same at every width. */
+#cz-geotype { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+/* Language & heritage: the switch card. The checkbox itself is the switch (appearance: none), so it keeps every native behaviour. */
+.cz-switch {
+  display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; border: 1px solid var(--rule); border-radius: 8px; background: var(--paper-card); cursor: pointer;
+}
+.cz-switch:hover { border-color: var(--ink-faint); }
+.cz-switch:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.cz-switch:has(input:disabled) { cursor: not-allowed; }
+.cz-switch input {
+  -webkit-appearance: none; appearance: none; flex: none; position: relative; width: 42px; height: 24px; margin: 1px 0 0; border: 0; border-radius: 999px;
+  background: var(--ink-faint); cursor: pointer; transition: background 0.15s;
+}
+.cz-switch input::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 0 rgba(26, 24, 21, 0.3); transition: transform 0.15s;
+}
+.cz-switch input:checked { background: var(--accent); }
+.cz-switch input:checked::after { transform: translateX(18px); }
+.cz-switch input:disabled { opacity: 0.6; cursor: not-allowed; }
+.cz-switch input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cz-switch-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.cz-switch-name { font-size: 14px; font-weight: 700; line-height: 1.3; color: var(--ink); }
+.cz-switch-desc { font-size: 12.5px; line-height: 1.4; color: var(--ink-soft); }
+
+/* Audience: results of the typeahead; an audience with no sourced rate can still be picked (for reference) and says so in amber */
+.cz-norate .cz-ta-rate { color: #8a3b00; }
+.cz-norate .cz-ta-name { color: var(--ink-soft); }
+.cz-chipmeta { opacity: 0.85; }
+
+@media (forced-colors: active) {
+  .cz-switch input:checked { forced-color-adjust: none; background: Highlight; }
+}
+
 /* ------------------------------------------------------------------ the TikTok panel (constanza-tiktok.js) */
 .cz-method-panel.hidden { display: none; }
-.cz-tt-status { border-radius: 10px; padding: 9px 12px; margin: 0 0 12px; font-size: 12.5px; line-height: 1.45; background: var(--paper-warm); color: var(--ink-soft); }
-.cz-tt-status code { font-family: var(--font-mono); font-size: 11.5px; background: var(--paper-card); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
-.cz-tt-status.cz-tt-on { background: var(--green-soft); color: #25562f; }
-.cz-tt-status.cz-tt-off { background: var(--amber-soft); color: #8a3b00; }
-.cz-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 4px; vertical-align: 1px; }
-.cz-seg + .cz-seg { margin-top: 6px; }
-.cz-seg button:disabled { opacity: 0.4; cursor: not-allowed; }
 .cz-chip[aria-pressed="true"] { background: var(--green-soft); border-color: #cfe5d3; color: #25562f; }
 button.cz-chip { cursor: pointer; font-family: inherit; }
 .cz-stagebar { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 4px 0 2px; }
@@ -384,7 +459,7 @@ button.cz-chip { cursor: pointer; font-family: inherit; }
 
 /* a pressed button must look pressed when the system colors replace ours (Windows high contrast) */
 @media (forced-colors: active) {
-  .cz-seg button[aria-pressed="true"], .cz-chip[aria-pressed="true"], .cz-stage.on { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
+  .cz-chip[aria-pressed="true"], .cz-stage.on { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
 }
 
 /* a plain labelled checkbox (Hispanic targeting) */

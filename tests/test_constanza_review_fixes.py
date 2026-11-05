@@ -396,7 +396,8 @@ def _frontend_harness():
 def _run_js(snippet: str):
     h = _frontend_harness()
     app_js = h.APP_JS
-    fns = "\n".join(h._extract_fn(app_js, n) for n in ("_constanzaFlightMonths", "_constanzaMonthlyBudget", "_constanzaErrorText"))
+    fns = "\n".join(h._extract_fn(app_js, n) for n in ("_constanzaFlightMonths", "_constanzaMonthlyBudget", "_constanzaErrorText", "_constanzaFullFlightBudget",
+                                                      "_constanzaHasFlightDates", "_constanzaFlightDays"))
     body = (
         "var console = { warn: function () {}, log: function () {}, error: function () {} };\n"
         + h._app_js_bundle() + "\n" + fns + "\n"
@@ -437,6 +438,26 @@ return JSON.stringify(R);
     assert out["ffDates"] == 2 and out["ffNoDates"] == 1 and out["capped"] == 120
     assert out["budgetMonth"] == 5000 and out["budgetWeek"] == 4000 and out["budgetQuarter"] == pytest.approx(1000)
     assert out["budgetFF"] == 6000 and out["budgetFFOne"] == 12000 and out["budgetNone"] == 0
+
+
+def test_a_lines_whole_flight_budget_and_whether_its_dates_are_known_are_what_a_method_that_checks_a_budget_reads():
+    out = _run_js("""
+var R = {};
+state = mk("week");        R.week = _constanzaFullFlightBudget({ monthly_budget: 1000, months: 6 });               // Step 04's budget is per period: 6 weeks of $1,000
+state = mk("month");       R.month = _constanzaFullFlightBudget({ monthly_budget: 5000, months: 3 });
+state = mk("full_flight"); R.ff = _constanzaFullFlightBudget({ monthly_budget: 12000, months: 1 });                  // Full Flight: the budget IS the flight's
+R.none = _constanzaFullFlightBudget({ monthly_budget: null, months: 4 });
+R.negative = _constanzaFullFlightBudget({ monthly_budget: -5, months: 2 });
+R.noPeriods = _constanzaFullFlightBudget({ monthly_budget: 100, months: 0 });
+state = mk("month");                              R.dates = _constanzaHasFlightDates();  R.days = _constanzaFlightDays();
+state = mk("month", {start: "", end: ""});        R.noDates = _constanzaHasFlightDates();  R.noDays = _constanzaFlightDays();
+state = mk("month", {start: "2026-12-31", end: "2026-11-24"}); R.swappedDays = _constanzaFlightDays();
+return JSON.stringify(R);
+""")
+    assert (out["week"], out["month"], out["ff"]) == (6000, 15000, 12000)
+    assert out["none"] == 0 and out["negative"] == 0 and out["noPeriods"] == 100
+    assert out["dates"] is True and out["days"] == 38 and out["noDates"] is False and out["noDays"] is None
+    assert out["swappedDays"] is None                                            # an end before the start is no flight length
 
 
 def test_error_messages_from_the_server_read_as_text_even_when_the_detail_is_a_list():

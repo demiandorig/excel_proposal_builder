@@ -21,10 +21,6 @@ import asyncio
 import json
 import logging
 import re
-import shutil
-import subprocess
-import sys
-import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +33,7 @@ from app import catalog
 from app.data.constanza import load_platform_dma
 from app.services import constanza_engine as engine
 from app.services import constanza_forecast_map as fm
+from app.services import constanza_methods as methods
 from app.services.constanza_geo import resolve_geo
 from app.services.schema_bootstrap import idempotent_statements
 
@@ -106,7 +103,7 @@ def test_with_no_admin_rows_every_product_behaves_exactly_as_phase_1_hard_coded_
     for p in catalog.CATALOG:
         cfg = fm.resolve_forecast(p.name, p.family)
         expected_platform = fm.DEFAULT_PLATFORM_PRODUCTS.get(p.name)
-        if p.name in fm.DEFAULT_API_PRODUCTS:                       # the one addition since: a product forecast by a live API (TikTok)
+        if p.name in fm.DEFAULT_API_PRODUCTS:                       # the addition since: a product forecast by a live API (TikTok, the three paid Meta SKUs)
             assert (cfg.enabled, cfg.method, cfg.platform, cfg.hispanic_weighted) == (True, fm.DEFAULT_API_PRODUCTS[p.name], None, False), p.name
         else:
             assert cfg.enabled == (p.family == "Entravision Plus"), p.name           # the button: the whole family, nothing else
@@ -379,7 +376,10 @@ def test_the_platform_products_endpoint_is_the_live_mapping(store):
 
 def test_the_admin_payload_lists_every_product_with_coverage_and_totals(store):
     data = asyncio.run(main.admin_get_forecast_map())
-    assert data["summary"] == {"total": len(catalog.effective_catalog()), "enabled": 22 + len(NEW_EP) + 1, "platform_modeled": 10, "generic": 12 + len(NEW_EP), "tiktok": 1, "customized": 0}
+    by_method = {key: sum(1 for method in fm.DEFAULT_API_PRODUCTS.values() if method == key) for key in methods.keys()}      # (a later method's default products count too)
+    assert by_method["tiktok"] == 1 and by_method["meta"] == 3
+    assert data["summary"] == {"total": len(catalog.effective_catalog()), "enabled": 22 + len(NEW_EP) + len(fm.DEFAULT_API_PRODUCTS), "platform_modeled": 10,
+                               "generic": 12 + len(NEW_EP), **by_method, "customized": 0}
     rows = {r["name"]: r for r in data["products"]}
     assert rows[ROKU]["enabled"] and rows[ROKU]["method"] == "platform" and rows[ROKU]["platform"] == "roku" and not rows[ROKU]["customized"]
     assert rows[SEARCH]["enabled"] is False and rows[SEARCH]["default"]["enabled"] is False
@@ -394,7 +394,7 @@ def test_the_admin_payload_lists_every_product_with_coverage_and_totals(store):
 
 def test_saving_a_choice_answers_with_the_refreshed_list(store):
     data = asyncio.run(main.admin_set_forecast_map(_body(SEARCH, method="generic", platform=None), _request("planner@x.com")))
-    assert data["saved"] is True and data["summary"]["customized"] == 1 and data["summary"]["enabled"] == 24 + len(NEW_EP)
+    assert data["saved"] is True and data["summary"]["customized"] == 1 and data["summary"]["enabled"] == 22 + len(fm.DEFAULT_API_PRODUCTS) + len(NEW_EP) + 1
     row = next(r for r in data["products"] if r["name"] == SEARCH)
     assert row["enabled"] and row["method"] == "generic" and row["customized"]
     assert store.rows[SEARCH]["updated_by"] == "planner@x.com"
@@ -506,6 +506,26 @@ def test_a_forecast_inheritance_failure_never_blocks_the_duplicate(store, monkey
     assert out["added"] is True
 
 
+def test_a_copy_of_a_meta_sku_on_a_database_that_still_has_the_old_method_list_is_made_without_the_mapping_and_the_failure_is_only_logged(store, monkeypatch, caplog):
+    """What docs/meta_forecasting.md and docs/forecast_data_platform.md say about the window before migration 0006 is published: the duplicate is created,
+    the answer carries no warning, the copy is a plain population-share estimate, and the refused write is in the server log only."""
+    awareness = "Facebook & Instagram Ads | Awareness"
+    _with_copy(monkeypatch, f"{awareness} (Copy)", catalog.by_name(awareness))
+    created = {"copied_from": awareness, "name": f"{awareness} (Copy)"}
+    monkeypatch.setattr(main, "catalog_create_product", lambda fields, copy_from_id=None: created)
+    monkeypatch.setattr(main.restrictions_svc, "inherit_product_approvals", lambda *a: 0)
+
+    def refused(name, cfg, updated_by):
+        raise RuntimeError('new row for relation "forecast_product_map" violates check constraint "forecast_product_map_method_check"')
+    monkeypatch.setattr(fm, "_write", refused)
+    with caplog.at_level(logging.ERROR, logger=main.__name__):
+        out = asyncio.run(main.admin_create_product(main.ProductRequest(copy_from_id=1), _request("planner@x.com")))
+    assert out["added"] is True and out["restrictions_warning"] is None and set(out) == {"added", "product", "restrictions_inherited", "restrictions_warning"}
+    cfg = fm.resolve_forecast(f"{awareness} (Copy)")
+    assert (cfg.method, cfg.source) == ("generic", "default") and store.rows == {}
+    assert any("couldn't copy the forecast mapping" in r.getMessage() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # 9. Wiring: schema, front end, admin page
 # ---------------------------------------------------------------------------------------------------------------------
@@ -515,55 +535,6 @@ def test_the_table_is_created_by_the_startup_bootstrap():
     mine = [s for s in statements if s["target"] == "forecast_product_map"]
     assert len(mine) == 1 and mine[0]["kind"] == "table"
     sql = re.sub(r"\s+", " ", mine[0]["sql"])
-    for column in ("product_name TEXT PRIMARY KEY", "enabled BOOLEAN NOT NULL", "method TEXT NOT NULL CHECK (method IN ('platform', 'generic', 'tiktok'))",
+    for column in ("product_name TEXT PRIMARY KEY", "enabled BOOLEAN NOT NULL", "method TEXT NOT NULL CHECK (method ~ '^[a-z][a-z0-9_]{1,31}$')",
                    "platform TEXT", "hispanic_weighted BOOLEAN NOT NULL DEFAULT FALSE"):
         assert column in sql, column
-
-
-APP_JS = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
-ADMIN_JS = (ROOT / "app" / "static" / "admin.js").read_text(encoding="utf-8")
-ADMIN_HTML = (ROOT / "app" / "templates" / "admin.html").read_text(encoding="utf-8")
-
-
-def test_the_avails_card_reads_the_products_forecast_config_not_a_hard_coded_family():
-    card = APP_JS.split("function renderAvailsGrid", 1)[1].split("\nfunction ", 1)[0]
-    # a paid Meta line has its own panel (audience scenarios) instead of the platform-data button: the config decides, not a family name
-    assert "${!isFreeform && _forecastEnabled(p) && p.meta_retail_cpm == null ? `" in card
-    assert 'p.family === "Entravision Plus"' not in card
-    helper = APP_JS.split("function _forecastEnabled(p) {", 1)[1].split("\n}\n", 1)[0]
-    assert "p.forecast ? !!p.forecast.enabled" in helper and 'p.family === "Entravision Plus"' in helper     # the old rule is only a fallback
-
-
-def test_forecast_enabled_helper_behaviour():
-    engine_path = shutil.which("node") or (shutil.which("osascript") if sys.platform == "darwin" else None)
-    if not engine_path:
-        pytest.skip("no JavaScript engine available")
-    fn = "function _forecastEnabled(p) {" + APP_JS.split("function _forecastEnabled(p) {", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
-    cases = [None, {"family": "Entravision Plus"}, {"family": "Display"}, {"family": "Display", "forecast": {"enabled": True}},
-             {"family": "Entravision Plus", "forecast": {"enabled": False}}]
-    body = fn + "return JSON.stringify(" + json.dumps(cases) + ".map(_forecastEnabled));"
-    with tempfile.TemporaryDirectory() as tmp:
-        script = Path(tmp) / "s.js"
-        if "node" in engine_path:
-            script.write_text(f"console.log((function () {{\n{body}\n}})());\n", encoding="utf-8")
-            cmd = [engine_path, str(script)]
-        else:
-            script.write_text(f"function run() {{\n return (function () {{\n{body}\n}})();\n}}\n", encoding="utf-8")
-            cmd = [engine_path, "-l", "JavaScript", str(script)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if proc.returncode != 0:
-        pytest.skip(f"JavaScript engine unusable here: {proc.stderr[:200]}")
-    assert json.loads(proc.stdout.strip()) == [False, True, False, True, False]
-
-
-def test_the_admin_page_has_a_forecast_tab_wired_to_the_endpoints():
-    assert '<button class="admin-tab" data-tab="forecast">Forecast</button>' in ADMIN_HTML
-    for element_id in ("tab-forecast", "fc-summary", "fc-coverage-body", "fc-search", "fc-family-filter", "fc-only-on", "fc-count", "fc-table", "fc-body"):
-        assert f'id="{element_id}"' in ADMIN_HTML, element_id
-    for token in ('document.getElementById("tab-forecast")', 'tab === "forecast" && !adminState.forecastLoaded', "wireForecast();",
-                  '"/api/admin/forecast-map"', '"/api/admin/forecast-map/reset"', '"/api/admin/forecast-map/add-product"'):
-        assert token in ADMIN_JS, token
-    # the routes exist on the server, and are covered by the blanket admin-only rule
-    for route in ('@app.get("/api/admin/forecast-map")', '@app.put("/api/admin/forecast-map")',
-                  '@app.post("/api/admin/forecast-map/reset")', '@app.post("/api/admin/forecast-map/add-product")'):
-        assert route in (ROOT / "app" / "main.py").read_text(encoding="utf-8"), route

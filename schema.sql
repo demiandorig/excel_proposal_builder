@@ -517,12 +517,15 @@ CREATE INDEX IF NOT EXISTS faq_entries_sort_idx ON faq_entries (section, sort_or
 -- rename doesn't orphan the row). A product with NO row keeps the built-in default: the "Entravision Plus" family gets
 -- the button, ten named products use their platform's DMA data, everything else is a population-share estimate of the
 -- line's own budget. method 'platform' needs a `platform` key (roku, prime, hulu, peacock, other_fast, vmvpd,
--- cumulative); 'generic' and 'tiktok' (a live audience-size estimate from TikTok's API) have none. Idempotent.
+-- cumulative); every other method has none: 'generic', and the registered API methods ('tiktok', 'meta': a live audience-size
+-- estimate from that platform's API). The CHECK is a KEY FORMAT, not a list of names: which methods exist is decided by the
+-- registry in app/services/constanza_methods.py (and validated when an admin saves and when a row is read), so adding a source
+-- never needs another migration (0006 replaced the list). Idempotent.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS forecast_product_map (
     product_name       TEXT PRIMARY KEY,
     enabled            BOOLEAN NOT NULL,
-    method             TEXT NOT NULL CHECK (method IN ('platform', 'generic', 'tiktok')),
+    method             TEXT NOT NULL CHECK (method ~ '^[a-z][a-z0-9_]{1,31}$'),
     platform           TEXT,
     hispanic_weighted  BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),

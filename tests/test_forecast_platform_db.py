@@ -538,24 +538,27 @@ def test_a_replaced_product_still_resolves_by_name_for_a_saved_proposal(db, monk
 
 # --------------------------------------------------------------------------------------------- the migration runner, isolated
 
-def test_the_forecast_map_accepts_the_tiktok_method_and_still_rejects_any_other(db):
-    """Migration 0004 widens the method check to 'tiktok'; the schema.sql baseline says the same, and the migration is re-runnable."""
-    mine = "zz-test Tiktok map"
+def test_the_forecast_map_accepts_any_method_key_and_rejects_what_is_not_one(db):
+    """Migration 0006 replaced the list of method names by a key-format check (which methods exist is the registry's business), and the
+    schema.sql baseline says the same. 'meta' and 'tiktok' go in; a value that is not a key does not; the migration is re-runnable.
+    The LATEST method migration is the one re-run here: 0004 would narrow the check back to three names (and fail once a 'meta' row exists)."""
+    mine = "zz-test Method map"
+    sql = next(m for m in migrations.discover() if m.version == "0006").sql
     with get_connection() as conn:
         conn.execute("DELETE FROM forecast_product_map WHERE product_name = %s", (mine,))
         try:
-            for method, platform in (("tiktok", None), ("generic", None), ("platform", "roku")):
+            for method, platform in (("tiktok", None), ("meta", None), ("generic", None), ("platform", "roku"), ("a_future_method2", None)):
                 conn.execute("INSERT INTO forecast_product_map (product_name, enabled, method, platform) VALUES (%s, TRUE, %s, %s) "
                              "ON CONFLICT (product_name) DO UPDATE SET method = EXCLUDED.method, platform = EXCLUDED.platform", (mine, method, platform))
-            conn.execute("UPDATE forecast_product_map SET method = 'tiktok', platform = NULL WHERE product_name = %s", (mine,))
-            assert conn.execute("SELECT method FROM forecast_product_map WHERE product_name = %s", (mine,)).fetchone()["method"] == "tiktok"
-            with pytest.raises(psycopg.errors.CheckViolation):
-                with conn.transaction():
-                    conn.execute("UPDATE forecast_product_map SET method = 'magic' WHERE product_name = %s", (mine,))
-            sql = next(m for m in migrations.discover() if m.version == "0004").sql
-            conn.execute(sql)                                                  # run again over the already-widened check: nothing breaks
+            conn.execute("UPDATE forecast_product_map SET method = 'meta', platform = NULL WHERE product_name = %s", (mine,))
+            assert conn.execute("SELECT method FROM forecast_product_map WHERE product_name = %s", (mine,)).fetchone()["method"] == "meta"
+            for bad in ("Magic!", "Meta", "", "m", "1meta", "has space", "x" * 33, "meta\n"):   # not a key: upper case, too short, too long, a digit first, a trailing newline, ...
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    with conn.transaction():
+                        conn.execute("UPDATE forecast_product_map SET method = %s WHERE product_name = %s", (bad, mine))
+            conn.execute(sql)                                                  # run again over the already-open check, with a 'meta' row in place: nothing breaks
             conn.execute(sql)
-            assert conn.execute("SELECT method FROM forecast_product_map WHERE product_name = %s", (mine,)).fetchone()["method"] == "tiktok"
+            assert conn.execute("SELECT method FROM forecast_product_map WHERE product_name = %s", (mine,)).fetchone()["method"] == "meta"
         finally:
             conn.execute("DELETE FROM forecast_product_map WHERE product_name = %s", (mine,))
 
@@ -615,3 +618,19 @@ def test_migration_files_must_be_named_and_numbered_properly(tmp_path):
         migrations.new_migration_path("Bad Name", tmp_path)
     with pytest.raises(ValueError):
         migrations._check_ledger("x; DROP TABLE y")
+
+
+def test_an_admin_choice_of_the_meta_method_is_stored_and_read_back(db):
+    from app.services import constanza_forecast_map as fm
+    name = next(p.name for p in catalog.CATALOG if p.family == "Search")
+    fm.invalidate()
+    try:
+        cfg = fm.set_override(name, {"enabled": True, "method": "meta", "platform": "roku", "hispanic_weighted": True}, "zz-test")
+        assert (cfg.enabled, cfg.method, cfg.platform, cfg.hispanic_weighted, cfg.source) == (True, "meta", None, False, "admin")
+        fm.invalidate()
+        assert fm.resolve_forecast(name).method == "meta"                     # read back from the table (the row survived the format check)
+    finally:
+        fm.clear_override(name)
+        fm.invalidate()
+    assert fm.resolve_forecast(name).method == "generic"
+
