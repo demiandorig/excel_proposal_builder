@@ -86,10 +86,21 @@ def test_everyday_phrases_resolve_to_the_right_segment(phrase, expected):
     "pet owners", "dog owners", "truck owners", "home insurance", "urgent care", "health care", "personal injury", "senior living",
     "nursing school", "phone plans", "live music", "hispanic voters", "life insurance", "insurance broker", "caregivers", "election",
 ])
-def test_a_single_shared_word_is_a_suggestion_never_an_applied_rate(taxonomy, phrase):
+def test_a_single_shared_word_is_a_suggestion_never_an_applied_rate(taxonomy, phrase, monkeypatch):
     """'pet owners' used to apply Small Business Owners' rate because both contain 'owners' (score 55, exactly the apply line)."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert taxonomy.best_match(phrase) is None, phrase
     assert resolve_interest(phrase).supported is False
+
+
+@pytest.mark.parametrize("phrase", ["personal injury", "live music", "life insurance", "election"])
+def test_the_llm_cannot_override_a_near_threshold_ambiguous_interest(phrase, monkeypatch):
+    from app.services import constanza_audience
+    monkeypatch.setattr(constanza_audience, "_openai_client", lambda: object())
+    monkeypatch.setattr(constanza_audience.llm_utils, "chat_text",
+                        lambda *args, **kwargs: pytest.fail("ambiguous lexical matches must not be resolved by the LLM"))
+    result = resolve_interest(phrase)
+    assert result.category is None and result.supported is False
 
 
 def test_two_audiences_that_fit_equally_well_are_left_for_the_planner_to_choose(taxonomy):

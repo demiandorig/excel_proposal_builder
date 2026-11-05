@@ -218,6 +218,15 @@ def resolve_interest(text: str) -> InterestResolution:
     if hit is not None:
         return _resolution(text, hit.segment, hit.how, tax)
 
+    # A deliberate near-threshold rejection is not a request for the model to
+    # choose anyway. These are usually shared-word or tied matches: allowing
+    # the LLM to pick one would turn an ambiguous suggestion into an applied
+    # sourced rate, bypassing the taxonomy's safety threshold.
+    near_matches = tax.search(text, limit=4)
+    if near_matches and near_matches[0].score >= audience_taxonomy._APPLY_THRESHOLD - 0.1:
+        return InterestResolution(input_text=text, category=None, supported=False,
+                                  suggestions=_suggestions(tax, text, limit=4))
+
     client = _openai_client()
     if client is not None:
         options = "\n".join(f"- {s.id}: {s.label}" for s in tax.ordered())

@@ -7,6 +7,7 @@ connection back.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -302,6 +303,9 @@ class _Proxy:
         while self.alive:
             try:
                 client, _ = self.listener.accept()
+                if not self.alive:
+                    client.close()
+                    return
                 server = socket.create_connection(self.upstream)
             except Exception:  # noqa: BLE001
                 return
@@ -343,16 +347,17 @@ class _Proxy:
 def test_a_database_outage_after_the_pool_exists_fails_fast_instead_of_stalling_every_call(real_url, monkeypatch):
     """The 'database is down' window used to guard only the first connect: once a pool existed, every call waited out the
     whole pool timeout (10 s) - threads piled up behind a database that was not coming back."""
-    from psycopg.conninfo import conninfo_to_dict
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
     info = conninfo_to_dict(real_url)
     proxy = _Proxy(info.get("host") or "127.0.0.1", int(info.get("port") or 5432))
     try:
-        monkeypatch.setenv("DATABASE_URL", real_url.replace(f":{info.get('port', 5432)}/", f":{proxy.port}/", 1)
-                           if f":{info.get('port', 5432)}/" in real_url else real_url)
+        monkeypatch.setenv("DATABASE_URL", make_conninfo(real_url, host="127.0.0.1", port=proxy.port))
         monkeypatch.setenv("DB_POOL_TIMEOUT", "8")
         with db.get_connection() as conn:                       # the pool now exists, through the proxy
             assert conn.execute("SELECT 1 AS one").fetchone()["one"] == 1
         proxy.cut()
+        with pytest.raises(psycopg.OperationalError):
+            psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=1).close()
         t0 = time.monotonic()
         with pytest.raises(psycopg.OperationalError):
             with db.get_connection() as conn:

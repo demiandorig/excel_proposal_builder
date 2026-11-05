@@ -194,6 +194,6 @@ def test_brief_bounds_openai_request_and_skips_fallback_on_timeout(monkeypatch):
 
     assert "timed out" in brief["error"].lower()
     assert captured == {
-        "timeout": llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        "timeout": sb._STRATEGY_OPENAI_TIMEOUT_SECONDS,
         "max_retries": 0,
     }

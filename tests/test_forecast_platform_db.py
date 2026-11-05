@@ -56,6 +56,22 @@ def key(db):
     _cleanup()
 
 
+@pytest.fixture
+def forecast_mapping_product(db):
+    """A temporary catalog row keeps override tests independent of a developer's live product list."""
+    from app.services import constanza_forecast_map
+    name = f"zz-test Forecast Mapping {uuid.uuid4().hex[:8]}"
+    with get_connection() as conn:
+        conn.execute("INSERT INTO products (name, family, buying_model) VALUES (%s, 'Test', 'CPM')", (name,))
+    catalog.invalidate_product_caches()
+    yield name
+    with get_connection() as conn:
+        conn.execute("DELETE FROM forecast_product_map WHERE product_name = %s", (name,))
+        conn.execute("DELETE FROM products WHERE name = %s", (name,))
+    catalog.invalidate_product_caches()
+    constanza_forecast_map.invalidate()
+
+
 def payload_for(key, scale=1.0, links=(), dmas=3, **kw):
     spec = SeriesSpec(series_key=key, title=f"Test {key}", channel="ctv", avails_unit="monthly", reader="madhive_zip",
                       source="x", products=list(links), **kw)
@@ -563,9 +579,9 @@ def test_the_forecast_map_accepts_any_method_key_and_rejects_what_is_not_one(db)
             conn.execute("DELETE FROM forecast_product_map WHERE product_name = %s", (mine,))
 
 
-def test_an_admin_choice_of_the_tiktok_method_is_stored_and_read_back(db):
+def test_an_admin_choice_of_the_tiktok_method_is_stored_and_read_back(forecast_mapping_product):
     from app.services import constanza_forecast_map as fm
-    name = next(p.name for p in catalog.CATALOG if p.family == "Search")
+    name = forecast_mapping_product
     fm.invalidate()
     try:
         cfg = fm.set_override(name, {"enabled": True, "method": "tiktok"}, "zz-test")
@@ -620,9 +636,9 @@ def test_migration_files_must_be_named_and_numbered_properly(tmp_path):
         migrations._check_ledger("x; DROP TABLE y")
 
 
-def test_an_admin_choice_of_the_meta_method_is_stored_and_read_back(db):
+def test_an_admin_choice_of_the_meta_method_is_stored_and_read_back(forecast_mapping_product):
     from app.services import constanza_forecast_map as fm
-    name = next(p.name for p in catalog.CATALOG if p.family == "Search")
+    name = forecast_mapping_product
     fm.invalidate()
     try:
         cfg = fm.set_override(name, {"enabled": True, "method": "meta", "platform": "roku", "hispanic_weighted": True}, "zz-test")
