@@ -98,7 +98,7 @@ General: Entravision's deep expertise in creating culturally relevant, bilingual
 # through to the fallback) and then break the fallback too.
 _SEARCH_MODEL = "gpt-5.1"
 _FALLBACK_MODEL = "gpt-5.1"
-_STRATEGY_OPENAI_TIMEOUT_SECONDS = 50.0
+_STRATEGY_OPENAI_TIMEOUT_SECONDS = llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS
 # Reasoning + visible tokens share this cap; a full brief has run ~12k chars (~3k tokens) and
 # an old 3,000 cap truncated it mid-object. llm_utils retries once at double this if still cut off.
 _MAX_OUTPUT_TOKENS = 16000

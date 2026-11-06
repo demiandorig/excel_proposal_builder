@@ -186,7 +186,11 @@ def _openai_client():
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return None
-    return _OpenAI(api_key=api_key)
+    return _OpenAI(
+        api_key=api_key,
+        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        max_retries=llm_utils.OPENAI_MAX_RETRIES,
+    )
 
 
 def _suggestions(tax, text: str, exclude: str | None = None, limit: int = 3) -> list[dict]:

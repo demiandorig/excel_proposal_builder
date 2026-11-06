@@ -14,3 +14,9 @@ For operational diagnosis, distinguish a broken credential/API connection from a
 **Why:** The OpenAI Responses API and web-search tool were reachable, while complete research prompts exceeded short per-request limits.
 
 **How to apply:** Use non-sensitive synthetic inputs for a one-off live check, record only success/error and duration, and keep regular tests fully stubbed.
+
+Every OpenAI client should set the shared request timeout and retry policy explicitly, and each route's overall deadline should leave room for the provider call and post-processing.
+
+**Why:** Different AI steps had unrelated short deadlines, while revision clients silently inherited the SDK's much longer default.
+
+**How to apply:** When adding an AI path, audit both its client configuration and the endpoint wrapper; keep the shared constants and regression tests aligned.

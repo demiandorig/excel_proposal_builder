@@ -637,7 +637,11 @@ def reprompt_emails(
     if not api_key:
         return _unchanged("OPENAI_API_KEY not set — reprompt skipped.")
 
-    client = _OpenAI(api_key=api_key)
+    client = _OpenAI(
+        api_key=api_key,
+        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        max_retries=llm_utils.OPENAI_MAX_RETRIES,
+    )
     if totals is None:
         totals = email_totals.totals_from_legacy(request, line_items, None, time_unit)
     # One overall figure only when there is ONE option: several are alternatives, and their sum means nothing.
@@ -787,7 +791,11 @@ def refine_gamma_outline(outline: str, reprompt: str) -> dict:
     if not api_key:
         return _unchanged("OPENAI_API_KEY not set — reprompt skipped.")
 
-    client = _OpenAI(api_key=api_key)
+    client = _OpenAI(
+        api_key=api_key,
+        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        max_retries=llm_utils.OPENAI_MAX_RETRIES,
+    )
     prompt = f"""You are revising a plain-text media-plan outline (a handoff doc fed into a separate presentation-building co-pilot, not shown to the client directly) based on the planner's feedback. Respond ONLY with valid JSON — no preamble, no markdown fences.
 
 ## CURRENT OUTLINE

@@ -703,7 +703,7 @@ def _revision_prompt(monkeypatch, **kwargs):
     captured = []
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     monkeypatch.setattr(ai_enricher, "_HAS_OPENAI", True)
-    monkeypatch.setattr(ai_enricher, "_OpenAI", lambda api_key: object())
+    monkeypatch.setattr(ai_enricher, "_OpenAI", lambda api_key, **kwargs: object())
     monkeypatch.setattr(ai_enricher.llm_utils, "chat_text", lambda client, model, prompt, **k: captured.append(prompt) or json.dumps(
         {"internal_email_subject": "s", "internal_email_body": "b", "client_email_subject": "s", "client_email_body": "b"}))
     result = ai_enricher.reprompt_emails(

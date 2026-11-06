@@ -113,8 +113,9 @@ from app.services.line_modifier import clean_line_modifier_or_none
 constanza_methods.ensure_loaded()
 
 _ROADBLOCKS_TOTAL_TIMEOUT_SECONDS = 60.0
-_GENERATE_ENRICHMENT_TIMEOUT_SECONDS = 10.0
+_GENERATE_ENRICHMENT_TIMEOUT_SECONDS = 60.0
 _STRATEGY_REQUEST_TIMEOUT_SECONDS = 60.0
+_AI_REVISION_TIMEOUT_SECONDS = 60.0
 _roadblocks_tasks: set[asyncio.Task] = set()
 _generate_enrichment_tasks: set[asyncio.Task] = set()
 
@@ -2871,13 +2872,22 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
         _email_figures_for_tiers(req, email_tiers, body.addons, body.time_unit, body.monthly_distribution_mode)
         if email_tiers is not None else None)
 
-    result = await asyncio.to_thread(
-        ai_enricher.reprompt_emails,
-        req, line_items, body.campaign_name,
-        body.current_internal_subject, body.current_internal_body,
-        body.current_client_subject, body.current_client_body,
-        body.reprompt, scope=body.scope, time_unit=body.time_unit, totals=email_figures,
-    )
+    try:
+        result = await asyncio.wait_for(asyncio.to_thread(
+            ai_enricher.reprompt_emails,
+            req, line_items, body.campaign_name,
+            body.current_internal_subject, body.current_internal_body,
+            body.current_client_subject, body.current_client_body,
+            body.reprompt, scope=body.scope, time_unit=body.time_unit, totals=email_figures,
+        ), timeout=_AI_REVISION_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        result = {
+            "internal_email_subject": body.current_internal_subject,
+            "internal_email_body": body.current_internal_body,
+            "client_email_subject": body.current_client_subject,
+            "client_email_body": body.current_client_body,
+            "error": f"Email revision exceeded the {_AI_REVISION_TIMEOUT_SECONDS}-second time limit; original emails were kept.",
+        }
     if email_figures is not None:
         result = {**result, "email_figures": email_figures.to_dict()}
 
@@ -2956,7 +2966,16 @@ async def refine_gamma_outline_endpoint(body: GammaOutlineRefineRequest) -> dict
     app.js's buildGammaOutline, no fetch at all) and stays that way; this
     endpoint only runs when the planner explicitly clicks "Refine".
     """
-    return await asyncio.to_thread(ai_enricher.refine_gamma_outline, body.outline, body.reprompt)
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(ai_enricher.refine_gamma_outline, body.outline, body.reprompt),
+            timeout=_AI_REVISION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "outline": body.outline,
+            "error": f"Outline refinement exceeded the {_AI_REVISION_TIMEOUT_SECONDS}-second time limit; the original outline was kept.",
+        }
 
 
 @app.get("/api/download/{proposal_id}")

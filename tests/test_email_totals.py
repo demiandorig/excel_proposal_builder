@@ -569,7 +569,7 @@ def test_the_revision_prompt_uses_the_plan_as_it_is_now_not_the_stale_line_list(
     captured = []
     monkeypatch.setenv("OPENAI_API_KEY", "test")
     monkeypatch.setattr(ai_enricher, "_HAS_OPENAI", True)
-    monkeypatch.setattr(ai_enricher, "_OpenAI", lambda api_key: object())
+    monkeypatch.setattr(ai_enricher, "_OpenAI", lambda api_key, **kwargs: object())
     monkeypatch.setattr(ai_enricher.llm_utils, "chat_text", lambda client, model, prompt, **k: captured.append(prompt) or json.dumps(
         {"internal_email_subject": "s", "internal_email_body": "b", "client_email_subject": "s", "client_email_body": "b"}))
     current = [{"label": "A", "name": "Independent", "line_items": [_li("Display Alpha", 5000.0)]},

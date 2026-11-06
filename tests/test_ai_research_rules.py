@@ -18,6 +18,7 @@ import pytest
 
 from app.catalog import CATALOG
 from app.services import ai_enricher, claim_rules, llm_utils, roadblocks as rb, source_rules
+from app.services import constanza_audience as constanza_audience_svc
 from app.services import strategy_brief as sb
 from app.services.ai_enricher import _blurb_sentence_ok, _compile_avoid, _parse_response, _tighten_blurb
 from app.services.notion_parser import ProposalRequest
@@ -550,6 +551,36 @@ def test_enrichment_and_roadblocks_bound_openai_waits_and_skip_timeout_fallback(
         {"timeout": llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS, "max_retries": 0},
         {"timeout": rb._ROADBLOCKS_OPENAI_TIMEOUT_SECONDS, "max_retries": 0},
     ]
+
+
+def test_revision_and_audience_openai_clients_use_shared_deadline(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
+    captured = []
+
+    def fake_openai(api_key=None, **kwargs):
+        captured.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(ai_enricher, "_OpenAI", fake_openai)
+    monkeypatch.setattr(constanza_audience_svc, "_HAS_OPENAI", True)
+    monkeypatch.setattr(constanza_audience_svc, "_OpenAI", fake_openai)
+    monkeypatch.setattr(
+        llm_utils, "chat_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stubbed")),
+    )
+
+    ai_enricher.reprompt_emails(
+        _request(), _items(), "Campaign",
+        "Internal", "Internal body", "Client", "Client body", "shorten this",
+    )
+    ai_enricher.refine_gamma_outline("Campaign outline with enough context.", "shorten this")
+    assert constanza_audience_svc._openai_client() is not None
+
+    expected = {
+        "timeout": llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        "max_retries": llm_utils.OPENAI_MAX_RETRIES,
+    }
+    assert captured == [expected, expected, expected]
 
 
 # ============================================================================================================
