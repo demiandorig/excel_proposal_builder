@@ -114,6 +114,7 @@ class ProposalEnrichment:
     client_email_body: str = ""
     used_web_search: bool = False
     error: Optional[str] = None
+    error_category: Optional[str] = None
     # Dollar amounts in the emails that match none of the plan's computed figures even after the automatic
     # correction pass (see _verify_email_figures) — shown to the planner instead of shipping them silently.
     figure_warnings: list[str] = field(default_factory=list)
@@ -343,19 +344,25 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     if not _HAS_OPENAI:
         return ProposalEnrichment(
             campaign_name=_fallback_campaign_name(request),
-            error="openai package not installed — run: pip install openai",
+            error=llm_utils.failure_message("configuration"),
+            error_category="configuration",
         )
     if not api_key:
         return ProposalEnrichment(
             campaign_name=_fallback_campaign_name(request),
-            error="OPENAI_API_KEY not set — email + blurb generation skipped.",
+            error=llm_utils.failure_message("configuration"),
+            error_category="configuration",
         )
 
-    client = _OpenAI(
-        api_key=api_key,
-        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
-        max_retries=llm_utils.OPENAI_MAX_RETRIES,
-    )
+    client_started = time.perf_counter()
+    try:
+        client = _OpenAI(
+            api_key=api_key,
+            timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+            max_retries=llm_utils.OPENAI_MAX_RETRIES,
+        )
+    except Exception as exc:
+        return _failed_enrichment(request, exc, "client_init", client_started)
     if totals is None:
         totals = email_totals.totals_from_legacy(request, line_items, tiers, time_unit)
     prompt = _build_prompt(request, line_items, strategy_brief=strategy_brief, tiers=tiers, time_unit=time_unit,
@@ -363,7 +370,8 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
     _log_enrichment_stage("prepare", started)
     truncated = ProposalEnrichment(
         campaign_name=_fallback_campaign_name(request),
-        error="Content generation was cut off before it finished, even after an automatic retry.",
+        error=llm_utils.failure_message("response_truncated"),
+        error_category="response_truncated",
     )
 
     stage_started = time.perf_counter()
@@ -371,38 +379,41 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
         raw = llm_utils.responses_text(client, model=_SEARCH_MODEL, prompt=prompt,
                                        tools=[{"type": "web_search"}],
                                        max_output_tokens=_ENRICH_MAX_OUTPUT_TOKENS)
-    except llm_utils.ResponseTruncated:
+    except llm_utils.ResponseTruncated as exc:
         _log_enrichment_stage("web_search", stage_started)
+        llm_utils.log_ai_failure("proposal_enrichment", "web_search", stage_started, exc)
         return truncated
     except Exception as search_exc:
         _log_enrichment_stage("web_search", stage_started)
-        if llm_utils.is_timeout_error(search_exc):
-            return ProposalEnrichment(
-                campaign_name=_fallback_campaign_name(request),
-                error="Content generation timed out before the response was complete.",
-            )
+        search_category = llm_utils.log_ai_failure("proposal_enrichment", "web_search", stage_started, search_exc)
+        if search_category in {"authentication", "permission", "quota", "rate_limit", "timeout"}:
+            return ProposalEnrichment(campaign_name=_fallback_campaign_name(request),
+                                      error=llm_utils.failure_message(search_category),
+                                      error_category=search_category)
         stage_started = time.perf_counter()
         try:
             raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
                                       max_completion_tokens=_ENRICH_MAX_OUTPUT_TOKENS)
-        except llm_utils.ResponseTruncated:
+        except llm_utils.ResponseTruncated as exc:
             _log_enrichment_stage("fallback", stage_started)
+            llm_utils.log_ai_failure("proposal_enrichment", "fallback", stage_started, exc)
             return truncated
         except Exception as fallback_exc:
             _log_enrichment_stage("fallback", stage_started)
-            return ProposalEnrichment(
-                campaign_name=_fallback_campaign_name(request),
-                error=f"Content generation failed: {fallback_exc}",
-            )
+            category = llm_utils.log_ai_failure("proposal_enrichment", "fallback", stage_started, fallback_exc)
+            return ProposalEnrichment(campaign_name=_fallback_campaign_name(request),
+                                      error=llm_utils.failure_message(category),
+                                      error_category=category)
         _log_enrichment_stage("fallback", stage_started)
         stage_started = time.perf_counter()
         result = _parse_response(raw, request, line_items, used_web_search=False, client=client)
         _log_enrichment_stage("parse", stage_started)
         if not result.error:
             result.error = (
-                f"Live web search failed ({search_exc}); this used the model's general "
+                "Live web search was unavailable; this used the model's general "
                 "knowledge instead — verify stats before relying on them."
             )
+            result.error_category = search_category
         stage_started = time.perf_counter()
         _verify_email_figures(client, result, totals, prompt)
         _log_enrichment_stage("figure_verification", stage_started)
@@ -418,6 +429,12 @@ def enrich_proposal(request, line_items, short_id: str, strategy_brief: Optional
 
 def _fallback_campaign_name(request) -> str:
     return request.client_name or "Campaign"
+
+
+def _failed_enrichment(request, exc: Exception, stage: str, started: float) -> ProposalEnrichment:
+    category = llm_utils.log_ai_failure("proposal_enrichment", stage, started, exc)
+    return ProposalEnrichment(campaign_name=_fallback_campaign_name(request),
+                              error=llm_utils.failure_message(category), error_category=category)
 
 
 # The Full Flight billing rule, said ONCE so the original email prompt (_build_prompt) and the planner's revision
@@ -546,10 +563,11 @@ def _check_and_repair_emails(client, totals, context: str, emails: dict, scope: 
     fixable = [i for i in issues if i.where in in_scope]
     best = emails
     if fixable and client is not None:
+        repair_started = time.perf_counter()
         try:
             repaired = _repair_email_figures(client, totals, emails, fixable, scope)
         except Exception as exc:         # a truncated / failed correction pass must not cost the planner the emails
-            _figure_logger.warning("figure correction pass failed: %s", exc)
+            llm_utils.log_ai_failure("email_figure_repair", "correction", repair_started, exc)
             repaired = None
         if repaired:
             after = _figure_issues(repaired, totals, context)
@@ -574,7 +592,7 @@ def _verify_email_figures(client, result: "ProposalEnrichment", totals, context:
             setattr(result, key, fixed[key])
         result.figure_warnings = warnings
     except Exception:
-        _figure_logger.exception("email figure verification failed; leaving the emails as written")
+        _figure_logger.warning("email figure verification failed; leaving the emails as written")
 
 
 def reprompt_emails(
@@ -622,26 +640,32 @@ def reprompt_emails(
     failure, returns the ORIGINAL email content unchanged (with `error`
     set) rather than blanking it out.
     """
-    def _unchanged(msg: str) -> dict:
+    def _unchanged(msg: str, category: Optional[str] = None) -> dict:
         return {
             "internal_email_subject": current_internal_subject,
             "internal_email_body": current_internal_body,
             "client_email_subject": current_client_subject,
             "client_email_body": current_client_body,
             "error": msg,
+            "error_category": category,
         }
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not _HAS_OPENAI:
-        return _unchanged("openai package not installed — run: pip install openai")
+        return _unchanged(llm_utils.failure_message("configuration"), "configuration")
     if not api_key:
-        return _unchanged("OPENAI_API_KEY not set — reprompt skipped.")
+        return _unchanged(llm_utils.failure_message("configuration"), "configuration")
 
-    client = _OpenAI(
-        api_key=api_key,
-        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
-        max_retries=llm_utils.OPENAI_MAX_RETRIES,
-    )
+    client_started = time.perf_counter()
+    try:
+        client = _OpenAI(
+            api_key=api_key,
+            timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+            max_retries=llm_utils.OPENAI_MAX_RETRIES,
+        )
+    except Exception as exc:
+        category = llm_utils.log_ai_failure("email_revision", "client_init", client_started, exc)
+        return _unchanged(llm_utils.failure_message(category), category)
     if totals is None:
         totals = email_totals.totals_from_legacy(request, line_items, None, time_unit)
     # One overall figure only when there is ONE option: several are alternatives, and their sum means nothing.
@@ -725,6 +749,7 @@ The INTERNAL email's final two lines (a "{{Name}}, part of your digital strategy
   "client_email_body": "revised full client email body"
 }}"""
 
+    revision_started = time.perf_counter()
     try:
         # No `temperature=` (GPT-5-series rejects it) and `max_completion_tokens`, not `max_tokens`.
         raw = llm_utils.chat_text(client, model=_REVISE_MODEL, prompt=prompt,
@@ -738,6 +763,7 @@ The INTERNAL email's final two lines (a "{{Name}}, part of your digital strategy
             "client_email_subject": data.get("client_email_subject") or current_client_subject,
             "client_email_body": _normalize_newlines(data.get("client_email_body") or current_client_body),
             "error": None,
+            "error_category": None,
         }
         # Hard guardrail, not just the prompt instruction above — force the
         # email OUTSIDE the requested scope back to its exact original
@@ -757,12 +783,14 @@ The INTERNAL email's final two lines (a "{{Name}}, part of your digital strategy
             result.update(fixed)
             result["figure_warnings"] = warnings
         except Exception:
-            _figure_logger.exception("email figure verification failed; leaving the revision as written")
+            _figure_logger.warning("email figure verification failed; leaving the revision as written")
         return result
-    except llm_utils.ResponseTruncated:
-        return _unchanged("The revision was cut off before it finished — emails left unchanged. Try again.")
+    except llm_utils.ResponseTruncated as exc:
+        llm_utils.log_ai_failure("email_revision", "generation", revision_started, exc)
+        return _unchanged(llm_utils.failure_message("response_truncated"), "response_truncated")
     except Exception as exc:
-        return _unchanged(f"Reprompt failed: {exc}")
+        category = llm_utils.log_ai_failure("email_revision", "generation", revision_started, exc)
+        return _unchanged(llm_utils.failure_message(category), category)
 
 
 def refine_gamma_outline(outline: str, reprompt: str) -> dict:
@@ -782,20 +810,25 @@ def refine_gamma_outline(outline: str, reprompt: str) -> dict:
     outline unchanged (with `error` set) rather than blanking it out —
     same failure-safety as reprompt_emails().
     """
-    def _unchanged(msg: str) -> dict:
-        return {"outline": outline, "error": msg}
+    def _unchanged(msg: str, category: Optional[str] = None) -> dict:
+        return {"outline": outline, "error": msg, "error_category": category}
 
     api_key = os.getenv("OPENAI_API_KEY")
     if not _HAS_OPENAI:
-        return _unchanged("openai package not installed — run: pip install openai")
+        return _unchanged(llm_utils.failure_message("configuration"), "configuration")
     if not api_key:
-        return _unchanged("OPENAI_API_KEY not set — reprompt skipped.")
+        return _unchanged(llm_utils.failure_message("configuration"), "configuration")
 
-    client = _OpenAI(
-        api_key=api_key,
-        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
-        max_retries=llm_utils.OPENAI_MAX_RETRIES,
-    )
+    client_started = time.perf_counter()
+    try:
+        client = _OpenAI(
+            api_key=api_key,
+            timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+            max_retries=llm_utils.OPENAI_MAX_RETRIES,
+        )
+    except Exception as exc:
+        category = llm_utils.log_ai_failure("gamma_outline_revision", "client_init", client_started, exc)
+        return _unchanged(llm_utils.failure_message(category), category)
     prompt = f"""You are revising a plain-text media-plan outline (a handoff doc fed into a separate presentation-building co-pilot, not shown to the client directly) based on the planner's feedback. Respond ONLY with valid JSON — no preamble, no markdown fences.
 
 ## CURRENT OUTLINE
@@ -819,19 +852,25 @@ never a budget, date or flight figure) rather than repeating it.
 Respond with this exact JSON structure:
 {{"outline": "the full revised outline text"}}"""
 
+    revision_started = time.perf_counter()
     try:
         raw = llm_utils.chat_text(client, model=_REVISE_MODEL, prompt=prompt,
                                   max_completion_tokens=_REVISE_MAX_COMPLETION_TOKENS)
         data = llm_utils.parse_json_object(raw, expect_any=("outline",), client=client)
         revised = data.get("outline")
         if not revised or not isinstance(revised, str):
-            return _unchanged("No structured response received — outline left unchanged.")
+            exc = ValueError("Missing outline field")
+            category = llm_utils.log_ai_failure("gamma_outline_revision", "parse", revision_started, exc)
+            return _unchanged(llm_utils.failure_message(category), category)
         # Code layer behind the no-Wikipedia rule in the prompt (a no-op when it never appears).
-        return {"outline": source_rules.strip_wikipedia(_normalize_newlines(revised)), "error": None}
-    except llm_utils.ResponseTruncated:
-        return _unchanged("The revision was cut off before it finished — outline left unchanged. Try again.")
+        return {"outline": source_rules.strip_wikipedia(_normalize_newlines(revised)),
+                "error": None, "error_category": None}
+    except llm_utils.ResponseTruncated as exc:
+        category = llm_utils.log_ai_failure("gamma_outline_revision", "generation", revision_started, exc)
+        return _unchanged(llm_utils.failure_message(category), category)
     except Exception as exc:
-        return _unchanged(f"Reprompt failed: {exc}")
+        category = llm_utils.log_ai_failure("gamma_outline_revision", "generation", revision_started, exc)
+        return _unchanged(llm_utils.failure_message(category), category)
 
 
 # ---------------------------------------------------------------------------
@@ -1419,15 +1458,18 @@ def _tighten_blurb(text: str, product_name: str = "", avoid: Optional["re.Patter
 
 def _parse_response(raw: str, request, line_items, used_web_search: bool = False,
                     client=None) -> ProposalEnrichment:
+    started = time.perf_counter()
     try:
         data = llm_utils.parse_json_object(
             raw, expect_any=("campaign_name", "product_blurbs", "internal_email_body", "client_email_body"),
             client=client)
-    except ValueError as exc:
+    except Exception as exc:
+        category = llm_utils.log_ai_failure("proposal_enrichment", "parse", started, exc)
         return ProposalEnrichment(
             campaign_name=_fallback_campaign_name(request),
             used_web_search=used_web_search,
-            error=str(exc),
+            error=llm_utils.failure_message(category),
+            error_category=category,
         )
 
     # Wikipedia is never a citation, anywhere in what the model wrote (blurbs, emails, campaign name): see

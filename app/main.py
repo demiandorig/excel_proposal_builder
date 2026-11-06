@@ -152,6 +152,7 @@ def _track_generate_enrichment_task(task: asyncio.Task) -> None:
 
 async def _generate_enrichment_with_timeout(*args, **kwargs):
     """AI enrichment is optional: cap its wait while allowing workbook generation to continue."""
+    started = time.perf_counter()
     task = asyncio.create_task(asyncio.to_thread(ai_enricher.enrich_proposal, *args, **kwargs))
     _track_generate_enrichment_task(task)
     try:
@@ -161,13 +162,16 @@ async def _generate_enrichment_with_timeout(*args, **kwargs):
     except asyncio.TimeoutError:
         request = args[0]
         _logger.warning(
-            "proposal generation stage=enrichment timed_out=true budget_seconds=%.1f",
+            "proposal generation request_id=%s stage=enrichment duration_ms=%d timed_out=true category=timeout budget_seconds=%.1f",
+            _api_request_id.get(),
+            round((time.perf_counter() - started) * 1000),
             _GENERATE_ENRICHMENT_TIMEOUT_SECONDS,
         )
         return ai_enricher.ProposalEnrichment(
             campaign_name=ai_enricher._fallback_campaign_name(request),
             error=f"AI enrichment exceeded the {_GENERATE_ENRICHMENT_TIMEOUT_SECONDS}-second time limit; "
                   "the workbook was generated without optional enrichment.",
+            error_category="timeout",
         )
 
 
@@ -1349,20 +1353,22 @@ async def strategy(body: StrategyRequest) -> dict:
             timeout=_STRATEGY_REQUEST_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        _logger.warning("strategy request id=%s stage=brief_generation timed_out=true budget_seconds=%.1f",
+        _logger.warning("strategy request id=%s stage=brief_generation timed_out=true category=timeout budget_seconds=%.1f",
                         request_id,
                         _STRATEGY_REQUEST_TIMEOUT_SECONDS)
         _logger.info("strategy request id=%s stage=total duration_ms=%d",
                      request_id,
                      round((time.perf_counter() - request_started) * 1000))
         timed_out_brief = strategy_brief_svc._error_brief(
-            f"Strategy brief exceeded the {_STRATEGY_REQUEST_TIMEOUT_SECONDS}-second time limit. Please try again."
+            f"Strategy brief exceeded the {_STRATEGY_REQUEST_TIMEOUT_SECONDS}-second time limit. Please try again.",
+            "timeout",
         )
         timed_out_brief["doc_token"] = None
         return timed_out_brief
-    _logger.info("strategy request id=%s stage=brief_generation duration_ms=%d",
+    _logger.info("strategy request id=%s stage=brief_generation duration_ms=%d category=%s",
                  request_id,
-                 round((time.perf_counter() - stage_started) * 1000))
+                 round((time.perf_counter() - stage_started) * 1000),
+                 brief.get("error_category") or "-")
 
     doc_token: Optional[str] = None
     if brief.get("strategy_summary") or brief.get("recommended_tactics"):
@@ -1523,6 +1529,7 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
     and returns a token to fetch it via /api/download-roadblocks/{token}.
     """
     route_started = time.perf_counter()
+    request_id = _api_request_id.get()
     req = _reconstruct_proposal_request(body.request)
 
     line_items = [
@@ -1542,7 +1549,10 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
     try:
         result = await asyncio.wait_for(asyncio.shield(worker), timeout=remaining)
     except asyncio.TimeoutError:
-        _logger.warning("roadblocks total request budget exceeded after %.1fs", _ROADBLOCKS_TOTAL_TIMEOUT_SECONDS)
+        _logger.warning(
+            "roadblocks request_id=%s stage=total duration_ms=%d category=timeout budget_seconds=%.1f",
+            request_id, round((time.perf_counter() - route_started) * 1000), _ROADBLOCKS_TOTAL_TIMEOUT_SECONDS,
+        )
         result = roadblocks_svc.timeout_result(line_items, body.categories)
         timed_out = True
 
@@ -1596,9 +1606,11 @@ async def roadblocks(body: RoadblocksRequest) -> dict:
             doc_token = None
 
     result["doc_token"] = doc_token
-    _logger.info("roadblocks request duration_ms=%d timed_out=%s",
+    _logger.info("roadblocks request id=%s stage=total duration_ms=%d timed_out=%s category=%s",
+                 request_id,
                  round((time.perf_counter() - route_started) * 1000),
-                 timed_out)
+                 timed_out,
+                 result.get("error_category") or "-")
     return result
 
 
@@ -2582,6 +2594,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         "has_email_doc": email_doc_filename is not None,
         "used_web_search": enrichment.used_web_search,
         "error": enrichment.error,
+        "error_category": enrichment.error_category,
         # dollar amounts in the emails that match none of the plan's computed figures even after the automatic
         # correction pass — shown to the planner rather than shipped silently
         "figure_warnings": list(getattr(enrichment, "figure_warnings", None) or []),
@@ -2852,6 +2865,8 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
     the same path/filename, so the existing download link keeps working and
     now serves the revised content.
     """
+    route_started = time.perf_counter()
+    request_id = _api_request_id.get()
     req = _reconstruct_proposal_request(body.request)
 
     line_items = [
@@ -2881,13 +2896,21 @@ async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict
             body.reprompt, scope=body.scope, time_unit=body.time_unit, totals=email_figures,
         ), timeout=_AI_REVISION_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
+        _logger.warning(
+            "email_revision request_id=%s stage=generation duration_ms=%d category=timeout",
+            request_id, round((time.perf_counter() - route_started) * 1000),
+        )
         result = {
             "internal_email_subject": body.current_internal_subject,
             "internal_email_body": body.current_internal_body,
             "client_email_subject": body.current_client_subject,
             "client_email_body": body.current_client_body,
             "error": f"Email revision exceeded the {_AI_REVISION_TIMEOUT_SECONDS}-second time limit; original emails were kept.",
+            "error_category": "timeout",
         }
+    _logger.info("email_revision request_id=%s stage=total duration_ms=%d category=%s",
+                 request_id, round((time.perf_counter() - route_started) * 1000),
+                 result.get("error_category") or "-")
     if email_figures is not None:
         result = {**result, "email_figures": email_figures.to_dict()}
 
@@ -2966,15 +2989,22 @@ async def refine_gamma_outline_endpoint(body: GammaOutlineRefineRequest) -> dict
     app.js's buildGammaOutline, no fetch at all) and stays that way; this
     endpoint only runs when the planner explicitly clicks "Refine".
     """
+    started = time.perf_counter()
+    request_id = _api_request_id.get()
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(ai_enricher.refine_gamma_outline, body.outline, body.reprompt),
             timeout=_AI_REVISION_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
+        _logger.warning(
+            "gamma_outline_revision request_id=%s stage=generation duration_ms=%d category=timeout",
+            request_id, round((time.perf_counter() - started) * 1000),
+        )
         return {
             "outline": body.outline,
             "error": f"Outline refinement exceeded the {_AI_REVISION_TIMEOUT_SECONDS}-second time limit; the original outline was kept.",
+            "error_category": "timeout",
         }
 
 

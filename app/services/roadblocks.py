@@ -92,15 +92,19 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
     matrix = restrictions.build_matrix([li.product_name for li in line_items], categories)
     api_key = os.getenv("OPENAI_API_KEY")
     if not _HAS_OPENAI:
-        return _error_result("openai package not installed — run: pip install openai", matrix, line_items)
+        return _error_result(llm_utils.failure_message("configuration"), matrix, line_items, "configuration")
     if not api_key:
-        return _error_result("OPENAI_API_KEY not set — roadblocks check skipped.", matrix, line_items)
+        return _error_result(llm_utils.failure_message("configuration"), matrix, line_items, "configuration")
 
-    client = _OpenAI(
-        api_key=api_key,
-        timeout=_ROADBLOCKS_OPENAI_TIMEOUT_SECONDS,
-        max_retries=llm_utils.OPENAI_MAX_RETRIES,
-    )
+    client_started = time.perf_counter()
+    try:
+        client = _OpenAI(
+            api_key=api_key,
+            timeout=_ROADBLOCKS_OPENAI_TIMEOUT_SECONDS,
+            max_retries=llm_utils.OPENAI_MAX_RETRIES,
+        )
+    except Exception as exc:
+        return _failed_result(exc, "client_init", client_started, matrix, line_items)
     prompt = _build_prompt(request, line_items, strategy_brief, matrix)
     _log_stage("prepare", started)
 
@@ -109,36 +113,44 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
         raw = llm_utils.responses_text(client, model=_SEARCH_MODEL, prompt=prompt,
                                        tools=[{"type": "web_search"}],
                                        max_output_tokens=_MAX_OUTPUT_TOKENS)
-    except llm_utils.ResponseTruncated:
+    except llm_utils.ResponseTruncated as exc:
         _log_stage("web_search", stage_started)
-        return _error_result(_TRUNCATED_MSG, matrix, line_items)
+        llm_utils.log_ai_failure("roadblocks", "web_search", stage_started, exc)
+        return _error_result(llm_utils.failure_message("response_truncated"), matrix, line_items,
+                             "response_truncated")
     except Exception as search_exc:
         _log_stage("web_search", stage_started)
-        if llm_utils.is_timeout_error(search_exc):
+        search_category = llm_utils.log_ai_failure("roadblocks", "web_search", stage_started, search_exc)
+        if search_category in {"authentication", "permission", "quota", "rate_limit", "timeout"}:
             return _error_result(
-                "Roadblocks check timed out before live research completed.",
+                llm_utils.failure_message(search_category),
                 matrix,
                 line_items,
+                search_category,
             )
         stage_started = time.perf_counter()
         try:
             raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
                                       max_completion_tokens=_MAX_OUTPUT_TOKENS)
-        except llm_utils.ResponseTruncated:
+        except llm_utils.ResponseTruncated as exc:
             _log_stage("fallback", stage_started)
-            return _error_result(_TRUNCATED_MSG, matrix, line_items)
+            llm_utils.log_ai_failure("roadblocks", "fallback", stage_started, exc)
+            return _error_result(llm_utils.failure_message("response_truncated"), matrix, line_items,
+                                 "response_truncated")
         except Exception as fallback_exc:
             _log_stage("fallback", stage_started)
-            return _error_result(f"Roadblocks check failed: {fallback_exc}", matrix, line_items)
+            category = llm_utils.log_ai_failure("roadblocks", "fallback", stage_started, fallback_exc)
+            return _error_result(llm_utils.failure_message(category), matrix, line_items, category)
         _log_stage("fallback", stage_started)
         stage_started = time.perf_counter()
         result = _parse(raw, used_web_search=False, client=client, matrix=matrix, line_items=line_items)
         _log_stage("parse", stage_started)
         if not result.get("error"):
             result["error"] = (
-                f"Live web search failed ({search_exc}); this used the model's general knowledge "
+                "Live web search was unavailable; this used the model's general knowledge "
                 "instead — verify against current platform policies before relying on it."
             )
+            result["error_category"] = search_category
         return result
     stage_started = time.perf_counter()
     result = _parse(raw, used_web_search=True, client=client, matrix=matrix, line_items=line_items)
@@ -153,10 +165,17 @@ def timeout_result(line_items, categories: Optional[list[str]] = None) -> dict:
         "Roadblocks check exceeded its time limit. Please retry.",
         matrix,
         line_items,
+        "timeout",
     )
 
 
-def _error_result(msg: str, matrix: Optional[dict] = None, line_items=None) -> dict:
+def _failed_result(exc: Exception, stage: str, started: float, matrix: dict, line_items) -> dict:
+    category = llm_utils.log_ai_failure("roadblocks", stage, started, exc)
+    return _error_result(llm_utils.failure_message(category), matrix, line_items, category)
+
+
+def _error_result(msg: str, matrix: Optional[dict] = None, line_items=None,
+                  category: Optional[str] = None) -> dict:
     """A failed model call still returns whatever the restrictions sheet alone
     settles (those verdicts don't need the model), so the planner isn't left
     with nothing when only the web-research half is down."""
@@ -166,6 +185,7 @@ def _error_result(msg: str, matrix: Optional[dict] = None, line_items=None) -> d
         "categories": [c.name for c in (matrix or {}).get("categories", [])],
         "used_web_search": False,
         "error": msg,
+        "error_category": category,
     }
     if matrix and matrix.get("categories") and line_items:
         _apply_matrix(result, matrix, line_items)
@@ -598,10 +618,12 @@ def _drop_wikipedia_support(risk: dict) -> None:
 
 
 def _parse(raw: str, used_web_search: bool, client=None, matrix: Optional[dict] = None, line_items=None) -> dict:
+    started = time.perf_counter()
     try:
         data = llm_utils.parse_json_object(raw, expect_any=_ROADBLOCKS_KEYS, client=client)
-    except ValueError as exc:
-        return _error_result(str(exc), matrix, line_items)
+    except Exception as exc:
+        category = llm_utils.log_ai_failure("roadblocks", "parse", started, exc)
+        return _error_result(llm_utils.failure_message(category), matrix, line_items, category)
 
     roadblocks = [r for r in (data.get("product_roadblocks") or []) if isinstance(r, dict)]
     for r in roadblocks:
@@ -623,6 +645,7 @@ def _parse(raw: str, used_web_search: bool, client=None, matrix: Optional[dict] 
         "categories": [],
         "used_web_search": used_web_search,
         "error": None,
+        "error_category": None,
     }
     if matrix is not None and line_items is not None:
         _apply_matrix(result, matrix, line_items)

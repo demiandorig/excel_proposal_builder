@@ -146,9 +146,9 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
     api_key = os.getenv("OPENAI_API_KEY")
 
     if not _HAS_OPENAI:
-        return _error_brief("openai package not installed — run: pip install openai")
+        return _error_brief(llm_utils.failure_message("configuration"), "configuration")
     if not api_key:
-        return _error_brief("OPENAI_API_KEY not set.")
+        return _error_brief(llm_utils.failure_message("configuration"), "configuration")
 
     ad_intel = ad_presence if (ad_presence and ad_presence.get("summary")) else None
 
@@ -166,11 +166,15 @@ async def generate_brief(request, reprompt: Optional[str] = None, mode: str = "c
         # mode="new_mix", rather than constraining to an empty set.
 
     stage_started = time.perf_counter()
-    client = _OpenAI(
-        api_key=api_key,
-        timeout=_STRATEGY_OPENAI_TIMEOUT_SECONDS,
-        max_retries=llm_utils.OPENAI_MAX_RETRIES,
-    )
+    client_started = time.perf_counter()
+    try:
+        client = _OpenAI(
+            api_key=api_key,
+            timeout=_STRATEGY_OPENAI_TIMEOUT_SECONDS,
+            max_retries=llm_utils.OPENAI_MAX_RETRIES,
+        )
+    except Exception as exc:
+        return _failure_brief(exc, "client_init", client_started)
     prompt = _build_prompt(request, reprompt, ad_intel=ad_intel, allowed_families=allowed_families,
                            time_unit=time_unit)
     _log_strategy_stage("prepare", stage_started)
@@ -214,30 +218,35 @@ def _run_brief_call(client, prompt: str) -> dict:
         raw = llm_utils.responses_text(client, model=_SEARCH_MODEL, prompt=prompt,
                                        tools=[{"type": "web_search"}],
                                        max_output_tokens=_MAX_OUTPUT_TOKENS)
-    except llm_utils.ResponseTruncated:
-        return _error_brief(_TRUNCATED_MSG)
+    except llm_utils.ResponseTruncated as exc:
+        llm_utils.log_ai_failure("strategy_brief", "web_search", stage_started, exc)
+        return _error_brief(llm_utils.failure_message("response_truncated"), "response_truncated")
     except Exception as search_exc:
         _log_strategy_stage("web_search", stage_started)
-        if llm_utils.is_timeout_error(search_exc):
-            return _error_brief("Strategy brief timed out before research completed.")
+        search_category = llm_utils.log_ai_failure("strategy_brief", "web_search", stage_started, search_exc)
+        if search_category in {"authentication", "permission", "quota", "rate_limit", "timeout"}:
+            return _error_brief(llm_utils.failure_message(search_category), search_category)
         stage_started = time.perf_counter()
         try:
             raw = llm_utils.chat_text(client, model=_FALLBACK_MODEL, prompt=prompt,
                                       max_completion_tokens=_MAX_OUTPUT_TOKENS)
-        except llm_utils.ResponseTruncated:
-            return _error_brief(_TRUNCATED_MSG)
+        except llm_utils.ResponseTruncated as exc:
+            llm_utils.log_ai_failure("strategy_brief", "fallback", stage_started, exc)
+            return _error_brief(llm_utils.failure_message("response_truncated"), "response_truncated")
         except Exception as fallback_exc:
             _log_strategy_stage("fallback", stage_started)
-            return _error_brief(f"Request failed: {fallback_exc}")
+            category = llm_utils.log_ai_failure("strategy_brief", "fallback", stage_started, fallback_exc)
+            return _error_brief(llm_utils.failure_message(category), category)
         _log_strategy_stage("fallback", stage_started)
         stage_started = time.perf_counter()
         result = _parse(raw, used_web_search=False, client=client)
         _log_strategy_stage("parse", stage_started)
         if not result.get("error"):
             result["error"] = (
-                f"Live web search failed ({search_exc}); this used the model's general "
+                "Live web search was unavailable; this used the model's general "
                 "knowledge instead — verify stats before relying on them."
             )
+            result["error_category"] = search_category
         return result
     _log_strategy_stage("web_search", stage_started)
     stage_started = time.perf_counter()
@@ -438,10 +447,11 @@ Respond ONLY with valid JSON — no markdown fences, no preamble:
 
 
 def _parse(raw: str, used_web_search: bool = False, client=None) -> dict:
+    started = time.perf_counter()
     try:
         data = llm_utils.parse_json_object(raw, expect_any=_BRIEF_KEYS, client=client)
-    except ValueError as exc:
-        return _error_brief(str(exc))
+    except Exception as exc:
+        return _failure_brief(exc, "parse", started)
 
     # Normalise: ensure all expected keys exist
     tactics = [t for t in (data.get("recommended_tactics") or []) if isinstance(t, dict)]
@@ -501,7 +511,12 @@ def _drop_wikipedia_support(t: dict) -> None:
         t[key] = source_rules.strip_wikipedia(t.get(key) or "")
 
 
-def _error_brief(msg: str) -> dict:
+def _failure_brief(exc: Exception, stage: str, started: float) -> dict:
+    category = llm_utils.log_ai_failure("strategy_brief", stage, started, exc)
+    return _error_brief(llm_utils.failure_message(category), category)
+
+
+def _error_brief(msg: str, category: Optional[str] = None) -> dict:
     return {
         "client_summary": "",
         "market_context": "",
@@ -511,4 +526,5 @@ def _error_brief(msg: str) -> dict:
         "key_insights": [],
         "used_web_search": False,
         "error": msg,
+        "error_category": category,
     }

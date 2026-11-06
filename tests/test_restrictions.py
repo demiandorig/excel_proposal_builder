@@ -360,7 +360,8 @@ def test_when_the_model_is_unavailable_the_sheets_verdicts_still_come_back(monke
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(rb, "_HAS_OPENAI", True)
     result = rb.generate_roadblocks(_req(), _items("YouTube Ads", "eDigital OLV"), categories=["Political"])
-    assert "OPENAI_API_KEY" in result["error"]
+    assert result["error_category"] == "configuration"
+    assert "not configured" in result["error"]
     verdicts = {r["product_name"]: r["matrix"]["verdict"] for r in result["product_roadblocks"]}
     assert verdicts == {"YouTube Ads": "not_allowed", "eDigital OLV": "allowed"}
 

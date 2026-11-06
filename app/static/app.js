@@ -1,6 +1,6 @@
-/* ========================================================================
+/* ------------------------------------------------------------------------
  * Entravision Proposal Builder — front-end controller
- * ======================================================================== */
+ * ------------------------------------------------------------------------ */
 
 // The proposal-wide billing period ("time_unit" on the wire, state.timeUnit here).
 // FULL_FLIGHT bills the WHOLE flight as ONE period — no per-month/week/quarter
@@ -2109,7 +2109,7 @@ async function onStrategyGenerate(reprompt = null, mode = "consistent") {
     loadingEl.classList.add("hidden");
 
     if (brief.error && !brief.strategy_summary) {
-      _showStrategyError(brief.error);
+      _showStrategyError(brief.error, brief.error_category);
       return;
     }
 
@@ -2117,7 +2117,7 @@ async function onStrategyGenerate(reprompt = null, mode = "consistent") {
   } catch (e) {
     if (epoch !== _resetEpoch) return;
     loadingEl.classList.add("hidden");
-    _showStrategyError("Request failed: " + e.message);
+    _showStrategyError("The request could not be completed. Check your connection and retry.", "service_unavailable");
   } finally {
     if (token === _strategyRunToken) {
       _strategyInFlightEpoch = null;
@@ -2145,13 +2145,29 @@ async function _readJsonResponse(res) {
   return data;
 }
 
-function _showStrategyError(message) {
+function _aiFailureGuidance(category, step) {
+  const stepName = step || "this step";
+  const guidance = {
+    authentication: "Ask an administrator to check the AI provider credentials.",
+    permission: "Ask an administrator to review access to the selected AI model or feature.",
+    quota: "Ask an administrator to review the AI provider's billing and usage limits.",
+    rate_limit: "Wait a moment, then retry.",
+    timeout: "Retry this step. If it keeps timing out, try again later.",
+    malformed_response: "Regenerate this step. If it happens again, report it to the team.",
+    response_truncated: "Regenerate this step; the response did not fit the output limit.",
+    service_unavailable: "Retry shortly; the provider may be having a temporary outage.",
+    configuration: "Ask an administrator to finish the AI provider setup.",
+    provider_error: "Retry shortly. If it continues, report it to the team.",
+  };
+  return guidance[category] || `Retry ${stepName}, or skip it and continue manually.`;
+}
+
+function _showStrategyError(message, category) {
   const errEl = document.getElementById("strategy-error");
   errEl.classList.remove("hidden");
-  const keyMissing = /OPENAI_API_KEY|openai package/i.test(message);
   errEl.innerHTML = `<strong>Strategy brief unavailable:</strong> ${escapeHtml(message)}<br>
-    <small>${keyMissing ? "Check the AI service configuration, then retry, or" : "Click Regenerate to try again, or"} skip and curate manually.</small>`;
-  document.getElementById("strategy-regenerate-btn").style.display = "";
+    <small>${escapeHtml(_aiFailureGuidance(category, "the brief"))} You can also skip and curate manually.</small>`;
+  if (category !== "configuration") document.getElementById("strategy-regenerate-btn").style.display = "";
 }
 
 // A prior on-demand check is only reused if it was run for the same client name/website.
@@ -2186,7 +2202,8 @@ function renderStrategyBrief(brief) {
   const noteEl = document.getElementById("strategy-search-note");
   if (!brief.used_web_search) {
     noteEl.classList.remove("hidden");
-    noteEl.textContent = "⚠ " + (brief.error || "Generated without live web search — verify stats before relying on them.");
+    noteEl.textContent = "⚠ " + (brief.error || "Generated without live web search — verify stats before relying on them.")
+      + (brief.error_category ? " " + _aiFailureGuidance(brief.error_category, "the brief") : "");
   } else {
     noteEl.classList.add("hidden");
   }
@@ -2668,7 +2685,7 @@ async function _runRoadblocks() {
       const errEl = document.getElementById("roadblocks-error");
       errEl.classList.remove("hidden");
       errEl.innerHTML = `<strong>Roadblocks check unavailable:</strong> ${escapeHtml(data.error)}<br>
-        <small>You can regenerate, or skip this step and continue.</small>`;
+        <small>${escapeHtml(_aiFailureGuidance(data.error_category, "the roadblocks check"))} You can skip this step and continue.</small>`;
       document.getElementById("roadblocks-regenerate-btn").style.display = "";
       return;
     }
@@ -2679,7 +2696,8 @@ async function _runRoadblocks() {
     loadingEl.classList.add("hidden");
     const errEl = document.getElementById("roadblocks-error");
     errEl.classList.remove("hidden");
-    errEl.textContent = "Request failed: " + e.message;
+    errEl.textContent = "The roadblocks check could not be completed. "
+      + _aiFailureGuidance("service_unavailable", "the roadblocks check");
     document.getElementById("roadblocks-regenerate-btn").style.display = "";
   } finally {
     if (token === _rbRunToken) { _rbInFlight = false; _rbAbort = null; }     // a superseded run must not clear the newer run's flags
@@ -2821,7 +2839,8 @@ function renderRoadblocks(data) {
   const noteEl = document.getElementById("roadblocks-search-note");
   if (!data.used_web_search) {
     noteEl.classList.remove("hidden");
-    noteEl.textContent = "⚠ " + (data.error || "Generated without live web search — verify against current platform policies.");
+    noteEl.textContent = "⚠ " + (data.error || "Generated without live web search — verify against current platform policies.")
+      + (data.error_category ? " " + _aiFailureGuidance(data.error_category, "the roadblocks check") : "");
   }
 
   const RISK_ORDER = { high: 0, medium: 1, low: 2 };
@@ -8025,6 +8044,7 @@ async function onGammaOutlineReprompt() {
   if (_gammaRevisionInFlightEpoch === epoch) return;
   const token = ++_gammaRevisionToken;
   _gammaRevisionInFlightEpoch = epoch;
+
   const btn = document.getElementById("gamma-reprompt-submit-btn");
   btn.disabled = true;
   btn.textContent = "Regenerating…";
@@ -8050,7 +8070,8 @@ async function onGammaOutlineReprompt() {
     }
     if (data.error) {
       status.textContent = `The revision reported a problem: ${data.error}. Review the outline and retry if needed.`;
-      alert("Reprompt didn't fully succeed: " + data.error);
+      alert("Reprompt didn't fully succeed: " + data.error + " "
+        + _aiFailureGuidance(data.error_category, "the outline revision"));
     } else {
       status.textContent = "Outline updated.";
     }
@@ -8061,8 +8082,9 @@ async function onGammaOutlineReprompt() {
     document.getElementById("gamma-reprompt-input").value = "";
   } catch (e) {
     if (epoch === _resetEpoch) {
-      status.textContent = `Couldn't revise the outline: ${e.message}. You can try again.`;
-      alert("Reprompt failed: " + e.message);
+      const guidance = _aiFailureGuidance("service_unavailable", "the outline revision");
+      status.textContent = `The outline revision could not be completed. ${guidance}`;
+      alert(`The outline revision could not be completed. ${guidance}`);
     }
   } finally {
     if (token === _gammaRevisionToken) {
@@ -8246,14 +8268,15 @@ async function showResult(data) {
   if (enrichment.error && !enrichment.internal_email_body) {
     // AI was skipped or fully failed
     aiError.classList.remove("hidden");
-    aiError.textContent = "ⓘ " + enrichment.error;
+    aiError.textContent = "ⓘ " + enrichment.error + " " + _aiFailureGuidance(enrichment.error_category, "content generation");
   } else if (enrichment.internal_email_body || enrichment.client_email_body) {
     aiContent.classList.remove("hidden");
 
     const searchNoteEl = document.getElementById("enrichment-search-note");
     if (!enrichment.used_web_search) {
       searchNoteEl.classList.remove("hidden");
-      searchNoteEl.textContent = "⚠ " + (enrichment.error || "Generated without live web search — verify stats before sending.");
+      searchNoteEl.textContent = "⚠ " + (enrichment.error || "Generated without live web search — verify stats before sending.")
+        + (enrichment.error_category ? " " + _aiFailureGuidance(enrichment.error_category, "content generation") : "");
     } else {
       searchNoteEl.classList.add("hidden");
     }
@@ -8423,9 +8446,10 @@ async function _submitEmailReprompt({ text, scope, btn, idleLabel }) {
       return;
     }
     if (data.error) {
-      failureMessage = `The revision reported a problem: ${data.error}. Review the emails and retry if needed.`;
+      failureMessage = `The revision reported a problem: ${data.error}. ${_aiFailureGuidance(data.error_category, "the email revision")}`;
       _setEmailRevisionBusy(false, failureMessage);
-      alert("Reprompt didn't fully succeed: " + data.error);
+      alert("Reprompt didn't fully succeed: " + data.error + " "
+        + _aiFailureGuidance(data.error_category, "the email revision"));
       return;
     }
     // Both emails were just re-priced against the plan that was sent; a one-sided revision leaves the other email
@@ -8460,9 +8484,10 @@ async function _submitEmailReprompt({ text, scope, btn, idleLabel }) {
     await buildInternalEmailMailtoLink();
   } catch (e) {
     if (epoch === _resetEpoch) {
-      failureMessage = `Couldn't revise the emails: ${e.message}. You can try again.`;
+      const guidance = _aiFailureGuidance("service_unavailable", "the email revision");
+      failureMessage = `The email revision could not be completed. ${guidance}`;
       _setEmailRevisionBusy(false, failureMessage);
-      alert("Request failed: " + e.message);
+      alert(failureMessage);
     }
   } finally {
     if (token === _emailRevisionToken) {

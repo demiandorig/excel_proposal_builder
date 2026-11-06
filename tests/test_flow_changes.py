@@ -84,7 +84,8 @@ STEP07_LETS = ["_rbDebounceTimer", "_rbRunToken", "_rbAbort", "_rbInFlight", "_r
 STEP07_FUNCTIONS = [
     "_cancelRoadblocksRun", "_rbBusy", "_resetRoadblocksUI", "_showRoadblocksPending", "onRvPick", "onRoadblocksGenerate",
     "_runRoadblocks", "_loadRestrictedVerticals", "_renderRestrictedVerticals", "_renderRvChips", "_updateRvNote",
-    "renderRoadblocks", "_enterRoadblocksStep", "_readJsonResponse", "_roadblockMatrixHtml", "setText", "escapeHtml", "escapeAttr",
+    "renderRoadblocks", "_enterRoadblocksStep", "_readJsonResponse", "_roadblockMatrixHtml", "_aiFailureGuidance",
+    "setText", "escapeHtml", "escapeAttr",
     # the read-only per-line notes under each product card (see tests/test_line_note.py) — renderRoadblocks calls them
     "_refreshRoadblockLineNotes", "_lineNotesForProduct", "_lineNote", "_cleanLineModifier", "_LINE_MODIFIER_UNWANTED",
     "_rbPlanKey", "_rbCacheKey",
@@ -722,7 +723,8 @@ def test_run_failures_leave_a_regenerate_button_and_clear_the_busy_flags(rb):
     assert e["error"] is True and "Roadblocks check unavailable" in e["text"] and e["regenerateShown"] is True and e["state"] is None
     assert e["spinner"] is False and e["busy"] is False
     h = rb["errorHttp"]
-    assert "Request failed: server exploded" in h["text"] and h["regenerateShown"] is True and h["busy"] is False
+    assert "could not be completed" in h["text"] and "server exploded" not in h["text"]
+    assert h["regenerateShown"] is True and h["busy"] is False
 
 
 def test_a_saved_result_restores_the_pick_without_running_anything(rb):

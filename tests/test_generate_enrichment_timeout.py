@@ -22,4 +22,5 @@ def test_slow_optional_enrichment_falls_back_without_blocking_generation(monkeyp
     assert result.campaign_name == "Acme"
     assert result.internal_email_body == ""
     assert "time limit" in result.error
-    assert "stage=enrichment timed_out=true" in caplog.text
+    assert "stage=enrichment" in caplog.text
+    assert "category=timeout" in caplog.text

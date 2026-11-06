@@ -5,3 +5,4 @@
 - [Publish foreign-key ordering](publish-foreign-key-ordering.md) — when a new referenced key and its foreign key are published together, stage the unique key first and add the FK in a later publish.
 - [Dependency audit resolution](dependency-audit-resolution.md) — manifest scans can select older transitive packages despite a direct security floor; check parent constraints too.
 - [AI tests and OpenAI diagnostics](deterministic-ai-tests.md) — stub automated calls; use synthetic live checks to separate connectivity from full-research latency.
+- [Safe AI failure diagnostics](ai-failure-diagnostics.md) — classify provider failures for UI; log only request IDs, stage, duration, and category.

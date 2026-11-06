@@ -197,3 +197,55 @@ def test_brief_bounds_openai_request_and_skips_fallback_on_timeout(monkeypatch):
         "timeout": sb._STRATEGY_OPENAI_TIMEOUT_SECONDS,
         "max_retries": 0,
     }
+
+
+class _ProviderFailure(Exception):
+    def __init__(self, status_code=None, body=None, request_id=None):
+        super().__init__("private prompt and credential details")
+        self.status_code = status_code
+        self.body = body
+        self.request_id = request_id
+
+
+@pytest.mark.parametrize(("error", "category"), [
+    (_ProviderFailure(401), "authentication"),
+    (_ProviderFailure(403), "permission"),
+    (_ProviderFailure(429, {"error": {"code": "insufficient_quota"}}), "quota"),
+    (_ProviderFailure(429), "rate_limit"),
+    (TimeoutError("private transport details"), "timeout"),
+    (ValueError("private model output"), "malformed_response"),
+    (llm_utils.ResponseTruncated("private output"), "response_truncated"),
+    (_ProviderFailure(503), "service_unavailable"),
+    (_ProviderFailure(), "provider_error"),
+])
+def test_openai_failure_categories_are_stable_and_user_messages_are_safe(error, category):
+    assert llm_utils.classify_failure(error) == category
+    message = llm_utils.failure_message(category)
+    assert message and "private prompt" not in message and "private model output" not in message
+
+
+def test_failure_log_has_request_id_stage_duration_category_but_no_provider_text(caplog):
+    error = _ProviderFailure(401, request_id="req-123", body={"error": "secret response"})
+    with caplog.at_level("WARNING", logger=llm_utils.__name__):
+        category = llm_utils.log_ai_failure("strategy_brief", "web_search", 0.0, error)
+
+    assert category == "authentication"
+    assert "ai_failure step=strategy_brief stage=web_search" in caplog.text
+    assert "duration_ms=" in caplog.text and "category=authentication" in caplog.text
+    assert "request_id=req-123" in caplog.text
+    assert "private prompt" not in caplog.text and "credential details" not in caplog.text
+    assert "secret response" not in caplog.text
+
+
+def test_strategy_authentication_failure_is_not_retried_as_a_fallback(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
+    monkeypatch.setattr(sb, "_HAS_OPENAI", True)
+    monkeypatch.setattr(sb, "_OpenAI", lambda **kwargs: object())
+    monkeypatch.setattr(llm_utils, "responses_text", lambda *a, **k: (_ for _ in ()).throw(_ProviderFailure(401)))
+    monkeypatch.setattr(llm_utils, "chat_text", lambda *a, **k: pytest.fail("auth failure should not retry"))
+
+    brief = asyncio.run(sb.generate_brief(_request()))
+
+    assert brief["error_category"] == "authentication"
+    assert "credentials" in brief["error"]
+    assert "private" not in brief["error"]
