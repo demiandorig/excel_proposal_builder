@@ -447,7 +447,7 @@ def test_the_strategy_brief_prompt_carries_the_no_wikipedia_rule():
     assert "never Wikipedia" in prompt                                 # also on the citation-field instruction
 
 
-def test_strategy_generation_uses_a_short_provider_deadline(monkeypatch):
+def test_strategy_generation_uses_a_bounded_provider_deadline(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
     monkeypatch.setattr(sb, "_HAS_OPENAI", True)
     client_options = {}
@@ -463,7 +463,7 @@ def test_strategy_generation_uses_a_short_provider_deadline(monkeypatch):
     monkeypatch.setattr(llm_utils, "responses_text", timed_out)
     result = asyncio.run(sb.generate_brief(_request()))
 
-    assert client_options["timeout"] == 8.0
+    assert client_options["timeout"] == 25.0
     assert client_options["max_retries"] == 0
     assert "timed out" in result["error"].lower()
 
