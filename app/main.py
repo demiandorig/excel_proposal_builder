@@ -102,6 +102,7 @@ from app.services import forecast_store
 from app.services.constanza_engine import estimate_avails
 from app.services import audience_taxonomy
 from app.services import constanza_hispanic
+from app.services import llm_utils
 from app.services import platform_scenarios
 from app.services import constanza_tiktok as tiktok_svc
 from app.services.tiktok_client import TikTokAPIError
@@ -1916,6 +1917,7 @@ def constanza_estimate(body: ConstanzaEstimateRequest) -> dict:
                 {
                     "input_text": i.input_text, "category": i.category, "label": i.label, "group": i.group,
                     "supported": i.supported, "status": i.status, "confidence": i.confidence,
+                    "ai_failure_category": i.ai_failure_category,
                     # the rate that was applied (the gender-specific one when the source gives it)
                     "rate": (i.rate_by_gender or {}).get(audience_in.gender or "all"),
                     "definition": i.definition, "source": i.source, "source_date": i.source_date, "source_url": i.source_url,
@@ -2086,6 +2088,9 @@ def constanza_parse_audience(body: ConstanzaParseAudienceRequest) -> dict:
         "interest_terms": spec.interest_terms, "geo_text": spec.geo_text,
         # true only when the text names the audience; null otherwise (an unspecified field, NOT an explicit "off" that would override a product's default)
         "geo_type_hint": spec.geo_type_hint, "hispanic": True if spec.hispanic else None,
+        "ai_warning": ({"category": spec.ai_failure_category,
+                        "message": llm_utils.failure_message(spec.ai_failure_category)}
+                       if spec.ai_failure_category else None),
     }
 
 

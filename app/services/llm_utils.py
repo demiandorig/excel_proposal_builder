@@ -1,4 +1,4 @@
-"""Shared OpenAI call + JSON-parse plumbing for strategy_brief, roadblocks and ai_enricher."""
+"""Shared OpenAI call, safe failure diagnostics, and JSON-parse plumbing."""
 from __future__ import annotations
 
 import logging

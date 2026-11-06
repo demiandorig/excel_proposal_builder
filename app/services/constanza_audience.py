@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
@@ -98,6 +99,7 @@ class AudienceSpec:
     geo_text: str = ""
     geo_type_hint: str | None = None   # "dma" | "state" | "zip" | "county" | "congressional_district" | "city" | "country"
     hispanic: bool = False             # Hispanic targeting: cut each area to its real Hispanic share (constanza_hispanic.py)
+    ai_failure_category: str | None = None
 
 
 @dataclass
@@ -118,6 +120,7 @@ class InterestResolution:
     how: str | None = None        # how it was matched: name | keyword | partial | words | fuzzy | llm
     gender_split: bool = False    # True when the source gives its OWN male and female rates (else 'all' stands in for both)
     suggestions: list = field(default_factory=list)   # the closest OTHER segments, [{id, label, supported}]
+    ai_failure_category: str | None = None
 
 
 @dataclass
@@ -231,8 +234,15 @@ def resolve_interest(text: str) -> InterestResolution:
         return InterestResolution(input_text=text, category=None, supported=False,
                                   suggestions=_suggestions(tax, text, limit=4))
 
-    client = _openai_client()
-    if client is not None:
+    started = time.perf_counter()
+    try:
+        client = _openai_client()
+        if client is None:
+            category = "configuration"
+            llm_utils.log_ai_failure("constanza_interest_match", "client", started, RuntimeError(), category)
+            return InterestResolution(input_text=text, category=None, supported=False,
+                                      suggestions=_suggestions(tax, text, limit=4), ai_failure_category=category)
+
         options = "\n".join(f"- {s.id}: {s.label}" for s in tax.ordered())
         prompt = (
             f"A media planner described a target audience interest as: {text!r}\n\n"
@@ -240,14 +250,18 @@ def resolve_interest(text: str) -> InterestResolution:
             f"Reply with ONLY the segment id (e.g. \"sports_fan\") or the single word \"none\" "
             f"if it doesn't confidently match any of them. Do not invent a new segment.\n\n{options}"
         )
-        try:
-            raw = llm_utils.chat_text(client, model=_MODEL, prompt=prompt, max_completion_tokens=20).strip().lower()
-        except Exception:
-            raw = "none"
+        raw = llm_utils.chat_text(client, model=_MODEL, prompt=prompt, max_completion_tokens=20).strip().lower()
+        if raw == "none":
+            return InterestResolution(input_text=text, category=None, supported=False,
+                                      suggestions=_suggestions(tax, text, limit=4))
         seg = tax.segments.get(raw)
-        if seg is not None:
-            return _resolution(text, seg, "llm", tax)
-    return InterestResolution(input_text=text, category=None, supported=False, suggestions=_suggestions(tax, text, limit=4))
+        if seg is None:
+            raise ValueError("unrecognized audience match")
+    except Exception as exc:
+        category = llm_utils.log_ai_failure("constanza_interest_match", "classification", started, exc)
+        return InterestResolution(input_text=text, category=None, supported=False,
+                                  suggestions=_suggestions(tax, text, limit=4), ai_failure_category=category)
+    return _resolution(text, seg, "llm", tax)
 
 
 _GENDER_ALIASES = {
@@ -301,10 +315,6 @@ def parse_audience_text(text: str) -> AudienceSpec:
 
 
 def _parse_audience_text(text: str) -> AudienceSpec:
-    client = _openai_client()
-    if client is None:
-        return AudienceSpec(geo_text=text)
-
     prompt = (
         "Parse this media-planning audience description into JSON with keys "
         "age_min (int or null), age_max (int or null), gender (\"male\"|\"female\"|\"all\"|null), "
@@ -314,11 +324,18 @@ def _parse_audience_text(text: str) -> AudienceSpec:
         "Return ONLY the JSON object, no other text.\n\n"
         f"Description: {text!r}"
     )
+    started = time.perf_counter()
     try:
+        client = _openai_client()
+        if client is None:
+            category = "configuration"
+            llm_utils.log_ai_failure("constanza_audience_parse", "client", started, RuntimeError(), category)
+            return AudienceSpec(geo_text=text, ai_failure_category=category)
         raw = llm_utils.chat_text(client, model=_MODEL, prompt=prompt, max_completion_tokens=300)
         data = llm_utils.parse_json_object(raw, expect_any=("geo_text",), client=client)
-    except Exception:
-        return AudienceSpec(geo_text=text)
+    except Exception as exc:
+        category = llm_utils.log_ai_failure("constanza_audience_parse", "parse", started, exc)
+        return AudienceSpec(geo_text=text, ai_failure_category=category)
 
     try:
         gender = normalize_gender(data.get("gender"))
@@ -554,6 +571,8 @@ def estimate_audience(base: AvailsEstimate, spec: AudienceSpec) -> AudienceEstim
             f"No sourced incidence rate for: {', '.join(i.input_text for i in unmatched)} — excluded from the estimate rather "
             "than guessed." + (f" Closest known audiences: {', '.join(sorted(close))}." if close else "")
         )
+    for category in dict.fromkeys(i.ai_failure_category for i in interests if i.ai_failure_category):
+        notes.append(llm_utils.failure_message(category))
     for i in supported_interests:
         if i.confidence == "low":
             notes.append(f"'{i.label or i.input_text}' uses a low-confidence rate ({i.source or 'derived estimate'}); treat the result as directional.")

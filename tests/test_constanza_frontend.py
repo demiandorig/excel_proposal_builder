@@ -640,9 +640,10 @@ def test_the_win_rate_note_is_for_api_readers_and_is_not_repeated_beside_the_win
     notes = run("""return JSON.stringify(P.notesOf({ notes: ["Win rate applied: x", "Platform-reported avails (v2)", "NOT INCLUDED in this estimate — y"] }));""")
     assert notes == ["Platform-reported avails (v2)"]
     box = run("""const aud = { confidence_tier: "audience_modeled_single_cut", audience_people: 5, est_uniques: 4, underlying_population: 100,
-        reliability_floor_population: 10000, below_reliability_threshold: false, interests: [], notes: ["Win rate applied: x", "A real audience note"] };
+        reliability_floor_population: 10000, below_reliability_threshold: false, interests: [], notes: ["Win rate applied: x", "A real audience note",
+          "The AI provider usage limit has been reached. Ask an administrator to review billing or usage limits."] };
         return JSON.stringify(P.audienceBoxHtml(aud, null));""")
-    assert "A real audience note" in box and "Win rate applied" not in box
+    assert "A real audience note" in box and "usage limit has been reached" in box and "Win rate applied" not in box
 
 
 def test_the_copied_summary_carries_the_win_rate_and_unique_ids_but_not_the_pool():
