@@ -55,6 +55,7 @@ from app.services.writing_style import HOUSE_VOICE_GUIDE
 # since GPT-5-series models reject any value but the default (1).
 _SEARCH_MODEL = "gpt-5.1"
 _FALLBACK_MODEL = "gpt-5.1"
+_ROADBLOCKS_OPENAI_TIMEOUT_SECONDS = 50.0
 # Shared by reasoning + visible tokens; output grows with the product count (>=5 cited sources).
 _MAX_OUTPUT_TOKENS = 16000
 _ROADBLOCKS_KEYS = ("overall_summary", "product_roadblocks")
@@ -97,7 +98,7 @@ def generate_roadblocks(request, line_items, strategy_brief: Optional[dict] = No
 
     client = _OpenAI(
         api_key=api_key,
-        timeout=llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        timeout=_ROADBLOCKS_OPENAI_TIMEOUT_SECONDS,
         max_retries=llm_utils.OPENAI_MAX_RETRIES,
     )
     prompt = _build_prompt(request, line_items, strategy_brief, matrix)

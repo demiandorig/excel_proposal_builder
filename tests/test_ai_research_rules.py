@@ -463,7 +463,7 @@ def test_strategy_generation_uses_a_bounded_provider_deadline(monkeypatch):
     monkeypatch.setattr(llm_utils, "responses_text", timed_out)
     result = asyncio.run(sb.generate_brief(_request()))
 
-    assert client_options["timeout"] == 25.0
+    assert client_options["timeout"] == 50.0
     assert client_options["max_retries"] == 0
     assert "timed out" in result["error"].lower()
 
@@ -548,7 +548,7 @@ def test_enrichment_and_roadblocks_bound_openai_waits_and_skip_timeout_fallback(
     assert "timed out" in roadblocks["error"].lower()
     assert client_kwargs == [
         {"timeout": llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS, "max_retries": 0},
-        {"timeout": llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS, "max_retries": 0},
+        {"timeout": rb._ROADBLOCKS_OPENAI_TIMEOUT_SECONDS, "max_retries": 0},
     ]
 
 

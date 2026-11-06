@@ -112,7 +112,7 @@ from app.services.line_modifier import clean_line_modifier_or_none
 # the imports are done (never from inside an import: constanza_methods.py explains why).
 constanza_methods.ensure_loaded()
 
-_ROADBLOCKS_TOTAL_TIMEOUT_SECONDS = 30.0
+_ROADBLOCKS_TOTAL_TIMEOUT_SECONDS = 60.0
 _GENERATE_ENRICHMENT_TIMEOUT_SECONDS = 10.0
 _STRATEGY_REQUEST_TIMEOUT_SECONDS = 60.0
 _roadblocks_tasks: set[asyncio.Task] = set()
