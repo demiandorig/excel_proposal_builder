@@ -353,7 +353,7 @@ Client name: ...
       </div>
 
       <!-- Loading state -->
-      <div id="strategy-loading" class="strategy-loading hidden">
+      <div id="strategy-loading" class="strategy-loading hidden" role="status" aria-live="polite">
         <div class="strategy-spinner"></div>
         <span id="strategy-loading-text">Researching campaign…</span>
       </div>
@@ -798,7 +798,7 @@ Client name: ...
       <!-- Loading state — generation genuinely takes a while (AI enrichment
            call + Excel/PPTX/docx build); a disabled button with new text is
            too easy to miss, especially once it's scrolled out of view. -->
-      <div id="generate-loading" class="strategy-loading hidden">
+      <div id="generate-loading" class="strategy-loading hidden" role="status" aria-live="polite">
         <div class="strategy-spinner"></div>
         <span id="generate-loading-text">Calling AI enrichment (campaign name, emails, blurbs)…</span>
       </div>
@@ -829,6 +829,7 @@ Client name: ...
             Update the emails' figures here, or click Generate again to rebuild the files too.
             <button class="btn-secondary" id="email-refresh-figures-btn" type="button">↺ Update the figures in the emails</button>
           </div>
+          <div id="email-revision-status" class="search-note email-figures-note hidden" role="status" aria-live="polite"></div>
 
           <!-- Dollar amounts the automatic check couldn't match to the plan's figures (filled in by app.js) -->
           <div id="email-figures-warning" class="search-note email-figures-note hidden"></div>
@@ -912,6 +913,7 @@ Client name: ...
                outline itself above is built client-side from data already
                on the page, no request involved. -->
           <div id="gamma-reprompt-area" class="reprompt-area hidden">
+            <p class="gamma-create-status hidden" id="gamma-reprompt-status" role="status" aria-live="polite"></p>
             <label class="reprompt-label">What would you like to change about this outline?
               <textarea id="gamma-reprompt-input" rows="3"
                 placeholder="e.g. 'Shorten the media plan section' or 'Emphasize the CTV tactic more'"></textarea>

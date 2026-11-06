@@ -1171,6 +1171,14 @@ async function startNewProposal() {
 // shared by New proposal and by pasting a different request over the current one.
 function _clearPerProposalState() {
   _resetEpoch++;
+  _strategyRunToken++;
+  _strategyInFlightEpoch = null;
+  _generateRunToken++;
+  _generateInFlightEpoch = null;
+  _emailRevisionToken++;
+  _emailRevisionInFlightEpoch = null;
+  _gammaRevisionToken++;
+  _gammaRevisionInFlightEpoch = null;
   state.constanzaGeoOverride = {};       // a geography picked for a line belongs to the proposal being left
   state.constanzaHispanic = {};          // ... and so does a line's own Hispanic targeting switch
   if (window.Constanza) Constanza.onProposalReset();
@@ -1199,13 +1207,54 @@ function _clearPerProposalState() {
   if (picker) picker.classList.add("hidden");
   state.mbModeNotice = false;
   _resetStrategyUI();
+  _setStrategyRequestBusy(false);
   _cancelRoadblocksRun();              // a pick still waiting out its debounce, or a check in flight, belongs to the proposal being left
   _resetRoadblocksUI();
+  const generateBtn = document.getElementById("generate-btn");
+  if (generateBtn) {
+    generateBtn.disabled = false;
+    generateBtn.textContent = "⬇ Generate Proposal";
+  }
+  const generateLoading = document.getElementById("generate-loading");
+  if (generateLoading) generateLoading.classList.add("hidden");
+  if (_generateStageTimer) {
+    clearInterval(_generateStageTimer);
+    _generateStageTimer = null;
+  }
+  const emailRevisionStatus = document.getElementById("email-revision-status");
+  if (emailRevisionStatus) {
+    emailRevisionStatus.textContent = "";
+    emailRevisionStatus.classList.add("hidden");
+  }
+  const gammaRevisionStatus = document.getElementById("gamma-reprompt-status");
+  if (gammaRevisionStatus) {
+    gammaRevisionStatus.textContent = "";
+    gammaRevisionStatus.classList.add("hidden");
+  }
+  ["email-reprompt-submit-btn", "email-refresh-figures-btn", "gamma-reprompt-submit-btn"].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) button.disabled = false;
+  });
+  const emailRepromptBtn = document.getElementById("email-reprompt-submit-btn");
+  if (emailRepromptBtn) emailRepromptBtn.textContent = "↺ Regenerate";
+  const emailRefreshBtn = document.getElementById("email-refresh-figures-btn");
+  if (emailRefreshBtn) emailRefreshBtn.textContent = "↺ Update the figures in the emails";
+  const gammaRepromptBtn = document.getElementById("gamma-reprompt-submit-btn");
+  if (gammaRepromptBtn) gammaRepromptBtn.textContent = "↺ Regenerate Outline";
   _rbResultCache.clear();             // paid results belong to the proposal being left
   _gammaReset();                      // the previous proposal's "deck is ready" link / error doesn't carry over
 }
 
 let _resetEpoch = 0;   // bumped by every resetAll() and re-parse, so a response that was in flight across it can tell
+let _strategyRunToken = 0;
+let _strategyInFlightEpoch = null;
+let _generateRunToken = 0;
+let _generateInFlightEpoch = null;
+let _generateStageTimer = null;
+let _emailRevisionToken = 0;
+let _emailRevisionInFlightEpoch = null;
+let _gammaRevisionToken = 0;
+let _gammaRevisionInFlightEpoch = null;
 let _driveUploading = false;   // a Google Drive upload (with its automatic retries) is running - see onDriveUpload()
 
 function resetAll() {
@@ -2035,13 +2084,17 @@ function _resetStrategyUI() {
 
 async function onStrategyGenerate(reprompt = null, mode = "consistent") {
   const epoch = _resetEpoch;
+  if (_strategyInFlightEpoch === epoch) return;
+  const token = ++_strategyRunToken;
+  _strategyInFlightEpoch = epoch;
   _resetStrategyUI();
+  _setStrategyRequestBusy(true);
   const loadingEl = document.getElementById("strategy-loading");
   const loadingText = document.getElementById("strategy-loading-text");
   loadingEl.classList.remove("hidden");
   loadingText.textContent = mode === "new_mix"
-    ? `Researching an overall media mix for ${state.parsed.client_name || "client"}…`
-    : `Researching ${state.parsed.client_name || "client"}…`;
+    ? `Researching an overall media mix for ${(state.parsed && state.parsed.client_name) || "this client"}…`
+    : `${reprompt ? "Revising" : "Researching"} the strategy for ${(state.parsed && state.parsed.client_name) || "this client"}…`;
 
   try {
     const res = await fetch("/api/strategy", {
@@ -2065,7 +2118,19 @@ async function onStrategyGenerate(reprompt = null, mode = "consistent") {
     if (epoch !== _resetEpoch) return;
     loadingEl.classList.add("hidden");
     _showStrategyError("Request failed: " + e.message);
+  } finally {
+    if (token === _strategyRunToken) {
+      _strategyInFlightEpoch = null;
+      if (epoch === _resetEpoch) _setStrategyRequestBusy(false);
+    }
   }
+}
+
+function _setStrategyRequestBusy(busy) {
+  ["strategy-regenerate-btn", "strategy-new-mix-btn", "reprompt-submit-btn"].forEach(id => {
+    const btn = document.getElementById(id);
+    if (btn) btn.disabled = !!busy;
+  });
 }
 
 // A proxy timeout or crash returns HTML, not JSON — surface the HTTP status instead of "Unexpected token <".
@@ -2085,8 +2150,8 @@ function _showStrategyError(message) {
   errEl.classList.remove("hidden");
   const keyMissing = /OPENAI_API_KEY|openai package/i.test(message);
   errEl.innerHTML = `<strong>Strategy brief unavailable:</strong> ${escapeHtml(message)}<br>
-    <small>${keyMissing ? "Set <code>OPENAI_API_KEY</code> to enable this step. You can" : "Click Regenerate to try again, or"} skip and curate manually.</small>`;
-  if (!keyMissing) document.getElementById("strategy-regenerate-btn").style.display = "";
+    <small>${keyMissing ? "Check the AI service configuration, then retry, or" : "Click Regenerate to try again, or"} skip and curate manually.</small>`;
+  document.getElementById("strategy-regenerate-btn").style.display = "";
 }
 
 // A prior on-demand check is only reused if it was run for the same client name/website.
@@ -7638,6 +7703,9 @@ function _wizardStateKey() {
 
 async function onGenerate() {
   const epoch = _resetEpoch;
+  if (_generateInFlightEpoch === epoch) return;
+  const token = ++_generateRunToken;
+  _generateInFlightEpoch = epoch;
   const sentStateKey = _wizardStateKey();
   const sentPlanKey = _emailPlanKey();       // what the emails below are about to be written against
   const payload = {
@@ -7670,9 +7738,15 @@ async function onGenerate() {
   loadingText.textContent = GENERATE_STAGES[0];
   loadingEl.classList.remove("hidden");
   const stageTimer = setInterval(() => {
+    if (token !== _generateRunToken || epoch !== _resetEpoch) {
+      clearInterval(stageTimer);
+      if (_generateStageTimer === stageTimer) _generateStageTimer = null;
+      return;
+    }
     stageIdx = Math.min(stageIdx + 1, GENERATE_STAGES.length - 1);
     loadingText.textContent = GENERATE_STAGES[stageIdx];
   }, 4000);
+  _generateStageTimer = stageTimer;
   try {
     const res = await fetch("/api/generate", {
       method: "POST",
@@ -7699,9 +7773,15 @@ async function onGenerate() {
     if (_wizardStateKey() === sentStateKey) _lastSavedDraftSnapshot = _flushAndSnapshotDraftState();
   } finally {
     clearInterval(stageTimer);
-    loadingEl.classList.add("hidden");
-    btn.disabled = false;
-    btn.textContent = "⬇ Generate Proposal";
+    if (_generateStageTimer === stageTimer) _generateStageTimer = null;
+    if (token === _generateRunToken) {
+      _generateInFlightEpoch = null;
+      if (epoch === _resetEpoch) {
+        loadingEl.classList.add("hidden");
+        btn.disabled = false;
+        btn.textContent = "⬇ Generate Proposal";
+      }
+    }
   }
 }
 
@@ -7941,9 +8021,16 @@ async function onGammaOutlineReprompt() {
   const text = document.getElementById("gamma-reprompt-input").value.trim();
   if (!text) { alert("Enter what you'd like to change first."); return; }
 
+  const epoch = _resetEpoch;
+  if (_gammaRevisionInFlightEpoch === epoch) return;
+  const token = ++_gammaRevisionToken;
+  _gammaRevisionInFlightEpoch = epoch;
   const btn = document.getElementById("gamma-reprompt-submit-btn");
   btn.disabled = true;
   btn.textContent = "Regenerating…";
+  const status = document.getElementById("gamma-reprompt-status");
+  status.textContent = "Revising the Gamma outline…";
+  status.classList.remove("hidden");
 
   try {
     const res = await fetch("/api/refine-gamma-outline", {
@@ -7955,12 +8042,17 @@ async function onGammaOutlineReprompt() {
       }),
     });
     const data = await res.json();
+    if (epoch !== _resetEpoch) return;
     if (!res.ok) {
+      status.textContent = `Couldn't revise the outline: ${data.detail || res.statusText}. You can try again.`;
       alert("Reprompt failed: " + (data.detail || res.statusText));
       return;
     }
     if (data.error) {
+      status.textContent = `The revision reported a problem: ${data.error}. Review the outline and retry if needed.`;
       alert("Reprompt didn't fully succeed: " + data.error);
+    } else {
+      status.textContent = "Outline updated.";
     }
     document.getElementById("gamma-outline-body").textContent = data.outline || document.getElementById("gamma-outline-body").textContent;
 
@@ -7968,10 +8060,18 @@ async function onGammaOutlineReprompt() {
     document.getElementById("gamma-reprompt-btn").style.display = "";
     document.getElementById("gamma-reprompt-input").value = "";
   } catch (e) {
-    alert("Reprompt failed: " + e.message);
+    if (epoch === _resetEpoch) {
+      status.textContent = `Couldn't revise the outline: ${e.message}. You can try again.`;
+      alert("Reprompt failed: " + e.message);
+    }
   } finally {
-    btn.disabled = false;
-    btn.textContent = "↺ Regenerate Outline";
+    if (token === _gammaRevisionToken) {
+      _gammaRevisionInFlightEpoch = null;
+      if (epoch === _resetEpoch) {
+        btn.disabled = false;
+        btn.textContent = "↺ Regenerate Outline";
+      }
+    }
   }
 }
 
@@ -8290,8 +8390,12 @@ async function _submitEmailReprompt({ text, scope, btn, idleLabel }) {
   const deliverableId = state.generatedProposalId || state.proposalId;
   if (!deliverableId || !state.enrichment) return;
   const epoch = _resetEpoch;
-  btn.disabled = true;
+  if (_emailRevisionInFlightEpoch === epoch) return;
+  const token = ++_emailRevisionToken;
+  _emailRevisionInFlightEpoch = epoch;
+  _setEmailRevisionBusy(true, `Revising ${scope === "both" ? "both emails" : scope === "internal" ? "the internal email" : "the client email"}…`);
   btn.textContent = "Regenerating…";
+  let failureMessage = "";
 
   try {
     // The figures key is taken WITH the payload, so an edit made while the revision runs still reads as stale after it.
@@ -8313,11 +8417,16 @@ async function _submitEmailReprompt({ text, scope, btn, idleLabel }) {
     const data = await res.json();
     if (epoch !== _resetEpoch) return;     // another proposal is on screen now — this revision isn't its business
     if (!res.ok) {
+      failureMessage = `Couldn't revise the emails: ${data.detail || res.statusText}. You can try again.`;
+      _setEmailRevisionBusy(false, failureMessage);
       alert("Reprompt failed: " + (data.detail || res.statusText));
       return;
     }
     if (data.error) {
+      failureMessage = `The revision reported a problem: ${data.error}. Review the emails and retry if needed.`;
+      _setEmailRevisionBusy(false, failureMessage);
       alert("Reprompt didn't fully succeed: " + data.error);
+      return;
     }
     // Both emails were just re-priced against the plan that was sent; a one-sided revision leaves the other email
     // as it was, so the "plan changed" note stays until that one is refreshed too.
@@ -8350,11 +8459,31 @@ async function _submitEmailReprompt({ text, scope, btn, idleLabel }) {
     // built — refresh it now so "Open in Email" reflects the just-revised text.
     await buildInternalEmailMailtoLink();
   } catch (e) {
-    alert("Request failed: " + e.message);
+    if (epoch === _resetEpoch) {
+      failureMessage = `Couldn't revise the emails: ${e.message}. You can try again.`;
+      _setEmailRevisionBusy(false, failureMessage);
+      alert("Request failed: " + e.message);
+    }
   } finally {
-    btn.disabled = false;
-    btn.textContent = idleLabel;
+    if (token === _emailRevisionToken) {
+      _emailRevisionInFlightEpoch = null;
+      if (epoch === _resetEpoch) {
+        _setEmailRevisionBusy(false, failureMessage);
+        btn.textContent = idleLabel;
+      }
+    }
   }
+}
+
+function _setEmailRevisionBusy(busy, message = "") {
+  ["email-reprompt-submit-btn", "email-refresh-figures-btn"].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) button.disabled = !!busy;
+  });
+  const status = document.getElementById("email-revision-status");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("hidden", !message);
 }
 
 function setText(id, text) {
