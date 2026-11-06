@@ -19,10 +19,11 @@ OUTLINE = "MEDIA PLAN OUTLINE — Acme\n\nCLIENT & CAMPAIGN\n- Client: Acme\n"
 
 
 class _Resp:
-    def __init__(self, status=200, body=None, text=""):
+    def __init__(self, status=200, body=None, text="", headers=None):
         self.status_code = status
         self._body = body
         self.text = text
+        self.headers = headers or {}
 
     def json(self):
         if self._body is None:
@@ -93,14 +94,21 @@ def test_optional_theme_folder_and_sharing_come_from_the_environment(monkeypatch
 
 
 @pytest.mark.parametrize("status,expected", [
-    (401, "rejected the API key"), (403, "rejected the API key"), (402, "out of credits"), (429, "rate-limiting"), (500, "returned 500"),
+    (401, "API credentials"), (403, "permissions"), (402, "generation limit"),
+    (429, "Wait a minute"), (500, "service outage"), (400, "request limits"),
 ])
 def test_gamma_errors_become_messages_a_planner_can_act_on(monkeypatch, status, expected):
     monkeypatch.setenv("GAMMA_API_KEY", "k")
-    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(status, {"message": "details here"}))
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(status, {"message": "private provider detail"}))
     with pytest.raises(gc.GammaError, match=expected) as exc:
         gc.start_generation(OUTLINE)
     assert exc.value.status_code == (429 if status == 429 else 502)
+    assert "private provider detail" not in str(exc.value)
+    expected_category = {
+        401: "authentication", 403: "permission", 402: "quota", 429: "rate_limit",
+        500: "service_unavailable", 400: "request_rejected",
+    }[status]
+    assert exc.value.category == expected_category
 
 
 def test_a_network_failure_or_a_missing_id_is_reported_not_raised_raw(monkeypatch):
@@ -109,11 +117,17 @@ def test_a_network_failure_or_a_missing_id_is_reported_not_raised_raw(monkeypatc
     def down(*a, **k):
         raise requests.ConnectionError("no route")
     monkeypatch.setattr(requests, "post", down)
-    with pytest.raises(gc.GammaError, match="Couldn't reach Gamma"):
+    with pytest.raises(gc.GammaError, match="temporarily unavailable") as exc:
         gc.start_generation(OUTLINE)
+    assert exc.value.category == "service_unavailable"
+    monkeypatch.setattr(requests, "post", lambda *a, **k: (_ for _ in ()).throw(requests.Timeout("secret timeout details")))
+    with pytest.raises(gc.GammaError, match="took too long") as exc:
+        gc.start_generation(OUTLINE)
+    assert exc.value.category == "timeout"
     monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(200, {"unexpected": True}))
-    with pytest.raises(gc.GammaError, match="generation id"):
+    with pytest.raises(gc.GammaError) as exc:
         gc.start_generation(OUTLINE)
+    assert exc.value.category == "provider_error"
 
 
 def test_polling_reports_pending_completed_and_failed(monkeypatch):
@@ -130,9 +144,71 @@ def test_polling_reports_pending_completed_and_failed(monkeypatch):
     done = gc.get_generation("gen_ABC123")
     assert done["status"] == "completed" and done["gamma_url"] == "https://gamma.app/docs/Acme-abc123"
     failed = gc.get_generation("gen_ABC123")
-    assert failed["status"] == "failed" and failed["error"] == "Out of credits" and failed["gamma_url"] is None
+    assert failed["status"] == "failed" and "generation limit" in failed["error"] and failed["gamma_url"] is None
+    assert "Out of credits" not in failed["error"]
     assert gc.get_generation("gen_ABC123")["status"] == "pending"                   # an unknown status keeps polling
     assert calls[0] == "https://public-api.gamma.app/v1.0/generations/gen_ABC123"
+
+
+@pytest.mark.parametrize("detail,category,phrase", [
+    ("Out of credits", "quota", "generation limit"),
+    ("Request throttled: too many requests", "rate_limit", "Wait a minute"),
+    ("Generation timed out", "timeout", "took too long"),
+    ("Unauthorized API key", "authentication", "administrator"),
+    ("Gamma service unavailable", "service_unavailable", "service outage"),
+    ("A provider-specific private error", "generation_failed", "Try again once"),
+])
+def test_async_generation_failures_get_safe_categories_and_guidance(monkeypatch, caplog, detail, category, phrase):
+    import logging
+    monkeypatch.setenv("GAMMA_API_KEY", "gamma-secret")
+    monkeypatch.setattr(
+        requests, "get",
+        lambda *a, **k: _Resp(200, {"status": "failed", "error": detail},
+                              headers={"x-request-id": "gamma-req-42"}),
+    )
+    with caplog.at_level(logging.WARNING, logger=gc.__name__):
+        result = gc.get_generation("gen_ABC123")
+    assert result["status"] == "failed"
+    assert phrase.lower() in result["error"].lower()
+    assert detail not in result["error"]
+    assert f"category={category}" in caplog.text
+    assert "stage=generation_status" in caplog.text
+    assert "request_id=gamma-req-42" in caplog.text
+    assert "gamma-secret" not in caplog.text and OUTLINE not in caplog.text
+
+
+def test_http_failure_log_contains_only_diagnostic_metadata(monkeypatch, caplog):
+    import logging
+    monkeypatch.setenv("GAMMA_API_KEY", "gamma-secret")
+    monkeypatch.setattr(
+        requests, "post",
+        lambda *a, **k: _Resp(503, {"message": "private outline and response detail"},
+                              headers={"x-request-id": "gamma-503-id"}),
+    )
+    with caplog.at_level(logging.WARNING, logger=gc.__name__):
+        with pytest.raises(gc.GammaError):
+            gc.start_generation(OUTLINE)
+    assert "stage=generation_start" in caplog.text
+    assert "duration_ms=" in caplog.text and "category=service_unavailable" in caplog.text
+    assert "request_id=gamma-503-id" in caplog.text
+    assert "private outline" not in caplog.text and OUTLINE not in caplog.text
+    assert "gamma-secret" not in caplog.text
+
+
+def test_async_error_code_and_alternate_request_id_header_are_used_safely(monkeypatch, caplog):
+    import logging
+    monkeypatch.setenv("GAMMA_API_KEY", "gamma-secret")
+    monkeypatch.setattr(
+        requests, "get",
+        lambda *a, **k: _Resp(200, {"status": "failed", "error": {
+            "code": "insufficient_credits", "message": "sensitive provider detail",
+        }}, headers={"x-gamma-request-id": "gamma-req-alt"}),
+    )
+    with caplog.at_level(logging.WARNING, logger=gc.__name__):
+        result = gc.get_generation("gen_ABC123")
+    assert "generation limit" in result["error"]
+    assert "sensitive provider detail" not in result["error"]
+    assert "category=quota" in caplog.text and "request_id=gamma-req-alt" in caplog.text
 
 
 @pytest.mark.parametrize("url", ["http://gamma.app/docs/x", "https://evil.example/docs/x", "https://gamma.app.evil.example/x",

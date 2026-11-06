@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from typing import Optional
 
 import requests
@@ -52,9 +53,93 @@ _INSTRUCTIONS = (
 class GammaError(Exception):
     """A Gamma call that failed, with a message a planner can act on."""
 
-    def __init__(self, message: str, status_code: int = 502):
+    def __init__(self, message: str, status_code: int = 502, *, category: str = "provider_error",
+                 request_id: str = "-"):
         super().__init__(message)
         self.status_code = status_code
+        self.category = category
+        self.request_id = request_id
+
+
+_FAILURE_MESSAGES = {
+    "authentication": "Gamma's connection needs attention. Ask an administrator to check the API credentials and plan access.",
+    "permission": "Gamma's connection doesn't have access to this feature. Ask an administrator to review the Gamma plan and permissions.",
+    "quota": "The Gamma workspace has reached its generation limit. Ask an administrator to review its credits or usage limits.",
+    "rate_limit": "Gamma is processing too many requests. Wait a minute, then try again.",
+    "timeout": "Gamma took too long to respond. Check your Gamma workspace in case the deck finished, then wait briefly and retry.",
+    "service_unavailable": "Gamma appears to be temporarily unavailable. Wait a few minutes and retry; if it continues, report a Gamma service outage.",
+    "request_rejected": "Gamma rejected the presentation request. Ask an administrator to review the Gamma connection and request limits.",
+    "generation_failed": "Gamma couldn't build the presentation. Try again once; if it fails again, report the issue to an administrator.",
+    "provider_error": "Gamma couldn't complete the request. Check your Gamma workspace, then retry; if it continues, report the issue to an administrator.",
+}
+
+
+def _request_id(response) -> str:
+    headers = getattr(response, "headers", None)
+    value = None
+    if hasattr(headers, "get"):
+        value = (headers.get("x-request-id") or headers.get("x-gamma-request-id")
+                 or headers.get("request-id"))
+    if not isinstance(value, str):
+        return "-"
+    safe_id = re.sub(r"[^A-Za-z0-9._:-]", "", value)[:120]
+    return safe_id or "-"
+
+
+def _log_failure(stage: str, started: float, category: str, request_id: str = "-") -> None:
+    log.warning(
+        "gamma_failure stage=%s duration_ms=%d category=%s request_id=%s",
+        stage, round((time.perf_counter() - started) * 1000), category, request_id,
+    )
+
+
+def _failure(category: str, stage: str, started: float, *, request_id: str = "-",
+             status_code: Optional[int] = None) -> GammaError:
+    _log_failure(stage, started, category, request_id)
+    default_status = {"rate_limit": 429, "timeout": 504}.get(category, 502)
+    return GammaError(_FAILURE_MESSAGES[category], status_code or default_status,
+                      category=category, request_id=request_id)
+
+
+def _response_failure(resp: "requests.Response", stage: str, started: float) -> GammaError:
+    status = resp.status_code
+    if status == 401:
+        category = "authentication"
+    elif status == 403:
+        category = "permission"
+    elif status == 402:
+        category = "quota"
+    elif status == 429:
+        category = "rate_limit"
+    elif status in (408, 504):
+        category = "timeout"
+    elif status >= 500:
+        category = "service_unavailable"
+    else:
+        category = "request_rejected"
+    return _failure(category, stage, started, request_id=_request_id(resp))
+
+
+def _transport_failure(exc: requests.RequestException, stage: str, started: float) -> GammaError:
+    category = "timeout" if isinstance(exc, requests.Timeout) else "service_unavailable"
+    return _failure(category, stage, started, request_id=_request_id(getattr(exc, "response", None)))
+
+
+def _generation_failure_category(error) -> str:
+    """Map Gamma's asynchronous failure detail to a safe category without returning that detail."""
+    text = error if isinstance(error, str) else ""
+    text = text.lower()
+    if any(word in text for word in ("credit", "quota", "usage limit", "out of credits")):
+        return "quota"
+    if any(word in text for word in ("rate limit", "rate-limit", "too many requests", "throttl")):
+        return "rate_limit"
+    if any(word in text for word in ("timed out", "timeout")):
+        return "timeout"
+    if any(word in text for word in ("unauthorized", "authentication", "api key", "forbidden")):
+        return "authentication"
+    if any(word in text for word in ("unavailable", "internal server", "service error", "try again later")):
+        return "service_unavailable"
+    return "generation_failed"
 
 
 def _api_key() -> str:
@@ -77,22 +162,6 @@ def _safe_gamma_url(url) -> Optional[str]:
 
 def _headers() -> dict:
     return {"X-API-KEY": _api_key(), "Content-Type": "application/json", "Accept": "application/json"}
-
-
-def _explain(resp: "requests.Response") -> GammaError:
-    detail = ""
-    try:
-        body = resp.json()
-        detail = body.get("message") or (body.get("error") or {}).get("message") or ""
-    except Exception:  # noqa: BLE001
-        detail = (resp.text or "")[:200]
-    if resp.status_code in (401, 403):
-        return GammaError("Gamma rejected the API key — check GAMMA_API_KEY and that the Gamma plan includes API access.", 502)
-    if resp.status_code == 402:
-        return GammaError("Gamma says the workspace is out of credits." + (f" ({detail})" if detail else ""), 502)
-    if resp.status_code == 429:
-        return GammaError("Gamma is rate-limiting requests — wait a minute and try again.", 429)
-    return GammaError(f"Gamma returned {resp.status_code}." + (f" {detail}" if detail else ""), 502)
 
 
 def _request_payload(outline: str, title: Optional[str]) -> dict:
@@ -119,19 +188,21 @@ def _request_payload(outline: str, title: Optional[str]) -> dict:
 
 def start_generation(outline: str, title: Optional[str] = None) -> str:
     """Ask Gamma to build a presentation from `outline`; returns the generation id to poll. Raises GammaError."""
+    started = time.perf_counter()
+    stage = "generation_start"
     try:
         resp = requests.post(f"{_API_BASE}/generations", headers=_headers(), json=_request_payload(outline, title), timeout=_TIMEOUT)
     except requests.RequestException as exc:
-        raise GammaError(f"Couldn't reach Gamma ({exc.__class__.__name__}). Try again in a moment.") from exc
+        raise _transport_failure(exc, stage, started) from exc
     if resp.status_code >= 400:
-        raise _explain(resp)
+        raise _response_failure(resp, stage, started)
     try:
         body = resp.json()
     except ValueError:
         body = None
     generation_id = body.get("generationId") if isinstance(body, dict) else None
     if not generation_id or not valid_generation_id(str(generation_id)):
-        raise GammaError("Gamma accepted the request but didn't return a generation id.")
+        raise _failure("provider_error", stage, started, request_id=_request_id(resp))
     return str(generation_id)
 
 
@@ -139,31 +210,39 @@ def get_generation(generation_id: str) -> dict:
     """{"status": "pending"|"completed"|"failed", "gamma_url": str|None, "error": str|None}. Raises GammaError."""
     if not valid_generation_id(generation_id):
         raise GammaError("That isn't a Gamma generation id.", 400)
+    started = time.perf_counter()
+    stage = "generation_status"
     try:
         resp = requests.get(f"{_API_BASE}/generations/{generation_id}", headers=_headers(), timeout=_TIMEOUT)
     except requests.RequestException as exc:
-        raise GammaError(f"Couldn't reach Gamma ({exc.__class__.__name__}). Try again in a moment.") from exc
+        raise _transport_failure(exc, stage, started) from exc
     if resp.status_code >= 400:
-        raise _explain(resp)
+        raise _response_failure(resp, stage, started)
     try:
         body = resp.json()
     except ValueError:
         body = None
     if not isinstance(body, dict):
-        raise GammaError("Gamma returned something unexpected.")
+        raise _failure("provider_error", stage, started, request_id=_request_id(resp))
     status = str(body.get("status") or "pending").lower()
     error = body.get("error")
     if isinstance(error, dict):
-        error = error.get("message") or "Gamma couldn't build the deck."
+        # Some asynchronous failures include a stable code as well as a display message.
+        error = " ".join(str(error[key]) for key in ("code", "type", "message") if error.get(key))
     if status == "completed":
         url = _safe_gamma_url(body.get("gammaUrl"))
         if url is None:
             # Built, but with no link we'd hand to a browser: say so rather than polling a finished deck forever.
+            _log_failure(stage, started, "provider_error", _request_id(resp))
             return {"status": "failed", "gamma_url": None,
                     "error": "Gamma finished the deck but didn't return a link this app can open — look for it in your Gamma workspace."}
         return {"status": "completed", "gamma_url": url, "error": None}
+    if status == "failed":
+        category = _generation_failure_category(error)
+        _log_failure(stage, started, category, _request_id(resp))
+        return {"status": "failed", "gamma_url": None, "error": _FAILURE_MESSAGES[category]}
     return {
-        "status": "failed" if status == "failed" else "pending",
+        "status": "pending",
         "gamma_url": None,
-        "error": (str(error) if error else "Gamma couldn't build the deck.") if status == "failed" else None,
+        "error": None,
     }

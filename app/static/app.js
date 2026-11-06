@@ -8010,7 +8010,7 @@ async function onGammaCreate() {
       } catch (pollError) {
         if (epoch !== _resetEpoch) { if (tab) tab.close(); return; }
         if (++failedPolls >= 5) {
-          throw new Error(`lost contact with Gamma while it was building (${pollError.message}). The deck may still finish — check your Gamma workspace.`);
+          throw new Error("Couldn't check Gamma's progress. The deck may still finish — check your Gamma workspace. Wait a moment and retry; if this continues, report a Gamma service issue.");
         }
         continue;
       }
@@ -8022,7 +8022,7 @@ async function onGammaCreate() {
       if (status.status === "failed") throw new Error(status.error || "Gamma couldn't build the deck.");
       _gammaStatus(`Gamma is building the deck… ${Math.round((Date.now() - started) / 1000)}s`);
     }
-    throw new Error("Gamma is taking longer than expected — check your Gamma workspace in a minute.");
+    throw new Error("Gamma is taking longer than expected. Check your Gamma workspace in a minute; if the deck isn't there, wait briefly and retry. Report it if this keeps happening.");
   } catch (e) {
     if (tab && !tab.closed) tab.close();
     if (epoch !== _resetEpoch) return;     // another proposal is on screen — this failure isn't its business
