@@ -32,15 +32,21 @@ def _row(proposal_id: str, seller_email: str, total_count: int, status: str = "g
     }
 
 
+def _page_recorder(captured: dict, rows: list):
+    """A fetch_all stand-in that answers EVERY statement of the list with `rows` and keeps the PAGE statement (the one with the window total)
+    in `captured`. The list now also runs the counts behind the status buttons and the saved plan's facts, so "the last call" is no
+    longer the page; the assertions below are about the page statement, as they always were."""
+    def fake_fetch_all(sql, params):
+        if "COUNT(*) OVER()" in sql:
+            captured["sql"] = sql
+            captured["params"] = params
+        return rows
+    return fake_fetch_all
+
+
 def test_mine_filter_matches_on_created_by_email_case_insensitively(monkeypatch):
     captured = {}
-
-    def fake_fetch_all(sql, params):
-        captured["sql"] = sql
-        captured["params"] = params
-        return [_row("p1", "Planner@Entravision.com", 1)]
-
-    monkeypatch.setattr(main, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(main, "fetch_all", _page_recorder(captured, [_row("p1", "Planner@Entravision.com", 1)]))
     result = asyncio.run(main.admin_list_proposals(_fake_request("planner@entravision.com"), mine=True))
 
     # created_by_email (the actual logged-in session), NOT seller_email
@@ -68,12 +74,7 @@ def test_list_orders_by_updated_at_not_generated_at(monkeypatch):
     # order now, so a draft sorts by when it was last saved, not always
     # pushed to the bottom.
     captured = {}
-
-    def fake_fetch_all(sql, params):
-        captured["sql"] = sql
-        return [_row("p1", "x", 1)]
-
-    monkeypatch.setattr(main, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(main, "fetch_all", _page_recorder(captured, [_row("p1", "x", 1)]))
     asyncio.run(main.my_proposals(_fake_request()))
     assert "ORDER BY updated_at DESC" in captured["sql"]
     assert "generated_at DESC" not in captured["sql"]
@@ -81,13 +82,7 @@ def test_list_orders_by_updated_at_not_generated_at(monkeypatch):
 
 def test_all_scope_omits_the_mine_filter_entirely(monkeypatch):
     captured = {}
-
-    def fake_fetch_all(sql, params):
-        captured["sql"] = sql
-        captured["params"] = params
-        return []
-
-    monkeypatch.setattr(main, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(main, "fetch_all", _page_recorder(captured, []))
     asyncio.run(main.admin_list_proposals(_fake_request(), mine=False))
 
     assert "LOWER(created_by_email)" not in captured["sql"]
@@ -97,13 +92,7 @@ def test_all_scope_omits_the_mine_filter_entirely(monkeypatch):
 
 def test_search_and_mine_combine_with_and(monkeypatch):
     captured = {}
-
-    def fake_fetch_all(sql, params):
-        captured["sql"] = sql
-        captured["params"] = params
-        return []
-
-    monkeypatch.setattr(main, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(main, "fetch_all", _page_recorder(captured, []))
     asyncio.run(main.admin_list_proposals(_fake_request("a@b.com"), mine=True, search="acme"))
 
     assert " AND " in captured["sql"]
@@ -134,13 +123,7 @@ def test_empty_result_has_sane_defaults(monkeypatch):
 
 def test_my_proposals_always_scopes_to_the_callers_own_email(monkeypatch):
     captured = {}
-
-    def fake_fetch_all(sql, params):
-        captured["sql"] = sql
-        captured["params"] = params
-        return [_row("p1", "planner@entravision.com", 1)]
-
-    monkeypatch.setattr(main, "fetch_all", fake_fetch_all)
+    monkeypatch.setattr(main, "fetch_all", _page_recorder(captured, [_row("p1", "planner@entravision.com", 1)]))
     # No `mine` param exists on this endpoint at all — it's always scoped,
     # unlike /api/admin/proposals which can see everyone's.
     result = asyncio.run(main.my_proposals(_fake_request("planner@entravision.com")))
