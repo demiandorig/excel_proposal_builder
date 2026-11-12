@@ -2532,43 +2532,126 @@ def _db_errors():
     return psycopg.errors
 
 
+# products.product_key is the stable key forecast data links to (migration 0001): NOT NULL and unique, assigned once from the name.
+# A BEFORE INSERT trigger used to be the only thing that filled it. A published deployment never runs migrations (its schema comes from
+# Publish's schema diff, which carries columns and indexes but not triggers), so there a new product reached the NOT NULL check with
+# no key and Add Product failed with a bare 500. The application now sets the key itself, by the same rule as the trigger, so adding
+# a product works whether or not the trigger is there (the trigger still fills it for any insert that leaves it out).
+_PRODUCT_KEY_MAX = 80
+_product_key_column = {"present": False}
+
+
+def product_key_slug(name: str) -> str:
+    """The readable part of a product's key: the same rule as the SQL function product_key_slug() of migration 0001."""
+    return re.sub(r"[^a-zA-Z0-9]+", "-", name or "").lower().strip("-")[:_PRODUCT_KEY_MAX]
+
+
+def next_product_key(name: str, taken: set) -> str:
+    """The key a new product gets: its slug, or the slug with -2, -3 ... when that is taken (as the trigger does)."""
+    base = product_key_slug(name) or "product"
+    candidate, n = base, 1
+    while candidate in taken:
+        n += 1
+        candidate = f"{base}-{n}"
+    return candidate
+
+
+def _has_product_key(conn) -> bool:
+    """Whether this database has products.product_key (a database from before the forecast platform does not). Only a yes is remembered."""
+    if _product_key_column["present"]:
+        return True
+    row = conn.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+                       "AND table_name = 'products' AND column_name = 'product_key'").fetchone()
+    _product_key_column["present"] = row is not None
+    return _product_key_column["present"]
+
+
+def _insert_product(conn, product: Product, sort_order: int, taken: Optional[set] = None) -> int:
+    """INSERT one product row (with its stable key when the column exists) and return its id. `taken` is the set of keys already in use;
+    pass one to insert many (it is kept up to date), or leave it out to have it read."""
+    columns, params = list(_PRODUCT_COLUMNS), _product_params(product)
+    key = None
+    if _has_product_key(conn):
+        if taken is None:
+            taken = {r["product_key"] for r in conn.execute("SELECT product_key FROM products WHERE product_key IS NOT NULL").fetchall()}
+        key = next_product_key(product.name, taken)
+        columns.append("product_key")
+        params.append(key)
+    placeholders = ", ".join(["%s"] * (len(columns) + 1))
+    new_id = conn.execute(f"INSERT INTO products (sort_order, {', '.join(columns)}) VALUES ({placeholders}) RETURNING id",
+                          [sort_order] + params).fetchone()["id"]
+    if key is not None and taken is not None:
+        taken.add(key)
+    return new_id
+
+
+def _is_key_clash(exc) -> bool:
+    """A UniqueViolation on the stable key (two products added at the same instant picked the same one), not on the name."""
+    diag = getattr(exc, "diag", None)
+    return "product_key" in (getattr(diag, "constraint_name", "") or "")
+
+
+def _database_refusal(exc, doing: str, done: str) -> Exception:
+    """What a planner is told when the database refuses a product write for a reason the form could not foresee: a sentence that names the
+    rule or column (never the data), as an error the route turns into JSON. The full error goes to the server log."""
+    errors = _db_errors()
+    log.error("couldn't %s a product: %s: %s", doing, exc.__class__.__name__, str(exc).splitlines()[0] if str(exc) else "", exc_info=True)
+    diag = getattr(exc, "diag", None)
+    column, rule = getattr(diag, "column_name", None), getattr(diag, "constraint_name", None)
+    if isinstance(exc, errors.NotNullViolation) and column:
+        return RuntimeError(f"The database needs a value for '{column}' that this form doesn't send, so the product was not {done}. "
+                            "This is a setup problem, not something you typed - the details are in the server log.")
+    if isinstance(exc, errors.IntegrityError) and rule:
+        return RuntimeError(f"The database refused this product (its rule '{rule}'), so it was not {done}. Check the values; "
+                            "if they look right, the details are in the server log.")
+    if isinstance(exc, (errors.UndefinedColumn, errors.UndefinedTable)):
+        return RuntimeError("The products table in this database is out of date (a column or table is missing), so the product was not "
+                            f"{done}. Apply the latest schema and try again; the details are in the server log.")
+    return RuntimeError(f"The database couldn't {doing} the product just now, so nothing was saved. Try again; if it keeps failing, "
+                        "the details are in the server log.")
+
+
 def create_product(fields: dict, copy_from_id: Optional[int] = None) -> dict:
     """Add a product — blank, or a COPY of `copy_from_id` with `fields` laid over it (a quick variant). A copy
-    sits right after its source. Returns {id, ...form fields}."""
+    sits right after its source. Returns {id, ...form fields}. ValueError: the planner's mistake (their words);
+    RuntimeError: the database refused or can't be reached (a sentence that says so, never a bare 500)."""
+    import psycopg
     rows = _require_table()
     errors = _db_errors()
-    try:
-        with get_connection() as conn:
-            source = _row(conn, copy_from_id) if copy_from_id is not None else None
-            if copy_from_id is not None and source is None:
-                raise ValueError("The product to copy no longer exists.")
-            product = _build_product(fields, source["product"] if source else None)
-            product = replace(product, family=_canonical_family(product.family, [r["product"].family for r in rows]))
-            clash = _same_name(conn, product.name)
-            live = [r for r in clash if not r["is_deleted"]]
-            if live:
-                raise ValueError(f"A product named '{product.name}' already exists.")
-            revive = clash[0] if clash else None            # a deleted product of the same name: reuse its row
-            if source is not None:
-                order = source["sort_order"] + 1
-                conn.execute("UPDATE products SET sort_order = sort_order + 1 WHERE sort_order >= %s", (order,))
-            else:
-                order = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM products").fetchone()["n"]
-            if revive is not None:
-                sets = ", ".join(f"{c} = %s" for c in _PRODUCT_COLUMNS)
-                conn.execute(f"UPDATE products SET {sets}, is_deleted = FALSE, sort_order = %s, updated_at = now() WHERE id = %s",
-                             _product_params(product) + [order, revive["id"]])
-                new_id = revive["id"]
-            else:
-                placeholders = ", ".join(["%s"] * (len(_PRODUCT_COLUMNS) + 1))
-                new_id = conn.execute(
-                    f"INSERT INTO products (sort_order, {', '.join(_PRODUCT_COLUMNS)}) VALUES ({placeholders}) RETURNING id",
-                    [order] + _product_params(product),
-                ).fetchone()["id"]
-    except errors.UniqueViolation:
-        raise ValueError("A product with that name already exists.") from None
-    except errors.DataError:
-        raise ValueError("One of the numbers or texts is too large or isn't valid.") from None
+    for attempt in range(3):
+        try:
+            with get_connection() as conn:
+                source = _row(conn, copy_from_id) if copy_from_id is not None else None
+                if copy_from_id is not None and source is None:
+                    raise ValueError("The product to copy no longer exists.")
+                product = _build_product(fields, source["product"] if source else None)
+                product = replace(product, family=_canonical_family(product.family, [r["product"].family for r in rows]))
+                clash = _same_name(conn, product.name)
+                live = [r for r in clash if not r["is_deleted"]]
+                if live:
+                    raise ValueError(f"A product named '{product.name}' already exists.")
+                revive = clash[0] if clash else None            # a deleted product of the same name: reuse its row
+                if source is not None:
+                    order = source["sort_order"] + 1
+                    conn.execute("UPDATE products SET sort_order = sort_order + 1 WHERE sort_order >= %s", (order,))
+                else:
+                    order = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM products").fetchone()["n"]
+                if revive is not None:                           # (its stable key stays as it was)
+                    sets = ", ".join(f"{c} = %s" for c in _PRODUCT_COLUMNS)
+                    conn.execute(f"UPDATE products SET {sets}, is_deleted = FALSE, sort_order = %s, updated_at = now() WHERE id = %s",
+                                 _product_params(product) + [order, revive["id"]])
+                    new_id = revive["id"]
+                else:
+                    new_id = _insert_product(conn, product, order)
+            break
+        except errors.UniqueViolation as exc:
+            if _is_key_clash(exc) and attempt < 2:
+                continue                                         # someone else just took the key: read the keys again
+            raise ValueError("A product with that name already exists.") from None
+        except errors.DataError:
+            raise ValueError("One of the numbers or texts is too large or isn't valid.") from None
+        except psycopg.Error as exc:
+            raise _database_refusal(exc, "add", "added") from None
     invalidate_product_caches(keep_stale=True)
     return {"id": new_id, **product_to_form(product), "copied_from": source["product"].name if source else None}
 
@@ -2576,6 +2659,7 @@ def create_product(fields: dict, copy_from_id: Optional[int] = None) -> dict:
 def update_product(product_id: int, fields: dict) -> dict:
     """Edit any field of a product. A new name is recorded as an alias, so the old one keeps resolving in saved
     proposals and pasted requests."""
+    import psycopg
     rows = _require_table()
     errors = _db_errors()
     try:
@@ -2599,6 +2683,8 @@ def update_product(product_id: int, fields: dict) -> dict:
         raise ValueError("A product with that name already exists.") from None
     except errors.DataError:
         raise ValueError("One of the numbers or texts is too large or isn't valid.") from None
+    except psycopg.Error as exc:
+        raise _database_refusal(exc, "save", "saved") from None
     if product.name != old.name:
         try:
             record_product_alias(old.name, product.name)
@@ -2634,6 +2720,8 @@ def bulk_upsert_products(items: list[dict]) -> dict:
     created, updated, unchanged, problems = [], [], [], []
     with get_connection() as conn:
         next_order = conn.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM products").fetchone()["n"]
+        taken_keys = ({r["product_key"] for r in conn.execute("SELECT product_key FROM products WHERE product_key IS NOT NULL").fetchall()}
+                      if _has_product_key(conn) else set())
         for item in items:
             line, fields = item["line"], item["fields"]
             name = (fields.get("name") or "").strip()
@@ -2658,11 +2746,7 @@ def bulk_upsert_products(items: list[dict]) -> dict:
                                      _product_params(product) + [next_order, dead["id"]])
                         next_order += 1
                     else:
-                        placeholders = ", ".join(["%s"] * (len(_PRODUCT_COLUMNS) + 1))
-                        new_id = conn.execute(
-                            f"INSERT INTO products (sort_order, {', '.join(_PRODUCT_COLUMNS)}) VALUES ({placeholders}) RETURNING id",
-                            [next_order] + _product_params(product),
-                        ).fetchone()["id"]
+                        new_id = _insert_product(conn, product, next_order, taken_keys)
                         live[product.name.casefold()] = {"id": new_id, "is_deleted": False, "product": product}
                         next_order += 1
                 (updated if match is not None else created).append(product.name)

@@ -68,8 +68,10 @@ def _product_list_without_a_database(request, monkeypatch):
     for name, fn in readers.items():
         monkeypatch.setattr(_catalog, name, fn)
     _catalog.invalidate_product_caches()
+    _catalog._product_key_column["present"] = False          # the memo "this database has products.product_key" is per database, not per process
     yield
     _catalog.invalidate_product_caches()
+    _catalog._product_key_column["present"] = False
 
 
 @pytest.fixture
