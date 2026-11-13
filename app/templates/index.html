@@ -21,6 +21,8 @@
   <link rel="stylesheet" href="/static/segment-browser.css" />
   <link rel="stylesheet" href="/static/constanza-meta.css" />
   <link rel="stylesheet" href="/static/constanza-tiktok.css" />
+  <!-- Split view: two wizard steps side by side (the strip under the proposal name, and the two-column layout of the steps). -->
+  <link rel="stylesheet" href="/static/split-view.css" />
 </head>
 <body>
   <!-- Full-page overlay while a past proposal is being reopened
@@ -143,6 +145,23 @@
              title="This is only the campaign-name part of the full naming convention — the ID/date/doc-type segments stay derived automatically." />
       <button class="btn-copy" id="proposal-name-save-btn" title="Save">✓ Save</button>
       <button class="btn-copy" id="proposal-name-cancel-btn" title="Cancel">✕ Cancel</button>
+    </div>
+  </div>
+
+  <!-- Split view: show a second step next to the one being worked on (budgets in Step 04 while the avails are open in Step 05).
+       Filled and shown by split-view.js from Step 02 onward on a wide window; hidden otherwise. The steps themselves stay where they are:
+       split-view.js only lays two of them out side by side. -->
+  <div class="split-bar hidden" id="split-bar">
+    <div class="split-bar-inner">
+      <button type="button" class="split-toggle" id="split-toggle" aria-pressed="false">
+        <svg class="split-toggle-icon" viewBox="0 0 20 14" width="18" height="13" aria-hidden="true" focusable="false"><rect x="1" y="1" width="8" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="11" y="1" width="8" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+        Split view
+      </button>
+      <label class="split-second hidden" id="split-second-wrap">
+        <span>Show alongside</span>
+        <select id="split-second-select"></select>
+      </label>
+      <span class="split-hint" id="split-hint"></span>
     </div>
   </div>
 
@@ -940,6 +959,7 @@ Client name: ...
   <script src="/static/curate-math.js"></script>
   <script src="/static/segment-browser.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/split-view.js"></script>
   <script src="/static/constanza.js"></script>
   <script src="/static/constanza-tiktok.js"></script>
   <script src="/static/constanza-meta.js"></script>
