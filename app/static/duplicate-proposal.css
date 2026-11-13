@@ -1,0 +1,55 @@
+/* ========================================================================
+   "Duplicate for a new client" (duplicate-proposal.js): the quick form's own pieces, and the "Copied from" notice at the top of Step 02.
+   The form is built from proposal-history.css's dialog shell and .ph-form primitives (loaded first), so this file only adds what they lack: the
+   loading / blocked / success states and a few spacing rules. The notice (#duplicate-notice) lives in index.html's Step 02 and is drawn by app.js.
+   Same rules as the rest of the app: purple is the one accent, hairline borders, 36px targets, text at 4.5:1 or better, calm motion.
+   ======================================================================== */
+
+/* ------------------------------------------------------------------ the dialog */
+.dup { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.dup-state { display: flex; align-items: center; gap: 10px; padding: 28px 20px; color: var(--ink-soft); font-size: 14px; }
+.dup-state--blocked { display: block; padding: 20px 20px 4px; }
+.dup-state--blocked .ph-form-alert { margin: 0; }
+.dup-fields { display: flex; flex-direction: column; gap: 14px; min-width: 0; margin: 0; padding: 0; border: 0; }   /* a <fieldset> only to disable the form while it is sent */
+.dup-fields[disabled] { opacity: 0.7; }
+.dup-flight-hint { min-height: 1.4em; margin-top: -4px; }                  /* the live line keeps its room, so the form does not jump when it appears */
+.dup-more > .ph-form-grid { margin-top: 2px; }
+.dup-form .ph-details > summary:focus-visible, .dup-form .ph-linkbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.dup-form .ph-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+#dup-same-agency { display: inline-flex; align-items: center; min-height: 36px; }               /* a text link, but a full-size target */
+.dup-form .ph-input::placeholder { color: var(--ph-muted); opacity: 0.8; }
+
+.dup-done { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 28px 24px 22px; text-align: center; }
+.dup-done-mark { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--ph-gen-bg); color: var(--ph-gen-fg); font-size: 22px; font-weight: 700; line-height: 1; }
+.dup-done-title { margin: 6px 0 0; font-family: var(--font-kicker); font-size: 18px; line-height: 1.3; }
+.dup-done-name { margin: 0; max-width: 100%; font-family: var(--font-mono); font-size: 12px; line-height: 1.4; color: var(--ph-muted); overflow-wrap: anywhere; }
+.dup-done-text { margin: 4px 0 0; max-width: 42ch; font-size: 14px; line-height: 1.5; color: var(--ink); }
+
+@media (prefers-reduced-motion: reduce) { .dup .ph-btn-wait { animation: none; } }
+
+/* ------------------------------------------------------------------ the "Copied from" notice at the top of Step 02 */
+.duplicate-notice {
+  margin: 0 0 24px; padding: 14px 18px 12px; background: var(--accent-soft); border: 1px solid #dcb6de; border-left: 4px solid var(--accent); border-radius: var(--radius);
+  font-size: 14px; line-height: 1.5; color: var(--ink);
+}
+.duplicate-notice.hidden { display: none; }
+.duplicate-notice-head { display: flex; align-items: flex-start; gap: 12px; }
+.duplicate-notice-title { flex: 1; min-width: 0; margin: 0; font-family: var(--font-kicker); font-size: 16px; font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
+.duplicate-notice-dismiss {
+  flex: none; display: grid; place-items: center; width: 36px; height: 36px; margin: -6px -8px 0 0; padding: 0; border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: none; color: var(--ink-soft); font: inherit; font-size: 22px; line-height: 1; cursor: pointer;
+}
+.duplicate-notice-dismiss:hover { border-color: var(--accent); color: var(--accent); }
+.duplicate-notice-dismiss:focus-visible, .duplicate-notice-more > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.duplicate-notice-lede { margin: 2px 0 0; color: var(--ink-soft); }
+.duplicate-notice-checks { margin: 8px 0 0; padding-left: 20px; }
+.duplicate-notice-checks li { margin: 3px 0; overflow-wrap: anywhere; }
+.duplicate-notice-more { margin-top: 8px; }
+.duplicate-notice-more > summary { display: inline-flex; align-items: center; min-height: 36px; font-size: 13px; font-weight: 600; color: var(--accent); cursor: pointer; }
+.duplicate-notice-info { margin: 2px 0 4px; padding-left: 20px; color: var(--ink-soft); }
+.duplicate-notice-info li { margin: 3px 0; overflow-wrap: anywhere; }
+
+/* Step 02's own Notion ID field: the note under it when what was typed is not an ID */
+.field-note { margin: 4px 0 0; font-size: 12.5px; line-height: 1.4; color: #8a0a25; }
+.field-note.hidden { display: none; }
+.form-grid input[aria-invalid="true"] { border-color: #8a0a25; }

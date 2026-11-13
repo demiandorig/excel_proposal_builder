@@ -1,0 +1,166 @@
+/* ==========================================================================
+   Split view — two wizard steps side by side (split-view.js). Written as a layer on top of styles.css's own tokens.
+   The two steps are the page's own sections: nothing is moved, they are placed in a two-column grid while <main class="canvas"> carries .split-on,
+   and each pane scrolls on its own so the planner can work in one while the other stays in view.
+   ========================================================================== */
+
+/* ----- The strip under the proposal name: the toggle, and which step sits alongside ----- */
+.split-bar {
+  background: var(--paper);
+  border-bottom: 1px solid var(--rule);
+}
+.split-bar.hidden { display: none; }
+.split-bar-inner {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 7px clamp(16px, 2.5vw, 40px);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  font-size: 13px;
+}
+.split-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--paper-card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.split-toggle:hover:not(:disabled) { border-color: var(--ink-soft); background: var(--paper-warm); }
+.split-toggle[aria-pressed="true"] { color: #fff; background: var(--accent); border-color: var(--accent); }
+.split-toggle[aria-pressed="true"]:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); filter: brightness(1.08); }
+.split-toggle:disabled { opacity: 0.55; cursor: not-allowed; }
+.split-toggle:focus-visible,
+.split-second select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.split-toggle-icon { flex: none; }
+.split-second { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-soft); }
+.split-second.hidden { display: none; }
+.split-second select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  padding: 5px 8px;
+  max-width: 280px;
+  background: var(--paper-card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+}
+.split-hint { color: var(--ink-soft); font-size: 12.5px; }
+.split-hint:empty { display: none; }
+
+/* The step pills: a step shown in the second pane reads as "on screen", the active one keeps the usual look. */
+.step.split-shown {
+  color: var(--paper);
+  border-bottom: 2px dashed var(--accent);
+}
+.step.split-shown span { color: var(--accent); }
+
+/* ----- The two panes ----- */
+.canvas.split-on {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 16px;
+  align-items: start;
+  padding-top: 14px;
+  padding-bottom: 14px;
+}
+/* The window is not scrolled: each pane is as tall as what is left under the strip (--split-top is measured by split-view.js), floor of 380px so a
+   short window scrolls the page instead of squeezing a pane to nothing. The 96px at the bottom of a pane keeps its last button clear of the Constanza launcher. */
+.panel.split-pane {
+  grid-row: 1;
+  margin-bottom: 0;
+  padding: 20px 22px 96px;
+  max-height: max(380px, calc(100vh - var(--split-top, 230px) - 30px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  scroll-padding-bottom: 96px;
+}
+.panel.split-pane-left { grid-column: 1; }
+.panel.split-pane-right { grid-column: 2; }
+.panel.split-pane-active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), var(--shadow-card);
+}
+.split-view-on .footer { display: none; }
+
+/* Compact headings: a pane is half a page wide and the lines (or avails) are what is being worked on. The step's own description and the long billing-period
+   explanation are left out here; both are back as soon as Split view is off. */
+.split-pane .panel-head { margin-bottom: 14px; }
+.split-pane .panel-head .display { font-size: 24px; margin-bottom: 0; }
+.split-pane .panel-head .lede { display: none; }
+.split-pane .time-unit-toggle-hint { display: none; }
+.split-pane .panel-head-row { flex-wrap: wrap; gap: 8px 16px; }
+.split-pane .panel-actions { margin-top: 24px; padding-top: 18px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .panel.split-pane { transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+}
+
+/* Step 04's table becomes a card per line below 1400px of WINDOW width (styles.css). A pane is half the window, so above 1400px it needs the same
+   layout: the rules of that media query again, scoped to the split view. */
+@media (min-width: 1401px) {
+  .canvas.split-on .line-items-scroll { overflow-x: visible; }
+  .canvas.split-on .line-items,
+  .canvas.split-on .line-items tbody { display: block; width: 100%; }
+  .canvas.split-on .line-items thead { display: none; }
+  .canvas.split-on .line-items tr.line-item-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 12px 14px;
+    padding: 16px 4px 18px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .canvas.split-on .line-items tr.line-item-row > td { display: block; padding: 0; border: 0; min-width: 0; flex: 1 1 150px; }
+  .canvas.split-on .line-items tr.line-item-row > td.col-drag { order: 1; flex: 0 0 18px; }
+  .canvas.split-on .line-items tr.line-item-row > td.idx { order: 2; flex: 0 0 26px; }
+  .canvas.split-on .line-items tr.line-item-row > td.product { order: 3; flex: 1 1 calc(100% - 160px); min-width: 0; }
+  .canvas.split-on .line-items tr.line-item-row > td.col-row-actions { order: 4; flex: 0 0 auto; margin-left: auto; }
+  .canvas.split-on .line-items tr.line-item-row > td.model { order: 5; }
+  .canvas.split-on .line-items tr.line-item-row > td.rate-cell { order: 6; }
+  .canvas.split-on .line-items tr.line-item-row > td.min { order: 7; flex-basis: 90px; }
+  .canvas.split-on .line-items tr.line-item-row > td.col-budget { order: 8; flex-basis: 200px; }
+  .canvas.split-on .line-items tr.line-item-row > td.col-share { order: 9; flex-basis: 110px; }
+  .canvas.split-on .line-items tr.line-item-row > td.col-months { order: 10; flex-basis: 90px; }
+  .canvas.split-on .line-items tr.line-item-row > td.col-target { order: 11; flex: 2 1 280px; }
+  .canvas.split-on .line-items tr.line-item-row > td.col-objective { order: 12; flex: 1 1 200px; }
+  .canvas.split-on .line-items tr.line-item-row > td.col-note { order: 13; flex: 1 1 200px; }
+  .canvas.split-on .line-items td.model::before,
+  .canvas.split-on .line-items td.rate-cell::before,
+  .canvas.split-on .line-items td.min::before,
+  .canvas.split-on .line-items td.col-budget::before,
+  .canvas.split-on .line-items td.col-share::before,
+  .canvas.split-on .line-items td.col-months::before,
+  .canvas.split-on .line-items td.col-target::before,
+  .canvas.split-on .line-items td.col-objective::before,
+  .canvas.split-on .line-items td.col-note::before {
+    display: block;
+    margin-bottom: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-faint);
+  }
+  .canvas.split-on .line-items td.model::before { content: "Model"; }
+  .canvas.split-on .line-items td.rate-cell::before { content: "Rate"; }
+  .canvas.split-on .line-items td.min::before { content: "Min"; }
+  .canvas.split-on .line-items td.col-budget::before { content: var(--lbl-budget, "Budget"); }
+  .canvas.split-on .line-items td.col-share::before { content: "% of total"; }
+  .canvas.split-on .line-items td.col-months::before { content: var(--lbl-months, "Months"); }
+  .canvas.split-on .line-items td.col-target::before { content: "Target override"; }
+  .canvas.split-on .line-items td.col-objective::before { content: "Objective"; }
+  .canvas.split-on .line-items td.col-note::before { content: "Planner note"; }
+  .canvas.split-on .line-items .col-target textarea { min-width: 0; }
+  .canvas.split-on .line-items .col-budget input { width: 100%; min-width: 0; }
+  .canvas.split-on #step-4.ff-mode .line-items td.col-months { display: none; }
+}

@@ -489,6 +489,28 @@ CREATE TABLE IF NOT EXISTS proposal_files (
 );
 
 -- ---------------------------------------------------------------------------
+-- dooh_screenlists — the DOOH screen lists planners upload on the DOOH line
+-- (app/services/dooh_screenlist.py). A list is thousands of rows x 40 columns, far
+-- too big to ride in the wizard's autosave JSON, so the parsed rows (gzip-compressed
+-- JSON) are stored here once and the proposal keeps only a small reference (this id,
+-- the file name, counts and totals). The id is the SHA-256 of the rows themselves, so
+-- a row is IMMUTABLE (the same rows are always the same id; nothing ever updates one)
+-- and a duplicated proposal can safely point at the same list. /api/generate loads
+-- the rows by id to fill the export's DOOH Screenlist table and DOOH Summary pivot.
+-- No trigger, idempotent, and every reader/writer is fail-safe if the table isn't
+-- there yet.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS dooh_screenlists (
+    id          TEXT PRIMARY KEY,
+    filename    TEXT NOT NULL,
+    screens     INTEGER NOT NULL,
+    content     BYTEA NOT NULL,
+    size_bytes  INTEGER NOT NULL,
+    created_by  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
 -- faq_entries — the rows of the exports' "Process FAQs" tab, edited in Admin -> FAQ
 -- (app/services/faq_entries.py). section 'faq' = the FAQ table (SERVICES | Frequently
 -- Asked Question | Resource Link); 'restriction' = the "CATEGORY AND PRODUCT RESTRICTIONS"
