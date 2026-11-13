@@ -125,10 +125,6 @@ const state = {
   // already follows, since editing client name there changes what the
   // un-overridden guess would even be.
   manualCampaignNameOverride: null,
-  // "My Proposal History" modal (Step 01) — a compact, always-scoped-to-
-  // the-caller-own-email view (see GET /api/my-proposals), independent
-  // of the wizard's own state and never sent anywhere.
-  myProposals: { page: 1, pageSize: 10, search: "", totalPages: 1, totalCount: 0 },
   // Tiered budget options (up to 10 — "A".."J"). state.lineItems/availsData
   // ALWAYS hold the currently-active tier's data (same as before tiers
   // existed — no other code needs to change); `tiers` holds a snapshot for
@@ -286,15 +282,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 // --------------------------------------------------------------------------
-// "My Proposal History" modal (Step 01) — any logged-in planner's own
-// past proposals, always scoped server-side (GET /api/my-proposals never
-// takes a `mine` override the way the admin endpoint does). Deliberately
-// a much simpler view than the admin console's own Proposals tab (no
-// seller/IP/device columns — a planner looking at their OWN history
-// doesn't need to be told it's theirs) but reuses its table/pagination
-// styling directly (admin.css, loaded on this page too).
+// "My Proposal History" (Step 01) — any logged-in planner's own past proposals, always scoped server-side
+// (GET /api/my-proposals never takes a `mine` override the way the admin endpoint does). The list, its search / filter / sort, the
+// delete confirmation and the dialog itself are ProposalHistory (proposal-history.js, shared with the Admin console's tab); this file only
+// says what Open, Duplicate and an empty list do on THIS page. "Duplicate for a new client" is DuplicateProposal (duplicate-proposal.js).
 // --------------------------------------------------------------------------
 
+// Kept: the Notion search table below formats its due dates with it.
 function formatDate(iso) {
   if (!iso) return "—";
   try {
@@ -304,77 +298,131 @@ function formatDate(iso) {
   }
 }
 
+// A blank wizard has nothing to lose, so Open / Continue can use this tab; anything parsed, or even just pasted or typed on Step 01, opens a new
+// tab instead (the work in progress, and its autosave, stay exactly as they are).
+function _wizardIsEmpty() {
+  return !state.parsed && !document.getElementById("notion-input").value.trim() && !document.getElementById("notion-id-input").value.trim();
+}
+
 function openMyProposalsModal() {
-  document.getElementById("my-proposals-modal").classList.remove("hidden");
-  loadMyProposals();
+  if (!window.ProposalHistory) { alert("The proposal history could not be loaded. Reload the page and try again."); return; }
+  ProposalHistory.openDialog({
+    title: "My Proposal History",
+    subtitle: "Open or continue a proposal, or copy one for a new client.",
+    endpoint: "/api/my-proposals",
+    pageSize: 25,
+    returnFocus: document.getElementById("my-proposals-btn"),
+    linkTarget: () => (_wizardIsEmpty() ? "_self" : "_blank"),
+    canDelete: (p) => p.status === "draft",
+    onDuplicate: ({ proposal, trigger, controller }) => {
+      if (!window.DuplicateProposal) { alert("The copy form could not be loaded. Reload the page and try again."); return; }
+      DuplicateProposal.open({
+        proposal,
+        trigger,
+        prepare: () => _dupFlushIfOpen(proposal.proposal_id),
+        // The copy opens in its own tab (a link in the dialog); the list behind it shows the new draft at the top, flashing.
+        onDone: (result) => controller.reload({ highlightId: result.proposal_id }),
+      });
+    },
+    emptyAction: { label: "Paste a Notion request", run: () => document.getElementById("notion-id-input").focus() },
+  });
 }
 
-function closeMyProposalsModal() {
-  document.getElementById("my-proposals-modal").classList.add("hidden");
-}
+// DUPLICATE FOR A NEW CLIENT: begin
+// The page's side of "Duplicate for a new client" (the form and the request are DuplicateProposal, duplicate-proposal.js; the copy itself is
+// built by POST /api/proposal/{id}/duplicate and opens with the same ?reopen= path as any draft, landing on Step 02).
 
-async function loadMyProposals() {
-  const body = document.getElementById("my-proposals-body");
-  body.innerHTML = `<tr><td colspan="7" class="admin-empty"><span class="btn-inline-spinner"></span>Loading…</td></tr>`;
-  document.getElementById("my-proposals-prev-btn").disabled = true;
-  document.getElementById("my-proposals-next-btn").disabled = true;
-
-  const { page, pageSize, search } = state.myProposals;
-  const params = new URLSearchParams({ page: String(page), page_size: String(pageSize), search });
+// Duplicating the draft that is open in THIS tab would copy its last SAVED version, so its unsaved edits are saved first, the way New proposal does
+// before it clears the page. A different proposal, or a generated one (a reopened generated proposal autosaves into its own new draft), needs nothing.
+// Resolves to "" when it is fine to copy, else the reason it is not; DuplicateProposal shows that instead of the form.
+async function _dupFlushIfOpen(sourceId) {
+  if (!state.parsed || !sourceId || state.generatedProposalId || state.proposalId !== sourceId) return "";
+  const waitUntil = Date.now() + 15000;
+  while ((_autosaveInFlight || _startingNew || document.getElementById("save-draft-btn").disabled) && Date.now() < waitUntil) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  if (_autosaveInFlight || _startingNew || document.getElementById("save-draft-btn").disabled) return "Saving your latest changes is taking longer than expected. Try again in a moment.";
+  const snapshot = _flushAndSnapshotDraftState();
+  if (snapshot === _lastSavedDraftSnapshot) return "";
+  _autosaveInFlight = true;            // keeps the autosave timer from posting a second copy meanwhile
   try {
-    const res = await fetch(`/api/my-proposals?${params}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || res.statusText);
-    state.myProposals.totalPages = data.total_pages || 1;
-    state.myProposals.totalCount = data.total_count || 0;
-    state.myProposals.page = data.page || page;
-    renderMyProposalsTable(data.proposals || []);
+    await _saveDraftNow(snapshot, { silent: true });
+    return "";
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="7" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
+    return `Couldn't save your latest changes (${e.message}). Try again.`;
   } finally {
-    document.getElementById("my-proposals-page-info").textContent = `Page ${state.myProposals.page} of ${state.myProposals.totalPages}`;
-    document.getElementById("my-proposals-prev-btn").disabled = state.myProposals.page <= 1;
-    document.getElementById("my-proposals-next-btn").disabled = state.myProposals.page >= state.myProposals.totalPages;
-    document.getElementById("my-proposals-count").textContent =
-      `${state.myProposals.totalCount} proposal${state.myProposals.totalCount === 1 ? "" : "s"}`;
+    _autosaveInFlight = false;
   }
 }
 
-function renderMyProposalsTable(list) {
-  const body = document.getElementById("my-proposals-body");
-  if (!list.length) {
-    body.innerHTML = `<tr><td colspan="7" class="admin-empty">No proposals yet.</td></tr>`;
+function hideDuplicateNotice() {
+  const box = document.getElementById("duplicate-notice");
+  if (!box) return;
+  box.classList.add("hidden");
+  ["duplicate-notice-checks", "duplicate-notice-info"].forEach(id => { document.getElementById(id).textContent = ""; });
+}
+
+// The "Copied from ..." notice at the top of Step 02: where the proposal came from, what to check (the server's "check" notes) and, folded away,
+// what else changed. Shown once per open of a fresh copy: the first autosave drops the notes server-side, so a later reopen has none. Everything
+// is put in with textContent: a client or option name is only ever text.
+function renderDuplicateNotice(from, notes) {
+  const box = document.getElementById("duplicate-notice");
+  if (!box) return;
+  const list = Array.isArray(notes) ? notes.filter(n => n && typeof n === "object" && typeof n.text === "string" && n.text.trim()) : [];
+  if (!from || typeof from !== "object" || !list.length) { hideDuplicateNotice(); return; }
+  const checks = list.filter(n => n.level === "check"), info = list.filter(n => n.level !== "check");
+  const fill = (id, items) => {
+    const ul = document.getElementById(id);
+    ul.textContent = "";
+    items.forEach(n => { const li = document.createElement("li"); li.textContent = n.text; ul.appendChild(li); });
+  };
+  document.getElementById("duplicate-notice-title").textContent = `Copied from “${String(from.title || from.client_name || "another proposal")}”`;
+  document.getElementById("duplicate-notice-lede").textContent = checks.length
+    ? `This is a copy for a new client. ${checks.length === 1 ? "One thing needs" : checks.length + " things need"} a look before you go on:`
+    : "This is a copy for a new client. Nothing was flagged, but give the figures a glance before you go on.";
+  fill("duplicate-notice-checks", checks);
+  fill("duplicate-notice-info", info);
+  const more = document.getElementById("duplicate-notice-more");
+  more.classList.toggle("hidden", !info.length);
+  more.open = false;
+  document.getElementById("duplicate-notice-more-summary").textContent = `What else changed (${info.length})`;
+  box.classList.remove("hidden");
+}
+
+// "EVC-48213", "evc 48213" or "48213" -> "EVC-48213"; blank -> ""; anything else -> null (not an ID). The same rule as the copy form and the server.
+function _normalizeNotionId(raw) {
+  const text = String(raw == null ? "" : raw).trim();
+  if (!text) return "";
+  const found = /^(?:evc[-\s]?)?(\d{4,5})$/i.exec(text);
+  return found ? "EVC-" + found[1] : null;
+}
+
+function _showNotionIdProblem(message) {
+  const note = document.getElementById("step02-notion-id-note");
+  const input = document.getElementById("step02-notion-id");
+  if (!note || !input) return;
+  note.textContent = message || "";
+  note.classList.toggle("hidden", !message);
+  if (message) input.setAttribute("aria-invalid", "true"); else input.removeAttribute("aria-invalid");
+}
+
+// Step 02's Notion ID field -> state.parsed.notion_id ("EVC-48213" or ""), and everywhere else the ID is shown: the pill and Step 01's box.
+// Text that is not an ID changes nothing and says so (the saved ID is never silently replaced or dropped). `quiet` (autosave, leaving the step)
+// neither complains nor rewrites what the planner may still be typing; leaving the field does both.
+function _commitStep02NotionId({ quiet = false } = {}) {
+  const input = document.getElementById("step02-notion-id");
+  if (!input || !state.parsed) return;
+  const id = _normalizeNotionId(input.value);
+  if (id === null) {
+    if (!quiet) _showNotionIdProblem("That isn't a Notion ID (4 or 5 digits, like EVC-48213), so it was not used.");
     return;
   }
-  body.innerHTML = list.map(p => {
-    const isDraft = p.status === "draft";
-    return `
-    <tr>
-      <td class="mono">${escapeHtml(formatDate(p.generated_at || p.updated_at))}</td>
-      <td class="mono">${escapeHtml(p.notion_id || "—")}</td>
-      <td>${escapeHtml(p.client_name || "—")}</td>
-      <td class="wrap">${escapeHtml(p.proposal_title || p.filename || "—")}</td>
-      <td>${isDraft ? '<span class="proposal-status-badge draft">Draft</span>' : ""}</td>
-      <td class="mono">${isDraft ? "—" : money(p.total_net)}</td>
-      <td class="my-proposals-actions">
-        <a class="reopen-link" href="/?reopen=${encodeURIComponent(p.proposal_id)}" target="_blank" rel="noopener">${isDraft ? "Continue ↗" : "Reopen ↗"}</a>
-        ${isDraft ? `<button type="button" class="btn-inline-delete" data-delete-draft="${escapeAttr(p.proposal_id)}" title="Delete this draft">🗑</button>` : ""}
-      </td>
-    </tr>
-  `;
-  }).join("");
+  if (!quiet) { _showNotionIdProblem(""); input.value = id; }
+  state.parsed.notion_id = id;
+  document.getElementById("notion-id-pill").textContent = id;
+  document.getElementById("notion-id-input").value = id.replace(/^EVC-/, "");
 }
-
-async function onDeleteDraft(proposalId) {
-  if (!confirm("Delete this draft? This can't be undone.")) return;
-  try {
-    const res = await fetch(`/api/proposal/${encodeURIComponent(proposalId)}`, { method: "DELETE" });
-    await _readJsonResponse(res);
-    loadMyProposals();
-  } catch (e) {
-    alert("Couldn't delete: " + e.message);
-  }
-}
+// DUPLICATE FOR A NEW CLIENT: end
 
 // --------------------------------------------------------------------------
 // "Search Notion Requests" modal (Step 01) — an alternative to copy-pasting
@@ -663,6 +711,8 @@ async function maybeReopenProposal() {
       state.furthestStep = 8;
       goToStep(4);  // straight to Curate — the paste/review content is already known
     }
+    // A copy made with "Duplicate for a new client" lands on Step 02 with a notice of what to check (a later reopen has no notes: see renderDuplicateNotice).
+    renderDuplicateNotice(data.duplicated_from, data.duplicate_notes);
   } catch (e) {
     alert("Reopen failed: " + e.message);
   } finally {
@@ -773,33 +823,8 @@ function _populateProductPicker(selectEl) {
 function wireEvents() {
   document.getElementById("parse-btn").addEventListener("click", onParse);
 
-  // "My Proposal History" modal (Step 01)
+  // "My Proposal History" (Step 01): ProposalHistory draws the dialog and wires its own controls
   document.getElementById("my-proposals-btn").addEventListener("click", openMyProposalsModal);
-  document.getElementById("my-proposals-close-btn").addEventListener("click", closeMyProposalsModal);
-  document.getElementById("my-proposals-modal").addEventListener("click", (e) => {
-    if (e.target.id === "my-proposals-modal") closeMyProposalsModal();  // backdrop click
-  });
-  // Delegated — the table body is fully re-rendered on every load/page
-  // change, so a per-row listener would need rewiring every time.
-  document.getElementById("my-proposals-body").addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-delete-draft]");
-    if (btn) onDeleteDraft(btn.dataset.deleteDraft);
-  });
-  document.getElementById("my-proposals-search").addEventListener("input", _debounce((e) => {
-    state.myProposals.search = e.target.value;
-    state.myProposals.page = 1;
-    loadMyProposals();
-  }, 350));
-  document.getElementById("my-proposals-prev-btn").addEventListener("click", () => {
-    if (state.myProposals.page <= 1) return;
-    state.myProposals.page -= 1;
-    loadMyProposals();
-  });
-  document.getElementById("my-proposals-next-btn").addEventListener("click", () => {
-    if (state.myProposals.page >= state.myProposals.totalPages) return;
-    state.myProposals.page += 1;
-    loadMyProposals();
-  });
 
   // "Search Notion Requests" modal (Step 01)
   document.getElementById("notion-search-btn").addEventListener("click", openNotionSearchModal);
@@ -916,6 +941,16 @@ function wireEvents() {
     _refreshStep02MonthsField();
   });
   document.getElementById("total-months-fix-btn").addEventListener("click", onFixStep02Months);
+
+  // Step 02's Notion ID (the copy form can leave it blank; this is where it gets added): tidied to EVC-##### when the planner leaves the field.
+  const step02NotionId = document.getElementById("step02-notion-id");
+  step02NotionId.addEventListener("change", () => _commitStep02NotionId());
+  step02NotionId.addEventListener("input", () => _showNotionIdProblem(""));
+  document.getElementById("duplicate-notice-dismiss").addEventListener("click", () => {
+    hideDuplicateNotice();
+    const heading = document.querySelector("#step-2 .display");     // the button just went away: the keyboard goes to the top of the step
+    if (heading) { heading.setAttribute("tabindex", "-1"); heading.focus(); }
+  });
 
   // Step 02's "Billing period" select — the second control (beside Step 04's
   // slider) for the ONE proposal-wide state.timeUnit. Deliberately has no
@@ -1243,6 +1278,8 @@ function _clearPerProposalState() {
   if (gammaRepromptBtn) gammaRepromptBtn.textContent = "↺ Regenerate Outline";
   _rbResultCache.clear();             // paid results belong to the proposal being left
   _gammaReset();                      // the previous proposal's "deck is ready" link / error doesn't carry over
+  hideDuplicateNotice();              // a copy's "Copied from ..." notice, and a leftover complaint about Step 02's Notion ID, belong to it too
+  _showNotionIdProblem("");
 }
 
 let _resetEpoch = 0;   // bumped by every resetAll() and re-parse, so a response that was in flight across it can tell
@@ -1967,6 +2004,10 @@ function syncFormToParsed() {
     // _netToGross/_grossToNet the moment Step 04 rendered, same bug.
     if (f === "agency_fee") {
       state.parsed[f] = _normalizeAgencyFee(el.value);
+      return;
+    }
+    if (f === "notion_id") {             // EVC-##### (or blank), also shown in the pill and Step 01's box; not a free-text field
+      _commitStep02NotionId({ quiet: true });
       return;
     }
     let v = el.value;

@@ -14,6 +14,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import copy
 import csv
 import io
 import json
@@ -93,6 +94,7 @@ from app.services import migrations as schema_migrations
 from app.services import schema_bootstrap
 from app.services import gamma_client
 from app.services import monthly_allocation
+from app.services import proposal_list as proposal_list_svc
 from app.services import notion_client
 from app.services import constanza_geo
 from app.services import constanza_meta
@@ -104,6 +106,7 @@ from app.services import audience_taxonomy
 from app.services import constanza_hispanic
 from app.services import llm_utils
 from app.services import platform_scenarios
+from app.services import proposal_duplicate
 from app.services import constanza_tiktok as tiktok_svc
 from app.services.tiktok_client import TikTokAPIError
 from app.services.constanza_audience import AudienceSpec, estimate_audience, load_interest_taxonomy, normalize_gender, parse_audience_text, split_hispanic_terms
@@ -616,7 +619,12 @@ def _save_proposal_metadata(
                 requester_ip = EXCLUDED.requester_ip,
                 requester_user_agent = EXCLUDED.requester_user_agent,
                 summary = EXCLUDED.summary,
-                reopen_state = EXCLUDED.reopen_state,
+                -- Every save rebuilds reopen_state from the page, which knows nothing of where a draft came from: keep the lineage of a
+                -- duplicated proposal ("Copied from ...") across autosaves and across the generate that promotes the draft. The notes a
+                -- duplicate leaves for its first visit are NOT kept: the first save drops them, which is "show once".
+                reopen_state = CASE WHEN proposals.reopen_state->'duplicated_from' IS NOT NULL
+                                    THEN EXCLUDED.reopen_state || jsonb_build_object('duplicated_from', proposals.reopen_state->'duplicated_from')
+                                    ELSE EXCLUDED.reopen_state END,
                 status = EXCLUDED.status,
                 updated_at = now()
             """,
@@ -640,6 +648,52 @@ def _save_proposal_metadata(
                 status,
             ),
         )
+
+
+def _insert_draft_if_absent(
+    *,
+    proposal_id: str,
+    client_name: str,
+    seller_email: str,
+    created_by_email: str,
+    requested_by: str,
+    notion_id: str | None,
+    proposal_title: str,
+    reopen_state: dict,
+    requester_ip: str | None = None,
+    requester_user_agent: str | None = None,
+) -> bool:
+    """Insert a brand-new DRAFT row, but only when nobody has taken `proposal_id` yet -> True when this call created it, False when the
+    row already existed (and was left exactly as it was). Used by the duplicate route, whose ids are derived from the request, so two
+    identical requests racing each other (a double click, a retry after a lost answer) land on the same id and exactly one inserts:
+    ON CONFLICT DO NOTHING decides it inside the database, where a check-then-insert in Python could not. Never an upsert, so it can
+    never overwrite a proposal. A draft has no files, no summary and no generated_at (the columns are left at their defaults)."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO proposals (
+                proposal_id, client_name, seller_email, created_by_email, requested_by, notion_id,
+                proposal_title, requester_ip, requester_user_agent, summary, reopen_state, status, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'draft', now())
+            ON CONFLICT (proposal_id) DO NOTHING
+            RETURNING proposal_id
+            """,
+            (
+                proposal_id,
+                client_name,
+                seller_email,
+                created_by_email,
+                requested_by,
+                notion_id,
+                proposal_title,
+                requester_ip,
+                requester_user_agent,
+                Jsonb({}),
+                Jsonb(reopen_state),
+            ),
+        ).fetchone()
+    return row is not None
 
 
 # ---------------------------------------------------------------------------
@@ -963,6 +1017,159 @@ class DraftSaveRequest(BaseModel):
     # real one once known — shown in My Proposals so a draft row isn't
     # blank; falls back to client_name server-side if empty.
     proposal_title: str = ""
+
+
+_DUPLICATE_REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{16,64}")
+_DUPLICATE_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_DUPLICATE_NOTION_ID = re.compile(r"(?:evc[-\s]?)?([0-9]{4,5})", re.IGNORECASE)
+_DUPLICATE_EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_DUPLICATE_YEARS = (2000, 2100)     # a typo like 2207 for 2027 is refused here instead of making a flight nobody meant
+
+
+def _duplicate_date(value, what: str) -> datetime:
+    """The form's date as a date (at midnight): exactly YYYY-MM-DD, a real calendar day, in a sane year. The messages are the ones the
+    quick form shows under the field."""
+    text = value.strip() if isinstance(value, str) else ""
+    if not _DUPLICATE_ISO_DATE.fullmatch(text):
+        raise ValueError(f"Enter the {what} as YYYY-MM-DD.")
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"The {what} isn't a real calendar date.")
+    if not _DUPLICATE_YEARS[0] <= parsed.year <= _DUPLICATE_YEARS[1]:
+        raise ValueError(f"The {what} must be in a year from {_DUPLICATE_YEARS[0]} to {_DUPLICATE_YEARS[1]}.")
+    return parsed
+
+
+class DuplicateProposalRequest(BaseModel):
+    """POST /api/proposal/{id}/duplicate's body: the "quick form" for the NEW opportunity (see app/services/proposal_duplicate.py).
+
+    Everything is cleaned here, so the transform and the database only ever see tidy text and real dates, and the messages are the plain
+    ones the dialog shows under each field (the dialog maps a 422's `loc` to the field and strips pydantic's "Value error, " prefix).
+    `requested_by`, `salesperson_email`, `salesperson_market` and `request_type` may be omitted or null, meaning "keep the original's";
+    an explicit empty string means blank. Unknown fields are ignored, as everywhere else in this app."""
+    # Minted by the dialog when it opens and kept for retries of that dialog: with the caller, the source and the body it fixes the new
+    # proposal's id, which is what makes a double click (or a retry after a lost answer) land on the same draft.
+    request_id: str
+    client_name: str                                  # never pre-filled with the original's: the old name must not survive by accident
+    start_date: str
+    end_date: str
+    notion_id: str = ""
+    agency_name: str = ""
+    agency_fee: Optional[float] = None                # a FRACTION (0.15), not a percent: the dialog converts what the planner typed
+    client_website: str = ""
+    requested_by: Optional[str] = None
+    salesperson_email: Optional[str] = None
+    salesperson_market: Optional[str] = None
+    request_type: Optional[str] = None
+    campaign_name: str = ""
+    keep_avails: bool = False                         # keep the Constanza avails estimates (calculated for the original client)
+
+    @field_validator("request_id", mode="before")
+    @classmethod
+    def _request_id_is_a_dialog_id(cls, v):
+        if not isinstance(v, str) or not _DUPLICATE_REQUEST_ID.fullmatch(v):
+            raise ValueError("The page didn't send a valid request id. Reload the page and try again.")
+        return v
+
+    @field_validator("client_name", mode="before")
+    @classmethod
+    def _client_name_is_needed(cls, v):
+        text = proposal_duplicate.plain_text(v, 200, "The client name")
+        if not text:
+            raise ValueError("Enter the new client's name.")
+        return text
+
+    @field_validator("start_date", mode="before")
+    @classmethod
+    def _start_is_a_real_date(cls, v):
+        return _duplicate_date(v, "start date").strftime("%Y-%m-%d")
+
+    @field_validator("end_date", mode="before")
+    @classmethod
+    def _end_is_a_real_date_after_the_start(cls, v, info):
+        end = _duplicate_date(v, "end date")
+        start = info.data.get("start_date")            # absent when the start itself was refused: that message is enough
+        if start:
+            first = datetime.strptime(start, "%Y-%m-%d")
+            if end < first:
+                raise ValueError("The end date can't be before the start date.")
+            if (end - first).days + 1 > proposal_duplicate.MAX_FLIGHT_DAYS:
+                raise ValueError("The flight can't be longer than 10 years.")
+        return end.strftime("%Y-%m-%d")
+
+    @field_validator("notion_id", mode="before")
+    @classmethod
+    def _notion_id_is_four_or_five_digits(cls, v):
+        text = proposal_duplicate.plain_text(v, 200, "The Notion ID")
+        if not text:
+            return ""
+        found = _DUPLICATE_NOTION_ID.fullmatch(text)
+        if not found:
+            raise ValueError("The Notion ID is a 4 or 5 digit number, for example EVC-48213.")
+        return f"EVC-{found.group(1)}"
+
+    @field_validator("agency_name", mode="before")
+    @classmethod
+    def _agency_name_is_plain(cls, v):
+        return proposal_duplicate.plain_text(v, 200, "The agency name")
+
+    @field_validator("campaign_name", mode="before")
+    @classmethod
+    def _campaign_name_is_plain(cls, v):
+        return proposal_duplicate.plain_text(v, 200, "The campaign name")
+
+    @field_validator("client_website", mode="before")
+    @classmethod
+    def _website_is_plain(cls, v):
+        return proposal_duplicate.plain_text(v, 300, "The website")
+
+    @field_validator("requested_by", mode="before")
+    @classmethod
+    def _requested_by_is_plain(cls, v):
+        return None if v is None else proposal_duplicate.plain_text(v, 200, "Requested by")
+
+    @field_validator("salesperson_market", mode="before")
+    @classmethod
+    def _market_is_plain(cls, v):
+        return None if v is None else proposal_duplicate.plain_text(v, 200, "The market")
+
+    @field_validator("request_type", mode="before")
+    @classmethod
+    def _request_type_is_plain(cls, v):
+        return None if v is None else proposal_duplicate.plain_text(v, 200, "The request type")
+
+    @field_validator("salesperson_email", mode="before")
+    @classmethod
+    def _email_looks_like_one(cls, v):
+        if v is None:
+            return None
+        text = proposal_duplicate.plain_text(v, 200, "The email")
+        if text and not _DUPLICATE_EMAIL.fullmatch(text):
+            raise ValueError("That doesn't look like an email address.")
+        return text
+
+    @field_validator("agency_fee", mode="before")
+    @classmethod
+    def _agency_fee_is_a_fraction(cls, v):
+        # STRICT: a fraction 0 <= f < 1, which is what ProposalRequest.agency_fee stores. The dialog converts the typed percent; this route
+        # does not guess whether 15 means 15% (Step 02's own field does, via _normalizeAgencyFee, and that dual reading is how "0.5" and "50" collide).
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        try:
+            if isinstance(v, bool):
+                raise TypeError
+            fee = float(v)
+        except (TypeError, ValueError):
+            raise ValueError("The agency fee must be a number between 0% and 99%.")
+        if not 0.0 <= fee < 1.0:                      # also false for NaN
+            raise ValueError("The agency fee must be between 0% and 99%.")
+        return fee or None                            # 0 means "no fee", the same as blank: classify_output_tabs only adds Gross for a fee > 0
+
+    @field_validator("keep_avails", mode="before")
+    @classmethod
+    def _keep_avails_defaults_to_off(cls, v):
+        return False if v is None else v
 
 
 class StrategyRequest(BaseModel):
@@ -2863,6 +3070,177 @@ async def delete_draft(proposal_id: str, request: Request) -> dict:
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Duplicate a proposal for a new client. What carries over and what resets lives in app/services/proposal_duplicate.py (a pure function
+# over the saved state); the two routes here only decide who may copy what, store the result as a DRAFT through the same builder every
+# draft save uses, and say what happened in words. No AI service is called anywhere on this path.
+# ---------------------------------------------------------------------------
+
+_DUPLICATE_DB_DOWN = "The database isn't reachable right now. Nothing was created. Try again in a moment."
+_DUPLICATE_NOT_SAVED = "We couldn't create the copy. Nothing was saved."
+_DUPLICATE_RETRY = "We couldn't create the copy. Please try again."
+
+
+def _duplicate_db(call, *args, **kwargs):
+    """One database call of the duplicate routes. A database that cannot be reached (DATABASE_URL missing, the server down, the pool busy
+    for too long) raises RuntimeError or psycopg.OperationalError, which the app would turn into a bare 500: say what happened instead."""
+    try:
+        return call(*args, **kwargs)
+    except (RuntimeError, psycopg.OperationalError) as exc:
+        _logger.warning("duplicate: the database could not be reached (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail=_DUPLICATE_DB_DOWN)
+
+
+def _duplicate_source(proposal_id: str, request: Request) -> tuple[dict, dict]:
+    """The proposal a duplicate starts from -> (its row, a private copy of its saved state with every product under its current name), or
+    the HTTPException that says why it cannot be copied: it isn't there (404), it isn't the caller's and the caller is no admin (403), it
+    was saved before reopening existed (410), or it holds no request details yet (409). The row is only read, never touched."""
+    meta = _duplicate_db(_get_proposal_metadata, proposal_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="We couldn't find that proposal. It may have been deleted.")
+    user = request.state.user
+    owner = (meta.get("created_by_email") or "").strip().lower()
+    if not user.get("is_admin") and (not owner or owner != (user.get("email") or "").strip().lower()):
+        raise HTTPException(status_code=403, detail="You can only duplicate your own proposals.")
+    state = meta.get("reopen_state")
+    if not state:
+        raise HTTPException(status_code=410, detail="This proposal was saved before copying was supported, so it can't be duplicated.")
+    if not isinstance(state, dict) or not isinstance(state.get("request"), dict) or not state["request"]:
+        raise HTTPException(status_code=409, detail="There's nothing to copy yet: this draft has no request details.")
+    return meta, _with_current_product_names(copy.deepcopy(state))
+
+
+def _duplicate_answer(*, new_id: str, created: bool, title: str, wizard_step, lineage: dict, notes: list, stats: dict) -> dict:
+    return {
+        "proposal_id": new_id,
+        "created": created,
+        "proposal_title": title,
+        "open_url": f"/?reopen={quote(new_id, safe='')}",      # the reopen path the page already has: the copy lands on Step 02
+        "wizard_step": wizard_step,
+        "duplicated_from": {key: lineage.get(key) for key in ("proposal_id", "title", "client_name")},
+        "notes": notes,
+        "stats": stats,
+    }
+
+
+def _duplicate_replay(existing: dict, *, source_id: str, source_state: dict, caller_email: str) -> dict:
+    """The answer for a copy that already exists (the same request sent twice): the copy as stored, `created: false`. A row that is not
+    THIS caller's copy of THIS source is refused (409): the id is derived from a secret, so that cannot happen by accident, but the check
+    costs nothing and a collision must never hand one planner another's proposal."""
+    stored = existing.get("reopen_state") if isinstance(existing.get("reopen_state"), dict) else {}
+    lineage = stored.get("duplicated_from") if isinstance(stored.get("duplicated_from"), dict) else {}
+    owner = (existing.get("created_by_email") or "").strip().lower()
+    if not owner or owner != caller_email.strip().lower() or lineage.get("proposal_id") != source_id:
+        raise HTTPException(status_code=409, detail=_DUPLICATE_RETRY)
+    notes = [n for n in stored["duplicate_notes"] if isinstance(n, dict)] if isinstance(stored.get("duplicate_notes"), list) else []
+    facts = proposal_duplicate.describe_source(stored)["source"]
+    return _duplicate_answer(
+        new_id=existing["proposal_id"], created=False, title=existing.get("proposal_title") or "", wizard_step=stored.get("wizard_step", 2),
+        lineage=lineage, notes=notes,
+        stats={"totals_before": proposal_duplicate.option_totals(source_state), "totals_after": proposal_duplicate.option_totals(stored),
+               "periods": facts["periods"], "time_unit": facts["time_unit"]},
+    )
+
+
+@app.get("/api/proposal/{proposal_id}/duplicate-defaults")
+async def duplicate_defaults(proposal_id: str, request: Request) -> dict:
+    """What the "Duplicate for a new client" form needs before it opens: facts about the proposal being copied (its dates and size, for
+    the form's one-line hint) and the values the form starts with. Read only. It also answers who may copy: the dialog opens only when this
+    succeeds, so a 403 or 410 is shown as a message instead of as a form that can never be submitted."""
+    meta, state = _duplicate_source(proposal_id, request)
+    described = proposal_duplicate.describe_source(state)
+    return {
+        "source": {
+            "proposal_id": proposal_id,
+            "title": meta.get("proposal_title") or "",
+            "client_name": meta.get("client_name") or state["request"].get("client_name") or "",
+            "status": meta.get("status") or "generated",
+            **described["source"],
+        },
+        "defaults": described["defaults"],
+    }
+
+
+@app.post("/api/proposal/{proposal_id}/duplicate")
+async def duplicate_proposal(proposal_id: str, body: DuplicateProposalRequest, request: Request) -> dict:
+    """
+    Copy a proposal (a draft or a generated one) for a NEW client: a fresh DRAFT that keeps the products, prices and options and takes the
+    client, dates and the rest of the basics from the form (app/services/proposal_duplicate.py has the rules). The page then opens the copy
+    with the reopen path it already has; it lands on Step 02, where a notice says what to check.
+
+    Allowed for the proposal's owner and for admins; the copy belongs to whoever makes it (an admin copying a planner's proposal gets a
+    draft in the admin's own history and the planner's proposal is not touched). The new id is derived from the caller, the source, the
+    dialog's request id and the form, so the same request twice (a double click, a retry after a lost answer) finds the same draft
+    (`created: false`) instead of making a second one, while a corrected form makes a new copy. One INSERT ... ON CONFLICT DO NOTHING creates
+    the row; nothing is written unless it succeeds.
+    """
+    meta, state = _duplicate_source(proposal_id, request)
+    user_email = request.state.user["email"]
+    basics = proposal_duplicate.DuplicateBasics(**body.model_dump(exclude={"request_id"}))
+    new_id = proposal_duplicate.derive_proposal_id(user_email, proposal_id, body.request_id, basics)
+
+    existing = _duplicate_db(_get_proposal_metadata, new_id)
+    if existing is not None:
+        return _duplicate_replay(existing, source_id=proposal_id, source_state=state, caller_email=user_email)
+
+    try:
+        result = proposal_duplicate.transform_reopen_state(state, basics, product_known=lambda name: by_name(name) is not None)
+        # The same models and builder every draft save uses, so the stored shape cannot drift from a saved draft.
+        draft = DraftSaveRequest(**result.state)
+        reopen_state = _build_reopen_state(
+            request_dict=draft.request, line_items=draft.line_items, tiers=draft.tiers, avails_data=draft.avails_data,
+            strategy_brief=draft.strategy_brief, roadblocks=draft.roadblocks, force_tabs=draft.force_tabs, addons=draft.addons,
+            raw_notion_text=draft.raw_notion_text, enrichment=draft.enrichment, time_unit=draft.time_unit,
+            monthly_distribution_mode=draft.monthly_distribution_mode, campaign_name_override=draft.campaign_name_override,
+            wizard_step=draft.wizard_step,
+        )
+        lineage = {
+            "proposal_id": proposal_id,
+            "title": str(meta.get("proposal_title") or meta.get("client_name") or "")[:200],
+            "client_name": str(meta.get("client_name") or state["request"].get("client_name") or "")[:200],
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        # Lineage is what the history shows as "Copied from ..."; the notes are for the first visit to Step 02 (the first autosave drops them).
+        reopen_state["duplicated_from"] = lineage
+        reopen_state["duplicate_notes"] = result.notes
+        copy_request = reopen_state["request"]
+        title = ai_enricher.build_proposal_title(
+            basics.notion_id or "----", basics.campaign_name or basics.client_name, copy_request.get("request_type") or "",
+            ref_date=basics.start_date, client_name=basics.client_name,
+        )
+    except Exception as exc:  # noqa: BLE001 - valid saved data cannot get here: it is a bug in the transform, and nothing has been written
+        detail = [list(err["loc"]) for err in exc.errors()] if hasattr(exc, "errors") and callable(exc.errors) else ""
+        _logger.error("duplicate: building the copy of %s failed (%s %s)", proposal_id, type(exc).__name__, detail)
+        raise HTTPException(status_code=500, detail=_DUPLICATE_NOT_SAVED)
+
+    created = _duplicate_db(
+        _insert_draft_if_absent,
+        proposal_id=new_id,
+        client_name=basics.client_name,
+        seller_email=copy_request.get("salesperson_email") or "",
+        created_by_email=user_email,
+        requested_by=copy_request.get("requested_by") or "",
+        notion_id=basics.notion_id or None,
+        proposal_title=title,
+        reopen_state=reopen_state,
+        requester_ip=request.client.host if request.client else "",
+        requester_user_agent=request.headers.get("user-agent", ""),
+    )
+    if not created:
+        # An identical request got there first (two clicks racing each other): answer with ITS draft.
+        existing = _duplicate_db(_get_proposal_metadata, new_id)
+        if existing is None:
+            raise HTTPException(status_code=409, detail=_DUPLICATE_RETRY)
+        return _duplicate_replay(existing, source_id=proposal_id, source_state=state, caller_email=user_email)
+    # Counters only: the log never carries a client name or an email.
+    _logger.info("duplicate proposal source=%s new=%s lines_reset=%d merges_dropped=%d avails_cleared=%d texts_cleared=%d", proposal_id, new_id,
+                 result.stats["split_reset"], result.stats["merges_dropped"], result.stats["avails_cleared"], result.stats["texts_cleared"])
+    return _duplicate_answer(
+        new_id=new_id, created=True, title=title, wizard_step=reopen_state["wizard_step"], lineage=lineage, notes=result.notes,
+        stats={key: result.stats[key] for key in ("totals_before", "totals_after", "periods", "time_unit")},
+    )
+
+
 @app.post("/api/proposal/{proposal_id}/reprompt-emails")
 async def reprompt_emails(proposal_id: str, body: RepromptEmailsRequest) -> dict:
     """
@@ -3759,14 +4137,31 @@ async def admin_delete_user(user_id: str, request: Request) -> dict:
 # be a genuinely large JSON blob (the full request/line_items/avails_data
 # for every tier), and the old query pulled it across the wire for EVERY
 # row just to immediately discard it on every single admin page load.
+# It must STAY out of this list: the page statement's COUNT(*) OVER() makes
+# every select-list expression run for every matching row, so one
+# `reopen_state->...` here is a 457 ms list instead of 7 ms (measured, 666
+# proposals); the few facts the list shows come out of it in a separate
+# statement for the page's ids only (app/services/proposal_list.py, which
+# refuses a column list that names it). created_by_email is the planner
+# column of the admin view (that route only puts it in the response).
 _PROPOSAL_LIST_COLUMNS = (
-    "proposal_id, client_name, seller_email, requested_by, notion_id, "
+    "proposal_id, client_name, seller_email, created_by_email, requested_by, notion_id, "
     "proposal_title, filename, generated_at, requester_ip, "
     "requester_user_agent, summary, status, updated_at"
 )
 
 
-def _query_proposals(*, mine_email: Optional[str], search: str, page: int, page_size: int) -> dict:
+def _query_proposals(
+    *,
+    mine_email: Optional[str],
+    search: str,
+    page: int,
+    page_size: int,
+    status: str = "all",
+    sort: str = "updated",
+    direction: Optional[str] = None,
+    admin: bool = False,
+) -> dict:
     """
     Shared query behind both /api/admin/proposals (any admin, defaults to
     their own but can see everyone's) and /api/my-proposals (any logged-in
@@ -3777,78 +4172,70 @@ def _query_proposals(*, mine_email: Optional[str], search: str, page: int, page_
     growing proposals table was an unbounded, ever-slower query on every
     single page load otherwise.
 
-    mine_email: None means no seller_email filter at all (admin "All
+    mine_email: None means no created_by_email filter at all (admin "All
     proposals"); any other value scopes to that exact email
     (case-insensitive) — the CALLER decides which, this function just
-    applies whatever it's given.
+    applies whatever it's given (an empty string scopes to nobody's rows,
+    never to everyone's).
+
+    status / sort / direction / search: the history page's filter button
+    (all | draft | generated), its sort (updated | client | value, each
+    ascending or descending) and its search box (every word must match);
+    all of it whitelisted or bound as parameters in
+    app/services/proposal_list.py, never put into the SQL text. `admin`
+    adds created_by_email (who generated it) to each row, for the admin
+    route only.
+
+    THREE statements, each cheap (see that module's docstring for why
+    reopen_state may only be read for the page's own ids): the PAGE, the
+    COUNTS behind the filter buttons (`facets`) and the saved plan's FACTS
+    (flight dates, how many lines, the draft's step, "copied from"). The
+    page is the one that must succeed, so it runs first; the counts and the
+    facts only decorate the list, so if either fails the list is still
+    returned without them (`facets` null, the facts null) and the log gets
+    the exception TYPE only — never the SQL parameters, which include what
+    the person typed in the search box.
     """
-    page = max(page, 1)
-    page_size = min(max(page_size, 1), 100)  # hard cap — this is a page size, not an export
-    offset = (page - 1) * page_size
-
-    where_clauses = []
-    params: list = []
-    if mine_email:
-        # created_by_email (the actual logged-in session that clicked
-        # Generate) — NOT seller_email (whatever the pasted Notion text's
-        # own "Salesperson email:" field said, which someone else may be
-        # the one generating on behalf of). See schema.sql's migration
-        # comment for the full reasoning; NULL for any proposal generated
-        # before this column existed, so those correctly never match here.
-        where_clauses.append("LOWER(created_by_email) = LOWER(%s)")
-        params.append(mine_email)
-    search = search.strip()
-    if search:
-        like = f"%{search}%"
-        where_clauses.append(
-            "(client_name ILIKE %s OR seller_email ILIKE %s OR requested_by ILIKE %s "
-            "OR notion_id ILIKE %s OR proposal_title ILIKE %s)"
-        )
-        params.extend([like, like, like, like, like])
-    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
-
-    # COUNT(*) OVER() rides along with the page's own rows in one round
-    # trip, instead of a second full COUNT query just for the "N total"
-    # figure the pagination UI needs.
-    rows = fetch_all(
-        f"""
-        SELECT {_PROPOSAL_LIST_COLUMNS}, COUNT(*) OVER() AS total_count
-        FROM proposals
-        {where_sql}
-        ORDER BY updated_at DESC
-        LIMIT %s OFFSET %s
-        """,
-        (*params, page_size, offset),
+    plan = proposal_list_svc.plan_list(
+        columns=_PROPOSAL_LIST_COLUMNS, mine_email=mine_email, search=search, page=page, page_size=page_size,
+        status=status, sort=sort, direction=direction,
     )
+
+    rows = fetch_all(plan.page_sql, plan.page_params)
+
+    facets = None
+    try:
+        facets = proposal_list_svc.facets_from_rows(fetch_all(plan.counts_sql, plan.counts_params))
+    except Exception as exc:  # noqa: BLE001 - the filter buttons' counts are a nicety; the list must still load
+        logging.getLogger(__name__).warning(
+            "proposal list: the status counts failed (%s); answering without them", type(exc).__name__)
+
+    facts = None
+    if rows:
+        try:
+            facts = proposal_list_svc.facts_by_id(fetch_all(
+                proposal_list_svc.FACTS_SQL, proposal_list_svc.facts_params(row["proposal_id"] for row in rows)))
+        except Exception as exc:  # noqa: BLE001 - flight dates, line counts and the like are a nicety too
+            logging.getLogger(__name__).warning(
+                "proposal list: the saved-plan facts failed (%s); answering without them", type(exc).__name__)
 
     total_count = rows[0]["total_count"] if rows else 0
     proposals = []
     for row in rows:
         meta = _proposal_metadata_from_row(row)
-        proposals.append({
-            "proposal_id": meta["proposal_id"],
-            "client_name": meta.get("client_name", ""),
-            "seller_email": meta.get("seller_email", ""),
-            "requested_by": meta.get("requested_by", ""),
-            "notion_id": meta.get("notion_id", ""),
-            "proposal_title": meta.get("proposal_title", ""),
-            "filename": meta.get("filename", ""),
-            "generated_at": meta.get("generated_at", ""),
-            "requester_ip": meta.get("requester_ip", ""),
-            "requester_user_agent": meta.get("requester_user_agent", ""),
-            "total_net": (meta.get("summary") or {}).get("total_net"),
-            "total_gross": (meta.get("summary") or {}).get("total_gross"),
-            "tabs_built": (meta.get("summary") or {}).get("tabs_built", []),
-            "status": meta.get("status") or "generated",
-            "updated_at": meta.get("updated_at", ""),
-        })
+        proposals.append(proposal_list_svc.shape_row(
+            meta, facts.get(meta["proposal_id"]) if facts is not None else None, admin=admin))
     return {
         "proposals": proposals,
         "count": len(proposals),
         "total_count": total_count,
-        "page": page,
-        "page_size": page_size,
-        "total_pages": max(1, -(-total_count // page_size)),  # ceil division
+        "page": plan.page,
+        "page_size": plan.page_size,
+        "total_pages": max(1, -(-total_count // plan.page_size)),  # ceil division
+        # The three filter buttons' figures (scope and search, NOT the status), or null if that query failed.
+        "facets": facets,
+        # status / sort / dir as they were understood, after normalisation.
+        "applied": plan.applied,
     }
 
 
@@ -3859,6 +4246,9 @@ async def admin_list_proposals(
     page_size: int = 25,
     mine: bool = True,
     search: str = "",
+    status: proposal_list_svc.StatusParam = "all",
+    sort: proposal_list_svc.SortParam = "updated",
+    dir: Optional[proposal_list_svc.DirParam] = None,  # noqa: A002 - `dir` is the query parameter's name
 ) -> dict:
     """
     List generated proposals, newest first — client, seller, Notion ID,
@@ -3866,7 +4256,7 @@ async def admin_list_proposals(
     /api/my-proposals for the non-admin equivalent).
 
     mine: True (the default) scopes to the LOGGED-IN admin's own
-    proposals (seller_email matches their login email, case-insensitive)
+    proposals (created_by_email matches their login email, case-insensitive)
     — per explicit request, planners land on "my work" first rather than
     the whole company's history. False returns everyone's — an admin
     privilege /api/my-proposals deliberately doesn't have.
@@ -3875,15 +4265,38 @@ async def admin_list_proposals(
     proposal title) — applied server-side now that the full list isn't
     sitting in the browser to filter client-side anymore; a search
     box keystroke is a real request now, not an instant in-memory filter.
+    Every typed word must match (client, seller/AE, Notion ID or title),
+    case-insensitively; at most 200 characters / 6 words are looked at.
+
+    status: all (default) | draft | generated. sort: updated (default) |
+    client | value, dir: asc | desc (default: that sort's natural way —
+    newest, A to Z, biggest first). Anything else is a 422 before any SQL
+    exists. Each row also says created_by_email (who generated it), the
+    flight dates, line / option counts, the draft's wizard step, whether
+    it can be reopened and where a copy came from, and the response has
+    `facets` (the counts behind the status buttons) and `applied`.
     """
-    return _query_proposals(
+    # The statements are blocking database calls (about 10-25 ms, three in
+    # a row): off the event loop, so a busy history list can't stall every
+    # other request this process is serving.
+    return await asyncio.to_thread(
+        _query_proposals,
         mine_email=request.state.user["email"] if mine else None,
         search=search, page=page, page_size=page_size,
+        status=status, sort=sort, direction=dir, admin=True,
     )
 
 
 @app.get("/api/my-proposals")
-async def my_proposals(request: Request, page: int = 1, page_size: int = 10, search: str = "") -> dict:
+async def my_proposals(
+    request: Request,
+    page: int = 1,
+    page_size: int = 10,
+    search: str = "",
+    status: proposal_list_svc.StatusParam = "all",
+    sort: proposal_list_svc.SortParam = "updated",
+    dir: Optional[proposal_list_svc.DirParam] = None,  # noqa: A002 - `dir` is the query parameter's name
+) -> dict:
     """
     A non-admin planner's OWN proposal history — same paginated/searched
     query /api/admin/proposals uses, but deliberately a separate route
@@ -3893,11 +4306,16 @@ async def my_proposals(request: Request, page: int = 1, page_size: int = 10, sea
     carved-out exception inside that admin-only gate. Always scoped to
     the CALLER's own email server-side — there's no `mine` param to
     override, unlike the admin endpoint, so a non-admin can never see
-    anyone else's history no matter what they pass.
+    anyone else's history no matter what they pass. Takes the admin
+    route's status / sort / dir / search (see there), but never reports
+    created_by_email: it is the caller's own email, and that column is the
+    admin view's.
     """
-    return _query_proposals(
+    return await asyncio.to_thread(
+        _query_proposals,
         mine_email=request.state.user["email"],
         search=search, page=page, page_size=page_size,
+        status=status, sort=sort, direction=dir,
     )
 
 
