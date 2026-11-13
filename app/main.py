@@ -113,10 +113,13 @@ from app.services.line_modifier import clean_line_modifier_or_none
 # the imports are done (never from inside an import: constanza_methods.py explains why).
 constanza_methods.ensure_loaded()
 
-_ROADBLOCKS_TOTAL_TIMEOUT_SECONDS = 60.0
-_GENERATE_ENRICHMENT_TIMEOUT_SECONDS = 60.0
-_STRATEGY_REQUEST_TIMEOUT_SECONDS = 60.0
-_AI_REVISION_TIMEOUT_SECONDS = 60.0
+# How long a planner waits for an AI step before it is given up on, whole step included (a search-backed answer can be cut off and asked
+# again at twice the size, so one step may be two model calls). Each is longer than llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS (a single call),
+# so a slow model reports its own "timed out" and not this outer one. Raised from 60 s: enrichment at 60 s was timing out on real proposals.
+_ROADBLOCKS_TOTAL_TIMEOUT_SECONDS = 120.0
+_GENERATE_ENRICHMENT_TIMEOUT_SECONDS = 120.0
+_STRATEGY_REQUEST_TIMEOUT_SECONDS = 120.0
+_AI_REVISION_TIMEOUT_SECONDS = 120.0
 _roadblocks_tasks: set[asyncio.Task] = set()
 _generate_enrichment_tasks: set[asyncio.Task] = set()
 
@@ -4201,6 +4204,10 @@ async def admin_create_product(body: ProductRequest, request: Request) -> dict:
         raise HTTPException(status_code=503, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception:  # noqa: BLE001 - a bare 500 reads "Request failed." in the form; say what happened, and log the rest
+        logging.getLogger(__name__).exception("adding a product failed unexpectedly")
+        raise HTTPException(status_code=500, detail="The product was not added because of an unexpected server error. "
+                                                    "The details are in the server log.")
     inherited, warning = 0, None
     if created.get("copied_from"):
         try:
@@ -4228,6 +4235,10 @@ async def admin_update_product(product_id: int, body: ProductRequest) -> dict:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception:  # noqa: BLE001 - see admin_create_product
+        logging.getLogger(__name__).exception("saving a product failed unexpectedly")
+        raise HTTPException(status_code=500, detail="The change was not saved because of an unexpected server error. "
+                                                    "The details are in the server log.")
     return {"saved": True, "product": updated}
 
 

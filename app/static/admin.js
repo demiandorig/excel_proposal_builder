@@ -109,7 +109,7 @@ async function loadAnalytics() {
   contentEl.classList.add("analytics-loading-dim");
   try {
     const res = await fetch(`/api/admin/analytics?window=${encodeURIComponent(adminState.analyticsWindow)}`);
-    if (!res.ok) throw new Error(res.statusText);
+    if (!res.ok) throw new Error(httpStatusText(res));
     adminState.analytics = await res.json();
     adminState.analyticsLoaded = true;
     renderAnalytics(adminState.analytics);
@@ -282,7 +282,7 @@ async function downloadCsv(url, btn) {
   btn.innerHTML = '<span class="btn-inline-spinner"></span>Exporting…';
   try {
     const res = await fetch(url);
-    if (!res.ok) throw new Error((await res.text().catch(() => "")) || res.statusText);
+    if (!res.ok) throw new Error((await res.text().catch(() => "")) || httpStatusText(res));
     const blob = await res.blob();
     // Filename from the server's Content-Disposition header when present
     // (all three export endpoints set one) — falls back to a generic name
@@ -325,7 +325,7 @@ function wireBulkUpload() {
     try {
       const res = await fetch("/api/admin/products/bulk-upsert", { method: "POST", body: formData });
       const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.detail || res.statusText);
+      if (!res.ok) throw new Error(body.detail || httpStatusText(res));
       renderBulkUploadResult(body);
       await loadRates();
     } catch (err) {
@@ -374,7 +374,7 @@ async function loadProposals() {
     const res = await fetch(`/api/admin/proposals?${params}`);
     if (adminState._proposalsRequestToken !== requestToken) return;  // superseded
     const data = await res.json();
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     adminState.proposals = data.proposals || [];
     adminState.proposalsTotalCount = data.total_count || 0;
     adminState.proposalsTotalPages = data.total_pages || 1;
@@ -469,7 +469,7 @@ async function loadRates() {
   try {
     const res = await fetch("/api/admin/products");
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     adminState.rates = data.products || [];
     adminState.productFamilies = data.families || [];
     adminState.ratesLoaded = true;
@@ -588,7 +588,7 @@ async function onSaveRate(productId) {
       body: JSON.stringify(payload),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(body.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(body.detail, httpStatusText(res)));
     btn.textContent = "Saved ✓";
     if (adminState.dirtyRates) delete adminState.dirtyRates[String(productId)];
     await loadRates();
@@ -607,7 +607,7 @@ async function onDeleteProduct(productId) {
     const res = await fetch(`/api/admin/products/${productId}`, { method: "DELETE" });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(detailText(body.detail, res.statusText));
+      throw new Error(detailText(body.detail, httpStatusText(res)));
     }
     if (adminState.dirtyRates) delete adminState.dirtyRates[String(productId)];
     await loadRates();
@@ -735,7 +735,7 @@ async function onSubmitProduct(e) {
       body: JSON.stringify(payload),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(body.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(body.detail, httpStatusText(res)));
     if (adminState.productFormToken === token) closeProductForm();         // not if the planner moved on meanwhile
     showProductNotice(mode, body);
     await loadRates();
@@ -843,7 +843,7 @@ async function _saveCcsList(btnId, inputId, endpoint) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ccs }),
     });
-    if (!res.ok) throw new Error(res.statusText);
+    if (!res.ok) throw new Error(httpStatusText(res));
     input.value = ccs.join(", ");
     btn.textContent = "Saved ✓";
   } catch (e) {
@@ -914,7 +914,7 @@ async function onSaveMarket(marketKey) {
     });
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.detail || res.statusText);
+      throw new Error(errBody.detail || httpStatusText(res));
     }
     btn.textContent = "Saved ✓";
     await loadMarketConfig();
@@ -931,7 +931,7 @@ async function onDeleteMarket(marketKey) {
     const res = await fetch(`/api/admin/market-config/${encodeURIComponent(marketKey)}`, { method: "DELETE" });
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
-      throw new Error(errBody.detail || res.statusText);
+      throw new Error(errBody.detail || httpStatusText(res));
     }
     await loadMarketConfig();
   } catch (e) {
@@ -1053,7 +1053,7 @@ async function onUpdateUser(userId, patch) {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
+      throw new Error(body.detail || httpStatusText(res));
     }
     await loadUsers();
   } catch (e) {
@@ -1080,7 +1080,7 @@ async function onDeleteUser(userId) {
     const res = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE" });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || res.statusText);
+      throw new Error(body.detail || httpStatusText(res));
     }
     await loadUsers();
   } catch (e) {
@@ -1111,7 +1111,7 @@ function wireAddUser() {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body.detail || res.statusText);
+        throw new Error(body.detail || httpStatusText(res));
       }
       form.reset();
       panel.open = false;
@@ -1138,7 +1138,7 @@ async function loadDisclaimers() {
   try {
     const res = await fetch("/api/admin/disclaimers");
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     adminState.disclaimers = data.disclaimers || [];
     adminState.disclaimerColors = data.colors || {};
     adminState.disclaimerSwatches = data.color_swatches || {};
@@ -1259,7 +1259,7 @@ async function toggleDisclaimer(id, isActive) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ is_active: isActive }),
     });
-    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, httpStatusText(res)));
   } catch (e) {
     alert("Update failed: " + e.message);
   }
@@ -1271,7 +1271,7 @@ async function deleteDisclaimer(id) {
   if (!confirm(`Delete the "${d ? d.name : id}" disclaimer? Exports will stop including it. This can't be undone.`)) return;
   try {
     const res = await fetch(`/api/admin/disclaimers/${encodeURIComponent(id)}`, { method: "DELETE" });
-    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, httpStatusText(res)));
     if (adminState.disclaimerEditingId === id) resetDisclaimerForm();
   } catch (e) {
     alert("Delete failed: " + e.message);
@@ -1307,7 +1307,7 @@ function wireDisclaimers() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(disclaimerFormPayload()),
         });
-      if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+      if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, httpStatusText(res)));
       resetDisclaimerForm();
       document.getElementById("dz-form-panel").open = false;
       await loadDisclaimers();
@@ -1337,7 +1337,7 @@ async function loadFaq() {
   try {
     const res = await fetch("/api/admin/faq");
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     adminState.faq = data.entries || [];
     adminState.faqLoaded = true;
     const link = document.getElementById("faq-guidelines-link");
@@ -1456,7 +1456,7 @@ async function onSubmitFaq(e) {
       body: JSON.stringify(payload),
     });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(body.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(body.detail, httpStatusText(res)));
     if (adminState.faqFormToken === token) closeFaqForm();        // not if the admin moved on meanwhile
     await loadFaq();
   } catch (err) {
@@ -1478,7 +1478,7 @@ async function onDeleteFaq(id) {
   if (!confirm(`Delete this row?\n\n${entry.services}`)) return;
   try {
     const res = await fetch(`/api/admin/faq/${id}`, { method: "DELETE" });
-    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, httpStatusText(res)));
     if (adminState.faqEditingId === id) closeFaqForm();
     await loadFaq();
   } catch (err) {
@@ -1491,7 +1491,7 @@ async function onMoveFaq(id, direction) {
     const res = await fetch(`/api/admin/faq/${id}/move`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ direction }),
     });
-    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, res.statusText));
+    if (!res.ok) throw new Error(detailText((await res.json().catch(() => ({}))).detail, httpStatusText(res)));
     await loadFaq();
   } catch (err) {
     alert("Move failed: " + err.message);
@@ -1510,7 +1510,7 @@ async function loadRestrictions() {
   try {
     const res = await fetch("/api/admin/restrictions");
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     applyRestrictionsPayload(data);
   } catch (e) {
     document.getElementById("rs-list").innerHTML = `<p class="admin-empty">Failed to load: ${escapeHtml(e.message)}</p>`;
@@ -1602,6 +1602,12 @@ function renderRestrictions() {
   });
 }
 
+// What to say when the server's reply carries no message of its own (a 500 page, a proxy error): HTTP/2 has no status text, and
+// "Request failed." alone gave a planner nothing to report.
+function httpStatusText(res) {
+  return (res && res.statusText) || (res && res.status ? `The server answered with an error (HTTP ${res.status}).` : "");
+}
+
 // FastAPI reports a validation failure as an ARRAY of {msg, loc, ...}; show its messages, not "[object Object]".
 function detailText(detail, fallback) {
   const one = d => {
@@ -1656,7 +1662,7 @@ async function saveRestriction(card, known) {
       body: JSON.stringify(payload),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     applyRestrictionsPayload(data);
     // The re-render above rebuilt this card; put the not-in-the-catalog warning back so it survives the save.
     if (unknown.length) {
@@ -1679,7 +1685,7 @@ async function deleteRestriction(card) {
   try {
     const res = await fetch(`/api/admin/restrictions/${encodeURIComponent(name)}`, { method: "DELETE" });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     applyRestrictionsPayload(data);
   } catch (e) {
     errEl.textContent = e.message;
@@ -1728,7 +1734,7 @@ function wireAddRestriction() {
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+      if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
       form.reset();
       syncType();
       document.getElementById("rs-add-panel").open = false;
@@ -1756,7 +1762,7 @@ function wireRestrictions() {
     try {
       const res = await request();
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+      if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
       applyRestrictionsPayload(data);
     } catch (e) {
       errEl.textContent = e.message;
@@ -1876,7 +1882,7 @@ async function loadConnections() {
   try {
     const res = await fetch("/api/admin/constanza/methods");
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     adminState.methods = Array.isArray(data) ? data : (data.methods || []);
     if (host) { const err = host.querySelector("[data-conn-error]"); if (err) err.remove(); }
     renderConnectionCards();
@@ -1895,7 +1901,7 @@ async function loadConnectionStatus(key) {
   try {
     const res = await fetch(_connPath(m, "status_url", `/api/constanza/${key}/status`));
     const s = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(s.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(s.detail, httpStatusText(res)));
     if (s.configured) {
       const mult = s.scenarios && s.scenarios.multipliers;
       const times = mult ? [mult.conservative, mult.mid, mult.upper] : (s.impressions_per_person != null ? [s.impressions_per_person] : []);
@@ -1926,7 +1932,7 @@ async function testConnection(key) {
   try {
     const res = await fetch(_connPath(m, "test_url", `/api/admin/constanza/${key}/test`), { method: "POST" });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     list.innerHTML = (data.checks || []).map(c => {
       const mark = !c.ok ? "✗" : (c.warn ? "!" : "✓");
       const cls = !c.ok ? "fc-chk-bad" : (c.warn ? "fc-chk-warn" : "fc-chk-ok");
@@ -1950,7 +1956,7 @@ async function loadForecast() {
   try {
     const res = await fetch("/api/admin/forecast-map");
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     adminState.forecastLoaded = true;
     applyForecastPayload(data);
   } catch (e) {
@@ -2162,7 +2168,7 @@ async function saveForecastRow(tr, changed) {
       body: JSON.stringify({ product_name: name, enabled, method, platform, hispanic_weighted: hispanic, win_rate: winRate }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     applyForecastPayload(data);
     const fresh = document.querySelector(`#fc-body tr[data-fc-product="${CSS.escape(name)}"]`);
     if (fresh) _forecastStatus(fresh, "Saved ✓", false);
@@ -2184,7 +2190,7 @@ async function resetForecastRow(tr) {
       body: JSON.stringify({ product_name: name }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     applyForecastPayload(data);
     const fresh = document.querySelector(`#fc-body tr[data-fc-product="${CSS.escape(name)}"]`);
     if (fresh) _forecastStatus(fresh, "Back to default ✓", false);
@@ -2208,7 +2214,7 @@ async function addForecastPlatformProduct(btn) {
       body: JSON.stringify({ product_name: name }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(detailText(data.detail, res.statusText));
+    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
     applyForecastPayload(data);
     adminState.ratesLoaded = false;        // the Product Catalog tab must show the new product next time it opens
   } catch (e) {

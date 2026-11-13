@@ -12,7 +12,9 @@ _logger = logging.getLogger(__name__)
 
 REPAIR_MODEL = "gpt-5-mini"
 REPAIR_MAX_COMPLETION_TOKENS = 16000
-OPENAI_REQUEST_TIMEOUT_SECONDS = 50.0
+# One model call. Kept shorter than every whole-step budget in app/main.py (_GENERATE_ENRICHMENT_TIMEOUT_SECONDS and its siblings, 120 s) so a
+# slow model fails here with its own "timed out" message first; a test pins that order.
+OPENAI_REQUEST_TIMEOUT_SECONDS = 110.0
 OPENAI_MAX_RETRIES = 0
 
 

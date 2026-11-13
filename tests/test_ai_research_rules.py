@@ -464,7 +464,7 @@ def test_strategy_generation_uses_a_bounded_provider_deadline(monkeypatch):
     monkeypatch.setattr(llm_utils, "responses_text", timed_out)
     result = asyncio.run(sb.generate_brief(_request()))
 
-    assert client_options["timeout"] == 50.0
+    assert client_options["timeout"] == llm_utils.OPENAI_REQUEST_TIMEOUT_SECONDS      # (the number itself is pinned in test_ai_time_limits.py)
     assert client_options["max_retries"] == 0
     assert "timed out" in result["error"].lower()
 

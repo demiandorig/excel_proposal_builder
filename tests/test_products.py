@@ -10,6 +10,7 @@ import csv
 import io
 import os
 import re
+from pathlib import Path
 
 os.environ.setdefault("DATABASE_URL", "postgresql://fake:fake@localhost/fake")
 
@@ -39,6 +40,8 @@ class FakeDB:
         self.aliases: dict[str, str] = {}
         self._next_id = max([r["id"] for r in self.rows], default=0) + 1
         self.statements: list[str] = []
+        self.has_key_column = True                 # False: a database from before products.product_key (migration 0001)
+        self.fail_next_insert = None               # an exception to raise from the next INSERT INTO products
 
     # context manager protocol of get_connection()
     def __call__(self):
@@ -79,6 +82,10 @@ class FakeDB:
             return _Result([dict(r) for r in self._ordered()])
         if q.startswith("SELECT id, is_deleted, name FROM products"):
             return _Result([{"id": r["id"], "is_deleted": r["is_deleted"], "name": r["name"]} for r in self.rows])
+        if q.startswith("SELECT 1 FROM information_schema.columns") and "column_name = 'product_key'" in q:
+            return _Result([{"?column?": 1}] if self.has_key_column else [])
+        if q.startswith("SELECT product_key FROM products WHERE product_key IS NOT NULL"):
+            return _Result([{"product_key": r["product_key"]} for r in self.rows if r.get("product_key")])
         if q.startswith("SELECT COALESCE(MAX(sort_order)"):
             return _Result([{"n": max([r["sort_order"] for r in self.rows], default=-1) + 1}])
         if q.startswith("UPDATE products SET sort_order = sort_order + 1 WHERE sort_order >= %s"):
@@ -87,8 +94,13 @@ class FakeDB:
                     r["sort_order"] += 1
             return _Result([])
         if q.startswith("INSERT INTO products (sort_order,"):
+            if self.fail_next_insert is not None:
+                error, self.fail_next_insert = self.fail_next_insert, None
+                raise error
             seeding = q.startswith("INSERT INTO products (sort_order, is_deleted,")
             cols = ["sort_order"] + (["is_deleted"] if seeding else []) + list(catalog._PRODUCT_COLUMNS)
+            if ", product_key)" in q:
+                cols.append("product_key")
             row = dict(zip(cols, params))
             row.setdefault("is_deleted", False)
             if "ON CONFLICT (name) DO NOTHING" in q and any(r["name"] == row["name"] for r in self.rows):
@@ -483,3 +495,136 @@ def test_reopening_a_saved_proposal_shows_a_split_or_renamed_product_under_its_c
     assert fixed["line_items"][0]["product_name"] == "YouTube Ads - Skippable" and fixed["line_items"][1]["product_name"] == "Search - SEM"
     assert fixed["tiers"][0]["line_items"][0]["product_name"] == "YouTube Ads - Skippable"
     assert fixed["tiers"][0]["line_items"][1]["product_name"] == "Totally Unknown"       # untouched when it can't be resolved
+
+
+# --- the stable key (products.product_key) is set by the application, not only by a database trigger ---------------------
+#
+# Published deployments never run migrations, so the trigger of migration 0001 that filled products.product_key can be missing
+# there while the NOT NULL column is present: every Add Product then failed with a bare 500 ("Request failed." in the form).
+
+def _violation(kind, *, column=None, constraint=None):
+    """A psycopg error carrying the diagnostics the database would have attached."""
+    import types
+    import psycopg
+
+    class _Err(getattr(psycopg.errors, kind)):
+        diag = types.SimpleNamespace(column_name=column, constraint_name=constraint)
+    return _Err(f"{kind}: details the planner must never see: (secret-ish) row data")
+
+
+@pytest.mark.parametrize("name,key", [
+    ("Google Search", "google-search"), ("  Meta | Awareness!! ", "meta-awareness"), ("---", ""), ("", ""),
+    ("Ünïcode Ads", "n-code-ads"), ("A" * 120, "a" * 80),
+    ("x-" * 60, "x-" * 40),                     # trimmed first, then cut to 80 characters (which may end in a dash), as left(trim(...), 80) does
+])
+def test_the_key_slug_follows_the_database_function_it_replaces(name, key):
+    assert catalog.product_key_slug(name) == key
+
+
+def test_a_taken_key_gets_the_next_number_like_the_trigger_does():
+    assert catalog.next_product_key("Google Search", set()) == "google-search"
+    assert catalog.next_product_key("Google Search", {"google-search"}) == "google-search-2"
+    assert catalog.next_product_key("Google Search", {"google-search", "google-search-2"}) == "google-search-3"
+    assert catalog.next_product_key("", {"product"}) == "product-2"
+    assert catalog.next_product_key("---", set()) == "product"            # nothing left of the name: the same fallback as the trigger
+
+
+def test_a_new_product_is_inserted_with_its_stable_key_so_no_trigger_is_needed(db):
+    out = catalog.create_product({"name": "Google Search", "family": "Search", "buying_model": "Fixed"})
+    row = next(r for r in db.rows if r["id"] == out["id"])
+    assert row["product_key"] == "google-search"
+    assert any(", product_key)" in q for q in db.statements if q.startswith("INSERT INTO products"))
+
+
+def test_a_second_product_with_a_look_alike_name_gets_a_numbered_key(db):
+    db.rows[0]["product_key"] = "google-search"
+    out = catalog.create_product({"name": "Google  Search!", "family": "Search", "buying_model": "Fixed"})
+    assert next(r for r in db.rows if r["id"] == out["id"])["product_key"] == "google-search-2"
+
+
+def test_a_copy_gets_its_own_key_not_its_sources(db):
+    db.rows[0]["product_key"] = "alpha"
+    out = catalog.create_product({"name": "Alpha (copy)"}, copy_from_id=db.rows[0]["id"])
+    assert next(r for r in db.rows if r["id"] == out["id"])["product_key"] == "alpha-copy"
+
+
+def test_a_database_without_the_key_column_still_adds_a_product(db):
+    db.has_key_column = False
+    out = catalog.create_product({"name": "Google Search", "family": "Search", "buying_model": "Fixed"})
+    assert "product_key" not in next(r for r in db.rows if r["id"] == out["id"])
+    assert not any("product_key)" in q for q in db.statements if q.startswith("INSERT INTO products"))
+
+
+def test_a_deleted_product_brought_back_keeps_the_key_it_had(db):
+    db.rows[2]["is_deleted"], db.rows[2]["product_key"] = True, "charlie"
+    out = catalog.create_product({"name": "Charlie", "family": "Display", "buying_model": "CPM"})
+    revived = next(r for r in db.rows if r["id"] == out["id"])
+    assert revived["id"] == 3 and revived["product_key"] == "charlie" and revived["is_deleted"] is False
+
+
+def test_two_products_added_at_the_same_instant_do_not_fail_one_of_them(db):
+    """The second adder's key was taken between reading the keys and inserting: it reads them again instead of reporting 'already exists'."""
+    db.fail_next_insert = _violation("UniqueViolation", constraint="products_product_key_uq")
+    out = catalog.create_product({"name": "Google Search", "family": "Search", "buying_model": "Fixed"})
+    assert out["name"] == "Google Search" and sum(1 for r in db.rows if r["name"] == "Google Search") == 1
+
+
+def test_a_clash_on_the_name_is_still_said_as_a_name_clash(db):
+    db.fail_next_insert = _violation("UniqueViolation", constraint="products_name_key")
+    with pytest.raises(ValueError, match="already exists"):
+        catalog.create_product({"name": "Google Search", "family": "Search", "buying_model": "Fixed"})
+
+
+@pytest.mark.parametrize("error,must_say", [
+    (_violation("NotNullViolation", column="some_new_column"), "'some_new_column'"),
+    (_violation("CheckViolation", constraint="products_buying_model_check"), "'products_buying_model_check'"),
+    (_violation("UndefinedColumn"), "out of date"),
+    (_violation("OperationalError"), "couldn't add the product just now"),
+])
+def test_a_database_refusal_becomes_a_sentence_that_says_what_to_look_at_and_none_of_the_data(db, error, must_say):
+    db.fail_next_insert = error
+    with pytest.raises(RuntimeError) as exc:
+        catalog.create_product({"name": "Google Search", "family": "Search", "buying_model": "Fixed"})
+    message = str(exc.value)
+    assert must_say in message and "server log" in message
+    assert "row data" not in message and "secret-ish" not in message
+
+
+def test_the_route_turns_that_sentence_into_json_not_a_bare_500(db):
+    import app.main as m
+    db.fail_next_insert = _violation("NotNullViolation", column="some_new_column")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(m.admin_create_product(m.ProductRequest(name="Google Search", family="Search", buying_model="Fixed"), _Req()))
+    assert exc.value.status_code == 503 and "some_new_column" in exc.value.detail
+
+
+@pytest.mark.parametrize("call", ["create", "update"])
+def test_a_surprise_in_the_catalog_layer_is_a_json_500_with_a_sentence_and_not_the_default_page(monkeypatch, call):
+    import app.main as m
+
+    def boom(*a, **k):
+        raise TypeError("something nobody foresaw: internal detail")      # (a KeyError would be a LookupError: the route's 404)
+    monkeypatch.setattr(m, "catalog_create_product" if call == "create" else "catalog_update_product", boom)
+    with pytest.raises(HTTPException) as exc:
+        if call == "create":
+            asyncio.run(m.admin_create_product(m.ProductRequest(name="X"), _Req()))
+        else:
+            asyncio.run(m.admin_update_product(1, m.ProductRequest(name="X")))
+    assert exc.value.status_code == 500 and "server log" in exc.value.detail and "internal detail" not in exc.value.detail
+
+
+def test_bulk_upload_gives_every_new_product_its_own_key(db):
+    out = catalog.bulk_upsert_products([
+        {"line": 2, "fields": {"name": "Google Search", "family": "Search", "buying_model": "Fixed"}},
+        {"line": 3, "fields": {"name": "Google  Search?", "family": "Search", "buying_model": "Fixed"}},
+    ])
+    assert out["errors"] == [] and len(out["created"]) == 2
+    keys = {r["product_key"] for r in db.rows if r["name"].startswith("Google")}
+    assert keys == {"google-search", "google-search-2"}
+
+
+def test_the_form_script_names_the_status_when_the_server_sends_no_message():
+    """Behind HTTP/2 a reply has no status text and a 500 page is not JSON: the form said only 'Request failed.'."""
+    js = (Path(__file__).resolve().parents[1] / "app" / "static" / "admin.js").read_text(encoding="utf-8")
+    assert "function httpStatusText(res)" in js and "HTTP ${res.status}" in js
+    assert "res.statusText" not in js.replace("(res && res.statusText)", "")
