@@ -111,6 +111,12 @@ the browser) and opens the finished deck in a new tab. Set `GAMMA_API_KEY` (Repl
 `GAMMA_THEME_ID`, `GAMMA_FOLDER_ID`, `GAMMA_WORKSPACE_ACCESS`). Without a key the button copies the outline and
 opens Gamma's own create page instead.
 
+### Duplicate for a new client
+
+- **My Proposal History** (and Admin → Proposal History) has a **Duplicate for new client** button: a short form takes the new client, flight dates and
+  Notion ID, and makes a draft that keeps the products, prices and options, opening on Step 02 with a list of what to check. No schema change; see
+  [docs/duplicate_proposal.md](docs/duplicate_proposal.md).
+
 ### Why the recommender is deterministic
 
 The mix suggester is a rule-based scorer keyed on the campaign goal and

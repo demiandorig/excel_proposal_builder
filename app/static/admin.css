@@ -149,15 +149,6 @@
   background: var(--paper-warm);
   color: var(--ink-faint);
 }
-.reopen-link {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--accent);
-  text-decoration: none;
-  white-space: nowrap;
-}
-.reopen-link:hover { text-decoration: underline; }
 .btn-save-row {
   background: var(--accent);
   border: 1px solid var(--accent);

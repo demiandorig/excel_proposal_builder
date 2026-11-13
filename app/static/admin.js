@@ -3,17 +3,7 @@
  * ======================================================================== */
 
 const adminState = {
-  proposals: [],
-  // Server-side pagination/filter state for the Proposals tab — the full
-  // list no longer lives in the browser (see loadProposals()), so every
-  // one of these triggers a real re-fetch, not an in-memory re-filter.
-  proposalsPage: 1,
-  proposalsPageSize: 25,
-  proposalsMineOnly: true,   // per explicit request: land on "my work" first, not the whole company's history
-  proposalsSearch: "",
-  proposalsTotalCount: 0,
-  proposalsTotalPages: 1,
-  proposalsLoading: false,
+  proposalsList: null,  // the Proposals tab's ProposalHistory controller (see mountProposals()); the list, its paging and its filters live inside the component
   analytics: null,
   analyticsLoaded: false,
   analyticsWindow: "all",  // "30d" | "90d" | "12m" | "all"
@@ -43,7 +33,6 @@ const adminState = {
 document.addEventListener("DOMContentLoaded", () => {
   wireTabs();
   wireSearch();
-  wireProposalsControls();
   wireAnalyticsControls();
   wireProductForm();
   wireBulkUpload();
@@ -54,7 +43,7 @@ document.addEventListener("DOMContentLoaded", () => {
   wireForecast();
   wireFaq();
   wireCsvExports();
-  loadProposals();
+  mountProposals();
 });
 
 // --------------------------------------------------------------------------
@@ -208,54 +197,9 @@ function renderAnalytics(data) {
     _analyticsBarList(data.by_time_unit, "time_unit", "count", _formatTimeUnitLabel);
 }
 
-// Debounces a function — waits `ms` after the LAST call before actually
-// running, cancelling any pending run each time it's called again. Used
-// for the proposals search box now that a keystroke means a real network
-// request (server-side search) instead of an instant in-memory filter —
-// without this, typing a 6-character search would fire 6 separate
-// requests, working against the exact "don't hammer the DB" goal this
-// whole pagination change exists for.
-function _debounce(fn, ms) {
-  let timer = null;
-  return (...args) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), ms);
-  };
-}
-
 function wireSearch() {
-  document.getElementById("proposals-search").addEventListener(
-    "input",
-    _debounce(e => {
-      adminState.proposalsSearch = e.target.value;
-      adminState.proposalsPage = 1;  // a new search always restarts at page 1
-      loadProposals();
-    }, 350)
-  );
   document.getElementById("rates-search").addEventListener("input", e => {
     renderRates(filterRates(e.target.value));
-  });
-}
-
-function wireProposalsControls() {
-  document.querySelectorAll("#proposals-scope-tabs .tier-tab").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const mineOnly = btn.dataset.scope === "mine";
-      if (adminState.proposalsMineOnly === mineOnly) return;
-      adminState.proposalsMineOnly = mineOnly;
-      adminState.proposalsPage = 1;
-      loadProposals();
-    });
-  });
-  document.getElementById("proposals-prev-btn").addEventListener("click", () => {
-    if (adminState.proposalsPage <= 1) return;
-    adminState.proposalsPage -= 1;
-    loadProposals();
-  });
-  document.getElementById("proposals-next-btn").addEventListener("click", () => {
-    if (adminState.proposalsPage >= adminState.proposalsTotalPages) return;
-    adminState.proposalsPage += 1;
-    loadProposals();
   });
 }
 
@@ -354,110 +298,35 @@ function renderBulkUploadResult(body) {
 // Proposal history
 // --------------------------------------------------------------------------
 
-async function loadProposals() {
-  // Guards the loading-indicator/table against an OLDER, slower request
-  // finishing after a NEWER one (e.g. flipping Mine->All then immediately
-  // typing a search) — only the request that's still current when it
-  // resolves gets to touch the DOM.
-  const requestToken = Symbol();
-  adminState._proposalsRequestToken = requestToken;
-  adminState.proposalsLoading = true;
-  renderProposalsLoading();
-
-  const params = new URLSearchParams({
-    page: String(adminState.proposalsPage),
-    page_size: String(adminState.proposalsPageSize),
-    mine: String(adminState.proposalsMineOnly),
-    search: adminState.proposalsSearch,
-  });
-  try {
-    const res = await fetch(`/api/admin/proposals?${params}`);
-    if (adminState._proposalsRequestToken !== requestToken) return;  // superseded
-    const data = await res.json();
-    if (!res.ok) throw new Error(detailText(data.detail, httpStatusText(res)));
-    adminState.proposals = data.proposals || [];
-    adminState.proposalsTotalCount = data.total_count || 0;
-    adminState.proposalsTotalPages = data.total_pages || 1;
-    // The server clamps page to what it actually has available (e.g. a
-    // filter change shrinks total_pages below the page we asked for) —
-    // mirror that back so Prev/Next and the "Page X of Y" text agree
-    // with what's really on screen.
-    adminState.proposalsPage = data.page || adminState.proposalsPage;
-    renderProposals(adminState.proposals);
-  } catch (e) {
-    if (adminState._proposalsRequestToken !== requestToken) return;
-    document.getElementById("proposals-body").innerHTML =
-      `<tr><td colspan="11" class="admin-empty">Failed to load: ${escapeHtml(e.message)}</td></tr>`;
-  } finally {
-    if (adminState._proposalsRequestToken === requestToken) {
-      adminState.proposalsLoading = false;
-      renderProposalsPagination();
-    }
-  }
-}
-
-// Shown WHILE a (re-)fetch is in flight — the search box, the Mine/All
-// toggle, and Prev/Next all now trigger a real network request instead
-// of an instant client-side filter, so each of those deserves visible
-// feedback instead of the table just sitting there looking unresponsive
-// for however long that request takes.
-function renderProposalsLoading() {
-  document.getElementById("proposals-body").innerHTML =
-    `<tr><td colspan="11" class="admin-empty"><span class="btn-inline-spinner"></span>Loading…</td></tr>`;
-  document.getElementById("proposals-prev-btn").disabled = true;
-  document.getElementById("proposals-next-btn").disabled = true;
-}
-
-function renderProposalsPagination() {
-  const { proposalsPage, proposalsTotalPages, proposalsTotalCount, proposalsMineOnly } = adminState;
-  document.getElementById("proposals-page-info").textContent =
-    `Page ${proposalsPage} of ${proposalsTotalPages}`;
-  document.getElementById("proposals-prev-btn").disabled = proposalsPage <= 1;
-  document.getElementById("proposals-next-btn").disabled = proposalsPage >= proposalsTotalPages;
-  document.getElementById("proposals-count").textContent =
-    `${proposalsTotalCount} proposal${proposalsTotalCount === 1 ? "" : "s"}`;
-  document.querySelectorAll("#proposals-scope-tabs .tier-tab").forEach(btn => {
-    btn.classList.toggle("active", (btn.dataset.scope === "mine") === proposalsMineOnly);
-  });
-}
-
-function renderProposals(list) {
-  const body = document.getElementById("proposals-body");
-  renderProposalsPagination();
-
-  if (!list.length) {
-    body.innerHTML = `<tr><td colspan="11" class="admin-empty">No proposals match.</td></tr>`;
+// The Proposals tab is the shared ProposalHistory list (proposal-history.js) mounted into #proposals-host: search, the Draft / Generated
+// filter, sorting, Show more and the planner / AE / device cell all live in the component. It lands on "My proposals" (not the whole
+// company's history), opens a row in a new tab (an admin is usually looking at somebody else's work), and offers Delete only for the signed-in
+// admin's own drafts: the component asks /api/me once for that, and a failed answer means no Delete rather than a wrong one.
+function mountProposals() {
+  const host = document.getElementById("proposals-host");
+  if (!host) return;
+  if (!window.ProposalHistory) {
+    host.innerHTML = '<p class="admin-empty">The proposal list could not load. Reload the page to try again.</p>';
     return;
   }
-
-  body.innerHTML = list.map(p => {
-    const isDraft = p.status === "draft";
-    return `
-    <tr>
-      <td class="mono">${formatDate(p.generated_at || p.updated_at)}</td>
-      <td class="mono">${escapeHtml(p.notion_id || "—")}</td>
-      <td>${escapeHtml(p.client_name || "—")}</td>
-      <td>${escapeHtml(p.requested_by || p.seller_email || "—")}</td>
-      <td class="wrap">${escapeHtml(p.proposal_title || p.filename || "—")}</td>
-      <td>${isDraft ? '<span class="proposal-status-badge draft">Draft</span>' : ""}</td>
-      <td class="mono">${escapeHtml((p.tabs_built || []).join(", "))}</td>
-      <td class="mono">${isDraft ? "—" : money(p.total_net)}</td>
-      <td class="mono muted">${escapeHtml(p.requester_ip || "—")}</td>
-      <td class="wrap muted" title="${escapeAttr(p.requester_user_agent || "")}">${escapeHtml(shortenUA(p.requester_user_agent))}</td>
-      <td><a class="reopen-link" href="/?reopen=${encodeURIComponent(p.proposal_id)}" target="_blank" rel="noopener">${isDraft ? "Continue ↗" : "Reopen ↗"}</a></td>
-    </tr>
-  `;
-  }).join("");
-}
-
-function shortenUA(ua) {
-  if (!ua) return "—";
-  // Pull out the most identifying browser/OS token for a compact display.
-  const m = ua.match(/(Windows NT [\d.]+|Mac OS X [\d_.]+|Android [\d.]+|iPhone OS [\d_.]+|Linux)/);
-  const browserM = ua.match(/(Chrome|Firefox|Safari|Edg|OPR)\/[\d.]+/);
-  const os = m ? m[1].replace(/_/g, ".") : "";
-  const browser = browserM ? browserM[0] : "";
-  return [os, browser].filter(Boolean).join(" · ") || ua.slice(0, 40);
+  adminState.proposalsList = ProposalHistory.mount(host, {
+    surface: "admin",
+    endpoint: "/api/admin/proposals",
+    pageSize: 50,
+    scopes: [{ key: "mine", label: "My proposals" }, { key: "all", label: "All proposals" }],
+    scope: "mine",
+    params: scope => ({ mine: scope === "mine" }),
+    linkTarget: () => "_blank",
+    // duplicate-proposal.js owns the form; once the copy exists the list reloads with the new row highlighted.
+    onDuplicate: ({ proposal, trigger, controller }) => {
+      if (!window.DuplicateProposal) return;
+      window.DuplicateProposal.open({
+        proposal,
+        trigger,
+        onDone: result => controller.reload({ highlightId: result && result.proposal_id }),
+      });
+    },
+  });
 }
 
 // --------------------------------------------------------------------------
