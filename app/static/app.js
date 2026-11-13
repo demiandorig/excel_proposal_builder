@@ -6636,6 +6636,7 @@ function renderAvailsGrid() {
         `}
       </div>
       <p class="sov-helper" id="sov-helper-${escapeAttr(li.id)}"></p>
+      ${p.family === "DOOH" && window.DoohScreenlist ? DoohScreenlist.blockHtml(li, existing) : ""}
       ${!isFreeform && _forecastEnabled(p) ? _constanzaBlockHtml(li, p, existing) : ""}
     `;
     grid.appendChild(card);

@@ -4,9 +4,11 @@ DOOH Deliverables — the DOOH Screenlist table and the pre-made DOOH Summary pi
 The "DOOH Deliverables" export is two worksheets that are always built together:
 
   DOOH Screenlist  The inventory the planner pastes in (the platform export's 40 columns, in a fixed order, plus two
-                   calculated helper columns) as an Excel TABLE named DOOHScreenlist, shipped with ONE sample row.
+                   calculated helper columns) as an Excel TABLE named DOOHScreenlist, shipped with ONE sample row, or
+                   with every row of the screen list the planner uploaded in the wizard (see dooh_screenlist.py).
   DOOH Summary     A real, pre-made PIVOT TABLE over that table: Venue Type > Network, with Number of Screens, Max.
-                   Avails and Max. Spend. It refreshes when the workbook opens, so pasted rows simply appear in it.
+                   Avails and Max. Spend. It refreshes when the workbook opens, so pasted rows simply appear in it; with
+                   an uploaded list its cache and its rendered cells already hold the real grouped numbers.
 
 openpyxl can write the table but cannot write a pivot table, so this module also contains `add_dooh_pivot()`, a
 post-processor that injects the pivot parts (pivotCacheDefinition / pivotCacheRecords / pivotTable, their rels, the
@@ -23,6 +25,7 @@ unit-tested without building a proposal.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 import posixpath
@@ -100,6 +103,18 @@ assert len(DOOH_SCREENLIST_COLUMNS) == 40 and len(DOOH_SAMPLE_ROW) == 40
 
 _SAMPLE_BY_COLUMN = dict(zip(DOOH_SCREENLIST_COLUMNS, DOOH_SAMPLE_ROW))
 
+# What a cell of each column holds (the upload parser produces exactly this, and the sample row follows it): numbers are
+# numbers, the four supports_* flags are real booleans, everything else is TEXT (ids and postal codes stay text so leading
+# zeros and long codes are never altered), and an empty cell is None.
+DOOH_NUMBER_COLUMNS = ("latitude", "longitude", "cpm", "four_week_impressions", "impression_multiplier",
+                       "bidstream_impressions", "bidstream_inferred_impressions", "screen_count", "min_duration",
+                       "max_duration")
+DOOH_BOOLEAN_COLUMNS = ("supports_video", "supports_banner", "supports_audio", "supports_dynamic_creative")
+DOOH_TEXT_COLUMNS = tuple(c for c in DOOH_SCREENLIST_COLUMNS if c not in DOOH_NUMBER_COLUMNS + DOOH_BOOLEAN_COLUMNS)
+
+# The Summary sheet's own instruction says a DOOH proposal needs at least this many screens.
+DOOH_MINIMUM_SCREENS = 20
+
 
 def max_avails_for(four_week_impressions) -> float:
     """The max_avails column's value for one row."""
@@ -158,29 +173,170 @@ PIVOT_DATA_FIELDS = (
 PIVOT_SHOW_SUBTOTALS = True       # a "<venue type> Total" line under each venue type's networks
 
 
-def pivot_preview_rows() -> list[tuple[str, tuple]]:
-    """The lines (kind, (B..F values)) a pivot over the one sample row renders to, in order — the header, the sample
-    screen, the venue type's subtotal and the grand total. Written into the Summary sheet as plain cells so the sheet is
-    right even where the pivot is never refreshed; refreshing it in Excel replaces them with the real thing."""
-    venue_type = _SAMPLE_BY_COLUMN["venue_type"]
-    network = _SAMPLE_BY_COLUMN["publisher"]
-    measures = (1, SAMPLE_MAX_AVAILS, SAMPLE_MAX_SPEND)
-    rows: list[tuple[str, tuple]] = [
-        ("header", (PIVOT_ROW_FIELDS[0][1], PIVOT_ROW_FIELDS[1][1]) + tuple(f[2] for f in PIVOT_DATA_FIELDS)),
-        ("data", (venue_type, network) + measures),
-    ]
-    if PIVOT_SHOW_SUBTOTALS:
-        rows.append(("subtotal", (f"{venue_type} Total", None) + measures))
-    rows.append(("grand", ("Grand Total", None) + measures))
-    return rows
+class DoohRowError(ValueError):
+    """A screen row the Screenlist table cannot hold: the wrong number of values, or a cell of the wrong type."""
 
 
-def pivot_ref() -> str:
-    """The A1 range the pivot occupies for the sample row (B6:F9 with subtotals)."""
-    last_row = PIVOT_FIRST_ROW + len(pivot_preview_rows()) - 1
-    first_col = _col_letter(PIVOT_FIRST_COL)
-    last_col = _col_letter(PIVOT_FIRST_COL + 4)
-    return f"{first_col}{PIVOT_FIRST_ROW}:{last_col}{last_row}"
+_COL_INDEX = {name: i for i, name in enumerate(DOOH_ALL_COLUMNS)}
+_NUMBER_SET, _BOOLEAN_SET = frozenset(DOOH_NUMBER_COLUMNS), frozenset(DOOH_BOOLEAN_COLUMNS)
+BLANK_LABEL = "(blank)"          # how a pivot labels an empty item
+_LONG_TEXT = 255                 # a text longer than this is flagged longText in the cache (Excel's pivot item limit)
+
+
+def _is_blank(value) -> bool:
+    return value is None or value == ""
+
+
+def helper_values(row) -> tuple[float, float]:
+    """(max_avails, max_spend) of one 40-value screen row — what its two calculated cells hold. The same IFERROR-to-0
+    the table formulas have, for a row whose impressions or CPM is not a number."""
+    try:
+        imps, cpm = row[_COL_INDEX["four_week_impressions"]], row[_COL_INDEX["cpm"]]
+        return max_avails_for(imps), max_spend_for(imps, cpm)
+    except (TypeError, ValueError):
+        return 0.0, 0.0
+
+
+def _check_row(row, number: int) -> None:
+    if len(row) != len(DOOH_SCREENLIST_COLUMNS):
+        raise DoohRowError(f"screen {number} has {len(row)} values; the Screenlist has {len(DOOH_SCREENLIST_COLUMNS)} columns")
+    for name, value in zip(DOOH_SCREENLIST_COLUMNS, row):
+        if _is_blank(value):
+            continue
+        if name in _NUMBER_SET:
+            ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        elif name in _BOOLEAN_SET:
+            ok = isinstance(value, bool)
+        else:
+            ok = isinstance(value, str)
+        if not ok:
+            raise DoohRowError(f"screen {number}: the {name} cell holds {value!r}, which a {name} column cannot")
+
+
+class _Axis:
+    """One row field of the pivot: its distinct values as a pivot sees them (text compared case-insensitively, empty is
+    its own "(blank)" item), in first-seen order — which is the order of the cache's shared items — plus the A-Z display
+    order the pivot field lists them in (empty last)."""
+
+    def __init__(self, values: list):
+        self.shared: list = []                       # label of each shared item (None = the empty item)
+        self.at_row: list[int] = []                  # each row's shared-item index
+        seen: dict = {}
+        for value in values:
+            key = None if _is_blank(value) else value.casefold()
+            index = seen.get(key)
+            if index is None:
+                index = seen[key] = len(self.shared)
+                self.shared.append(None if key is None else value)
+            self.at_row.append(index)
+        self.order = sorted(range(len(self.shared)),
+                            key=lambda i: (self.shared[i] is None, (self.shared[i] or "").casefold(), self.shared[i] or ""))
+        self.position = {shared_index: pos for pos, shared_index in enumerate(self.order)}
+
+    def label(self, shared_index: int) -> str:
+        return BLANK_LABEL if self.shared[shared_index] is None else self.shared[shared_index]
+
+
+class PivotModel:
+    """Everything the pivot parts are written from, worked out once from the screens: the 42-value rows (the 40 inventory
+    values + the two helper values), the two axes, the column types the cache describes, and the layout the pivot renders
+    (Venue Type > Network lines, each venue type's subtotal, the grand total).
+
+    `rows` is a list of 40-value typed screen rows (see DOOH_NUMBER_COLUMNS...); None is the one sample row the template
+    ships with. The sample goes through exactly the same code, so the shipped template and an uploaded list can't drift."""
+
+    def __init__(self, rows=None):
+        if rows is None:
+            self.rows = [_all_sample_values()]
+        else:
+            self.rows = []
+            for number, row in enumerate(rows, start=1):
+                _check_row(row, number)
+                self.rows.append(list(row) + list(helper_values(row)))
+            if not self.rows:
+                raise DoohRowError("a screen list needs at least one screen")
+        self.n = len(self.rows)
+        self.axes = {col: _Axis([r[_COL_INDEX[col]] for r in self.rows]) for col in _row_field_columns()}
+        self.stats = {name: self._column_stats(_COL_INDEX[name]) for name in DOOH_ALL_COLUMNS if name not in self.axes}
+        self.layout = self._layout()
+
+    def _column_stats(self, at: int) -> dict:
+        kinds, low, high, all_int, long_text = set(), None, None, True, False
+        for row in self.rows:
+            value = row[at]
+            kind = _kind(value)
+            kinds.add(kind)
+            if kind == "num":
+                low = value if low is None or value < low else low
+                high = value if high is None or value > high else high
+                all_int = all_int and float(value) == int(float(value))
+            elif kind == "str" and len(value) > _LONG_TEXT:
+                long_text = True
+        return {"kinds": kinds, "min": low, "max": high, "all_int": all_int, "long_text": long_text}
+
+    def _layout(self) -> list[tuple]:
+        """[(kind, venue shared index, network shared index or None, (count, avails, spend))] in display order, then the
+        grand total as ("grand", None, None, measures). kind is "data" or "subtotal"."""
+        venue, network = (self.axes[col] for col, _ in PIVOT_ROW_FIELDS)
+        at_id, at_avails, at_spend = (_COL_INDEX[f[0]] for f in PIVOT_DATA_FIELDS)
+        groups: dict[int, dict[int, list]] = {}
+        for i, row in enumerate(self.rows):
+            cell = groups.setdefault(venue.at_row[i], {}).setdefault(network.at_row[i], [0, [], []])
+            cell[0] += 0 if _is_blank(row[at_id]) else 1      # Count counts the cells that are not empty
+            cell[1].append(row[at_avails])
+            cell[2].append(row[at_spend])
+
+        def measures(parts):
+            return (sum(p[0] for p in parts), round(math.fsum(v for p in parts for v in p[1]), 6),
+                    round(math.fsum(v for p in parts for v in p[2]), 6))
+
+        out: list[tuple] = []
+        for v in venue.order:
+            nets = sorted(groups[v], key=network.position.__getitem__)
+            for n in nets:
+                out.append(("data", v, n, measures([groups[v][n]])))
+            if PIVOT_SHOW_SUBTOTALS:
+                out.append(("subtotal", v, None, measures(list(groups[v].values()))))
+        out.append(("grand", None, None, measures([c for g in groups.values() for c in g.values()])))
+        return out
+
+    def preview_rows(self) -> list[tuple[str, tuple]]:
+        venue, network = (self.axes[col] for col, _ in PIVOT_ROW_FIELDS)
+        rows: list[tuple[str, tuple]] = [
+            ("header", (PIVOT_ROW_FIELDS[0][1], PIVOT_ROW_FIELDS[1][1]) + tuple(f[2] for f in PIVOT_DATA_FIELDS))]
+        previous_venue = None
+        for kind, v, n, measures in self.layout:
+            if kind == "data":
+                rows.append(("data", (venue.label(v) if v != previous_venue else None, network.label(n)) + measures))
+                previous_venue = v
+            elif kind == "subtotal":
+                rows.append(("subtotal", (f"{venue.label(v)} Total", None) + measures))
+            else:
+                rows.append(("grand", ("Grand Total", None) + measures))
+        return rows
+
+    @property
+    def ref(self) -> str:
+        last_row = PIVOT_FIRST_ROW + len(self.layout)          # the header line + one line per layout entry
+        return f"{_col_letter(PIVOT_FIRST_COL)}{PIVOT_FIRST_ROW}:{_col_letter(PIVOT_FIRST_COL + 4)}{last_row}"
+
+
+def _model_for(data) -> PivotModel:
+    return data if isinstance(data, PivotModel) else PivotModel(data)
+
+
+def pivot_preview_rows(rows=None) -> list[tuple[str, tuple]]:
+    """The lines (kind, (B..F values)) a pivot over the screens renders to, in order — the header, each Venue Type >
+    Network line, each venue type's subtotal and the grand total (for the one sample row: the header, the sample screen,
+    its venue type's subtotal and the grand total). Written into the Summary sheet as plain cells so the sheet is right
+    even where the pivot is never refreshed; refreshing it in Excel replaces them with the real thing. `rows`: the typed
+    screen rows (None = the sample row)."""
+    return _model_for(rows).preview_rows()
+
+
+def pivot_ref(rows=None) -> str:
+    """The A1 range the pivot occupies (B6:F9 for the sample row, with subtotals)."""
+    return _model_for(rows).ref
 
 
 def _col_letter(n: int) -> str:
@@ -211,8 +367,9 @@ _SUBTOTAL_ATTR = {"count": ' subtotal="count"'}     # a dataField's aggregation;
 
 
 def _q(value) -> str:
-    """A double-quoted XML attribute value."""
-    return '"' + _xml_escape(str(value), {'"': "&quot;"}) + '"'
+    """A double-quoted XML attribute value. A line break or tab inside it is written as a character reference: an XML
+    parser turns a literal one into a space (attribute-value normalization), which would change an address or note."""
+    return '"' + _xml_escape(str(value), {'"': "&quot;", "\n": "&#10;", "\r": "&#13;", "\t": "&#9;"}) + '"'
 
 
 def _num(value: float) -> str:
@@ -244,32 +401,49 @@ def _field_numfmt(column: str, money_fmt_id: int) -> int:
     return {MAX_AVAILS_COLUMN: 3, MAX_SPEND_COLUMN: money_fmt_id}.get(column, 0)
 
 
-def build_cache_definition_xml(money_fmt_id: int, records_rid: str = "rId1", refreshed_by: str = "Proposal Builder") -> str:
-    """xl/pivotCache/pivotCacheDefinition1.xml — the cache describes the table's 42 columns, with the sample row's
-    values (so the pivot is complete even before its first refresh) and refreshOnLoad so Excel rebuilds it from the
-    table every time the workbook is opened."""
+def _shared_items_xml(stats: dict) -> str:
+    """The <sharedItems> of a cache field that is not on an axis: no item list, just what its cells contain (Excel
+    stores the values themselves in the records). The types are exactly the ones present, so the declared kinds and the
+    records can never disagree."""
+    kinds = stats["kinds"]
+    blank = "blank" in kinds
+    types = kinds - {"blank"}
+    if not types:
+        return '<sharedItems containsNonDate="0" containsString="0" containsBlank="1"/>'
+    if types == {"num"}:
+        integer = ' containsInteger="1"' if stats["all_int"] else ""
+        bounds = f'minValue="{_num(stats["min"])}" maxValue="{_num(stats["max"])}"'
+        if blank:
+            return f'<sharedItems containsString="0" containsBlank="1" containsNumber="1"{integer} {bounds}/>'
+        return f'<sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1"{integer} {bounds}/>'
+    if len(types) == 1:                                   # text, or booleans: no item list unless the field is on an axis
+        attrs = (' containsBlank="1"' if blank else "") + (' longText="1"' if stats["long_text"] else "")
+        return f"<sharedItems{attrs}/>"
+    raise DoohRowError(f"a column mixes {', '.join(sorted(types))} cells")
+
+
+def build_cache_definition_xml(money_fmt_id: int, records_rid: str = "rId1", refreshed_by: str = "Proposal Builder",
+                               rows=None) -> str:
+    """xl/pivotCache/pivotCacheDefinition1.xml — the cache describes the table's 42 columns, with the screens' values (so
+    the pivot is complete even before its first refresh; for the template, the one sample row) and refreshOnLoad so Excel
+    rebuilds it from the table every time the workbook is opened. `rows`: the typed screen rows (None = the sample row)."""
+    model = _model_for(rows)
     refreshed_date = (datetime.now(timezone.utc).replace(tzinfo=None) - datetime(1899, 12, 30)).total_seconds() / 86400
     fields = []
-    row_cols = _row_field_columns()
-    for name, value in zip(DOOH_ALL_COLUMNS, _all_sample_values()):
-        numfmt = _field_numfmt(name, money_fmt_id)
-        kind = _kind(value)
-        if name in row_cols:
-            shared = f'<sharedItems count="1"><s v={_q(value)}/></sharedItems>'
-        elif kind == "num":
-            integer = ' containsInteger="1"' if float(value) == int(float(value)) else ""
-            shared = (f'<sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1"{integer} '
-                      f'minValue="{_num(value)}" maxValue="{_num(value)}"/>')
-        elif kind == "blank":
-            shared = '<sharedItems containsNonDate="0" containsString="0" containsBlank="1"/>'
-        else:                                   # text and booleans: no shared-item list unless the field is on an axis
-            shared = "<sharedItems/>"
-        fields.append(f'<cacheField name={_q(name)} numFmtId="{numfmt}">{shared}</cacheField>')
+    for name in DOOH_ALL_COLUMNS:
+        axis = model.axes.get(name)
+        if axis is not None:
+            items = "".join("<m/>" if label is None else f"<s v={_q(label)}/>" for label in axis.shared)
+            blank = ' containsBlank="1"' if None in axis.shared else ""
+            shared = f'<sharedItems{blank} count="{len(axis.shared)}">{items}</sharedItems>'
+        else:
+            shared = _shared_items_xml(model.stats[name])
+        fields.append(f'<cacheField name={_q(name)} numFmtId="{_field_numfmt(name, money_fmt_id)}">{shared}</cacheField>')
     return (
         _XML_DECL
         + f'<pivotCacheDefinition xmlns="{_NS_MAIN}" xmlns:r="{_NS_R}" r:id={_q(records_rid)} refreshOnLoad="1" '
           f'refreshedBy={_q(refreshed_by)} refreshedDate="{refreshed_date:.9f}" createdVersion="8" refreshedVersion="8" '
-          f'minRefreshableVersion="3" recordCount="1">'
+          f'minRefreshableVersion="3" recordCount="{model.n}">'
           f'<cacheSource type="worksheet"><worksheetSource name={_q(DOOH_TABLE_NAME)}/></cacheSource>'
           f'<cacheFields count="{len(fields)}">{"".join(fields)}</cacheFields>'
           '<extLst><ext uri="{725AE2AE-9491-48be-B2B4-4EB974FC3084}" '
@@ -278,50 +452,73 @@ def build_cache_definition_xml(money_fmt_id: int, records_rid: str = "rId1", ref
     )
 
 
-def build_cache_records_xml() -> str:
-    """xl/pivotCache/pivotCacheRecords1.xml — the one sample row."""
-    row_cols = _row_field_columns()
-    cells = []
-    for name, value in zip(DOOH_ALL_COLUMNS, _all_sample_values()):
-        kind = _kind(value)
-        if name in row_cols:
-            cells.append('<x v="0"/>')            # index into that field's shared items
-        elif kind == "blank":
-            cells.append("<m/>")
-        elif kind == "bool":
-            cells.append(f'<b v="{int(value)}"/>')
-        elif kind == "num":
-            cells.append(f'<n v="{_num(value)}"/>')
-        else:
-            cells.append(f"<s v={_q(value)}/>")
-    return (_XML_DECL + f'<pivotCacheRecords xmlns="{_NS_MAIN}" xmlns:r="{_NS_R}" count="1"><r>{"".join(cells)}</r></pivotCacheRecords>')
+def build_cache_records_xml(rows=None) -> str:
+    """xl/pivotCache/pivotCacheRecords1.xml — one record per screen (for the template, the one sample row)."""
+    model = _model_for(rows)
+    row_cols = set(model.axes)
+    records = []
+    for i, row in enumerate(model.rows):
+        cells = []
+        for name, value in zip(DOOH_ALL_COLUMNS, row):
+            if name in row_cols:
+                cells.append(f'<x v="{model.axes[name].at_row[i]}"/>')     # index into that field's shared items
+                continue
+            kind = _kind(value)
+            if kind == "blank":
+                cells.append("<m/>")
+            elif kind == "bool":
+                cells.append(f'<b v="{int(value)}"/>')
+            elif kind == "num":
+                cells.append(f'<n v="{_num(value)}"/>')
+            else:
+                cells.append(f"<s v={_q(value)}/>")
+        records.append(f'<r>{"".join(cells)}</r>')
+    return (_XML_DECL + f'<pivotCacheRecords xmlns="{_NS_MAIN}" xmlns:r="{_NS_R}" count="{model.n}">{"".join(records)}</pivotCacheRecords>')
 
 
-def build_pivot_table_xml(cache_id: int, money_fmt_id: int) -> str:
-    """xl/pivotTables/pivotTable1.xml — Venue Type > Network in tabular form, three value fields, grand totals on."""
-    index = {name: i for i, name in enumerate(DOOH_ALL_COLUMNS)}
+def build_pivot_table_xml(cache_id: int, money_fmt_id: int, rows=None) -> str:
+    """xl/pivotTables/pivotTable1.xml — Venue Type > Network in tabular form, three value fields, grand totals on. The
+    row/column items and the location are those of the screens' layout (see PivotModel.layout), so the definition matches
+    the cells written into the Summary sheet and the cache's records."""
+    model = _model_for(rows)
+    index = _COL_INDEX
     row_captions = {col: caption for col, caption in PIVOT_ROW_FIELDS}
     data_cols = {f[0] for f in PIVOT_DATA_FIELDS}
     subtotals = PIVOT_SHOW_SUBTOTALS
 
     no_subtotal_attr = "" if subtotals else ' defaultSubtotal="0"'
-    items = ('<items count="2"><item x="0"/><item t="default"/></items>' if subtotals
-             else '<items count="1"><item x="0"/></items>')
     pivot_fields = []
     for name in DOOH_ALL_COLUMNS:
         numfmt = _field_numfmt(name, money_fmt_id)
         if name in row_captions:
+            order = model.axes[name].order
+            items = "".join(f'<item x="{i}"/>' for i in order) + ('<item t="default"/>' if subtotals else "")
             pivot_fields.append(
                 f'<pivotField name={_q(row_captions[name])} axis="axisRow" compact="0" outline="0" showAll="0" '
-                f'sortType="ascending"{no_subtotal_attr}>{items}</pivotField>')   # A-Z, not the pasted order
+                f'sortType="ascending"{no_subtotal_attr}><items count="{len(order) + (1 if subtotals else 0)}">{items}</items>'
+                f'</pivotField>')   # A-Z, not the pasted order
         else:
             data_attr = ' dataField="1"' if name in data_cols else ""
             fmt = f' numFmtId="{numfmt}"' if numfmt else ""
             pivot_fields.append(f'<pivotField{data_attr} compact="0"{fmt} outline="0" showAll="0"/>')
 
     row_fields = "".join(f'<field x="{index[col]}"/>' for col, _ in PIVOT_ROW_FIELDS)
-    row_items = '<i><x/><x/></i>' + ('<i t="default"><x/></i>' if subtotals else "") + '<i t="grand"><x/></i>'
-    n_row_items = 3 if subtotals else 2
+    venue, network = (model.axes[col] for col, _ in PIVOT_ROW_FIELDS)
+
+    def x(position: int) -> str:                  # <x/> is item 0
+        return "<x/>" if position == 0 else f'<x v="{position}"/>'
+
+    items_xml, previous_venue = [], None
+    for kind, v, n, _measures in model.layout:
+        if kind == "data":
+            # the first line of a venue type names both items; the next ones repeat the venue type (r="1": one leading item shared with the line above)
+            items_xml.append(f"<i>{x(venue.position[v])}{x(network.position[n])}</i>" if v != previous_venue
+                             else f'<i r="1">{x(network.position[n])}</i>')
+            previous_venue = v
+        elif kind == "subtotal":
+            items_xml.append(f'<i t="default">{x(venue.position[v])}</i>')
+        else:
+            items_xml.append('<i t="grand"><x/></i>')
     col_items = '<i><x/></i>' + "".join(f'<i i="{k}"><x v="{k}"/></i>' for k in range(1, len(PIVOT_DATA_FIELDS)))
     formats = {_COUNT_FORMAT: 3, _MONEY_FORMAT: money_fmt_id}
     data_fields = "".join(
@@ -336,10 +533,10 @@ def build_pivot_table_xml(cache_id: int, money_fmt_id: int) -> str:
           'applyAlignmentFormats="0" applyWidthHeightFormats="1" dataCaption="Values" updatedVersion="8" '
           'minRefreshableVersion="3" itemPrintTitles="1" createdVersion="8" indent="0" compact="0" compactData="0" '
           'multipleFieldFilters="0">'
-          f'<location ref={_q(pivot_ref())} firstHeaderRow="0" firstDataRow="1" firstDataCol="{len(PIVOT_ROW_FIELDS)}"/>'
+          f'<location ref={_q(model.ref)} firstHeaderRow="0" firstDataRow="1" firstDataCol="{len(PIVOT_ROW_FIELDS)}"/>'
           f'<pivotFields count="{len(pivot_fields)}">{"".join(pivot_fields)}</pivotFields>'
           f'<rowFields count="{len(PIVOT_ROW_FIELDS)}">{row_fields}</rowFields>'
-          f'<rowItems count="{n_row_items}">{row_items}</rowItems>'
+          f'<rowItems count="{len(items_xml)}">{"".join(items_xml)}</rowItems>'
           '<colFields count="1"><field x="-2"/></colFields>'
           f'<colItems count="{len(PIVOT_DATA_FIELDS)}">{col_items}</colItems>'
           f'<dataFields count="{len(PIVOT_DATA_FIELDS)}">{data_fields}</dataFields>'
@@ -483,10 +680,28 @@ def _add_pivot_style(styles_xml: str) -> str:
     return styles_xml
 
 
-def _set_cached_value(sheet_xml: str, ref: str, value: float) -> str:
-    """Fill the (empty) cached value of the formula cell `ref` — openpyxl writes formulas without one."""
-    pattern = re.compile(r'(<c r="%s"[^>]*>(?:(?!</c>).)*?</f>)(?:<v></v>|<v\s*/>)?(</c>)' % re.escape(ref), re.S)
-    return pattern.sub(lambda m: f"{m.group(1)}<v>{_num(value)}</v>{m.group(2)}", sheet_xml, count=1)
+def _fill_cached_values(sheet_xml: str, values: dict[str, list[float]]) -> str:
+    """Fill the (empty) cached value of every helper formula cell — openpyxl writes formulas without one, so a viewer
+    that doesn't recalculate (Protected View, a preview pane) would show nothing. `values` maps a column letter to that
+    column's value per data row (row 2 first). One pass over the sheet, whatever the number of rows; raises
+    DoohPivotError unless every cell was found (the sheet is not the one the builder wrote)."""
+    letters = "|".join(re.escape(c) for c in values)
+    pattern = re.compile(r'(<c r="(%s)(\d+)"[^>]*><f>[^<]*</f>)(?:<v></v>|<v\s*/>)?(</c>)' % letters)
+    filled = 0
+
+    def put(m):
+        nonlocal filled
+        column, row = m.group(2), int(m.group(3))
+        column_values = values[column]
+        if not 2 <= row < 2 + len(column_values):
+            return m.group(0)
+        filled += 1
+        return f"{m.group(1)}<v>{_num(column_values[row - 2])}</v>{m.group(4)}"
+
+    out = pattern.sub(put, sheet_xml)
+    if filled != sum(len(v) for v in values.values()):
+        raise DoohPivotError(f"{DOOH_SCREENLIST_SHEET} does not hold the {len(next(iter(values.values())))} rows it should")
+    return out
 
 
 def _add_ignored_errors(sheet_xml: str, sqref: str) -> str:
@@ -515,7 +730,8 @@ def _sheet_parts(parts: dict) -> dict:
     return out
 
 
-def _find_screenlist_table(parts: dict, sheet_part: str) -> str:
+def _find_screenlist_table(parts: dict, sheet_part: str) -> tuple[str, str]:
+    """(part path, ref) of the Screenlist's table, after checking it is the one the builder writes."""
     for rel in _read_rels(parts, _rels_path_for(sheet_part)):
         if rel["type"] == _REL_TABLE:
             path = _resolve(posixpath.dirname(sheet_part), rel["target"])
@@ -524,12 +740,17 @@ def _find_screenlist_table(parts: dict, sheet_part: str) -> str:
                 names = [c.get("name") for c in root.iter(f"{{{_NS_MAIN}}}tableColumn")]
                 if names != DOOH_ALL_COLUMNS:
                     raise DoohPivotError(f"table {DOOH_TABLE_NAME} does not have the expected columns: {names}")
-                return path
+                return path, root.get("ref")
     raise DoohPivotError(f"{DOOH_SCREENLIST_SHEET} has no table named {DOOH_TABLE_NAME}")
 
 
-def add_dooh_pivot(path: Union[str, Path]) -> bool:
+def add_dooh_pivot(path: Union[str, Path], rows=None) -> bool:
     """Add the DOOH Summary pivot table to the saved workbook at `path`.
+
+    `rows` are the typed screen rows the Screenlist sheet was built from (build_dooh_screenlist(wb, rows=...)); None is
+    the template's one sample row. The pivot's cache and its row/column items are written from them, and the helper
+    columns' cached values are filled for every one of them, so the workbook is complete before Excel refreshes it. The
+    sheet's table must cover exactly header + these rows, or DoohPivotError is raised.
 
     Returns True when the pivot was added; False when there was nothing to do (the workbook has no DOOH Summary +
     DOOH Screenlist pair, or the pivot is already there — safe to call twice). Raises DoohPivotError when the DOOH sheets
@@ -549,7 +770,11 @@ def add_dooh_pivot(path: Union[str, Path]) -> bool:
     summary_rels_path = _rels_path_for(summary_part)
     if any(r["type"] == _REL_PIVOT_TABLE for r in _read_rels(parts, summary_rels_path)):
         return False
-    _find_screenlist_table(parts, list_part)                  # validates the source table before anything is written
+    _, table_ref = _find_screenlist_table(parts, list_part)   # validates the source table before anything is written
+    model = PivotModel(rows)                                   # raises DoohRowError for a row the table could not hold
+    expected_ref = f"A1:{_col_letter(len(DOOH_ALL_COLUMNS))}{model.n + 1}"
+    if table_ref != expected_ref:
+        raise DoohPivotError(f"table {DOOH_TABLE_NAME} covers {table_ref}, not {expected_ref} (header + {model.n} screens)")
 
     for needed in ("[Content_Types].xml", "xl/workbook.xml", "xl/_rels/workbook.xml.rels", "xl/styles.xml"):
         if needed not in parts:
@@ -576,10 +801,10 @@ def add_dooh_pivot(path: Union[str, Path]) -> bool:
 
     # --- the three pivot parts and their rels
     rec_rels, rec_rid = _add_rel(None, _REL_CACHE_REC, posixpath.basename(cache_rec))
-    new_parts[cache_def] = build_cache_definition_xml(money_id, records_rid=rec_rid).encode("utf-8")
+    new_parts[cache_def] = build_cache_definition_xml(money_id, records_rid=rec_rid, rows=model).encode("utf-8")
     new_parts[_rels_path_for(cache_def)] = rec_rels.encode("utf-8")
-    new_parts[cache_rec] = build_cache_records_xml().encode("utf-8")
-    new_parts[pivot_tbl] = build_pivot_table_xml(cache_id, money_id).encode("utf-8")
+    new_parts[cache_rec] = build_cache_records_xml(model).encode("utf-8")
+    new_parts[pivot_tbl] = build_pivot_table_xml(cache_id, money_id, model).encode("utf-8")
     pt_rels, _ = _add_rel(None, _REL_CACHE_DEF, "../pivotCache/" + posixpath.basename(cache_def))
     new_parts[_rels_path_for(pivot_tbl)] = pt_rels.encode("utf-8")
 
@@ -614,8 +839,9 @@ def add_dooh_pivot(path: Union[str, Path]) -> bool:
 
     # --- Screenlist sheet: cached values for the two helper formulas + no "number stored as text" triangles
     list_xml = parts[list_part].decode("utf-8")
-    for column, value in ((MAX_AVAILS_COLUMN, SAMPLE_MAX_AVAILS), (MAX_SPEND_COLUMN, SAMPLE_MAX_SPEND)):
-        list_xml = _set_cached_value(list_xml, f"{_col_letter(DOOH_ALL_COLUMNS.index(column) + 1)}2", value)
+    list_xml = _fill_cached_values(list_xml, {
+        _col_letter(DOOH_ALL_COLUMNS.index(column) + 1): [row[DOOH_ALL_COLUMNS.index(column)] for row in model.rows]
+        for column in DOOH_HELPER_COLUMNS})
     list_xml = _add_ignored_errors(list_xml, f"A2:{_col_letter(len(DOOH_ALL_COLUMNS))}1048576")
     new_parts[list_part] = list_xml.encode("utf-8")
 
