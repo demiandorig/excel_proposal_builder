@@ -2304,6 +2304,24 @@
     if (S.result) $("constanza-bubble").classList.add("cz-has-result");
   }
 
+  // The page changed the line the dock is open for (Split view keeps Step 04 on screen beside it: a budget, the flight, the target). The estimate shown for
+  // that line is judged against the line as it is NOW, so the "the line changed" banner and the Insert buttons follow the edit without closing the dock.
+  // Only an estimate that is saved on the line can be judged (S.resultSnapshot), and nothing is drawn again unless the reasons changed: a keystroke that
+  // changes nothing never repaints the result the planner is reading.
+  function refreshLine() {
+    if (!S.open || S.lineId == null) return;
+    const line = lineFactsFor(S.lineId);
+    if (!line) return;
+    const sub = $("cz-sub");
+    if (sub && line.label && /^For the Step 05 line:/.test(sub.textContent)) sub.textContent = `For the Step 05 line: ${line.label}`;
+    if (!S.result || S.resultLid !== S.lineId || !S.resultSnapshot) return;
+    const next = snapshotStale(S.resultSnapshot, line);
+    const now = Array.isArray(S.resultStale) ? S.resultStale : [];
+    if (next.join("|") === now.join("|")) return;
+    S.resultStale = next.length ? next : null;
+    renderResult(S.result);
+  }
+
   // ---- open / close
   // Order (docs/constanza_methods.md): mount; which line the dock is open for (methods hear it); the form's own seeds; then, once the catalog is there, the
   // product - which tells its method it was chosen, so ctx.line() is already the new line inside onSelect - and the saved estimate of the line.
@@ -2551,7 +2569,7 @@
 
   // ------------------------------------------------------------------ public surface
   window.Constanza = {
-    open, close, toggle, isOpen: () => S.open, hintOnce, setMood, onProposalReset, replaceGeoItem: replaceItem,
+    open, close, toggle, isOpen: () => S.open, refreshLine, hintOnce, setMood, onProposalReset, replaceGeoItem: replaceItem,
     registerMethod, renderCard, renderCardError, mountGeoHelp, summarize, badgesHtml, iconHtml: () => MINI_ICON, compact, lineLabel,
     periodLineHtml: (series) => (isLiveSports(series) && series.period_label ? `<p class="cz-period-line">📅 Live sports period: ${esc(series.period_label)}</p>` : ""),
     // The plugin contract and what the page needs to draw any method's Step 05 block without naming one (docs/constanza_methods.md).

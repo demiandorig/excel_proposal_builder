@@ -870,6 +870,7 @@ function wireEvents() {
     pill.addEventListener("click", () => {
       const target = parseInt(pill.dataset.step);
       if (target === state.step || target > state.furthestStep) return;
+      if (typeof _splitPillClick === "function" && _splitPillClick(target)) return;   // split-view.js: a step already on screen just becomes the active one
       if (state.step === 2) syncFormToParsed();
       if (state.step === 4) syncLineItemsFromTable();
       if (state.step === 5) syncAvailsFromGrid();
@@ -1666,6 +1667,7 @@ function goToStep(n) {
   }
   // Step 08 holds the generated emails: say so if the plan has changed since they were written.
   if (n === 8) _refreshEmailStaleNote();
+  typeof _splitAfterGoToStep === "function" && _splitAfterGoToStep(n);   // split-view.js: keeps two steps on screen when Split view is on
   updateProposalNameBar();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -3457,6 +3459,7 @@ function _curateDerivedMonths() {
 }
 
 function renderLineItems() {
+  typeof _splitNotify === "function" && _splitNotify(4);      // split-view.js: the other step on screen follows (a no-op unless Split view is on)
   renderAllTierTabStrips();
   const tbody = document.getElementById("line-items-body");
   tbody.innerHTML = "";
@@ -5971,6 +5974,7 @@ function _mbRenderApplyControls(months) {
 }
 
 function renderMonthlyBreakdown() {
+  typeof _splitNotify === "function" && _splitNotify(6);
   _resyncAllTierMonths();
   const emptyState = document.getElementById("mb-no-dates");
   const content = document.getElementById("mb-content");
@@ -6568,6 +6572,7 @@ function _jumpToCurateField(field, lineId) {
 }
 
 function renderAvailsGrid() {
+  typeof _splitNotify === "function" && _splitNotify(5);
   renderAllTierTabStrips();
   const rt = (state.parsed.request_type || "").toLowerCase();
   const needs = rt.includes("avails") || rt.includes("full presentation");
