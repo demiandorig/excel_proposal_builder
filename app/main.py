@@ -33,7 +33,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Optional, Union
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 # Load .env (OPENAI_API_KEY, DRIVE_CLIENT_ID/SECRET/ROOT_FOLDER_ID, etc.) into
 # the process environment before anything below reads os.environ — the repo
@@ -81,6 +81,7 @@ from app.market_config import (
 )
 from app.services import drive_uploader
 from app.services import proposal_files as proposal_files_svc
+from app.services import dooh_screenlist as dooh_screenlist_svc
 from app.services import ai_enricher
 from app.services import email_totals as email_totals_svc
 from app.services import docx_builder
@@ -844,6 +845,17 @@ class AvailsEntry(BaseModel):
     @classmethod
     def _clean_forecast_snapshot(cls, v):
         return clean_forecast_snapshot(v)
+
+    # The DOOH line's uploaded screen list (the platform's inventory export): a small reference {id, filename, screens, skipped, totals} only.
+    # The rows themselves live in the dooh_screenlists table under that id and never ride in this JSON (thousands of rows x 40 columns in every
+    # autosave); /api/generate loads them by id. Declared because Pydantic would silently drop an undeclared key, and rebuilt field by field so a
+    # malformed or tampered value is dropped (see app/services/dooh_screenlist.py).
+    dooh_screenlist: Optional[dict] = None
+
+    @field_validator("dooh_screenlist", mode="before")
+    @classmethod
+    def _clean_dooh_screenlist(cls, v):
+        return dooh_screenlist_svc.clean_reference(v)
 
 
 class TierModel(BaseModel):
@@ -2644,9 +2656,12 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
         AddonItem(product_name=a.product_name, amount=a.amount, notes_override=a.notes_override)
         for a in body.addons
     ]
+    # The DOOH line's uploaded screen list (loaded by id from the store; the proposal JSON only carries a reference).
+    dooh_rows, dooh_warnings = await asyncio.to_thread(_dooh_screenlist_for, tiers)
     workbook_started = time.perf_counter()
     try:
-        summary = generate_proposal(
+        summary = await asyncio.to_thread(
+            generate_proposal,
             req, tiers[0]["line_items"], output_path,
             force_tabs=body.force_tabs,
             enrichment=enrichment,
@@ -2663,6 +2678,7 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
             monthly_distribution_mode=body.monthly_distribution_mode,
             time_unit=body.time_unit,
             disclaimers_by_tier=disclaimers_by_tier,
+            dooh_screenlist=dooh_rows,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
@@ -2671,6 +2687,8 @@ async def generate(body: GenerateRequest, request: Request) -> dict:
     if full_flight_warnings:
         # generate_proposal re-normalizes (idempotently, so it has nothing left to report) — surface what THIS pass folded.
         summary["warnings"] = full_flight_warnings + list(summary.get("warnings") or [])
+    if dooh_warnings:
+        summary["warnings"] = list(summary.get("warnings") or []) + dooh_warnings
 
     # 7. Insert a copy-paste-ready proposal line near the top of the internal
     #    email (planner adds the Drive link after upload). The AI is prompted
@@ -4019,6 +4037,74 @@ async def suggest_tabs(body: SuggestTabsRequest) -> dict:
         req.request_type, body.product_names,
         has_agency_fee=req.agency_fee is not None and req.agency_fee > 0,
     )}
+
+
+@app.post("/api/dooh/screenlist")
+async def upload_dooh_screenlist(request: Request) -> dict:
+    """The planner's DOOH screen list (the platform's inventory export, .csv or .xlsx): read it, store the rows, and answer
+    with the small reference the proposal keeps plus the totals that fill the line's Max Recommended Monthly Imps / Spend.
+
+    The file is the raw request body (file name in the X-Filename header, URL-encoded), read in pieces and refused past
+    dooh_screenlist.MAX_UPLOAD_BYTES without ever holding more than that. Same login as every other proposal route
+    (the _require_login middleware). 400 = the file can't be used (the message says why, in plain words), 413 = too big,
+    503 = the list was read but could not be saved just now."""
+    limit = dooh_screenlist_svc.MAX_UPLOAD_BYTES
+    too_big = HTTPException(status_code=413, detail=f"That file is larger than {limit // (1024 * 1024)} MB. Filter the screen list "
+                                                    "(for example to the markets in this proposal) and upload it again.")
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise too_big
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > limit:
+            raise too_big
+        chunks.append(chunk)
+    filename = unquote(request.headers.get("x-filename", ""))
+    try:
+        parsed = await asyncio.to_thread(dooh_screenlist_svc.parse_upload, filename, b"".join(chunks))
+    except dooh_screenlist_svc.ScreenlistError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        list_id = await asyncio.to_thread(dooh_screenlist_svc.save, parsed, request.state.user["email"])
+    except Exception:  # noqa: BLE001 - say it plainly; the details are in the log
+        _logger.exception("DOOH screen list was read but could not be stored")
+        raise HTTPException(status_code=503, detail="The screen list was read but could not be saved just now. Try again in a moment.")
+    return dooh_screenlist_svc.upload_response(parsed, list_id)
+
+
+def _dooh_screenlist_for(tiers: list[dict]) -> tuple[Optional[list], list[str]]:
+    """The rows of the uploaded screen list the DOOH tabs are built from (None = the sample row), and warnings to show.
+
+    The DOOH tabs are ONE shared pair for every option, so one list is used: the first one found on a DOOH line, option A
+    first. A list on a line whose product is not DOOH (the product was changed after uploading) is ignored. A list that can't
+    be loaded never fails Generate: the tabs keep the sample row and the planner is told."""
+    found: list[tuple[str, dict]] = []
+    for t in tiers:
+        entries = t.get("avails_data") or {}
+        for li in t["line_items"]:
+            ref = (entries.get(li.id) or {}).get("dooh_screenlist") if li.id else None
+            product = by_name(li.product_name) if ref else None
+            if ref and product is not None and product.family == "DOOH":
+                found.append((t.get("label") or "A", ref))
+    if not found:
+        return None, []
+    label, ref = found[0]
+    warnings: list[str] = []
+    if len({r["id"] for _, r in found}) > 1:
+        warnings.append(f"More than one DOOH screen list is attached. The DOOH tabs are shared by every option, so Option {label}'s "
+                        f"list ({ref['filename']}) was used for them.")
+    try:
+        rows = dooh_screenlist_svc.load_rows(ref["id"])
+    except Exception:  # noqa: BLE001
+        _logger.exception("DOOH screen list could not be loaded for Generate")
+        rows = None
+    if not rows:
+        warnings.append(f"The DOOH screen list '{ref['filename']}' could not be loaded just now, so the DOOH tabs hold the one sample row. "
+                        "Generate again, or upload the list again on the DOOH line.")
+        return None, warnings
+    return rows, warnings
 
 
 class DisclaimerPreviewRequest(BaseModel):

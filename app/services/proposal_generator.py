@@ -208,6 +208,7 @@ def generate_proposal(
     monthly_distribution_mode: str = "even",   # Step 06's plan-wide default-split choice — "even" or "prorated"
     time_unit: str = "month",   # the billing period — "week" | "month" | "quarter" | "full_flight", proposal-wide
     disclaimers_by_tier: Optional[dict] = None,   # {tier_label: [banner dict, ...]} — see app/disclaimers.py
+    dooh_screenlist: Optional[list] = None,   # the typed rows of the planner's uploaded DOOH screen list (see dooh_screenlist.py); None = the sample row
 ) -> dict:
     """
     Generate an Excel proposal for the given request + line items.
@@ -253,6 +254,11 @@ def generate_proposal(
                 months == 1 (see normalize_full_flight_lines), the sheet
                 shows "Months: 1", one breakdown column spanning the flight,
                 and nothing is multiplied by a month count.
+
+        dooh_screenlist: the rows of the screen list the planner uploaded on the DOOH line (loaded by main.py from
+                the screen list store, so this module never reads the DB itself). With them the DOOH Screenlist table
+                holds every screen and the DOOH Summary pivot is pre-populated; None keeps the template's one sample
+                row, byte for byte as before this parameter existed.
 
         disclaimers_by_tier: admin keyword disclaimers already matched per
                 option by app/disclaimers.py (resolved in main.py and passed
@@ -576,9 +582,9 @@ def generate_proposal(
     # DOOH Deliverables / Process FAQs — shared, single instance regardless of tier count. The two DOOH sheets are
     # always built together: the Summary is a pivot table over the Screenlist table.
     if tabs.get("dooh"):
-        et.build_dooh_summary(wb, client_name=request.client_name or "")
+        et.build_dooh_summary(wb, client_name=request.client_name or "", rows=dooh_screenlist)
         tabs_built.append(dooh_pivot.DOOH_SUMMARY_SHEET)
-        et.build_dooh_screenlist(wb)
+        et.build_dooh_screenlist(wb, rows=dooh_screenlist)
         tabs_built.append(dooh_pivot.DOOH_SCREENLIST_SHEET)
 
     # Always include Process FAQs as a reference tab (the rows an admin keeps in Admin -> FAQ; built-ins if unreadable)
@@ -594,7 +600,7 @@ def generate_proposal(
         # that touches the workbook (an openpyxl load + save afterwards would drop it). A failure keeps the workbook
         # as saved — the Screenlist table is there, the Summary just has no pivot — and says so.
         try:
-            dooh_pivot.add_dooh_pivot(output_path)
+            dooh_pivot.add_dooh_pivot(output_path, rows=dooh_screenlist or None)
         except Exception as e:  # noqa: BLE001
             warnings.append(f"The DOOH Summary pivot table could not be added ({e}); the DOOH Screenlist is complete.")
 
